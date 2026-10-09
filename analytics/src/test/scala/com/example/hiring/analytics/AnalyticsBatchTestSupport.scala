@@ -18,7 +18,6 @@ import com.example.hiring.analytics.adapter.spark.{
 }
 import com.example.hiring.analytics.domain.SubjectPseudonymizer
 import com.example.hiring.analytics.service.batch.*
-import com.example.hiring.analytics.service.erasure.AnalyticsErasureWorker
 import com.example.hiring.analytics.service.keyretirement.HmacKeyRetirementAuthorizationStore
 import cats.effect.{Clock, IO, Resource}
 import org.apache.spark.sql.SparkSession
@@ -27,6 +26,10 @@ import org.typelevel.log4cats.slf4j.Slf4jLogger
 
 private[analytics] object AnalyticsBatchTestSupport {
   val reportPublisher: AnalyticsReportPublisher[IO] = new AnalyticsReportPublisher[IO] {
+    override def publicationReceipt(
+        reservation: AnalyticsReportReservation
+    ): IO[AnalyticsReportPublicationReceipt] = IO.pure(AnalyticsReportPublicationReceipt.Absent)
+
     override def reservePinned(
         runId: RunId,
         rangeFingerprint: RangeFingerprint,
@@ -95,7 +98,7 @@ private[analytics] object AnalyticsBatchTestSupport {
         store,
         deltaWriter,
         AnalyticsTestOperationalConfig.operational.retention,
-        Some(clock.realTimeInstant)
+        clock
       )
       val silver = new AnalyticsBatchSilverStage[IO](
         paths,
@@ -124,7 +127,7 @@ private[analytics] object AnalyticsBatchTestSupport {
         lakehouseLock,
         com.example.hiring.analytics.service.batch.AnalyticsStreamingRegistry.allowUnregistered[IO],
         AnalyticsTestOperationalConfig.operational,
-        Some(clock.realTimeInstant)
+        clock
       ).run(manifest)
     }
   }
@@ -154,7 +157,7 @@ private[analytics] object AnalyticsBatchTestSupport {
       AnalyticsTestOperationalConfig.operational,
       lakehouseExecution,
       Slf4jLogger.getLogger[IO],
-      Some(clock.realTimeInstant)
+      clock
     )
 
   def newKeyContinuityStage(
@@ -170,6 +173,6 @@ private[analytics] object AnalyticsBatchTestSupport {
     val lookup = new KeyRetirementLookup[IO] {
       override def list(lakehouseRoot: String) = retirementStore.list(lakehouseRoot)
     }
-    new AnalyticsKeyContinuityStage[IO](paths, pseudonymizer, execution, lookup, Some(clock.realTimeInstant))
+    new AnalyticsKeyContinuityStage[IO](paths, pseudonymizer, execution, lookup, clock)
   }
 }

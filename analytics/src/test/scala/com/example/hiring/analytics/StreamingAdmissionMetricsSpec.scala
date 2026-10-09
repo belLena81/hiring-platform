@@ -1,7 +1,6 @@
 package com.example.hiring.analytics.adapter.spark
 
 import cats.effect.{IO, Resource}
-import cats.syntax.all.*
 import munit.CatsEffectSuite
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.sql.types.{ArrayType, StringType, StructField, StructType}
@@ -47,7 +46,7 @@ final class StreamingAdmissionMetricsSpec extends CatsEffectSuite {
       future.count(),
       closed.count()
     )
-    assertEquals(SparkStreamingBatchStages.measureQuality(malformed, conflicts, future, closed), expected)
+    assertEquals(AdmissionQualityBaseline.measure(malformed, conflicts, future, closed), expected)
   }
 
   test("empty admission categories return four zero counts") {
@@ -56,7 +55,7 @@ final class StreamingAdmissionMetricsSpec extends CatsEffectSuite {
         val empty = events(spark, Vector.empty)
         assertEquivalent(empty, empty, empty, empty)
         assertEquals(
-          SparkStreamingBatchStages.measureQuality(empty, empty, empty, empty),
+          AdmissionQualityBaseline.measure(empty, empty, empty, empty),
           SparkStreamingBatchStages.AdmissionQuality(0L, 0L, 0L, 0L)
         )
       }
@@ -72,7 +71,7 @@ final class StreamingAdmissionMetricsSpec extends CatsEffectSuite {
         val closed = events(spark, Vector(Some("closed"), Some("closed")))
         assertEquivalent(malformed, conflicts, future, closed)
         assertEquals(
-          SparkStreamingBatchStages.measureQuality(malformed, conflicts, future, closed),
+          AdmissionQualityBaseline.measure(malformed, conflicts, future, closed),
           SparkStreamingBatchStages.AdmissionQuality(2L, 2L, 3L, 2L)
         )
       }
@@ -88,7 +87,7 @@ final class StreamingAdmissionMetricsSpec extends CatsEffectSuite {
           .join(conflicts, Seq(Columns.EventId), "left_anti")
         assertEquivalent(empty, conflicts, future, empty)
         assertEquals(
-          SparkStreamingBatchStages.measureQuality(empty, conflicts, future, empty),
+          AdmissionQualityBaseline.measure(empty, conflicts, future, empty),
           SparkStreamingBatchStages.AdmissionQuality(0L, 1L, 2L, 0L)
         )
       }
@@ -105,9 +104,9 @@ final class StreamingAdmissionMetricsSpec extends CatsEffectSuite {
         val blocked = events(spark, Vector(Some("blocked"), Some("blocked")))
           .join(conflicts, Seq(Columns.EventId), "left_anti")
         assertEquivalent(empty, conflicts, empty, mixed)
-        assertEquals(SparkStreamingBatchStages.measureQuality(empty, conflicts, empty, mixed).closed, 2L)
+        assertEquals(AdmissionQualityBaseline.measure(empty, conflicts, empty, mixed).closed, 2L)
         assertEquivalent(empty, conflicts, empty, blocked)
-        assertEquals(SparkStreamingBatchStages.measureQuality(empty, conflicts, empty, blocked).closed, 0L)
+        assertEquals(AdmissionQualityBaseline.measure(empty, conflicts, empty, blocked).closed, 0L)
       }
     }
   }

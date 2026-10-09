@@ -3,7 +3,6 @@ package com.example.hiring.analytics
 import com.example.hiring.analytics.adapter.kafka.KafkaClientProperties
 import com.example.hiring.analytics.config.{KafkaConnection, KafkaSecurityProtocol}
 import com.example.hiring.analytics.adapter.spark.KafkaOffsetRangeSource
-import com.example.hiring.analytics.domain.PartitionOffsetRange
 import com.example.hiring.analytics.errors.AnalyticsError
 import io.circe.parser.parse
 
@@ -11,6 +10,57 @@ import org.apache.kafka.common.config.types.Password
 import org.apache.kafka.common.security.JaasContext
 
 class KafkaClientPropertiesSpec extends munit.FunSuite {
+  private val contract = {
+    val relative =
+      java.nio.file.Path.of("test-support", "src", "main", "resources", "kafka-client-settings-contract.json")
+    val start = java.nio.file.Path.of(System.getProperty("user.dir")).toAbsolutePath
+    val found = Iterator
+      .iterate(Option(start))(_.flatMap(dir => Option(dir.getParent)))
+      .flatten
+      .map(_.resolve(relative))
+      .find(java.nio.file.Files.isRegularFile(_))
+    parse(
+      java.nio.file.Files.readString(found.getOrElse(fail("Kafka client settings contract fixture is missing")))
+    ).toOption.get
+  }
+
+  private def contractCases(name: String) = contract.hcursor.downField(name).values.get.toVector.map(_.hcursor)
+
+  private def protocol(name: String) =
+    if (name == "SASL_SSL") KafkaSecurityProtocol.SaslSsl else KafkaSecurityProtocol.SaslPlaintext
+
+  test("credentialed and anonymous properties match the contract shared with the application build") {
+    contractCases("credentialed").foreach { c =>
+      val user = c.get[String]("username").toOption.get
+      val secret = c.get[String]("password").toOption.get
+      val selected = protocol(c.get[String]("protocol").toOption.get)
+      val connection =
+        KafkaConnection("localhost:9092", Some(user), Some(secret), selected, allowPlaintext = true)
+      val want = c.downField("expected").focus.get.as[Map[String, String]].toOption.get
+      assertEquals(KafkaClientProperties.clientProperties(connection), Right(want), c.get[String]("name").toOption.get)
+      assertEquals(com.example.hiring.testing.LocalTestServices.jaasConfig(user, secret), want("sasl.jaas.config"))
+    }
+    contractCases("anonymous").foreach { c =>
+      val connection =
+        KafkaConnection("localhost:9092", None, None, protocol(c.get[String]("protocol").toOption.get), true)
+      val want = c.downField("expectedAnalytics").focus.get.as[Map[String, String]].toOption.get
+      assertEquals(KafkaClientProperties.clientProperties(connection), Right(want), c.get[String]("name").toOption.get)
+    }
+  }
+
+  test("admin and offset-inspection clients are bounded by explicit timeouts") {
+    val connection = KafkaConnection("broker.example:9093", Some("reader"), Some("credential"))
+    val admin = KafkaClientProperties.adminProperties(connection).toOption.get
+    assertEquals(admin("request.timeout.ms"), "10000")
+    assertEquals(admin("default.api.timeout.ms"), "10000")
+    assertEquals(admin("bootstrap.servers"), "broker.example:9093")
+    assertEquals(admin("security.protocol"), "SASL_SSL")
+    val consumer = KafkaClientProperties.retentionConsumerProperties(connection).toOption.get
+    assertEquals(consumer("default.api.timeout.ms"), "10000")
+    assertEquals(consumer("enable.auto.commit"), "false")
+    assertEquals(consumer("security.protocol"), "SASL_SSL")
+  }
+
   test("JAAS connector options round-trip quoted, slashed, and control characters") {
     val username = "reader\"\\line\nuser"
     val password = "secret\"\\tab\tvalue"

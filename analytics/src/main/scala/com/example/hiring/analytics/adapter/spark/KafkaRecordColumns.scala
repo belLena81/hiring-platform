@@ -8,7 +8,7 @@ import org.apache.spark.sql.types.StructType
 /** Validates the Kafka columns required by bounded analytics ingestion. */
 private[analytics] object KafkaRecordColumns {
   def validate[F[_]: Async](schema: StructType): F[Unit] = {
-    val required = Set("topic", "partition", "offset", "timestamp", "value")
+    val required = Set(Columns.Topic, Columns.Partition, Columns.Offset, Columns.Timestamp, Columns.Value)
     val missing = required.diff(schema.fieldNames.toSet).toVector.sorted
     if (missing.isEmpty) Async[F].unit else Async[F].raiseError(AnalyticsError.InvalidSourceSchema(missing))
   }

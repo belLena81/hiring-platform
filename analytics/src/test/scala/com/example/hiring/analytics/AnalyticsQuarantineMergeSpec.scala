@@ -1,7 +1,6 @@
 package com.example.hiring.analytics.adapter.spark
 
 import cats.effect.{IO, Resource}
-import cats.syntax.all.*
 import com.example.hiring.analytics.{AnalyticsTestOperationalConfig, AnalyticsTestSubjectPseudonymizer}
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
@@ -93,7 +92,9 @@ final class AnalyticsQuarantineMergeSpec extends CatsEffectSuite {
           val starts = new AtomicInteger(0)
           val listener = new SparkListener {
             override def onJobStart(event: SparkListenerJobStart): Unit =
-              if (Option(event.properties).exists(_.getProperty("spark.jobGroup.id") == group)) starts.incrementAndGet()
+              if (Option(event.properties).exists(_.getProperty("spark.jobGroup.id") == group)) {
+                val _ = starts.incrementAndGet()
+              }
           }
           val grouped = new SparkExecution[IO] {
             override def apply[A](work: => A): IO[A] = execution {
@@ -172,7 +173,7 @@ final class AnalyticsQuarantineMergeSpec extends CatsEffectSuite {
           .merge(rows(spark).limit(0), paths.quarantine, "target.absent = source.absent")
           .attempt
         _ <- IO {
-          assert(wrongSchema.left.exists(_.isInstanceOf[AnalyticsError.LakehouseFailure]))
+          assert(wrongSchema.left.exists(_.isInstanceOf[AnalyticsError.DeltaSchemaMismatch]))
           assert(invalidCondition.isLeft)
         }
       } yield ()
@@ -186,7 +187,7 @@ final class AnalyticsQuarantineMergeSpec extends CatsEffectSuite {
         result <- new DeltaBatchWriter[IO](paths, execution)
           .merge(rows(spark).limit(0), paths.quarantine, condition)
           .attempt
-        _ <- IO(assert(result.left.exists(_.isInstanceOf[AnalyticsError.LakehouseFailure])))
+        _ <- IO(assert(result.left.exists(_.isInstanceOf[AnalyticsError.DeltaSchemaMismatch])))
       } yield ()
     }
   }

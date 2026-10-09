@@ -52,8 +52,6 @@ object MongoDatabaseProbe {
       metadata: Map[LogField, String],
       diagnostics: Diagnostics
   ): DatabaseProbe = new DatabaseProbe {
-    override def check: IO[ProbeResult] = check(None)
-
     override def check(requestId: Option[String]): IO[ProbeResult] =
       database
         .runCommand(new Document("ping", 1))

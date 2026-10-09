@@ -6,7 +6,6 @@ import com.example.hiring.analytics.config.{
   KafkaConnection
 }
 import com.example.hiring.analytics.domain.*
-import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.batch.*
 import com.example.hiring.analytics.service.erasure.*
 
@@ -282,6 +281,10 @@ final class AnalyticsErasureWorkerSpec extends CatsEffectSuite {
         IO.pure(AnalyticsReportOutput(asOf, Vector.empty, None, Vector.empty))
     }
     val publisher = new AnalyticsReportPublisher[IO] {
+      override def publicationReceipt(
+          reservation: AnalyticsReportReservation
+      ): IO[AnalyticsReportPublicationReceipt] = IO.pure(AnalyticsReportPublicationReceipt.Absent)
+
       override def reservePinned(
           runId: RunId,
           rangeFingerprint: RangeFingerprint,
@@ -330,7 +333,8 @@ final class AnalyticsErasureWorkerSpec extends CatsEffectSuite {
       AnalyticsErasureWorkerPolicy(
         retention,
         AnalyticsErasureWorkerTimings(leaseDuration, 1.second, 1.second)
-      )
+      ),
+      cats.effect.Clock[IO]
     )
   }
 }

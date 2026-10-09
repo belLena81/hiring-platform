@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.service
 
+/** Log/diagnostic reason codes (the `reason` field of log events), not a typed error channel. */
 enum FailureReason(val reason: String) {
   case InvalidRequest extends FailureReason("INVALID_REQUEST")
   case InvalidQuery extends FailureReason("INVALID_QUERY")

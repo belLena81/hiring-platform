@@ -10,7 +10,6 @@ import cats.effect.{Async, Resource}
 import cats.syntax.all.*
 import org.apache.kafka.clients.consumer.KafkaConsumer
 import org.apache.kafka.common.TopicPartition
-import org.apache.kafka.common.serialization.ByteArrayDeserializer
 
 import java.util.Properties
 import scala.jdk.CollectionConverters.*
@@ -112,16 +111,12 @@ private[analytics] object KafkaRetentionAdapter {
   ): Resource[F, KafkaConsumer[Array[Byte], Array[Byte]]] =
     for {
       _ <- Resource.eval(KafkaConnection.preflight[F](connection))
-      clientProperties <- Resource.eval(Async[F].fromEither(KafkaClientProperties.clientProperties(connection)))
+      consumerProperties <- Resource.eval(
+        Async[F].fromEither(KafkaClientProperties.retentionConsumerProperties(connection))
+      )
       client <- Resource.make(driverExecution.blocking {
         val properties = new Properties()
-        properties.setProperty("bootstrap.servers", connection.bootstrapServers)
-        properties.setProperty("group.id", "hiring-analytics-erasure")
-        properties.setProperty("key.deserializer", classOf[ByteArrayDeserializer].getName)
-        properties.setProperty("value.deserializer", classOf[ByteArrayDeserializer].getName)
-        properties.setProperty("enable.auto.commit", "false")
-        properties.setProperty("default.api.timeout.ms", "10000")
-        clientProperties.foreach { case (key, value) => properties.setProperty(key, value) }
+        consumerProperties.foreach { case (key, value) => properties.setProperty(key, value) }
         new KafkaConsumer[Array[Byte], Array[Byte]](properties)
       })(client => driverExecution.blocking(client.close()).void)
     } yield client

@@ -15,7 +15,9 @@ final class HiringGraphQLContractSpec extends CatsEffectSuite {
     finally stream.close()
   }
 
-  private val probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
+  private val probe = new DatabaseProbe {
+    def check(requestId: Option[String]): IO[ProbeResult] = IO.pure(ProbeResult.Ready)
+  }
   private val service = new HealthService(probe, Diagnostics.noop)
 
   private def parseRequest(query: String): IO[GraphQLRequest] =

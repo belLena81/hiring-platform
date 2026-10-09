@@ -1,14 +1,10 @@
 package com.example.hiring.analytics
-import com.example.hiring.analytics.service.keyretirement.*
 import com.example.hiring.analytics.service.batch.*
 import com.example.hiring.analytics.errors.*
 import com.example.hiring.analytics.domain.*
 import com.example.hiring.analytics.config.*
 import com.example.hiring.analytics.config.AnalyticsPositiveInt.*
-import com.example.hiring.analytics.adapter.spark.*
-import com.example.hiring.analytics.adapter.mongo.*
 import com.example.hiring.analytics.adapter.kafka.*
-import com.example.hiring.analytics.adapter.local.*
 import com.example.hiring.analytics.service.erasure.*
 import AnalyticsBatchTestSupport.{newBatch, newKeyContinuityStage}
 
@@ -153,7 +149,8 @@ class AnalyticsTransformsSpec extends FunSuite {
       sparkExecution,
       manifestStore,
       deltaWriter,
-      AnalyticsTestOperationalConfig.operational.retention
+      AnalyticsTestOperationalConfig.operational.retention,
+      cats.effect.Clock[IO]
     )
     val payload = event("610cb653-75fc-3d31-b2c6-3cd8cee7cd4c", "APPLICATION_CREATED")
     val parsed = OperationalEventTransforms.parseKafkaRecords(
@@ -167,7 +164,7 @@ class AnalyticsTransformsSpec extends FunSuite {
     val observedAt = Instant.parse("2026-09-30T10:00:00Z")
 
     val result = stage
-      .persistParsed(spark, parsed, emptyMarkers, IO.unit, IO.pure(observedAt), _ => IO.unit)
+      .persistParsed(parsed, emptyMarkers, IO.unit, IO.pure(observedAt), _ => IO.unit)
       .unsafeRunSync()
 
     assertEquals(result.records, 2L)
@@ -927,6 +924,10 @@ class AnalyticsTransformsSpec extends FunSuite {
       )
     )
     val reportPublisher = new AnalyticsReportPublisher[IO] {
+      override def publicationReceipt(
+          reservation: AnalyticsReportReservation
+      ): IO[AnalyticsReportPublicationReceipt] = IO.pure(AnalyticsReportPublicationReceipt.Absent)
+
       override def reservePinned(
           runId: RunId,
           rangeFingerprint: RangeFingerprint,
@@ -1004,6 +1005,10 @@ class AnalyticsTransformsSpec extends FunSuite {
     val published = new AtomicInteger(0)
     val failPublishedManifestOnce = new AtomicBoolean(true)
     val publisher = new AnalyticsReportPublisher[IO] {
+      override def publicationReceipt(
+          reservation: AnalyticsReportReservation
+      ): IO[AnalyticsReportPublicationReceipt] = IO.pure(AnalyticsReportPublicationReceipt.Absent)
+
       override def reservePinned(
           runId: RunId,
           rangeFingerprint: RangeFingerprint,
@@ -1074,6 +1079,10 @@ class AnalyticsTransformsSpec extends FunSuite {
       }
     }
     val publisher = new AnalyticsReportPublisher[IO] {
+      override def publicationReceipt(
+          reservation: AnalyticsReportReservation
+      ): IO[AnalyticsReportPublicationReceipt] = IO.pure(AnalyticsReportPublicationReceipt.Absent)
+
       override def reservePinned(
           runId: RunId,
           rangeFingerprint: RangeFingerprint,
@@ -1193,7 +1202,7 @@ class AnalyticsTransformsSpec extends FunSuite {
       pseudonymizer,
       fixedClock(Instant.parse("2026-09-22T13:00:00Z"))
     )
-    intercept[AnalyticsError.LakehouseFailure] {
+    intercept[AnalyticsError.MarkedSubjectRetained] {
       maintenance.verifyMarkedSubjectsAbsent(Vector(token)).unsafeRunSync()
     }
     val deletionRun = validatedManifest(
@@ -1326,7 +1335,7 @@ class AnalyticsTransformsSpec extends FunSuite {
         }) -> token
       }
       assertEquals(actual.map(_._1.get()), expected)
-    } finally executor.shutdownNow()
+    } finally { val _ = executor.shutdownNow() }
   }
 
   test("temporary Delta rewrite path is removed after failure and cancellation") {
@@ -1731,7 +1740,6 @@ class AnalyticsTransformsSpec extends FunSuite {
     newKeyContinuityStage(paths, old)
       .validateKeyMaterialContinuity(spark)
       .unsafeRunSync()
-    val markers = DataFrameDeletionMarkerSource[IO](markerFrame(Seq.empty))
     val rotatingStage = newKeyContinuityStage(paths, rotating)
     rotatingStage.validateKeyMaterialContinuity(spark).unsafeRunSync()
     val stored = spark.createDataFrame(
@@ -1764,7 +1772,6 @@ class AnalyticsTransformsSpec extends FunSuite {
 
   test("HMAC key continuity rejects changed material under the same key ID") {
     val paths = TestAnalyticsLakehousePaths.unsafe(Files.createTempDirectory("analytics-key-continuity").toUri.toString)
-    val markers = DataFrameDeletionMarkerSource[IO](markerFrame(Seq.empty))
     val original =
       AnalyticsTestSubjectPseudonymizer.fromKeyRing("hmac-v1", hmacKey("original-continuity-key"), Vector.empty)
     val changed =
@@ -1790,7 +1797,6 @@ class AnalyticsTransformsSpec extends FunSuite {
       .write
       .format("delta")
       .save(paths.silver)
-    val markers = DataFrameDeletionMarkerSource[IO](markerFrame(Seq.empty))
     val error = intercept[AnalyticsError.InvalidConfiguration] {
       newKeyContinuityStage(paths, pseudonymizer).validateKeyMaterialContinuity(spark).unsafeRunSync()
     }
@@ -1872,6 +1878,10 @@ class AnalyticsTransformsSpec extends FunSuite {
       .range(1L)
       .select(org.apache.spark.sql.functions.expr("raise_error('marker evaluation failed')").as("subjectToken"))
     val publisher = new AnalyticsReportPublisher[IO] {
+      override def publicationReceipt(
+          reservation: AnalyticsReportReservation
+      ): IO[AnalyticsReportPublicationReceipt] = IO.pure(AnalyticsReportPublicationReceipt.Absent)
+
       override def reservePinned(
           runId: RunId,
           rangeFingerprint: RangeFingerprint,

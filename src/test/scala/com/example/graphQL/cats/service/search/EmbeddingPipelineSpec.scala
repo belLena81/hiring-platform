@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.service.search
 
-import cats.effect.{IO, Resource}
+import cats.effect.{Clock, IO, Resource}
 import cats.effect.Deferred
 import cats.effect.Ref
 import cats.effect.std.Queue
@@ -1358,12 +1358,18 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
         3,
         retryDelay,
         30.seconds,
-        clock.get,
+        clockOf(clock),
         "fixture-worker",
         diagnostics
       )
       Resource.make(worker.stream.compile.drain.start)(_.cancel).as(wakeups)
     }
+
+  private def clockOf(instants: Ref[IO, Instant]): Clock[IO] = new Clock[IO] {
+    override val applicative: cats.Applicative[IO] = IO.asyncForIO
+    override def realTime: IO[FiniteDuration] = instants.get.map(_.toEpochMilli.millis)
+    override def monotonic: IO[FiniteDuration] = IO.monotonic
+  }
 
   private final case class ObservableWork(
       delegate: EmbeddingWorkRepository,

@@ -2,12 +2,6 @@ package com.example.hiring.analytics.adapter.spark
 
 import cats.effect.{IO, Resource}
 import cats.syntax.all.*
-import io.delta.tables.DeltaTable
-import com.example.hiring.analytics.{
-  AnalyticsTestOperationalConfig,
-  AnalyticsTestSubjectPseudonymizer,
-  TestAnalyticsLakehousePaths
-}
 import java.sql.Timestamp
 import java.time.Instant
 import org.apache.spark.sql.Row

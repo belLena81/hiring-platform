@@ -1,5 +1,7 @@
 package com.example.hiring.analytics.adapter.spark
 
+import com.example.hiring.analytics.AnalyticsTestClocks
+
 import cats.effect.{IO, Ref, Resource}
 import cats.syntax.all.*
 import com.example.hiring.analytics.AnalyticsTestSubjectPseudonymizer
@@ -47,7 +49,10 @@ final class AnalyticsKeyContinuitySpec extends CatsEffectSuite {
     val root = Resource.make(IO.blocking(Files.createTempDirectory("hiring-key-continuity-")))(path =>
       IO.blocking {
         val entries = Files.walk(path)
-        try entries.sorted(Comparator.reverseOrder()).forEach(entry => Files.deleteIfExists(entry))
+        try
+          entries.sorted(Comparator.reverseOrder()).forEach { entry =>
+            val _ = Files.deleteIfExists(entry)
+          }
         finally entries.close()
       }
     )
@@ -91,7 +96,7 @@ final class AnalyticsKeyContinuitySpec extends CatsEffectSuite {
     )
 
   private def stage(paths: AnalyticsLakehousePaths, execution: SparkExecution[IO]): AnalyticsKeyContinuityStage[IO] =
-    new AnalyticsKeyContinuityStage(paths, keys, execution, lookup, Some(IO.pure(at)))
+    new AnalyticsKeyContinuityStage(paths, keys, execution, lookup, AnalyticsTestClocks.fixed(at))
 
   private val tokenShape = StructType(
     Vector(
@@ -241,7 +246,13 @@ final class AnalyticsKeyContinuitySpec extends CatsEffectSuite {
           override def list(root: String): IO[Vector[HmacKeyRetirementAuthorization]] =
             reads.update(_ + 1).as(Vector.empty)
         }
-        validator = new AnalyticsKeyContinuityStage[IO](paths, keys, execution, freshLookup, Some(IO.pure(at)))
+        validator = new AnalyticsKeyContinuityStage[IO](
+          paths,
+          keys,
+          execution,
+          freshLookup,
+          AnalyticsTestClocks.fixed(at)
+        )
         _ <- validator.validateHmacConfiguration(spark)
         _ <- validator.validateHmacConfiguration(spark)
         changed <- execution(

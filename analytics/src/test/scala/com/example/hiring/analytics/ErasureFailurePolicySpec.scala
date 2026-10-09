@@ -1,13 +1,5 @@
 package com.example.hiring.analytics
-import com.example.hiring.analytics.service.keyretirement.*
-import com.example.hiring.analytics.service.batch.*
 import com.example.hiring.analytics.errors.*
-import com.example.hiring.analytics.domain.*
-import com.example.hiring.analytics.config.*
-import com.example.hiring.analytics.adapter.spark.*
-import com.example.hiring.analytics.adapter.mongo.*
-import com.example.hiring.analytics.adapter.kafka.*
-import com.example.hiring.analytics.adapter.local.*
 import com.example.hiring.analytics.service.erasure.*
 
 import munit.FunSuite
@@ -40,5 +32,35 @@ final class ErasureFailurePolicySpec extends FunSuite {
     assertEquals(unknownRetry.category, ErasureFailureCategory.Unknown)
     assertEquals(unknownRetry.retryAfter, Some(10.seconds))
     assertEquals(unknownExhausted.retryAfter, None)
+  }
+
+  test("durable retry delays keep the historical capped doubling schedule") {
+    def historical(nextAttempt: Int): FiniteDuration =
+      math.min(300L, 5L * (1L << math.min(math.max(nextAttempt - 1, 0), 6))).seconds
+
+    (-1 to 20).foreach(attempt => assertEquals(ErasureFailurePolicy.retryDelay(attempt), historical(attempt)))
+    assertEquals(
+      (1 to 9).map(ErasureFailurePolicy.retryDelay).toVector,
+      Vector(5, 10, 20, 40, 80, 160, 300, 300, 300).map(_.seconds)
+    )
+  }
+
+  test("every lakehouse failure introduced from generic wrappers keeps its transient source category") {
+    val sourceFailures = Vector[AnalyticsError](
+      AnalyticsError.LakehouseLockOwnershipLost,
+      AnalyticsError.LakehouseLockOwnershipUncertain,
+      AnalyticsError.DeltaSchemaMismatch("file:///tmp/table"),
+      AnalyticsError.MarkedSubjectRetained("file:///tmp/table"),
+      AnalyticsError.InvalidBronzeSchema,
+      AnalyticsError.StreamingAdmissionConflictsChanged,
+      AnalyticsError.ReportNotSingular,
+      AnalyticsError.ReportRowLimitExceeded(10),
+      AnalyticsError.KeyRetirementAuditUnverified(new RuntimeException)
+    )
+    sourceFailures.foreach { error =>
+      val decision = ErasureFailurePolicy.decide(error, 1)
+      assertEquals(decision.category, ErasureFailureCategory.TransientSource, error.getMessage)
+      assertEquals(decision.retryAfter, Some(5.seconds))
+    }
   }
 }

@@ -2,7 +2,7 @@ package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.IO
 import cats.syntax.all.*
-import com.example.graphQL.cats.config.AppConfig
+import com.example.graphQL.cats.config.AppConfigFixtures
 import com.example.graphQL.cats.domain.model.{CandidateProfile, RecruiterProfile, UserProfile, UserRole}
 import com.example.graphQL.cats.runtime.MongoHiringRuntime
 import com.example.graphQL.cats.service.{AccountError, Diagnostics, UseCaseError}
@@ -36,7 +36,9 @@ final class MongoAccountRegistrationIntegrationSpec extends MongoIntegrationSuit
                  |vector-search.enabled=false
                  |""".stripMargin
     IO.fromEither(
-      AppConfig.fromConfig(raw, Map.empty).leftMap(_ => new AssertionError("Account-registration config rejected"))
+      AppConfigFixtures
+        .fromConfig(raw, Map.empty)
+        .leftMap(_ => new AssertionError("Account-registration config rejected"))
     ).map(config =>
       MongoHiringRuntime.RuntimeConfig(
         config.mongoUri,

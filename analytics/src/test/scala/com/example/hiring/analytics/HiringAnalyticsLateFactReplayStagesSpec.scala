@@ -1,8 +1,9 @@
 package com.example.hiring.analytics.adapter.spark
 
+import com.example.hiring.analytics.AnalyticsTestClocks
+
 import cats.effect.{Deferred, IO}
 import cats.effect.unsafe.implicits.global
-import cats.syntax.all.*
 import com.example.hiring.analytics.{AnalyticsTestSubjectPseudonymizer, TestAnalyticsLakehousePaths}
 import com.example.hiring.analytics.domain.*
 import com.example.hiring.analytics.errors.AnalyticsError
@@ -200,8 +201,8 @@ final class HiringAnalyticsLateFactReplayStagesSpec extends FunSuite {
       new DeltaBatchReader[IO](execution),
       writer,
       maintenance,
-      Some(IO.pure(Now)),
-      Some(mergeClock)
+      AnalyticsTestClocks.fixed(Now),
+      mergeClock
     )
   }
 

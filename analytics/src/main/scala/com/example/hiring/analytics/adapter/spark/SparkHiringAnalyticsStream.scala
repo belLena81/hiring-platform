@@ -30,7 +30,6 @@ import java.nio.charset.StandardCharsets
 import java.time.Instant
 import scala.concurrent.{Await, Future}
 import scala.concurrent.duration.*
-import scala.jdk.CollectionConverters.*
 import scala.util.control.NonFatal
 
 /** Owns a Structured Streaming query; callback effects are bridged only at Spark's synchronous adapter boundary. */
@@ -146,7 +145,7 @@ private[analytics] final class SparkHiringAnalyticsStream[F[_]: Async](
           .option("kafka.group.id", AnalyticsStreamingSettings.ConsumerGroupId)
           .option("subscribe", AnalyticsTopic.unwrap(topic))
           .option("startingOffsets", startingOffsets)
-          .option("maxOffsetsPerTrigger", settings.maxOffsetsPerTrigger.asInstanceOf[Int])
+          .option("maxOffsetsPerTrigger", (settings.maxOffsetsPerTrigger: Int))
           .option("failOnDataLoss", "true")
           .option("kafka.isolation.level", "read_committed")
           .load()
@@ -280,18 +279,13 @@ private[analytics] final class SparkHiringAnalyticsStream[F[_]: Async](
             else writeNewIdentity().map(_ => false)
           } else
             readExisting.flatMap { _ =>
-              val sparkArtifacts = fileSystem.listStatus(checkpoint).filterNot(_.getPath == identityFile)
-              {
-                val commits = new Path(checkpoint, "commits")
-                val hasCommittedBatches = fileSystem.exists(commits) && fileSystem.listStatus(commits).exists(_.isFile)
-                val established = fileSystem.exists(establishedFile) || hasCommittedBatches
-                val checkpointState = if (!established) Right(()) else validateEstablishedCheckpoint()
-                checkpointState
-                  .flatMap(_ =>
-                    Either.cond(!established || fileSystem.exists(queryIdentityFile), (), invalidCheckpoint)
-                  )
-                  .map(_ => established)
-              }
+              val commits = new Path(checkpoint, "commits")
+              val hasCommittedBatches = fileSystem.exists(commits) && fileSystem.listStatus(commits).exists(_.isFile)
+              val established = fileSystem.exists(establishedFile) || hasCommittedBatches
+              val checkpointState = if (!established) Right(()) else validateEstablishedCheckpoint()
+              checkpointState
+                .flatMap(_ => Either.cond(!established || fileSystem.exists(queryIdentityFile), (), invalidCheckpoint))
+                .map(_ => established)
             }
         }
       }

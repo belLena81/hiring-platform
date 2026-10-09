@@ -169,7 +169,11 @@ object OperationalEventTransforms {
     val kind = col(Columns.EventType)
     val job = payload("job")
     val skills = job.getField("skills")
-    val jobFact = kind.isin("JOB_CREATED", "JOB_UPDATED", "JOB_CLOSED") &&
+    val jobFact = kind.isin(
+      AnalyticsEventType.JobCreated.wire,
+      AnalyticsEventType.JobUpdated.wire,
+      AnalyticsEventType.JobClosed.wire
+    ) &&
       payloadKeys("job") && keys(
         get_json_object(col(Columns.RawValue), "$.payload.job"),
         "jobId",
@@ -177,7 +181,7 @@ object OperationalEventTransforms {
         "status"
       ) &&
       aggregate("Job", job.getField("jobId")) && job.getField("status").isin("Open", "Closed") &&
-      (kind =!= lit("JOB_CLOSED") || job.getField("status") === lit("Closed")) &&
+      (kind =!= lit(AnalyticsEventType.JobClosed.wire) || job.getField("status") === lit("Closed")) &&
       skills.isNotNull && size(skills) <= lit(100) && size(array_distinct(skills)) === size(skills) &&
       forall(
         skills,
@@ -190,54 +194,61 @@ object OperationalEventTransforms {
         try_variant_get(try_parse_json(col(Columns.RawValue)), "$.payload.job.skills", "array<variant>"),
         skill => schema_of_variant(skill) === lit("STRING")
       )
-    val created = kind === lit("APPLICATION_CREATED") &&
+    val created = kind === lit(AnalyticsEventType.ApplicationCreated.wire) &&
       payloadKeys("applicationId", "candidateId", "jobId", "status") && applicationIds &&
       aggregate("Application", payload("applicationId")) && payload("status") === lit("Created")
-    val changed = kind === lit("APPLICATION_STATUS_CHANGED") &&
+    val changed = kind === lit(AnalyticsEventType.ApplicationStatusChanged.wire) &&
       payloadKeys("applicationId", "candidateId", "jobId", "previousStatus", "newStatus") && applicationIds &&
       aggregate("Application", payload("applicationId")) && payload("newStatus").isin(Statuses*) &&
       ((payload("previousStatus").isNull && get_json_object(
         col(Columns.RawValue),
         "$.payload.previousStatus"
       ).isNull) || payload("previousStatus").isin(Statuses*))
-    val hired = kind === lit("CANDIDATE_HIRED") &&
+    val hired = kind === lit(AnalyticsEventType.CandidateHired.wire) &&
       payloadKeys("applicationId", "candidateId", "jobId", "status") && applicationIds &&
       aggregate("Application", payload("applicationId")) && payload("status") === lit("Hired")
     val results = payload("results")
     val resultIds = transform(results, result => result.getField("resultId"))
     val resultRanks = transform(results, result => result.getField("rank"))
     val rawResults = from_json(get_json_object(col(Columns.RawValue), "$.payload.results"), ArrayType(StringType))
-    val searched = kind === lit("SEARCH_PERFORMED") && payloadKeys("searchId", "searchKind", "results") &&
-      aggregate("Search", payload("searchId")) && payload("searchKind").isin(SearchKinds*) &&
-      results.isNotNull && size(results) <= lit(100) && size(array_distinct(resultIds)) === size(results) &&
-      (size(results) === lit(0) || resultRanks === sequence(lit(1), size(results))) &&
-      forall(
-        results,
-        result =>
-          uuid(result.getField("resultId")) && rank(result.getField("rank")) &&
-            result.getField("score").isNotNull && !isnan(result.getField("score")) &&
-            result.getField("score") =!= lit(Double.PositiveInfinity) && result.getField("score") =!= lit(
-              Double.NegativeInfinity
+    val searched =
+      kind === lit(AnalyticsEventType.SearchPerformed.wire) && payloadKeys("searchId", "searchKind", "results") &&
+        aggregate("Search", payload("searchId")) && payload("searchKind").isin(SearchKinds*) &&
+        results.isNotNull && size(results) <= lit(100) && size(array_distinct(resultIds)) === size(results) &&
+        (size(results) === lit(0) || resultRanks === sequence(lit(1), size(results))) &&
+        forall(
+          results,
+          result =>
+            uuid(result.getField("resultId")) && rank(result.getField("rank")) &&
+              result.getField("score").isNotNull && !isnan(result.getField("score")) &&
+              result.getField("score") =!= lit(Double.PositiveInfinity) && result.getField("score") =!= lit(
+                Double.NegativeInfinity
+              )
+        ) &&
+        forall(rawResults, result => keys(result, "resultId", "rank", "score")) &&
+        forall(
+          try_variant_get(try_parse_json(col(Columns.RawValue)), "$.payload.results", "array<variant>"),
+          result =>
+            numericVariant(try_variant_get(result, "$.rank", "variant")) && numericVariant(
+              try_variant_get(result, "$.score", "variant")
             )
-      ) &&
-      forall(rawResults, result => keys(result, "resultId", "rank", "score")) &&
-      forall(
-        try_variant_get(try_parse_json(col(Columns.RawValue)), "$.payload.results", "array<variant>"),
-        result =>
-          numericVariant(try_variant_get(result, "$.rank", "variant")) && numericVariant(
-            try_variant_get(result, "$.score", "variant")
-          )
-      )
-    val viewed = kind === lit("JOB_VIEWED") && payloadKeys("searchId", "resultId", "searchKind", "rank") &&
-      aggregate("Search", payload("resultId")) && payload("searchKind").isNull &&
-      get_json_object(col(Columns.RawValue), "$.payload.searchKind").isNull &&
-      (!payload("searchId").isNull || get_json_object(col(Columns.RawValue), "$.payload.searchId").isNull) &&
-      (!payload("rank").isNull || get_json_object(col(Columns.RawValue), "$.payload.rank").isNull) &&
-      payload("searchId").isNull === payload("rank").isNull &&
-      (payload("searchId").isNull || uuid(payload("searchId"))) && (payload("rank").isNull || (rank(
-        payload("rank")
-      ) && numericPayloadField("$.payload.rank")))
-    val clicked = kind === lit("SEARCH_RESULT_CLICKED") && payloadKeys("searchId", "resultId", "searchKind", "rank") &&
+        )
+    val viewed =
+      kind === lit(AnalyticsEventType.JobViewed.wire) && payloadKeys("searchId", "resultId", "searchKind", "rank") &&
+        aggregate("Search", payload("resultId")) && payload("searchKind").isNull &&
+        get_json_object(col(Columns.RawValue), "$.payload.searchKind").isNull &&
+        (!payload("searchId").isNull || get_json_object(col(Columns.RawValue), "$.payload.searchId").isNull) &&
+        (!payload("rank").isNull || get_json_object(col(Columns.RawValue), "$.payload.rank").isNull) &&
+        payload("searchId").isNull === payload("rank").isNull &&
+        (payload("searchId").isNull || uuid(payload("searchId"))) && (payload("rank").isNull || (rank(
+          payload("rank")
+        ) && numericPayloadField("$.payload.rank")))
+    val clicked = kind === lit(AnalyticsEventType.SearchResultClicked.wire) && payloadKeys(
+      "searchId",
+      "resultId",
+      "searchKind",
+      "rank"
+    ) &&
       aggregate("Search", payload("searchId")) && uuid(payload("resultId")) && payload("searchKind").isin(
         SearchKinds*
       ) && rank(payload("rank")) && numericPayloadField("$.payload.rank")
@@ -246,7 +257,7 @@ object OperationalEventTransforms {
     length(encode(col(Columns.RawValue), "UTF-8")) <= lit(MaxEnvelopeBytes) &&
     keys(
       col(Columns.RawValue),
-      "eventId",
+      Columns.EventId,
       "eventType",
       "occurredAt",
       "aggregateType",
@@ -321,6 +332,20 @@ object OperationalEventTransforms {
         .reduce(_ && _) &&
       length(trim(col(Columns.ActorId))) > lit(0) &&
       col(Columns.Payload).isNotNull
+
+  /** Event IDs whose raw payload fingerprint differs from a previously stored fingerprint for the same event ID. */
+  def historicalFingerprintConflicts(incoming: DataFrame, storedFingerprints: DataFrame): DataFrame =
+    incoming
+      .select(Columns.EventId, Columns.RawValue)
+      .withColumn("incomingFingerprint", sha2(col(Columns.RawValue), 256))
+      .join(
+        storedFingerprints.withColumnRenamed(Columns.EventFingerprint, "storedFingerprint"),
+        Seq(Columns.EventId),
+        "inner"
+      )
+      .filter(col("incomingFingerprint") =!= col("storedFingerprint"))
+      .select(Columns.EventId)
+      .distinct()
 }
 
 object HiringGoldTransforms {
@@ -366,9 +391,6 @@ object HiringGoldTransforms {
         .filter(col(Columns.ContributingSubjects) >= lit(AnalyticsRetention.MinimumContributors))
         .drop(Columns.ContributingSubjects)
     }
-
-  def suppressSmallGroups(dataset: DataFrame, contributorColumn: String): DataFrame =
-    dataset.filter(col(contributorColumn) >= lit(AnalyticsRetention.MinimumContributors))
 
   /** Wide daily shape consumed by the operational AnalyticsFunnelDay projection. */
   def wideFunnelDay(silver: DataFrame): Either[AnalyticsError, DataFrame] = {

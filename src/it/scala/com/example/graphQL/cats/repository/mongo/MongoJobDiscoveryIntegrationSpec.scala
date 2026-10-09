@@ -221,10 +221,8 @@ final class MongoJobDiscoveryIntegrationSpec extends MongoJobDiscoveryFixture {
         else
           success(repository.nearbyJobs(scope, query.copy(after = after), 7)).flatMap { page =>
             page.lastOption.fold(IO.pure(List.empty[NearbyJob])) { last =>
-              val encoded = NearbyJobCursorCodec.encode(last.distanceKm, last.job.id, query)
-              IO.fromEither(
-                NearbyJobCursorCodec.decode(encoded, query).leftMap(error => new AssertionError(error.message))
-              ).flatMap(cursor => pages(Some(cursor), remaining - 1).map(page ++ _))
+              val cursor = NearbyJobCursor(last.distanceKm, last.job.id, query.fingerprint)
+              pages(Some(cursor), remaining - 1).map(page ++ _)
             }
           }
       for {

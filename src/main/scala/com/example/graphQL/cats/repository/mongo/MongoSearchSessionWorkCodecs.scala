@@ -35,9 +35,9 @@ private[mongo] object MongoSearchSessionWorkCodecs {
 
   def readWork(document: Document): Either[StoredDocumentError, PendingSearchSessionWork] =
     for {
-      sessionDocument <- requiredDocument(document, MongoFields.Session)
+      sessionDocument <- MongoDocumentFields.requiredDocument(document, MongoFields.Session)
       session <- MongoHiringCodecs.readSearchSession(sessionDocument).toEither.leftMap(_.head)
-      eventDocument <- requiredDocument(document, MongoFields.Event)
+      eventDocument <- MongoDocumentFields.requiredDocument(document, MongoFields.Event)
       event <- MongoHiringCodecs.readOperationalEvent(eventDocument).toEither.leftMap(_.head)
       _ <- Either.cond(
         session.query.isEmpty && PendingSearchSessionWork(session, event).addressesSession,
@@ -49,35 +49,12 @@ private[mongo] object MongoSearchSessionWorkCodecs {
   def readClaim(document: Document): Either[StoredDocumentError, ClaimedSearchSessionWork] =
     for {
       work <- readWork(document)
-      attempts <- requiredInt(document, MongoFields.Attempts)
-      leaseToken <- requiredString(document, MongoFields.LeaseToken)
+      attempts <- MongoDocumentFields.requiredInt32(document, MongoFields.Attempts)
+      leaseToken <- MongoDocumentFields.requiredString(document, MongoFields.LeaseToken)
     } yield ClaimedSearchSessionWork(work, attempts, leaseToken)
 
   def readState(document: Document): Either[StoredDocumentError, SearchSessionWorkState] =
-    requiredString(document, MongoFields.State).flatMap(value =>
-      SearchSessionWorkState.values
-        .find(_.toString == value)
-        .toRight(StoredDocumentError.InvalidField(MongoFields.State))
+    MongoDocumentFields.requiredEnum(document, MongoFields.State)(
+      MongoDocumentFields.byName(SearchSessionWorkState.values)
     )
-
-  private def requiredDocument(document: Document, field: String): Either[StoredDocumentError, Document] =
-    Option(document.get(field)) match {
-      case Some(value: Document) => Right(value)
-      case None                  => Left(StoredDocumentError.MissingField(field))
-      case _                     => Left(StoredDocumentError.InvalidField(field))
-    }
-
-  private def requiredString(document: Document, field: String): Either[StoredDocumentError, String] =
-    Option(document.get(field)) match {
-      case Some(value: String) => Right(value)
-      case None                => Left(StoredDocumentError.MissingField(field))
-      case _                   => Left(StoredDocumentError.InvalidField(field))
-    }
-
-  private def requiredInt(document: Document, field: String): Either[StoredDocumentError, Int] =
-    Option(document.get(field)) match {
-      case Some(value: java.lang.Integer) => Right(value.intValue)
-      case None                           => Left(StoredDocumentError.MissingField(field))
-      case _                              => Left(StoredDocumentError.InvalidField(field))
-    }
 }

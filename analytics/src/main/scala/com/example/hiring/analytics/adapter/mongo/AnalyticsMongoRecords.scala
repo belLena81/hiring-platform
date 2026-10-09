@@ -180,13 +180,13 @@ private[analytics] object AnalyticsMongoRecords {
     def widen(value: BsonValue): BsonValue = value match {
       case nested: BsonDocument =>
         val widened = new BsonDocument()
-        nested.forEach((key, field) =>
-          widened.put(
+        nested.forEach { (key, field) =>
+          val _ = widened.put(
             key,
             if (longFields.contains(key) && field.isInt32) new BsonInt64(field.asInt32().getValue.toLong)
             else widen(field)
           )
-        )
+        }
         widened
       case array: BsonArray => new BsonArray(array.getValues.asScala.map(widen).asJava)
       case other            => other

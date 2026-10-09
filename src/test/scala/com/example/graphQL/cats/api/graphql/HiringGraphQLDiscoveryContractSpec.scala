@@ -5,13 +5,22 @@ import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.{AccountStatus, GeoPoint, Location, Application, ApplicationEvent}
 import com.example.graphQL.cats.domain.model.Identifiers.ApplicationId
 import com.example.graphQL.cats.service.{ActorContext, ProbeResult, ServiceFixtures, HiringReadService, RepositoryError}
-import com.example.graphQL.cats.service.search.{JobDiscoveryTestSupport, JobSearchFilter, NearbyJobsQuery}
+import com.example.graphQL.cats.service.search.{
+  JobDiscoveryTestSupport,
+  JobSearchFilter,
+  NearbyJobCursor,
+  NearbyJobsQuery
+}
+import com.example.graphQL.cats.domain.pagination.JobCursor
 import io.circe.Json
+import java.time.Instant
 import munit.CatsEffectSuite
 import sangria.parser.QueryParser
 import sangria.validation.QueryValidator
 
 final class HiringGraphQLDiscoveryContractSpec extends CatsEffectSuite {
+  private given CursorCodec.CursorKey = TestGraphQLSupport.cursorKey
+  private def cursorNow: Instant = Instant.now()
   private val center = GeoPoint(35d, 33d)
   private val candidate = ServiceFixtures.candidate
   private val actor = ActorContext(candidate.id, candidate.role)
@@ -47,6 +56,9 @@ final class HiringGraphQLDiscoveryContractSpec extends CatsEffectSuite {
 
   private def errorCode(result: Json): Either[io.circe.DecodingFailure, String] =
     result.hcursor.downField("errors").downArray.downField("extensions").get[String]("code")
+
+  private def errorMessage(result: Json): Either[io.circe.DecodingFailure, String] =
+    result.hcursor.downField("errors").downArray.get[String]("message")
 
   test("five expensive aliases through fragments reject before any discovery resolver runs") {
     val query = """query {
@@ -170,7 +182,11 @@ final class HiringGraphQLDiscoveryContractSpec extends CatsEffectSuite {
           hit
             .get[String]("cursor")
             .toOption
-            .exists(cursor => NearbyJobsQuery.decodeCursor(cursor, NearbyJobsQuery(center, 20d, normalized)).isRight)
+            .exists(cursor =>
+              CursorCodec
+                .decode[NearbyJobCursor](cursor, cursorNow)
+                .exists(_.isBoundTo(NearbyJobsQuery(center, 20d, normalized)))
+            )
         )
         val skill = result.hcursor.downField("data").downField("jobDiscoveryFacets").downField("skills").downArray
         assertEquals(skill.get[String]("value"), Right("Scala"))
@@ -219,18 +235,32 @@ final class HiringGraphQLDiscoveryContractSpec extends CatsEffectSuite {
 
   test("executed malformed and wrong-bound cursors preserve sanitized cursor errors") {
     val query = NearbyJobsQuery(center, 20d, JobSearchFilter(None, Set.empty, None))
-    val wrongBound = NearbyJobsQuery.encodeCursor(1d, pointJob.id, query.copy(radiusKm = 21d))
-    val invalidDistance = NearbyJobsQuery.encodeCursor(-1d, pointJob.id, query)
-    val invalidIdentity = java.util.Base64.getUrlEncoder
+    def nearbyCursor(distance: Double, bound: NearbyJobsQuery): String =
+      CursorCodec.encode(NearbyJobCursor(distance, pointJob.id, bound.fingerprint), cursorNow)
+    val wrongBound = nearbyCursor(1d, query.copy(radiusKm = 21d))
+    val invalidDistance = nearbyCursor(-1d, query)
+    val jobConnectionCursor = CursorCodec.encode(JobCursor(cursorNow, pointJob.id), cursorNow)
+    val legacyUnsigned = java.util.Base64.getUrlEncoder
       .withoutPadding()
-      .encodeToString(s"1.0|invalid|${query.fingerprint}".getBytes(java.nio.charset.StandardCharsets.UTF_8))
+      .encodeToString(
+        s"1.0|${pointJob.id.value}|${query.fingerprint}".getBytes(java.nio.charset.StandardCharsets.UTF_8)
+      )
     val operation = """query($after: String) {
       nearbyJobs(center: {latitude: 35, longitude: 33}, radiusKm: 20, first: 1, after: $after) { hasNextPage }
     }"""
     JobDiscoveryTestSupport.fixture(List(candidate)).flatMap { fixture =>
-      List("%", wrongBound, invalidDistance, invalidIdentity).traverse_ { cursor =>
+      List(
+        ("%", "INVALID_CURSOR", "Invalid cursor"),
+        (legacyUnsigned, "INVALID_CURSOR", "Invalid cursor"),
+        (wrongBound, "INVALID_CURSOR", "Nearby cursor does not match criteria"),
+        (invalidDistance, "INVALID_CURSOR", "Invalid cursor"),
+        (jobConnectionCursor, "WRONG_CURSOR_KIND", "Cursor belongs to a different connection")
+      ).traverse_ { case (cursor, code, message) =>
         execute(operation, Json.obj("after" -> Json.fromString(cursor)), fixture)
-          .map(result => assertEquals(errorCode(result), Right("INVALID_CURSOR")))
+          .map { result =>
+            assertEquals(errorCode(result), Right(code))
+            assertEquals(errorMessage(result), Right(message))
+          }
       } *> fixture.calls.get.map(calls => assertEquals(calls, JobDiscoveryTestSupport.Calls()))
     }
   }

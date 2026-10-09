@@ -6,7 +6,7 @@ import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
 import com.example.hiring.analytics.service.keyretirement.HmacKeyRetirementAuthorization
 
-import cats.effect.Async
+import cats.effect.{Async, Clock}
 import cats.syntax.all.*
 import io.delta.tables.DeltaTable
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
@@ -23,10 +23,10 @@ private[analytics] final class AnalyticsKeyContinuityStage[F[_]: Async](
     pseudonymizer: SubjectPseudonymizer,
     execution: SparkExecution[F],
     retirementAuthorizations: KeyRetirementLookup[F],
-    private[analytics] val nowOverride: Option[F[Instant]] = None
+    clock: Clock[F]
 ) {
   private val blocking = execution
-  private val now = nowOverride.getOrElse(Async[F].realTimeInstant)
+  private val now = clock.realTimeInstant
 
   private[spark] def ensurePrimaryTokenCompatibility(spark: SparkSession, at: Instant): F[Unit] = blocking.either {
     val failureColumn = "_hiringPrimaryTokenFailure"
@@ -36,16 +36,20 @@ private[analytics] final class AnalyticsKeyContinuityStage[F[_]: Async](
       else {
         val stored = spark.read.format("delta").load(SparkPhysicalLocation.resolve(path))
         val columns = stored.columns.toSet
-        if (!columns.contains("subjectToken"))
+        if (!columns.contains(Columns.SubjectToken))
           Vector(stored.limit(1).select(lit(index * 2).as(failureColumn)))
         else {
           val activeData =
-            if (columns.contains("expiresAt")) col("expiresAt").isNull || col("expiresAt") > lit(Timestamp.from(at))
+            if (columns.contains(Columns.ExpiresAt))
+              col(Columns.ExpiresAt).isNull || col(Columns.ExpiresAt) > lit(Timestamp.from(at))
             else lit(true)
           val expectedPrefix = pseudonymizer.primaryKeyId + "_"
           Vector(
             stored
-              .filter(activeData && (col("subjectToken").isNull || !col("subjectToken").startsWith(expectedPrefix)))
+              .filter(
+                activeData && (col(Columns.SubjectToken).isNull || !col(Columns.SubjectToken)
+                  .startsWith(expectedPrefix))
+              )
               .limit(1)
               .select(lit(index * 2 + 1).as(failureColumn))
           )
@@ -76,17 +80,19 @@ private[analytics] final class AnalyticsKeyContinuityStage[F[_]: Async](
         if (DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(path))) {
           val frame = spark.read.format("delta").load(SparkPhysicalLocation.resolve(path))
           val tokenFrames = Vector(
-            Option.when(frame.columns.contains("subjectTokens"))(
-              frame.select(explode(col("subjectTokens")).as("token"))
+            Option.when(frame.columns.contains(Columns.SubjectTokens))(
+              frame.select(explode(col(Columns.SubjectTokens)).as(Columns.Token))
             ),
-            Option.when(frame.columns.contains("subjectToken"))(frame.select(col("subjectToken").as("token")))
+            Option.when(frame.columns.contains(Columns.SubjectToken))(
+              frame.select(col(Columns.SubjectToken).as(Columns.Token))
+            )
           ).flatten
           val tokenValues = tokenFrames
             .reduceOption(_.unionByName(_))
             .getOrElse(
-              frame.limit(0).select(lit(null).cast(StringType).as("token"))
+              frame.limit(0).select(lit(null).cast(StringType).as(Columns.Token))
             )
-          Vector(tokenValues.filter(col("token").isNotNull && !col("token").rlike(tokenPattern)).limit(1))
+          Vector(tokenValues.filter(col(Columns.Token).isNotNull && !col(Columns.Token).rlike(tokenPattern)).limit(1))
         } else Vector.empty
       }
     val incompatible = invalidTokens.reduceOption(_.unionByName(_)).exists(_.limit(1).count() > 0L)
@@ -118,7 +124,7 @@ private[analytics] final class AnalyticsKeyContinuityStage[F[_]: Async](
             spark.read
               .format("delta")
               .load(SparkPhysicalLocation.resolve(paths.hmacKeyRegistry))
-              .select("keyId", "verifier")
+              .select(Columns.KeyId, Columns.Verifier)
               .collect()
               .toVector
               .map(row => row.getString(0) -> row.getString(1))
@@ -174,12 +180,16 @@ private[analytics] final class AnalyticsKeyContinuityStage[F[_]: Async](
       else {
         val frame = spark.read.format("delta").load(SparkPhysicalLocation.resolve(path))
         val tokenFrames = Vector(
-          Option.when(frame.columns.contains("subjectTokens"))(frame.select(explode(col("subjectTokens")).as("token"))),
-          Option.when(frame.columns.contains("subjectToken"))(frame.select(col("subjectToken").as("token")))
+          Option.when(frame.columns.contains(Columns.SubjectTokens))(
+            frame.select(explode(col(Columns.SubjectTokens)).as(Columns.Token))
+          ),
+          Option.when(frame.columns.contains(Columns.SubjectToken))(
+            frame.select(col(Columns.SubjectToken).as(Columns.Token))
+          )
         ).flatten
         tokenFrames
           .reduceOption(_.unionByName(_))
-          .exists(_.filter(col("token").startsWith(keyId + "_")).limit(1).count() > 0L)
+          .exists(_.filter(col(Columns.Token).startsWith(keyId + "_")).limit(1).count() > 0L)
       }
     }
 
@@ -187,7 +197,10 @@ private[analytics] final class AnalyticsKeyContinuityStage[F[_]: Async](
     spark.createDataFrame(
       values.map { case (keyId, verifier) => Row(keyId, verifier) }.asJava,
       StructType(
-        Seq(StructField("keyId", StringType, nullable = false), StructField("verifier", StringType, nullable = false))
+        Seq(
+          StructField(Columns.KeyId, StringType, nullable = false),
+          StructField(Columns.Verifier, StringType, nullable = false)
+        )
       )
     )
 }

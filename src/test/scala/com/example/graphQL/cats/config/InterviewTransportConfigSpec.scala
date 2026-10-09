@@ -4,10 +4,9 @@ import com.example.graphQL.cats.domain.workflow.InterviewTopicPair
 import munit.FunSuite
 
 final class InterviewTransportConfigSpec extends FunSuite {
-  private def configuration(overrides: String) = AppConfig.fromConfig(
-    "include classpath(\"application.conf\")\nhttp.host=\"127.0.0.1\"\nhttp.port=8080\nmongo.uri=\"mongodb://127.0.0.1:27018\"\nauth.jwt.hs256-secret=\"synthetic-test-signing-key-material\"\n" + overrides,
-    Map.empty
-  )
+  private def configuration(overrides: String) = AppConfigFixtures.withPackagedDefaults(overrides)
+  private def errorsOf(overrides: String): List[ConfigError] =
+    configuration(overrides).swap.toOption.fold(fail(s"Expected rejected configuration for $overrides"))(_.toList)
 
   test("interview transport retains the existing production topics and groups") {
     val result = configuration("").fold(errors => fail(errors.toString), identity)
@@ -30,12 +29,23 @@ final class InterviewTransportConfigSpec extends FunSuite {
     assertEquals(result.kafka.interview.workerGroup, "hiring.test.workers.owned")
   }
 
-  test("interview transport rejects shared topics, shared groups and invalid topic syntax") {
+  test("interview transport names each rejected topic, group or shared pair") {
     List(
-      "kafka.interview.commands-topic=\"hiring.interview-results\"",
-      "kafka.interview.worker-group=\"hiring-interview-orchestrator\"",
-      "kafka.interview.commands-topic=\"..\"",
-      "kafka.interview.results-topic=\"invalid topic\""
-    ).foreach(value => assert(configuration(value).isLeft, value))
+      ("kafka.interview.commands-topic=\"hiring.interview-results\"", ConfigError.InvalidInterviewTopicPair),
+      ("kafka.interview.worker-group=\"hiring-interview-orchestrator\"", ConfigError.InvalidInterviewGroupPair),
+      ("kafka.interview.commands-topic=\"..\"", ConfigError.InvalidInterviewCommandsTopic),
+      ("kafka.interview.commands-topic=\".\"", ConfigError.InvalidInterviewCommandsTopic),
+      ("kafka.interview.results-topic=\"invalid topic\"", ConfigError.InvalidInterviewResultsTopic),
+      ("kafka.interview.results-topic=\"" + "t" * 250 + "\"", ConfigError.InvalidInterviewResultsTopic),
+      ("kafka.interview.worker-group=\"bad group\"", ConfigError.InvalidInterviewWorkerGroup),
+      ("kafka.interview.orchestrator-group=\"" + "g" * 201 + "\"", ConfigError.InvalidInterviewOrchestratorGroup)
+    ).foreach { case (override_, expected) => assert(errorsOf(override_).contains(expected), clues(override_)) }
+  }
+
+  test("independent interview transport violations are all reported") {
+    assertEquals(
+      errorsOf("kafka.interview.commands-topic=\"..\"\nkafka.interview.worker-group=\"bad group\"").toSet,
+      Set[ConfigError](ConfigError.InvalidInterviewCommandsTopic, ConfigError.InvalidInterviewWorkerGroup)
+    )
   }
 }

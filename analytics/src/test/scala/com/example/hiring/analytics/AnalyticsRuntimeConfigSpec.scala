@@ -1,21 +1,11 @@
 package com.example.hiring.analytics
 import com.example.hiring.analytics.app.AppModule
-import com.example.hiring.analytics.service.keyretirement.*
-import com.example.hiring.analytics.service.batch.*
 import com.example.hiring.analytics.errors.*
 import com.example.hiring.analytics.domain.*
 import com.example.hiring.analytics.config.*
-import com.example.hiring.analytics.adapter.spark.*
-import com.example.hiring.analytics.adapter.mongo.*
 import com.example.hiring.analytics.adapter.kafka.*
-import com.example.hiring.analytics.adapter.local.*
-import com.example.hiring.analytics.service.erasure.*
 import com.example.hiring.analytics.config.AnalyticsPositiveInt.*
-import io.github.iltotore.iron.*
 import scala.concurrent.duration.*
-
-import com.example.hiring.analytics.adapter.spark.*
-import com.example.hiring.analytics.adapter.mongo.*
 
 import java.util.Base64
 import java.nio.charset.StandardCharsets
@@ -121,9 +111,13 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
 |}
     |""".stripMargin
 
+  /** Operational settings as the batch loader resolves them, with `overrides` layered over the base environment. */
+  private def operational(overrides: Map[String, String]): Either[AnalyticsError, AnalyticsOperationalSettings] =
+    AnalyticsConfigFixtures.batch(hocon, settings ++ overrides).map(_.common.operational)
+
   test("batch settings load service and run inputs through HOCON substitutions") {
     val loaded =
-      AnalyticsRuntimeConfig.batchFromHocon(hocon, settings).toOption.getOrElse(fail("expected valid batch config"))
+      AnalyticsConfigFixtures.batch(hocon, settings).toOption.getOrElse(fail("expected valid batch config"))
     assertEquals(loaded.manifest.runId.value, "run-local-1")
     assertEquals(
       loaded.manifest.offsetRanges,
@@ -154,8 +148,8 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
         |  }
         |  batch {""".stripMargin
     )
-    val loaded = AnalyticsRuntimeConfig
-      .lateFactReplayFromHocon(replayHocon, settings)
+    val loaded = AnalyticsConfigFixtures
+      .lateFactReplay(replayHocon, settings)
       .toOption
       .getOrElse(fail("expected valid late-fact replay config"))
 
@@ -178,8 +172,8 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
         |  }
         |  batch {""".stripMargin
     )
-    val error = AnalyticsRuntimeConfig
-      .lateFactReplayFromHocon(replayHocon, settings)
+    val error = AnalyticsConfigFixtures
+      .lateFactReplay(replayHocon, settings)
       .swap
       .toOption
       .getOrElse(fail("expected topic mismatch and over-limit errors"))
@@ -188,10 +182,10 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
   }
 
   test("late-fact replay configuration requires identity and coordinates and rejects duplicate selections") {
-    val missingBlock = AnalyticsRuntimeConfig.lateFactReplayFromHocon(hocon, settings)
+    val missingBlock = AnalyticsConfigFixtures.lateFactReplay(hocon, settings)
     assert(missingBlock.swap.toOption.exists(_.getMessage.contains("analytics.replay configuration is required")))
 
-    val incomplete = AnalyticsRuntimeConfig.lateFactReplayFromHocon(
+    val incomplete = AnalyticsConfigFixtures.lateFactReplay(
       hocon.replace("  batch {", "  replay { maximum-records = 1000 }\n  batch {"),
       settings
     )
@@ -199,7 +193,7 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
     assert(incompleteMessage.getMessage.contains("analytics.replay.request-id is required"))
     assert(incompleteMessage.getMessage.contains("analytics.replay.coordinates is required"))
 
-    val duplicate = AnalyticsRuntimeConfig.lateFactReplayFromHocon(
+    val duplicate = AnalyticsConfigFixtures.lateFactReplay(
       hocon.replace(
         "  batch {",
         """  replay {
@@ -236,27 +230,24 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
   }
 
   test("operational retention, worker timings, and runtime bounds validate defaults and overrides") {
-    val configured = AnalyticsRuntimeConfig
-      .operationalFromHocon(
-        hocon,
-        Map(
-          "ANALYTICS_RETENTION_BRONZE_DAYS" -> "14",
-          "ANALYTICS_RETENTION_QUARANTINE_DAYS" -> "12",
-          "ANALYTICS_RETENTION_SILVER_DAYS" -> "60",
-          "ANALYTICS_RETENTION_PUBLISHED_SNAPSHOT_DAYS" -> "15",
-          "ANALYTICS_RETENTION_DELETION_MARKER_DAYS" -> "20",
-          "ANALYTICS_RETENTION_DELTA_VACUUM_SAFETY" -> "3 days",
-          "ANALYTICS_RETENTION_DELTA_LOG_RETENTION" -> "10 days",
-          "ANALYTICS_REPORT_RESERVATION_TTL" -> "45 days",
-          "ANALYTICS_MONGO_TRANSACTION_WINDOW" -> "30 seconds",
-          "ANALYTICS_MAXIMUM_ERASURE_EVIDENCE_FILES" -> "8000",
-          "ANALYTICS_MONGO_PUBLISHER_BUFFER_SIZE" -> "64",
-          "ANALYTICS_ERASURE_LEASE_DURATION" -> "120 seconds",
-          "ANALYTICS_ERASURE_DELIVERY_TIMEOUT" -> "45 seconds",
-          "ANALYTICS_ERASURE_POLL_INTERVAL" -> "8 seconds"
-        )
+    val configured = operational(
+      Map(
+        "ANALYTICS_RETENTION_BRONZE_DAYS" -> "14",
+        "ANALYTICS_RETENTION_QUARANTINE_DAYS" -> "12",
+        "ANALYTICS_RETENTION_SILVER_DAYS" -> "60",
+        "ANALYTICS_RETENTION_PUBLISHED_SNAPSHOT_DAYS" -> "15",
+        "ANALYTICS_RETENTION_DELETION_MARKER_DAYS" -> "20",
+        "ANALYTICS_RETENTION_DELTA_VACUUM_SAFETY" -> "3 days",
+        "ANALYTICS_RETENTION_DELTA_LOG_RETENTION" -> "10 days",
+        "ANALYTICS_REPORT_RESERVATION_TTL" -> "45 days",
+        "ANALYTICS_MONGO_TRANSACTION_WINDOW" -> "30 seconds",
+        "ANALYTICS_MAXIMUM_ERASURE_EVIDENCE_FILES" -> "8000",
+        "ANALYTICS_MONGO_PUBLISHER_BUFFER_SIZE" -> "64",
+        "ANALYTICS_ERASURE_LEASE_DURATION" -> "120 seconds",
+        "ANALYTICS_ERASURE_DELIVERY_TIMEOUT" -> "45 seconds",
+        "ANALYTICS_ERASURE_POLL_INTERVAL" -> "8 seconds"
       )
-      .toOption
+    ).toOption
       .getOrElse(fail("expected valid operational config"))
     assertEquals(configured.retention.bronzeDays.value, 14)
     assertEquals(configured.retention.quarantineDays.value, 12)
@@ -274,18 +265,16 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
     assertEquals(MaximumErasureEvidenceFiles.unwrap(configured.maximumErasureEvidenceFiles), 8000)
     assertEquals(MongoPublisherBufferSize.unwrap(configured.mongoPublisherBufferSize), 64)
 
-    val invalid = AnalyticsRuntimeConfig.operationalFromHocon(
-      hocon,
+    val invalid = operational(
       Map("ANALYTICS_RETENTION_BRONZE_DAYS" -> "0", "ANALYTICS_MONGO_PUBLISHER_BUFFER_SIZE" -> "-1")
     )
     val message = invalid.swap.toOption.getOrElse(fail("expected rejected operational settings")).getMessage
     assert(message.contains("analytics.operational.retention.bronze-days"), message)
-    assert(message.contains("must be greater than zero"))
+    assert(message.contains("Should be strictly positive"))
     assert(message.contains("analytics.operational.mongo-publisher-buffer-size"))
-    assert(message.contains("must be between one and"))
+    assert(message.contains("Should be included in [1, 65536]"))
 
-    val invalidWorkerTimings = AnalyticsRuntimeConfig.operationalFromHocon(
-      hocon,
+    val invalidWorkerTimings = operational(
       Map(
         "ANALYTICS_ERASURE_LEASE_DURATION" -> "0 seconds",
         "ANALYTICS_ERASURE_DELIVERY_TIMEOUT" -> "-1 seconds",
@@ -296,14 +285,13 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
       .getOrElse(fail("expected rejected erasure worker timings"))
       .getMessage
     assert(
-      workerTimingMessage.contains("erasure-worker.lease-duration must be at least one millisecond"),
+      workerTimingMessage.contains("erasure-worker.lease-duration: Should be at least one millisecond"),
       workerTimingMessage
     )
-    assert(workerTimingMessage.contains("erasure-worker.delivery-timeout must be at least one millisecond"))
-    assert(workerTimingMessage.contains("erasure-worker.poll-interval must be at least one millisecond"))
+    assert(workerTimingMessage.contains("erasure-worker.delivery-timeout: Should be at least one millisecond"))
+    assert(workerTimingMessage.contains("erasure-worker.poll-interval: Should be at least one millisecond"))
 
-    val subMillisecondWorkerTimings = AnalyticsRuntimeConfig.operationalFromHocon(
-      hocon,
+    val subMillisecondWorkerTimings = operational(
       Map(
         "ANALYTICS_ERASURE_LEASE_DURATION" -> "1 nanosecond",
         "ANALYTICS_ERASURE_DELIVERY_TIMEOUT" -> "999 microseconds",
@@ -313,27 +301,23 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
     val subMillisecondMessage = subMillisecondWorkerTimings.swap.toOption
       .getOrElse(fail("expected rejected sub-millisecond erasure worker timings"))
       .getMessage
-    assert(subMillisecondMessage.contains("erasure-worker.lease-duration must be at least one millisecond"))
-    assert(subMillisecondMessage.contains("erasure-worker.delivery-timeout must be at least one millisecond"))
-    assert(subMillisecondMessage.contains("erasure-worker.poll-interval must be at least one millisecond"))
+    assert(subMillisecondMessage.contains("erasure-worker.lease-duration: Should be at least one millisecond"))
+    assert(subMillisecondMessage.contains("erasure-worker.delivery-timeout: Should be at least one millisecond"))
+    assert(subMillisecondMessage.contains("erasure-worker.poll-interval: Should be at least one millisecond"))
 
-    val minimumWorkerTimings = AnalyticsRuntimeConfig
-      .operationalFromHocon(
-        hocon,
-        Map(
-          "ANALYTICS_ERASURE_LEASE_DURATION" -> "1 millisecond",
-          "ANALYTICS_ERASURE_DELIVERY_TIMEOUT" -> "1 millisecond",
-          "ANALYTICS_ERASURE_POLL_INTERVAL" -> "1 millisecond"
-        )
+    val minimumWorkerTimings = operational(
+      Map(
+        "ANALYTICS_ERASURE_LEASE_DURATION" -> "1 millisecond",
+        "ANALYTICS_ERASURE_DELIVERY_TIMEOUT" -> "1 millisecond",
+        "ANALYTICS_ERASURE_POLL_INTERVAL" -> "1 millisecond"
       )
-      .toOption
+    ).toOption
       .getOrElse(fail("expected one-millisecond erasure worker timings to be accepted"))
     assertEquals(minimumWorkerTimings.erasureWorkerTimings.leaseDuration, 1.millisecond)
     assertEquals(minimumWorkerTimings.erasureWorkerTimings.deliveryTimeout, 1.millisecond)
     assertEquals(minimumWorkerTimings.erasureWorkerTimings.pollInterval, 1.millisecond)
 
-    val invalidDeltaDurations = AnalyticsRuntimeConfig.operationalFromHocon(
-      hocon,
+    val invalidDeltaDurations = operational(
       Map(
         "ANALYTICS_RETENTION_DELTA_VACUUM_SAFETY" -> "0 seconds",
         "ANALYTICS_RETENTION_DELTA_LOG_RETENTION" -> "-1 day"
@@ -342,31 +326,26 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
     val deltaDurationMessage = invalidDeltaDurations.swap.toOption
       .getOrElse(fail("expected rejected Delta retention durations"))
       .getMessage
-    assert(deltaDurationMessage.contains("retention.delta-vacuum-safety must be greater than zero"))
-    assert(deltaDurationMessage.contains("retention.delta-log-retention must be greater than zero"))
+    assert(deltaDurationMessage.contains("retention.delta-vacuum-safety: Should be strictly positive"))
+    assert(deltaDurationMessage.contains("retention.delta-log-retention: Should be strictly positive"))
 
-    val invalidTimeWindows = AnalyticsRuntimeConfig.operationalFromHocon(
-      hocon,
+    val invalidTimeWindows = operational(
       Map("ANALYTICS_REPORT_RESERVATION_TTL" -> "0 seconds", "ANALYTICS_MONGO_TRANSACTION_WINDOW" -> "0 seconds")
     )
     val timeWindowMessage = invalidTimeWindows.swap.toOption
       .getOrElse(fail("expected rejected time windows"))
       .getMessage
-    assert(timeWindowMessage.contains("report-reservation-ttl must be greater than zero"))
-    assert(timeWindowMessage.contains("mongo-transaction-window must be greater than zero"))
+    assert(timeWindowMessage.contains("report-reservation-ttl: Should be strictly positive"))
+    assert(timeWindowMessage.contains("mongo-transaction-window: Should be strictly positive"))
 
-    val evidenceOverflow = AnalyticsRuntimeConfig.operationalFromHocon(
-      hocon,
+    val evidenceOverflow = operational(
       Map("ANALYTICS_MAXIMUM_ERASURE_EVIDENCE_FILES" -> Int.MaxValue.toString)
     )
     assert(evidenceOverflow.isLeft)
 
-    val safeVacuum = AnalyticsRuntimeConfig
-      .operationalFromHocon(
-        hocon,
-        Map("ANALYTICS_RETENTION_DELTA_VACUUM_SAFETY" -> "7 days")
-      )
-      .toOption
+    val safeVacuum = operational(
+      Map("ANALYTICS_RETENTION_DELTA_VACUUM_SAFETY" -> "7 days")
+    ).toOption
       .getOrElse(fail("expected valid Delta vacuum config"))
     assertEquals(safeVacuum.retention.deltaVacuumSafetyCheckEnabled, true)
     assertEquals(safeVacuum.retention.deltaVacuumSafety, 7.days)
@@ -377,34 +356,27 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
   }
 
   test("bounded operational refinements accept their limits and reject values outside them") {
-    val minimums = AnalyticsRuntimeConfig
-      .operationalFromHocon(
-        hocon,
-        Map(
-          "ANALYTICS_MAXIMUM_ERASURE_EVIDENCE_FILES" -> "1",
-          "ANALYTICS_MONGO_PUBLISHER_BUFFER_SIZE" -> "1"
-        )
+    val minimums = operational(
+      Map(
+        "ANALYTICS_MAXIMUM_ERASURE_EVIDENCE_FILES" -> "1",
+        "ANALYTICS_MONGO_PUBLISHER_BUFFER_SIZE" -> "1"
       )
-      .toOption
+    ).toOption
       .getOrElse(fail("expected minimum bounded settings to load"))
     assertEquals(MaximumErasureEvidenceFiles.unwrap(minimums.maximumErasureEvidenceFiles), 1)
     assertEquals(MongoPublisherBufferSize.unwrap(minimums.mongoPublisherBufferSize), 1)
 
-    val maximums = AnalyticsRuntimeConfig
-      .operationalFromHocon(
-        hocon,
-        Map(
-          "ANALYTICS_MAXIMUM_ERASURE_EVIDENCE_FILES" -> "2147483646",
-          "ANALYTICS_MONGO_PUBLISHER_BUFFER_SIZE" -> "65536"
-        )
+    val maximums = operational(
+      Map(
+        "ANALYTICS_MAXIMUM_ERASURE_EVIDENCE_FILES" -> "2147483646",
+        "ANALYTICS_MONGO_PUBLISHER_BUFFER_SIZE" -> "65536"
       )
-      .toOption
+    ).toOption
       .getOrElse(fail("expected maximum bounded settings to load"))
     assertEquals(MaximumErasureEvidenceFiles.unwrap(maximums.maximumErasureEvidenceFiles), Int.MaxValue - 1)
     assertEquals(MongoPublisherBufferSize.unwrap(maximums.mongoPublisherBufferSize), 65536)
 
-    val invalid = AnalyticsRuntimeConfig.operationalFromHocon(
-      hocon,
+    val invalid = operational(
       Map(
         "ANALYTICS_MAXIMUM_ERASURE_EVIDENCE_FILES" -> "2147483647",
         "ANALYTICS_MONGO_PUBLISHER_BUFFER_SIZE" -> "65537"
@@ -414,8 +386,7 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
     assert(message.contains("maximum-erasure-evidence-files"))
     assert(message.contains("mongo-publisher-buffer-size"))
 
-    val nonPositive = AnalyticsRuntimeConfig.operationalFromHocon(
-      hocon,
+    val nonPositive = operational(
       Map(
         "ANALYTICS_MAXIMUM_ERASURE_EVIDENCE_FILES" -> "0",
         "ANALYTICS_MONGO_PUBLISHER_BUFFER_SIZE" -> "0"
@@ -432,12 +403,12 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
       "ANALYTICS_KAFKA_SECURITY_PROTOCOL" -> "SASL_PLAINTEXT",
       "ANALYTICS_KAFKA_ALLOW_PLAINTEXT" -> "true"
     )
-    val loaded = AnalyticsRuntimeConfig.batchFromHocon(hocon, local).toOption.getOrElse(fail("expected local config"))
+    val loaded = AnalyticsConfigFixtures.batch(hocon, local).toOption.getOrElse(fail("expected local config"))
     assertEquals(loaded.common.kafka.securityProtocol, KafkaSecurityProtocol.SaslPlaintext)
     assertEquals(loaded.common.kafka.allowPlaintext, true)
 
-    val missingOptIn = AnalyticsRuntimeConfig
-      .batchFromHocon(
+    val missingOptIn = AnalyticsConfigFixtures
+      .batch(
         hocon,
         settings + ("ANALYTICS_KAFKA_SECURITY_PROTOCOL" -> "SASL_PLAINTEXT")
       )
@@ -491,7 +462,7 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
   }
 
   test("Kafka configuration rejects unsupported protocols and malformed opt-in values") {
-    val unsupported = AnalyticsRuntimeConfig.batchFromHocon(
+    val unsupported = AnalyticsConfigFixtures.batch(
       hocon,
       settings ++ Map(
         "ANALYTICS_KAFKA_SECURITY_PROTOCOL" -> "PLAINTEXT",
@@ -500,7 +471,7 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
     )
     assert(unsupported.swap.toOption.exists(_.getMessage.contains("security-protocol")))
 
-    val malformedFlag = AnalyticsRuntimeConfig.batchFromHocon(
+    val malformedFlag = AnalyticsConfigFixtures.batch(
       hocon,
       settings ++ Map(
         "ANALYTICS_KAFKA_SECURITY_PROTOCOL" -> "SASL_PLAINTEXT",
@@ -511,13 +482,13 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
   }
 
   test("typed batch readers reject malformed numeric substitutions without echoing their values") {
-    val malformed = AnalyticsRuntimeConfig.batchFromHocon(
+    val malformed = AnalyticsConfigFixtures.batch(
       hocon,
       settings + ("ANALYTICS_PARTITION" -> "not-a-number")
     )
     assert(malformed.swap.toOption.exists(error => !error.getMessage.contains("not-a-number")))
 
-    val blankTopic = AnalyticsRuntimeConfig.batchFromHocon(
+    val blankTopic = AnalyticsConfigFixtures.batch(
       hocon.replace("topic = \"hiring.operational-events\"", "topic = \" \""),
       settings
     )
@@ -525,14 +496,14 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
   }
 
   test("PureConfig failures identify missing and malformed keys") {
-    val missing = AnalyticsRuntimeConfig.batchFromHocon(
+    val missing = AnalyticsConfigFixtures.batch(
       hocon.replace("database = \"hiring\"", "databse = \"hiring\""),
       settings
     )
     val missingMessage = missing.swap.toOption.getOrElse(fail("expected missing database config")).getMessage
     assert(missingMessage.contains("database"))
 
-    val malformed = AnalyticsRuntimeConfig.batchFromHocon(
+    val malformed = AnalyticsConfigFixtures.batch(
       hocon.replace("username = ${?ANALYTICS_KAFKA_USERNAME}", "username = [42]"),
       settings
     )
@@ -544,8 +515,8 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
       "secret-base64 = ${?HIRING_ANALYTICS_HMAC_SECRET_BASE64}",
       s"secret-base64 = \"$secretSentinel\"\n    broken = ["
     )
-    val parseMessage = AnalyticsRuntimeConfig
-      .batchFromHocon(malformedHocon, settings)
+    val parseMessage = AnalyticsConfigFixtures
+      .batch(malformedHocon, settings)
       .swap
       .toOption
       .getOrElse(fail("expected malformed HOCON"))
@@ -556,18 +527,19 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
       "secret-base64 = ${?HIRING_ANALYTICS_HMAC_SECRET_BASE64}",
       s"secret-base64 = \"$secretSentinel\"\n    unresolved = $${UNRESOLVED_CONFIG_SENTINEL}"
     )
-    val substitutionMessage = AnalyticsRuntimeConfig
-      .batchFromHocon(unresolvedSubstitution, settings)
+    val substitutionMessage = AnalyticsConfigFixtures
+      .batch(unresolvedSubstitution, settings)
       .swap
       .toOption
       .getOrElse(fail("expected unresolved secret substitution"))
       .getMessage
-    assert(substitutionMessage.contains("substitutions are invalid"))
+    assert(substitutionMessage.contains("Could not resolve substitution"), substitutionMessage)
+    assert(substitutionMessage.contains("UNRESOLVED_CONFIG_SENTINEL"))
     assert(!substitutionMessage.contains(secretSentinel))
   }
 
   test("key-retirement audit reports its missing config path") {
-    val missingAudit = AnalyticsRuntimeConfig.keyRetirementAuditFromHocon(
+    val missingAudit = AnalyticsConfigFixtures.keyRetirementAudit(
       hocon.replace("key-retirement-audit {", "unused-audit {"),
       settings
     )
@@ -579,11 +551,11 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
     val packaged = try new String(input.readAllBytes(), StandardCharsets.UTF_8)
     finally input.close()
     val loaded =
-      AnalyticsRuntimeConfig.batchFromHocon(packaged, settings).toOption.getOrElse(fail("expected packaged config"))
+      AnalyticsConfigFixtures.batch(packaged, settings).toOption.getOrElse(fail("expected packaged config"))
     assertEquals(loaded.common.sparkMaster, "local[*]")
     assertEquals(AnalyticsTopic.unwrap(loaded.manifest.offsetRanges.head.topic), "hiring.operational-events")
-    val audit = AnalyticsRuntimeConfig
-      .keyRetirementAuditFromHocon(packaged, settings + ("ANALYTICS_RETIRING_KEY_ID" -> "hmac-v1"))
+    val audit = AnalyticsConfigFixtures
+      .keyRetirementAudit(packaged, settings + ("ANALYTICS_RETIRING_KEY_ID" -> "hmac-v1"))
       .toOption
       .getOrElse(fail("expected valid audit config"))
     assertEquals(audit.mongoDatabase, "hiring")
@@ -593,8 +565,8 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
     assertEquals(audit.writers.managed, Vector.empty)
     assertEquals(MongoPublisherBufferSize.unwrap(audit.operational.mongoPublisherBufferSize), 256)
 
-    val credentialedAudit = AnalyticsRuntimeConfig
-      .keyRetirementAuditFromHocon(
+    val credentialedAudit = AnalyticsConfigFixtures
+      .keyRetirementAudit(
         packaged,
         settings ++ Map(
           "ANALYTICS_RETIRING_KEY_ID" -> "hmac-v1",
@@ -608,8 +580,8 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
   }
 
   test("key-retirement audit config decodes typed evidence and rejects malformed typed fields") {
-    val audit = AnalyticsRuntimeConfig
-      .keyRetirementAuditFromHocon(
+    val audit = AnalyticsConfigFixtures
+      .keyRetirementAudit(
         hocon,
         settings ++ Map(
           "ANALYTICS_RETIRING_KEY_ID" -> "hmac-v1",
@@ -626,14 +598,14 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
     assertEquals(audit.writers.managed.head.disposition, Some(AnalyticsAuditWriterDisposition.Stopped))
 
     val malformedTimestamp = hocon.replace("2026-09-27T00:00:00Z", "invalid-timestamp")
-    assert(AnalyticsRuntimeConfig.keyRetirementAuditFromHocon(malformedTimestamp, settings).isLeft)
+    assert(AnalyticsConfigFixtures.keyRetirementAudit(malformedTimestamp, settings).isLeft)
     val malformedDisposition = hocon.replace("disposition = \"stopped\"", "disposition = \"invalid\"")
-    assert(AnalyticsRuntimeConfig.keyRetirementAuditFromHocon(malformedDisposition, settings).isLeft)
+    assert(AnalyticsConfigFixtures.keyRetirementAudit(malformedDisposition, settings).isLeft)
   }
 
   test("worker settings validate a separate fencer connection") {
     val loaded =
-      AnalyticsRuntimeConfig.workerFromHocon(hocon, settings).toOption.getOrElse(fail("expected valid worker config"))
+      AnalyticsConfigFixtures.worker(hocon, settings).toOption.getOrElse(fail("expected valid worker config"))
     assertEquals(AnalyticsTopic.unwrap(loaded.topic), "hiring.operational-events")
     assertEquals(loaded.fencerKafka.saslUsername, Some("analytics_fencer"))
     assert(!loaded.toString.contains("fencer-secret"))
@@ -652,9 +624,9 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
       "HIRING_ANALYTICS_HMAC_PREVIOUS_KEY_ID" -> "",
       "HIRING_ANALYTICS_HMAC_PREVIOUS_SECRET_BASE64" -> ""
     )
-    assert(AnalyticsRuntimeConfig.workerFromHocon(applicationHocon, workerEnvironment).isRight)
-    assert(AnalyticsRuntimeConfig.batchFromHocon(applicationHocon, workerEnvironment).isLeft)
-    assert(AnalyticsRuntimeConfig.keyRetirementAuditFromHocon(applicationHocon, workerEnvironment).isLeft)
+    assert(AnalyticsConfigFixtures.worker(applicationHocon, workerEnvironment).isRight)
+    assert(AnalyticsConfigFixtures.batch(applicationHocon, workerEnvironment).isLeft)
+    assert(AnalyticsConfigFixtures.keyRetirementAudit(applicationHocon, workerEnvironment).isLeft)
   }
 
   test("empty optional previous-key substitutions mean no retiring key") {
@@ -662,7 +634,7 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
       "HIRING_ANALYTICS_HMAC_PREVIOUS_KEY_ID" -> "",
       "HIRING_ANALYTICS_HMAC_PREVIOUS_SECRET_BASE64" -> ""
     )
-    assert(AnalyticsRuntimeConfig.batchFromHocon(hocon, withEmptyRotationSettings).isRight)
+    assert(AnalyticsConfigFixtures.batch(hocon, withEmptyRotationSettings).isRight)
 
     val incomplete = SubjectPseudonymizer.validateFromBase64(Some(key), "hmac-v1", Some("old-key"), Some(""))
     assert(
@@ -686,7 +658,7 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
       "ANALYTICS_END_OFFSET_EXCLUSIVE" -> "4"
     )
     val error =
-      AnalyticsRuntimeConfig.batchFromHocon(hocon, invalid).swap.toOption.getOrElse(fail("expected invalid config"))
+      AnalyticsConfigFixtures.batch(hocon, invalid).swap.toOption.getOrElse(fail("expected invalid config"))
     val message = error.getMessage
     assert(message.contains("analytics.mongo.uri"), message)
     assert(message.contains("analytics.kafka.bootstrap-servers"))
@@ -695,7 +667,7 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
     assert(!message.contains("this-value-must-not-appear-in-errors"))
 
     val invalidRange =
-      AnalyticsRuntimeConfig.batchFromHocon(hocon, settings + ("ANALYTICS_END_OFFSET_EXCLUSIVE" -> "4"))
+      AnalyticsConfigFixtures.batch(hocon, settings + ("ANALYTICS_END_OFFSET_EXCLUSIVE" -> "4"))
     assert(invalidRange.swap.toOption.exists(_.getMessage.contains("end offset must not precede start offset")))
   }
 
@@ -713,4 +685,132 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
     assert(errors.contains("HIRING_ANALYTICS_HMAC_KEY_ID must be non-empty"))
     assert(errors.contains("previous HMAC key ID and secret must be configured together"))
   }
+
+  test("batch validation reports independent cross-field violations together") {
+    val invalid = settings ++ Map(
+      "MONGODB_URI" -> "not a mongo uri",
+      "ANALYTICS_KAFKA_SECURITY_PROTOCOL" -> "SASL_PLAINTEXT",
+      "ANALYTICS_END_OFFSET_EXCLUSIVE" -> "4"
+    )
+    assertEquals(
+      failureSet(AnalyticsConfigFixtures.batch(hocon, invalid)),
+      List(
+        "Kafka SASL_PLAINTEXT requires analytics.kafka.allow-plaintext=true",
+        "analytics.mongo.uri is invalid",
+        "end offset must not precede start offset"
+      )
+    )
+  }
+
+  test("worker validation reports a missing fencer credential and an invalid Mongo URI together") {
+    val invalid = settings - "ANALYTICS_KAFKA_FENCER_PASSWORD" + ("MONGODB_URI" -> "not a mongo uri")
+    assertEquals(
+      failureSet(AnalyticsConfigFixtures.worker(hocon, invalid)),
+      List("analytics.kafka.fencer.password is required", "analytics.mongo.uri is invalid")
+    )
+  }
+
+  test("key-retirement audit reports a missing retiring key and an invalid Mongo URI together") {
+    assertEquals(
+      failureSet(AnalyticsConfigFixtures.keyRetirementAudit(hocon, settings + ("MONGODB_URI" -> "not a mongo uri"))),
+      List("analytics.key-retirement-audit.retiring-key-id is required", "analytics.mongo.uri is invalid")
+    )
+  }
+
+  test("streaming runtime settings accumulate common and streaming violations and report decode paths") {
+    val streamingHocon = hocon.replace(
+      "  batch {",
+      """|  streaming {
+        |    stream-id = "hiring-events"
+        |    activation-grant-id = "grant-2026-10"
+        |    checkpoint-location = "file:///var/lib/hiring-analytics/checkpoints/hiring-events"
+        |    trigger-interval = 10 seconds
+        |    max-offsets-per-trigger = 1000
+        |    maximum-replay-records = 1000
+        |    maintenance-interval = 60 seconds
+        |    progress-retention = 7 days
+        |    initial-offsets = [{ partition = 0, offset = 0 }]
+        |  }
+        |  batch {""".stripMargin
+    )
+    val loaded = AnalyticsConfigFixtures.streamingRuntime(streamingHocon, settings)
+    assertEquals(loaded.map(runtime => AnalyticsTopic.unwrap(runtime.topic)), Right("hiring.operational-events"))
+    assertEquals(loaded.map(_.streaming.triggerInterval), Right(10.seconds))
+
+    val emptyOffsets =
+      streamingHocon.replace("initial-offsets = [{ partition = 0, offset = 0 }]", "initial-offsets = []")
+    assertEquals(
+      failureSet(AnalyticsConfigFixtures.streamingRuntime(emptyOffsets, settings + ("MONGODB_URI" -> "not a uri"))),
+      List(
+        "analytics.mongo.uri is invalid",
+        "analytics.streaming.initial-offsets must explicitly name every source partition"
+      )
+    )
+
+    val outOfBounds = streamingHocon
+      .replace("max-offsets-per-trigger = 1000", "max-offsets-per-trigger = 100001")
+      .replace("trigger-interval = 10 seconds", "trigger-interval = 11 seconds")
+    val decodeMessage = invalidMessage(AnalyticsConfigFixtures.streamingRuntime(outOfBounds, settings))
+    assert(decodeMessage.contains("analytics.streaming.max-offsets-per-trigger: Should be included in [1, 100000]"))
+    assert(
+      decodeMessage.contains("analytics.streaming.trigger-interval: Should be strictly positive and at most 10 seconds")
+    )
+  }
+
+  test("every loader names the failing paths of bounded operational fields") {
+    val outOfBounds = settings ++ Map(
+      "ANALYTICS_RETENTION_BRONZE_DAYS" -> "0",
+      "ANALYTICS_ERASURE_POLL_INTERVAL" -> "0 seconds"
+    )
+    val loaders: Vector[(String, Map[String, String]) => Either[AnalyticsError, Any]] = Vector(
+      AnalyticsConfigFixtures.batch,
+      AnalyticsConfigFixtures.worker,
+      AnalyticsConfigFixtures.lateFactReplay,
+      AnalyticsConfigFixtures.keyRetirementAudit
+    )
+    loaders.foreach { read =>
+      val message = invalidMessage(read(hocon, outOfBounds))
+      assert(message.contains("analytics.operational.retention.bronze-days: Should be strictly positive"), message)
+      assert(
+        message.contains("analytics.operational.erasure-worker.poll-interval: Should be at least one millisecond"),
+        message
+      )
+    }
+  }
+
+  test("decode failures name the failing paths without echoing malformed values or exception text") {
+    val secret = "sk-live-SECRET-TEXT-1234"
+    val message = invalidMessage(
+      AnalyticsConfigFixtures.batch(
+        hocon,
+        settings ++ Map(
+          "ANALYTICS_MONGO_PUBLISHER_BUFFER_SIZE" -> secret,
+          "ANALYTICS_REPORT_RESERVATION_TTL" -> secret
+        )
+      )
+    )
+    assert(message.contains("analytics.operational.mongo-publisher-buffer-size"), message)
+    assert(message.contains("analytics.operational.report-reservation-ttl"), message)
+    assert(!message.contains(secret), message)
+    assert(!message.contains("SECRET-TEXT"), message)
+    assert(!message.contains("sk-live"), message)
+  }
+
+  test("an unresolved substitution reports only its name and no neighbouring values") {
+    val secret = "sk-live-SECRET-TEXT-1234"
+    val unresolved = hocon.replace(
+      "key-id = \"hmac-v1\"",
+      s"key-id = \"$secret\"\n    unresolved = $${?SECRET_SUBSTITUTION}\n    required = $${SECRET_SUBSTITUTION}"
+    )
+    val message = invalidMessage(AnalyticsConfigFixtures.batch(unresolved, settings))
+    assert(message.contains("SECRET_SUBSTITUTION"), message)
+    assert(!message.contains(secret), message)
+    assert(!message.contains("sk-live"), message)
+  }
+
+  private def invalidMessage(result: Either[AnalyticsError, Any]): String =
+    result.swap.toOption.getOrElse(fail("expected an invalid configuration")).getMessage
+
+  private def failureSet(result: Either[AnalyticsError, Any]): List[String] =
+    invalidMessage(result).split("; ").toList.sorted
 }

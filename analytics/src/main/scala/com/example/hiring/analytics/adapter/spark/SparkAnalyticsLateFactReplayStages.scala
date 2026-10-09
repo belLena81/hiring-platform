@@ -22,12 +22,11 @@ private[analytics] final class SparkAnalyticsLateFactReplayStages[F[_]: Async](
     reader: DeltaReader[F],
     writer: DeltaWriter[F],
     maintenance: AnalyticsBatchMaintenance[F],
-    private[analytics] val nowOverride: Option[F[Instant]] = None,
-    private[analytics] val mergeClockOverride: Option[Clock] = None
+    clock: cats.effect.Clock[F],
+    mergeClock: Clock = Clock.systemUTC()
 ) extends AnalyticsLateFactReplayStages[F] {
   private val F = Async[F]
-  private val now = nowOverride.getOrElse(F.realTimeInstant)
-  private val mergeClock = mergeClockOverride.getOrElse(Clock.systemUTC())
+  private val now = clock.realTimeInstant
   private val silverShape = AnalyticsTableSchemas.silver ++ AnalyticsTableSchemas.expiry
 
   override def validateHmacConfiguration: F[Unit] = maintenance.validateHmacConfigurationLocked

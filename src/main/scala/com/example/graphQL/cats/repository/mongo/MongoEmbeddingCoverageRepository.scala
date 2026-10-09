@@ -74,7 +74,7 @@ final class MongoEmbeddingCoverageRepository(database: MongoDatabase[IO], diagno
           (jobQueue.oldestWaitingAvailableAt.toList ++ candidateQueue.oldestWaitingAvailableAt.toList).minOption
         )
       )
-    }(_ => Left(RepositoryError.Unavailable))
+    }
 
   private final case class Page(after: Option[String], scanned: Int, tally: EmbeddingCoverageTally)
   private final case class Scanned(tally: EmbeddingCoverageTally, truncated: Boolean)
@@ -120,7 +120,7 @@ final class MongoEmbeddingCoverageRepository(database: MongoDatabase[IO], diagno
     aggregate(scan.collection, countPipeline(scan), limits).flatMap(rows =>
       RepositoryIO.fromEither(
         rows.headOption.fold[Either[RepositoryError, Long]](Right(0L))(row =>
-          number(row, "n").map(_.longValue).leftMap(_ => RepositoryError.InvalidStoredData)
+          MongoDocumentFields.toRepository(MongoDocumentFields.requiredNumberAsLong(row, "n"))
         )
       )
     )
@@ -133,15 +133,11 @@ final class MongoEmbeddingCoverageRepository(database: MongoDatabase[IO], diagno
       RepositoryIO.fromEither(rows.headOption match {
         case None      => Right(EmbeddingQueueObservation(truncated = false, 0L, None))
         case Some(row) =>
-          for {
-            total <- number(row, "total").leftMap(_ => RepositoryError.InvalidStoredData)
-            stuck <- number(row, "stuck").leftMap(_ => RepositoryError.InvalidStoredData)
-            oldest <- optionalDate(row, "oldest").leftMap(_ => RepositoryError.InvalidStoredData)
-          } yield EmbeddingQueueObservation(
-            total.longValue > request.limits.maxEntitiesPerKind.toLong,
-            stuck.longValue,
-            oldest
-          )
+          MongoDocumentFields.toRepository(for {
+            total <- MongoDocumentFields.requiredNumberAsLong(row, "total")
+            stuck <- MongoDocumentFields.requiredNumberAsLong(row, "stuck")
+            oldest <- MongoDocumentFields.optionalInstant(row, "oldest")
+          } yield EmbeddingQueueObservation(total > request.limits.maxEntitiesPerKind.toLong, stuck, oldest))
       })
     )
 }
@@ -284,48 +280,35 @@ private[mongo] object MongoEmbeddingCoverageRepository {
     )
   }
 
-  def number(document: Document, field: String): Either[Throwable, Number] =
-    Either
-      .catchNonFatal(document.get(field))
-      .flatMap {
-        case value: Number => Right(value)
-        case _             => Left(new IllegalArgumentException("Expected number"))
-      }
-
-  def optionalDate(document: Document, field: String): Either[Throwable, Option[Instant]] =
-    Either.catchNonFatal(Option(document.getDate(field)).map(_.toInstant))
-
   private def queuedWork(document: Document): Either[RepositoryError, Option[EmbeddingQueuedWork]] =
-    Either
-      .catchNonFatal(document.getList(WorkField, classOf[Document]).asScala.toList)
-      .leftMap(_ => RepositoryError.InvalidStoredData)
+    MongoDocumentFields
+      .toRepository(MongoDocumentFields.requiredDocumentVector(document, WorkField))
       .flatMap {
-        case Nil        => Right(None)
-        case row :: Nil => queuedRow(row).map(Some(_))
-        case _          => Left(RepositoryError.InvalidStoredData)
+        case Vector()    => Right(None)
+        case Vector(row) => queuedRow(row).map(Some(_))
+        case _           => Left(RepositoryError.InvalidStoredData)
       }
 
   private def queuedRow(row: Document): Either[RepositoryError, EmbeddingQueuedWork] =
-    (for {
-      state <- Either
-        .catchNonFatal(row.getString(MongoFields.State))
-        .flatMap(value => EmbeddingWorkState.values.find(_.toString == value).toRight(new IllegalArgumentException))
-      failure <- Either
-        .catchNonFatal(Option(row.getString(MongoFields.Failure)))
-        .flatMap(
-          _.traverse(value =>
-            EmbeddingWorkFailure.values.find(_.toString == value).toRight(new IllegalArgumentException)
-          )
+    MongoDocumentFields
+      .toRepository(for {
+        state <- MongoDocumentFields.requiredEnum(row, MongoFields.State)(
+          MongoDocumentFields.byName(EmbeddingWorkState.values)
         )
-      availableAt <- optionalDate(row, MongoFields.AvailableAt).flatMap(_.toRight(new IllegalArgumentException))
-      leaseUntil <- optionalDate(row, MongoFields.LeaseUntil)
-      _ <- Either.cond(
-        (state != EmbeddingWorkState.Failed || failure.nonEmpty) &&
-          (state != EmbeddingWorkState.Processing || leaseUntil.nonEmpty),
-        (),
-        new IllegalArgumentException
+        failure <- MongoDocumentFields.optionalEnum(row, MongoFields.Failure)(
+          MongoDocumentFields.byName(EmbeddingWorkFailure.values)
+        )
+        availableAt <- MongoDocumentFields.requiredInstant(row, MongoFields.AvailableAt)
+        leaseUntil <- MongoDocumentFields.optionalInstant(row, MongoFields.LeaseUntil)
+      } yield (state, failure, availableAt, leaseUntil))
+      .filterOrElse(
+        { case (state, failure, _, leaseUntil) =>
+          (state != EmbeddingWorkState.Failed || failure.nonEmpty) &&
+          (state != EmbeddingWorkState.Processing || leaseUntil.nonEmpty)
+        },
+        RepositoryError.InvalidStoredData
       )
-    } yield EmbeddingQueuedWork(state, failure, availableAt, leaseUntil)).leftMap(_ =>
-      RepositoryError.InvalidStoredData
-    )
+      .map { case (state, failure, availableAt, leaseUntil) =>
+        EmbeddingQueuedWork(state, failure, availableAt, leaseUntil)
+      }
 }

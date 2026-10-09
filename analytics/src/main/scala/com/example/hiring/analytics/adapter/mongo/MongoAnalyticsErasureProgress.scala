@@ -26,7 +26,6 @@ final class MongoAnalyticsErasureProgress[F[_]: Async] private (
     streams: MongoPublisherStream
 ) extends MongoAnalyticsErasureStoreSupport[F](streams)
     with ErasureProgress[F] {
-  import MongoAnalyticsErasureStoreSupport.*
 
   def persistDeltaPurgedAt(claim: ErasureClaim, at: Instant, now: Instant): F[ErasureUpdate] = mongo {
     matchedUpdate(
@@ -77,7 +76,7 @@ final class MongoAnalyticsErasureProgress[F[_]: Async] private (
       val prepared = operations
 
       mongo {
-        MongoSession.resource(client, streams).use { session =>
+        MongoSession.resource(client).use { session =>
           streams
             .transaction(session) {
               EitherT.liftF[F, AnalyticsError, ErasureUpdate](

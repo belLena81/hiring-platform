@@ -5,13 +5,12 @@ import cats.effect.std.UUIDGen
 import cats.syntax.all.*
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.Diagnostics
-import com.example.graphQL.cats.shared.Parsing
 import mongo4cats.client.{ClientSession, MongoClient}
 import mongo4cats.database.MongoDatabase
 import org.bson.Document
 
 import java.time.Instant
-import java.util.{Date, UUID}
+import java.util.Date
 
 /** The Mongo-only transaction context used by receipt-aware repository writes. */
 private[mongo] final case class MongoMutationWriteContext(session: Option[ClientSession[IO]])
@@ -143,13 +142,7 @@ final class MongoMutationReceiptRepository(
 
   private def remove(session: Option[ClientSession[IO]], key: MutationReceiptKey): IO[Unit] =
     MongoRepositorySupport.guard(diagnostics, "mutationReceipt.remove")(
-      collection
-        .flatMap(c =>
-          session.fold(
-            c.deleteOne(keyFilter(key).bson, new com.mongodb.client.model.DeleteOptions)
-          )(active => c.deleteOne(active, keyFilter(key).sessionFilter, new com.mongodb.client.model.DeleteOptions))
-        )
-        .void
+      MongoSessionOperations.deleteOne(collection, session, keyFilter(key)).void
     )(_ => ())
 
   private def keyFilter(key: MutationReceiptKey): MongoFilter =
@@ -180,47 +173,41 @@ final class MongoMutationReceiptRepository(
     new Document(MongoFields.Type, entity.entityType).append(MongoFields.EntityId, entity.entityId)
 
   private def read(document: Document): Either[RepositoryError, MutationReceipt] =
-    for {
-      operation <- Option(document.getString(MongoFields.Operation)).toRight(RepositoryError.InvalidStoredData)
-      actorScope <- Option(document.getString(MongoFields.ActorScope)).toRight(RepositoryError.InvalidStoredData)
-      idempotencyKey <- Option(document.getString(MongoFields.IdempotencyKey))
-        .flatMap(parseUuid)
-        .toRight(RepositoryError.InvalidStoredData)
-      fingerprint <- Option(document.getString(MongoFields.Fingerprint)).toRight(RepositoryError.InvalidStoredData)
-      state <- Option(document.getString(MongoFields.State))
-        .flatMap(parseState)
-        .toRight(RepositoryError.InvalidStoredData)
-      createdAt <- Option(document.getDate(MongoFields.CreatedAt))
-        .map(_.toInstant)
-        .toRight(RepositoryError.InvalidStoredData)
-      expiresAt <- Option(document.getDate(MongoFields.ExpiresAt))
-        .map(_.toInstant)
-        .toRight(RepositoryError.InvalidStoredData)
-    } yield MutationReceipt(
-      MutationReceiptKey(operation, actorScope, idempotencyKey),
-      MutationReceiptFingerprint.stored(fingerprint),
-      state,
-      Option(document.get(MongoFields.Entity, classOf[Document])).flatMap(readEntity),
-      createdAt,
-      Option(document.getDate(MongoFields.CompletedAt)).map(_.toInstant),
-      expiresAt
+    MongoDocumentFields.toRepository(
+      for {
+        operation <- MongoDocumentFields.requiredString(document, MongoFields.Operation)
+        actorScope <- MongoDocumentFields.requiredString(document, MongoFields.ActorScope)
+        idempotencyKey <- MongoDocumentFields.requiredUuid(document, MongoFields.IdempotencyKey)
+        fingerprint <- MongoDocumentFields.requiredString(document, MongoFields.Fingerprint)
+        state <- MongoDocumentFields.requiredEnum(document, MongoFields.State)(
+          MongoDocumentFields.byName(MutationReceiptState.values)
+        )
+        createdAt <- MongoDocumentFields.requiredInstant(document, MongoFields.CreatedAt)
+        expiresAt <- MongoDocumentFields.requiredInstant(document, MongoFields.ExpiresAt)
+        completedAt <- MongoDocumentFields.optionalInstant(document, MongoFields.CompletedAt)
+        entity <- MongoDocumentFields.optionalDocument(document, MongoFields.Entity).flatMap(_.flatTraverse(readEntity))
+      } yield MutationReceipt(
+        MutationReceiptKey(operation, actorScope, idempotencyKey),
+        MutationReceiptFingerprint.stored(fingerprint),
+        state,
+        entity,
+        createdAt,
+        completedAt,
+        expiresAt
+      )
     )
 
-  private def readEntity(document: Document): Option[MutationEntityReference] =
-    for {
-      entityType <- Option(document.getString(MongoFields.Type))
-      entityId <- Option(document.getString(MongoFields.EntityId))
-    } yield MutationEntityReference(entityType, entityId)
-
-  private def parseUuid(value: String): Option[UUID] = Parsing.parseUuid(value).toOption
-
-  private def parseState(value: String): Option[MutationReceiptState] =
-    MutationReceiptState.values.find(_.toString == value)
+  /** An entity reference is present only when both parts are; a partial reference reads as absent. */
+  private def readEntity(document: Document): MongoDocumentFields.Read[Option[MutationEntityReference]] =
+    (
+      MongoDocumentFields.optionalString(document, MongoFields.Type),
+      MongoDocumentFields.optionalString(document, MongoFields.EntityId)
+    ).mapN((entityType, entityId) => (entityType, entityId).mapN(MutationEntityReference.apply))
 
   private def mapWrite[A](error: Throwable): Either[RepositoryError, A] =
     error match {
-      case write: com.mongodb.MongoWriteException if write.getError.getCode == 11000 => Left(RepositoryError.Conflict)
-      case _ => Left(RepositoryError.Unavailable)
+      case MongoDuplicateKey(_) => Left(RepositoryError.Conflict)
+      case _                    => Left(RepositoryError.Unavailable)
     }
 }
 

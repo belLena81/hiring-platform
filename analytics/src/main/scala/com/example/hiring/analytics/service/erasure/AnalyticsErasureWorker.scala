@@ -13,11 +13,10 @@ import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
 import com.example.hiring.analytics.service.batch.AnalyticsReportPublisher
 import com.example.hiring.analytics.service.batch.AnalyticsReportReservation
 
-import cats.effect.{Async, Outcome, Temporal}
+import cats.effect.{Async, Clock, Outcome, Temporal}
 import cats.Monad
 import cats.data.EitherT
 import cats.syntax.all.*
-import io.github.iltotore.iron.*
 import org.typelevel.log4cats.Logger
 
 import java.time.Instant
@@ -36,13 +35,13 @@ final class AnalyticsErasureWorker[F[_]: Async](
     lakehouseLock: AnalyticsLakehouseLock[F],
     logger: Logger[F],
     policy: AnalyticsErasureWorkerPolicy,
-    private[analytics] val nowOverride: Option[F[Instant]] = None
+    clock: Clock[F]
 ) {
   private val retention = policy.retention
   private val leaseDuration = policy.timings.leaseDuration
   private val deliveryTimeout = policy.timings.deliveryTimeout
   private val pollInterval = policy.timings.pollInterval
-  private val now = nowOverride.getOrElse(Async[F].realTimeInstant)
+  private val now = clock.realTimeInstant
   private def leaseUntil: F[Instant] = now.map(_.plusMillis(leaseDuration.toMillis))
 
   def run: F[Unit] =

@@ -13,6 +13,7 @@ private[analytics] object AnalyticsCollections {
   val HiringMigrationLedger = "hiring_migration_ledger"
   val OutboxSubjectFences = "outbox_subject_fences"
   val Users = "users"
+  val ProducerRegistrations = "producer_registrations"
 
   object Fields {
     val Id = "_id"

@@ -29,11 +29,10 @@ object KafkaProducerFencer {
     if (transactionalIds.isEmpty) Async[F].unit
     else
       (KafkaConnection.preflight[F](connection) *> Async[F].fromEither(
-        KafkaClientProperties.clientProperties(connection)
-      )).flatMap { clientProperties =>
+        KafkaClientProperties.adminProperties(connection)
+      )).flatMap { adminProperties =>
         val properties = new Properties()
-        properties.put("bootstrap.servers", connection.bootstrapServers)
-        clientProperties.foreach { case (key, value) => properties.setProperty(key, value) }
+        adminProperties.foreach { case (key, value) => properties.setProperty(key, value) }
         Resource
           .make(driverExecution.blocking(Admin.create(properties)))(admin =>
             driverExecution.blocking(admin.close(Duration.ofSeconds(5))).void
@@ -42,7 +41,8 @@ object KafkaProducerFencer {
             for {
               result <- driverExecution.blocking(admin.fenceProducers(transactionalIds.distinct.asJava).all())
               _ <- afterSubmission(result)
-              _ <- driverExecution.blocking(result.get()).void
+              // The broker round trip completes off the single-thread driver executor and is cancellable.
+              _ <- Async[F].fromCompletableFuture(Async[F].delay(result.toCompletionStage.toCompletableFuture)).void
             } yield ()
           }
       }

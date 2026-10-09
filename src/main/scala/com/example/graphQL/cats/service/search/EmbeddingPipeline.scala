@@ -1,13 +1,13 @@
 package com.example.graphQL.cats.service.search
 
-import cats.effect.std.Queue
-import cats.effect.{IO, Resource}
+import cats.effect.std.{Queue, UUIDGen}
+import cats.effect.{Clock, IO, Resource}
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId, parse as parseIdentifier}
 import com.example.graphQL.cats.domain.model.{EmbeddingMeta, EntityEmbedding, SearchableText}
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.RepositoryError
-import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogFields}
+import com.example.graphQL.cats.service.{BackgroundWorker, Diagnostics, LogEvent, LogFields}
 import com.example.graphQL.cats.service.Diagnostics.*
 import fs2.Stream
 import java.time.Instant
@@ -29,10 +29,10 @@ trait EmbeddingWorkPublisher {
 final class DurableEmbeddingWorkPublisher private[search] (
     repository: EmbeddingWorkRepository,
     wakeups: Queue[IO, Unit],
-    now: IO[Instant]
+    clock: Clock[IO]
 ) extends EmbeddingWorkPublisher {
   private[search] def offer(work: EmbeddingWork): IO[Unit] =
-    now.flatMap(repository.enqueue(DurableEmbeddingWorkPublisher.keyFor(work), _).value).flatMap {
+    clock.realTimeInstant.flatMap(repository.enqueue(DurableEmbeddingWorkPublisher.keyFor(work), _).value).flatMap {
       case Right(())   => wake
       case Left(error) => IO.raiseError(new IllegalStateException(s"Embedding work enqueue failed: $error"))
     }
@@ -59,7 +59,7 @@ final class EmbeddingPipeline(
     retryAttempts: Int,
     retryDelay: FiniteDuration,
     leaseDuration: FiniteDuration,
-    now: IO[Instant],
+    clock: Clock[IO],
     workerId: String,
     diagnostics: Diagnostics,
     durableRetryAttempts: Int = 1,
@@ -67,6 +67,8 @@ final class EmbeddingPipeline(
     durableRetryCap: FiniteDuration = 5.minutes,
     workerHealth: Boolean => IO[Unit] = _ => IO.unit
 ) {
+  private val now: IO[Instant] = clock.realTimeInstant
+
   def stream: Stream[IO, Unit] =
     Stream
       .fromQueueUnterminated(wakeups)
@@ -305,6 +307,8 @@ final class EmbeddingPipeline(
 }
 
 object EmbeddingPipeline {
+  private val WorkerName = "embedding-pipeline"
+
   def resource(
       work: EmbeddingWorkRepository,
       users: UserRepository,
@@ -322,12 +326,14 @@ object EmbeddingPipeline {
       durableRetryBase: FiniteDuration = 1.second,
       durableRetryCap: FiniteDuration = 5.minutes,
       workerRestartDelay: FiniteDuration = 1.second,
-      workerHealth: Boolean => IO[Unit] = _ => IO.unit
+      workerHealth: Boolean => IO[Unit] = _ => IO.unit,
+      clock: Clock[IO] = Clock[IO],
+      uuidGen: UUIDGen[IO] = UUIDGen[IO]
   ): Resource[IO, DurableEmbeddingWorkPublisher] =
     Resource.eval(Queue.bounded[IO, Unit](queueSize)).flatMap { wakeups =>
       for {
-        workerId <- Resource.eval(IO.randomUUID.map(_.toString))
-        publisher = new DurableEmbeddingWorkPublisher(work, wakeups, IO.realTimeInstant)
+        workerId <- Resource.eval(uuidGen.randomUUID.map(_.toString))
+        publisher = new DurableEmbeddingWorkPublisher(work, wakeups, clock)
         pipeline = new EmbeddingPipeline(
           wakeups,
           work,
@@ -339,7 +345,7 @@ object EmbeddingPipeline {
           retryAttempts,
           retryDelay,
           leaseDuration,
-          IO.realTimeInstant,
+          clock,
           workerId,
           diagnostics,
           durableRetryAttempts,
@@ -347,7 +353,7 @@ object EmbeddingPipeline {
           durableRetryCap,
           workerHealth
         )
-        _ <- Resource.make(
+        _ <- BackgroundWorker.resource(WorkerName, diagnostics)(
           workerReady.flatMap { ready =>
             if (!ready) workerHealth(false)
             else
@@ -358,8 +364,8 @@ object EmbeddingPipeline {
                 )
                 .flatMap(_ => IO.sleep(workerRestartDelay))
                 .foreverM
-          }.start
-        )(_.cancel)
+          }
+        )
       } yield publisher
     }
 }

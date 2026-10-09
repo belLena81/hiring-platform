@@ -162,15 +162,30 @@ object LocalTestServices {
       } yield ()
     }
 
+  /** PLAIN login module text; literals escape backslash, quote and control characters like the production builders. */
+  def jaasConfig(username: String, password: String): String =
+    s"org.apache.kafka.common.security.plain.PlainLoginModule required username=${jaasLiteral(username)} password=${jaasLiteral(password)};"
+
+  private def jaasLiteral(value: String): String =
+    value
+      .flatMap {
+        case '\\'  => "\\\\"
+        case '"'   => "\\\""
+        case '\n'  => "\\n"
+        case '\r'  => "\\r"
+        case '\t'  => "\\t"
+        case '\b'  => "\\b"
+        case '\f'  => "\\f"
+        case other => other.toString
+      }
+      .mkString("\"", "", "\"")
+
   def adminProperties(value: Manifest, username: String, password: String): Properties = {
     val properties = new Properties()
     properties.put("bootstrap.servers", value.kafkaBootstrap)
     properties.put("security.protocol", "SASL_PLAINTEXT")
     properties.put("sasl.mechanism", "PLAIN")
-    properties.put(
-      "sasl.jaas.config",
-      s"org.apache.kafka.common.security.plain.PlainLoginModule required username=\"$username\" password=\"$password\";"
-    )
+    properties.put("sasl.jaas.config", jaasConfig(username, password))
     properties.put("default.api.timeout.ms", "10000")
     properties.put("request.timeout.ms", "10000")
     properties

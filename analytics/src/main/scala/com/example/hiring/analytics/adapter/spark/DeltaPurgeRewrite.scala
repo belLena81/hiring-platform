@@ -45,7 +45,7 @@ private[analytics] object DeltaPurgeRewrite {
     }
 
   /** The caller owns the lakehouse mutex. A crash requires the documented operator lock recovery first. */
-  def recover[F[_]: Async](
+  def recover[F[_]](
       root: String,
       configuration: Configuration,
       maximumEntries: Int,
@@ -67,7 +67,7 @@ private[analytics] object DeltaPurgeRewrite {
   }
 
   /** Read-only audits reject abandoned copies; maintenance must recover them before a retirement verdict. */
-  def verifyRecovered[F[_]: Async](
+  def verifyRecovered[F[_]](
       root: String,
       configuration: Configuration,
       maximumEntries: Int,

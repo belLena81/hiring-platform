@@ -13,8 +13,7 @@ import org.apache.kafka.clients.consumer.KafkaConsumer
 import org.apache.kafka.clients.admin.AdminClient
 import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.serialization.ByteArrayDeserializer
-import org.apache.spark.sql.{Column, DataFrame, SparkSession}
-import org.apache.spark.sql.functions.{col, lit}
+import org.apache.spark.sql.{DataFrame, SparkSession}
 
 import java.util.Properties
 import java.util.concurrent.TimeUnit
@@ -217,45 +216,4 @@ object KafkaOffsetRangeSource {
       }
     Json.fromFields(byTopic).noSpaces
   }
-}
-
-/** Test and backfill adapter. Its frame must have Kafka's topic, partition, offset, timestamp and value columns. */
-private[analytics] final case class DataFrameBatchSource[F[_]: Async](
-    records: DataFrame,
-    sparkExecution: SparkExecution[F]
-) extends BoundedOperationalEventSource[F] {
-  override def verifyOffsets(frame: DataFrame, manifest: AnalyticsRunManifest): F[Unit] =
-    AnalyticsOffsetRanges.verify(frame, manifest, sparkExecution)
-
-  override def read(spark: SparkSession, manifest: AnalyticsRunManifest): F[DataFrame] =
-    AnalyticsOffsetRanges.requireNonEmpty(manifest) *>
-      sparkExecution(records.schema)
-        .adaptError {
-          case error: AnalyticsError => error
-          case NonFatal(cause)       => AnalyticsError.SourceReadFailure(cause)
-        }
-        .flatMap(KafkaRecordColumns.validate) *>
-      sparkExecution {
-        val inManifest = manifest.offsetRanges.foldLeft(lit(false): Column) { (condition, range) =>
-          condition || (
-            col("topic") === lit(AnalyticsTopic.unwrap(range.topic)) &&
-              col("partition") === lit(range.partition) &&
-              col("offset") >= lit(range.startOffset) &&
-              col("offset") < lit(range.endOffsetExclusive)
-          )
-        }
-        records.filter(inManifest)
-      }
-        .adaptError {
-          case error: AnalyticsError => error
-          case NonFatal(cause)       => AnalyticsError.SourceReadFailure(cause)
-        }
-}
-
-private[analytics] object DataFrameBatchSource {
-  def apply[F[_]: Async](records: DataFrame): DataFrameBatchSource[F] =
-    new DataFrameBatchSource[F](
-      records,
-      SparkBlockingExecution.forTests[F](scala.concurrent.ExecutionContext.parasitic)
-    )
 }

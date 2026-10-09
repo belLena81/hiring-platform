@@ -9,7 +9,7 @@ import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.events.OperationalEventEnvelope
 import com.example.graphQL.cats.domain.pagination.*
 import com.example.graphQL.cats.service.Diagnostics
-import com.mongodb.{MongoCommandException, MongoWriteException}
+import com.mongodb.MongoCommandException
 import com.mongodb.client.model.Filters
 import mongo4cats.client.{ClientSession, MongoClient}
 import mongo4cats.database.MongoDatabase
@@ -38,7 +38,7 @@ final class MongoApplicationRepository private (
           .subflatMap(document =>
             MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readApplication))
           )
-      }(_ => Left(RepositoryError.Unavailable))
+      }
 
   override def findByCandidate(
       scope: HiringReadScope,
@@ -315,11 +315,11 @@ final class MongoApplicationRepository private (
               .repository(document.traverse(MongoJobSubmissionSnapshotCodec.read))
               .map(_.filter(_.status == JobStatus.Open))
           )
-      }(_ => Left(RepositoryError.Unavailable))
+      }
 
   private def mapWrite(error: Throwable): Either[RepositoryError, Unit] =
     error match {
-      case write: MongoWriteException if write.getError.getCode == 11000 => Left(RepositoryError.DuplicateApplication)
+      case MongoDuplicateKey(_) => Left(RepositoryError.DuplicateApplication)
       case command: MongoCommandException if MongoTransactionRunner.isWriteConflict(command) =>
         Left(RepositoryError.Conflict)
       case _ => Left(RepositoryError.Unavailable)
@@ -327,7 +327,7 @@ final class MongoApplicationRepository private (
 
   private def mapDuplicateAs(error: RepositoryError)(throwable: Throwable): Either[RepositoryError, Unit] =
     throwable match {
-      case write: MongoWriteException if write.getError.getCode == 11000                     => Left(error)
+      case MongoDuplicateKey(_)                                                              => Left(error)
       case command: MongoCommandException if MongoTransactionRunner.isWriteConflict(command) =>
         Left(RepositoryError.Conflict)
       case _ => Left(RepositoryError.Unavailable)

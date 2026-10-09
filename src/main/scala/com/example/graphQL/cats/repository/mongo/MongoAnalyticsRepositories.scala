@@ -99,7 +99,7 @@ final class MongoAnalyticsErasureRequestRepository(
             )
           )
           .subflatMap(_.fold[Either[RepositoryError, Unit]](Left(RepositoryError.Unavailable))(_ => Right(())))
-      )(_ => Left(RepositoryError.Unavailable))
+      )
 
   override def enqueue(
       userId: UserId,
@@ -111,12 +111,8 @@ final class MongoAnalyticsErasureRequestRepository(
         RepositoryIO.lift(UUIDGen[IO].randomUUID.map(_.toString)).flatMap { freshReceiptId =>
           MongoMutationWriteContext.run(context, transactionRunner, transactionRequired = true) { session =>
             val requestId = userId.value.toString
-            val completion = session.fold(
-              MongoAnalyticsRepositoryOperations.findOne(completions, None, MongoFilter.eq(MongoFields.Id, requestId))
-            )(active =>
-              MongoAnalyticsRepositoryOperations
-                .findOne(completions, Some(active), MongoFilter.eq(MongoFields.Id, requestId))
-            )
+            val completion = MongoAnalyticsRepositoryOperations
+              .findOne(completions, session, MongoFilter.eq(MongoFields.Id, requestId))
             completion
               .flatMap {
                 case Some(document) =>
@@ -124,22 +120,12 @@ final class MongoAnalyticsErasureRequestRepository(
                     case Some(value) => RepositoryIO.fromEither(Right(value))
                     case None        =>
                       val update = MongoUpdate.set(MongoFields.ReceiptId, freshReceiptId)
-                      val result = session.fold(
-                        MongoAnalyticsRepositoryOperations.updateOne(
-                          completions,
-                          None,
-                          MongoFilter.eq(MongoFields.Id, requestId),
-                          update,
-                          new UpdateOptions
-                        )
-                      )(active =>
-                        MongoAnalyticsRepositoryOperations.updateOne(
-                          completions,
-                          Some(active),
-                          MongoFilter.eq(MongoFields.Id, requestId),
-                          update,
-                          new UpdateOptions
-                        )
+                      val result = MongoAnalyticsRepositoryOperations.updateOne(
+                        completions,
+                        session,
+                        MongoFilter.eq(MongoFields.Id, requestId),
+                        update,
+                        new UpdateOptions
                       )
                       result.subflatMap(
                         _.fold[Either[RepositoryError, String]](Left(RepositoryError.MissingWriteResult))(_ =>
@@ -148,35 +134,20 @@ final class MongoAnalyticsErasureRequestRepository(
                       )
                   }
                 case None =>
-                  val existing = session.fold(
-                    MongoAnalyticsRepositoryOperations
-                      .findOne(collection, None, MongoFilter.eq(MongoFields.Id, requestId))
-                  )(active =>
-                    MongoAnalyticsRepositoryOperations
-                      .findOne(collection, Some(active), MongoFilter.eq(MongoFields.Id, requestId))
-                  )
+                  val existing = MongoAnalyticsRepositoryOperations
+                    .findOne(collection, session, MongoFilter.eq(MongoFields.Id, requestId))
                   existing.flatMap {
                     case Some(document) =>
                       Option(document.getString(MongoFields.ReceiptId)) match {
                         case Some(value) => RepositoryIO.fromEither(Right(value))
                         case None        =>
                           val update = MongoUpdate.set(MongoFields.ReceiptId, freshReceiptId)
-                          val result = session.fold(
-                            MongoAnalyticsRepositoryOperations.updateOne(
-                              collection,
-                              None,
-                              MongoFilter.eq(MongoFields.Id, requestId),
-                              update,
-                              new UpdateOptions
-                            )
-                          )(active =>
-                            MongoAnalyticsRepositoryOperations.updateOne(
-                              collection,
-                              Some(active),
-                              MongoFilter.eq(MongoFields.Id, requestId),
-                              update,
-                              new UpdateOptions
-                            )
+                          val result = MongoAnalyticsRepositoryOperations.updateOne(
+                            collection,
+                            session,
+                            MongoFilter.eq(MongoFields.Id, requestId),
+                            update,
+                            new UpdateOptions
                           )
                           result.subflatMap(
                             _.fold[Either[RepositoryError, String]](Left(RepositoryError.MissingWriteResult))(_ =>
@@ -185,13 +156,8 @@ final class MongoAnalyticsErasureRequestRepository(
                           )
                       }
                     case None =>
-                      val fence = session.fold(
-                        MongoAnalyticsRepositoryOperations
-                          .findOne(subjectFences, None, MongoFilter.eq(MongoFields.Id, requestId))
-                      )(active =>
-                        MongoAnalyticsRepositoryOperations
-                          .findOne(subjectFences, Some(active), MongoFilter.eq(MongoFields.Id, requestId))
-                      )
+                      val fence = MongoAnalyticsRepositoryOperations
+                        .findOne(subjectFences, session, MongoFilter.eq(MongoFields.Id, requestId))
                       fence.flatMap { _ =>
                         val request = new Document(MongoFields.Id, requestId)
                           .append(MongoFields.RequestedAt, Date.from(now))
@@ -199,9 +165,7 @@ final class MongoAnalyticsErasureRequestRepository(
                           .append(MongoFields.State, "Pending")
                           .append(MongoFields.FencingVersion, 1)
                           .append("producerRegistry", true)
-                        val insert = session.fold(
-                          MongoAnalyticsRepositoryOperations.insertOne(collection, None, request)
-                        )(active => MongoAnalyticsRepositoryOperations.insertOne(collection, Some(active), request))
+                        val insert = MongoAnalyticsRepositoryOperations.insertOne(collection, session, request)
                         insert.flatMap {
                           case Some(_) =>
                             val reportControl =
@@ -211,22 +175,12 @@ final class MongoAnalyticsErasureRequestRepository(
                               MongoUpdate.set(MongoFields.State, AnalyticsReportSnapshotDocument.Hidden),
                               MongoUpdate.set(MongoFields.HiddenAt, Date.from(now))
                             )
-                            val hideResult = session.fold(
-                              MongoAnalyticsRepositoryOperations.updateOne(
-                                reportControl,
-                                None,
-                                MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.ControlId),
-                                hide,
-                                new UpdateOptions
-                              )
-                            )(active =>
-                              MongoAnalyticsRepositoryOperations.updateOne(
-                                reportControl,
-                                Some(active),
-                                MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.ControlId),
-                                hide,
-                                new UpdateOptions
-                              )
+                            val hideResult = MongoAnalyticsRepositoryOperations.updateOne(
+                              reportControl,
+                              session,
+                              MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.ControlId),
+                              hide,
+                              new UpdateOptions
                             )
                             hideResult.subflatMap {
                               case Some(result) if result.getMatchedCount == 1L => Right(freshReceiptId)
@@ -240,7 +194,7 @@ final class MongoAnalyticsErasureRequestRepository(
               }
           }
         }
-      )(_ => Left(RepositoryError.Unavailable))
+      )
 
   override def statusForSubject(
       userId: UserId,
@@ -275,7 +229,7 @@ final class MongoAnalyticsErasureRequestRepository(
                     )
                   )
             }
-        })(_ => Left(RepositoryError.Unavailable))
+        })
         .flatMap {
           case AccountDeletionStatus.Complete =>
             RepositoryIO
@@ -293,17 +247,13 @@ final class MongoAnalyticsErasureRequestRepository(
               .flatMap(_.deleteMany(MongoFilter.in(MongoFields.SubjectIds, List(userId.value.toString)).bson))
           )
           .void
-      )(_ => Left(RepositoryError.Unavailable))
+      )
 
   override def markComplete(userId: UserId, now: Instant): RepositoryIO[Unit] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "analyticsErasure.markComplete")(transactionRunner.run { session =>
         val requestId = userId.value.toString
-        val user = session.fold(
-          MongoAnalyticsRepositoryOperations.findOne(users, None, MongoFilter.eq(MongoFields.Id, requestId))
-        )(active =>
-          MongoAnalyticsRepositoryOperations.findOne(users, Some(active), MongoFilter.eq(MongoFields.Id, requestId))
-        )
+        val user = MongoAnalyticsRepositoryOperations.findOne(users, session, MongoFilter.eq(MongoFields.Id, requestId))
         user
           .flatMap {
             case Some(document) if document.getString(MongoFields.AccountStatus) == "Deleted" =>
@@ -316,29 +266,16 @@ final class MongoAnalyticsErasureRequestRepository(
                 MongoUpdate.set(MongoFields.CompletedAt, Date.from(now)),
                 MongoUpdate.set(MongoFields.ExpiresAt, Date.from(now.plusSeconds(31L * 24L * 60L * 60L)))
               )
-              val requests = session.fold(
-                MongoAnalyticsRepositoryOperations.updateOne(collection, None, filter, update, new UpdateOptions)
-              )(active =>
-                MongoAnalyticsRepositoryOperations
-                  .updateOne(collection, Some(active), filter, update, new UpdateOptions)
-              )
+              val requests =
+                MongoAnalyticsRepositoryOperations.updateOne(collection, session, filter, update, new UpdateOptions)
               requests.flatMap {
                 case Some(result) if result.getMatchedCount == 1L => persistCompletion(session, requestId, now)
                 case Some(_)                                      =>
-                  val completed = session.fold(
-                    MongoAnalyticsRepositoryOperations.findOne(
-                      collection,
-                      None,
-                      MongoFilter
-                        .and(MongoFilter.eq(MongoFields.Id, requestId), MongoFilter.eq(MongoFields.State, "Complete"))
-                    )
-                  )(active =>
-                    MongoAnalyticsRepositoryOperations.findOne(
-                      collection,
-                      Some(active),
-                      MongoFilter
-                        .and(MongoFilter.eq(MongoFields.Id, requestId), MongoFilter.eq(MongoFields.State, "Complete"))
-                    )
+                  val completed = MongoAnalyticsRepositoryOperations.findOne(
+                    collection,
+                    session,
+                    MongoFilter
+                      .and(MongoFilter.eq(MongoFields.Id, requestId), MongoFilter.eq(MongoFields.State, "Complete"))
                   )
                   completed.flatMap(
                     _.fold(RepositoryIO.fromEither(Left(RepositoryError.Conflict)))(_ =>
@@ -349,18 +286,15 @@ final class MongoAnalyticsErasureRequestRepository(
               }
             case _ => RepositoryIO.fromEither(Left(RepositoryError.Conflict))
           }
-      })(_ => Left(RepositoryError.Unavailable))
+      })
 
   private def persistCompletion(
       session: Option[ClientSession[IO]],
       userId: String,
       now: Instant
   ): RepositoryIO[Unit] = {
-    val request = session.fold(
-      MongoAnalyticsRepositoryOperations.findOne(collection, None, MongoFilter.eq(MongoFields.Id, userId))
-    )(active =>
-      MongoAnalyticsRepositoryOperations.findOne(collection, Some(active), MongoFilter.eq(MongoFields.Id, userId))
-    )
+    val request =
+      MongoAnalyticsRepositoryOperations.findOne(collection, session, MongoFilter.eq(MongoFields.Id, userId))
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "analyticsErasure.persistCompletion")(
         request
@@ -374,20 +308,15 @@ final class MongoAnalyticsErasureRequestRepository(
             ).flatten
             val filter = MongoFilter.eq(MongoFields.Id, userId)
             val update = MongoUpdate.combine(updates*)
-            val result = session.fold(
-              MongoAnalyticsRepositoryOperations
-                .updateOne(completions, None, filter, update, new UpdateOptions().upsert(true))
-            )(active =>
-              MongoAnalyticsRepositoryOperations
-                .updateOne(completions, Some(active), filter, update, new UpdateOptions().upsert(true))
-            )
+            val result = MongoAnalyticsRepositoryOperations
+              .updateOne(completions, session, filter, update, new UpdateOptions().upsert(true))
             result
               .subflatMap {
                 case Some(_) => Right(())
                 case _       => Left(RepositoryError.MissingWriteResult)
               }
           }
-      )(_ => Left(RepositoryError.Unavailable))
+      )
   }
 }
 
@@ -414,6 +343,8 @@ final class MongoAnalyticsReportRepository(
     diagnostics: Diagnostics
 ) extends AnalyticsReportRepository,
       AnalyticsReportSnapshotPublisher {
+  import MongoAnalyticsRepositoryOperations.{findOne, replaceOne, updateOne}
+
   private val collection = Mongo4catsCollections.documents(database, MongoCollections.AnalyticsReportSnapshots)
   private val control = Mongo4catsCollections.documents(database, MongoCollections.AnalyticsReportControl)
   private val reservations = Mongo4catsCollections.documents(database, MongoCollections.AnalyticsReportRuns)
@@ -421,7 +352,7 @@ final class MongoAnalyticsReportRepository(
   override def latest: RepositoryIO[Option[AnalyticsReportSnapshot]] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "analyticsReport.latest")(transactionRunner.run { session =>
-        findOne(session, control, MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.ControlId)).flatMap {
+        findOne(control, session, MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.ControlId)).flatMap {
           case Some(document) =>
             MongoHiringPersistenceCodecs
               .decodeAnalyticsReportControl(document)
@@ -429,8 +360,8 @@ final class MongoAnalyticsReportRepository(
               .filter(_.state == AnalyticsReportSnapshotDocument.Published) match {
               case Some(state) if state.generation >= 0L && state.lastPublishedRevision >= 0L =>
                 findOne(
-                  session,
                   collection,
+                  session,
                   MongoFilter.and(
                     MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.CurrentId),
                     MongoFilter.eq(MongoFields.State, AnalyticsReportSnapshotDocument.Published),
@@ -450,7 +381,7 @@ final class MongoAnalyticsReportRepository(
             }
           case _ => RepositoryIO.fromEither(Right(None))
         }
-      })(_ => Left(RepositoryError.Unavailable))
+      })
 
   override def reserve(
       runId: AnalyticsRunId,
@@ -461,11 +392,11 @@ final class MongoAnalyticsReportRepository(
     if (!reservationExpiresAt.isAfter(now)) RepositoryIO.fromEither(Left(RepositoryError.Conflict))
     else {
       val result = transactionRunner.run { session =>
-        findOne(session, reservations, MongoFilter.eq(MongoFields.Id, runId.value)).flatMap {
+        findOne(reservations, session, MongoFilter.eq(MongoFields.Id, runId.value)).flatMap {
           case Some(existing) =>
             readReservation(existing) match {
               case Some(reservation) if reservation.rangeFingerprint == rangeFingerprint =>
-                findOne(session, control, MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.ControlId))
+                findOne(control, session, MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.ControlId))
                   .flatMap {
                     case Some(state)
                         if existing.getString(MongoFields.State) == "Reserved" &&
@@ -474,15 +405,15 @@ final class MongoAnalyticsReportRepository(
                             Option(state.get(MongoFields.LastPublishedRevision, classOf[java.lang.Long]))
                               .exists(_.longValue() >= reservation.revision)) =>
                       updateOne(
-                        session,
                         control,
+                        session,
                         MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.ControlId),
                         MongoUpdate.inc(MongoFields.NextRevision, 1L)
                       ).flatMap {
                         case Some(incremented) if incremented.getMatchedCount == 1L =>
                           findOne(
-                            session,
                             control,
+                            session,
                             MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.ControlId)
                           )
                             .flatMap {
@@ -498,8 +429,8 @@ final class MongoAnalyticsReportRepository(
                                   RepositoryIO.fromEither(Left(RepositoryError.InvalidStoredData))
                                 else
                                   updateOne(
-                                    session,
                                     reservations,
+                                    session,
                                     MongoFilter.and(
                                       MongoFilter.eq(MongoFields.Id, runId.value),
                                       MongoFilter.eq(MongoFields.State, "Reserved")
@@ -532,14 +463,14 @@ final class MongoAnalyticsReportRepository(
               MongoUpdate.inc(MongoFields.NextRevision, 1L)
             )
             updateOne(
-              session,
               control,
+              session,
               MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.ControlId),
               increment
             )
               .flatMap {
                 case Some(result) if result.getMatchedCount == 1L =>
-                  findOne(session, control, MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.ControlId))
+                  findOne(control, session, MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.ControlId))
                     .flatMap {
                       case Some(state) =>
                         val generation = Option(state.get(MongoFields.Generation, classOf[java.lang.Long]))
@@ -561,7 +492,7 @@ final class MongoAnalyticsReportRepository(
                               Some(Date.from(reservationExpiresAt))
                             )
                           )
-                          insertOne(session, reservations, document).as(reservation)
+                          insertOne(reservations, session, document).as(reservation)
                         }
                       case None => RepositoryIO.fromEither(Left(RepositoryError.InvalidStoredData))
                     }
@@ -572,7 +503,7 @@ final class MongoAnalyticsReportRepository(
       }
       MongoRepositorySupport
         .repositoryGuard(diagnostics, "analyticsReport.reserve")(result.recoverWith { case RepositoryError.Conflict =>
-          findOne(None, reservations, MongoFilter.eq(MongoFields.Id, runId.value)).subflatMap { existing =>
+          findOne(reservations, None, MongoFilter.eq(MongoFields.Id, runId.value)).subflatMap { existing =>
             existing match {
               case Some(document) if readReservation(document).isEmpty => Left(RepositoryError.InvalidStoredData)
               case Some(document)                                      =>
@@ -583,7 +514,7 @@ final class MongoAnalyticsReportRepository(
               case None => Left(RepositoryError.Conflict)
             }
           }
-        })(_ => Left(RepositoryError.Unavailable))
+        })
 
     }
 
@@ -598,10 +529,10 @@ final class MongoAnalyticsReportRepository(
       MongoRepositorySupport
         .repositoryGuard(diagnostics, "analyticsReport.publish")(transactionRunner.run { session =>
           for {
-            storedRun <- findOne(session, reservations, MongoFilter.eq(MongoFields.Id, reservation.runId.value))
+            storedRun <- findOne(reservations, session, MongoFilter.eq(MongoFields.Id, reservation.runId.value))
             controlState <- findOne(
-              session,
               control,
+              session,
               MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.ControlId)
             )
             result <- (storedRun.flatMap(readReservation), controlState) match {
@@ -622,8 +553,8 @@ final class MongoAnalyticsReportRepository(
                   if (!sameRunAlreadyPublished) RepositoryIO.fromEither(Left(RepositoryError.Conflict))
                   else
                     findOne(
-                      session,
                       collection,
+                      session,
                       MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.CurrentId)
                     ).flatMap {
                       case Some(existing)
@@ -644,8 +575,8 @@ final class MongoAnalyticsReportRepository(
                           .append(MongoFields.Revision, reservation.revision)
                           .append(MongoFields.RunId, reservation.runId.value)
                         replaceOne(
-                          session,
                           collection,
+                          session,
                           MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.CurrentId),
                           restored,
                           new ReplaceOptions().upsert(true)
@@ -671,7 +602,7 @@ final class MongoAnalyticsReportRepository(
                       List(AnalyticsReportSnapshotDocument.Published, AnalyticsReportSnapshotDocument.Unpublished)
                     )
                   )
-                  updateOne(session, control, controlFilter, updateControl).flatMap {
+                  updateOne(control, session, controlFilter, updateControl).flatMap {
                     case Some(updateResult) if updateResult.getMatchedCount == 1L =>
                       val snapshotDocument = AnalyticsReportSnapshotDocument
                         .write(snapshot, expiresAt)
@@ -679,16 +610,16 @@ final class MongoAnalyticsReportRepository(
                         .append(MongoFields.Revision, reservation.revision)
                         .append(MongoFields.RunId, reservation.runId.value)
                       replaceOne(
-                        session,
                         collection,
+                        session,
                         MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.CurrentId),
                         snapshotDocument,
                         new ReplaceOptions().upsert(true)
                       ).flatMap {
                         case Some(_) =>
                           updateOne(
-                            session,
                             reservations,
+                            session,
                             MongoFilter.and(
                               MongoFilter.eq(MongoFields.Id, reservation.runId.value),
                               MongoFilter.eq(MongoFields.Generation, reservation.generation),
@@ -711,34 +642,11 @@ final class MongoAnalyticsReportRepository(
               case (None, _)                       => RepositoryIO.fromEither(Left(RepositoryError.Conflict))
             }
           } yield result
-        })(_ => Left(RepositoryError.Unavailable))
-
-  private def findOne(
-      session: Option[ClientSession[IO]],
-      collection: IO[MongoCollection[IO, Document]],
-      filter: MongoFilter
-  ): RepositoryIO[Option[Document]] = MongoAnalyticsRepositoryOperations.findOne(collection, session, filter)
-
-  private def updateOne(
-      session: Option[ClientSession[IO]],
-      collection: IO[MongoCollection[IO, Document]],
-      filter: MongoFilter,
-      update: MongoUpdate
-  ): RepositoryIO[Option[com.mongodb.client.result.UpdateResult]] =
-    MongoAnalyticsRepositoryOperations.updateOne(collection, session, filter, update, new UpdateOptions)
-
-  private def replaceOne(
-      session: Option[ClientSession[IO]],
-      collection: IO[MongoCollection[IO, Document]],
-      filter: MongoFilter,
-      replacement: Document,
-      options: ReplaceOptions
-  ): RepositoryIO[Option[com.mongodb.client.result.UpdateResult]] =
-    MongoAnalyticsRepositoryOperations.replaceOne(collection, session, filter, replacement, options)
+        })
 
   private def insertOne(
-      session: Option[ClientSession[IO]],
       collection: IO[MongoCollection[IO, Document]],
+      session: Option[ClientSession[IO]],
       document: Document
   ): RepositoryIO[Unit] =
     MongoAnalyticsRepositoryOperations

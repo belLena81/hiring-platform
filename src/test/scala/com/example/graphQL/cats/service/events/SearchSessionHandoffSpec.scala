@@ -2,6 +2,7 @@ package com.example.graphQL.cats.service.events
 
 import cats.effect.{Deferred, IO, Ref}
 import cats.syntax.all.*
+import com.example.graphQL.cats.FixedTestClock
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.Diagnostics
@@ -83,6 +84,41 @@ final class SearchSessionHandoffSpec extends CatsEffectSuite {
         )
       }
     }
+  }
+
+  test("search-session workers claim with the injected clock and the configured lease") {
+    for {
+      observed <- Deferred[IO, (Instant, Instant)]
+      repository = new SearchSessionWorkRepository {
+        override def enqueue(work: PendingSearchSessionWork, createdAt: Instant): RepositoryIO[Unit] =
+          RepositoryIO.fromEither(Right(()))
+        override def findForActor(actor: UserId, search: UUID): RepositoryIO[Option[SearchSessionLookup]] =
+          RepositoryIO.fromEither(Right(None))
+        override def claim(
+            workerId: String,
+            currentTime: Instant,
+            leaseUntil: Instant
+        ): RepositoryIO[Option[ClaimedSearchSessionWork]] =
+          RepositoryIO.lift(observed.complete((currentTime, leaseUntil)).as(None))
+        override def complete(claim: ClaimedSearchSessionWork, completedAt: Instant): RepositoryIO[Unit] =
+          RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
+        override def retry(claim: ClaimedSearchSessionWork, availableAt: Instant): RepositoryIO[Unit] =
+          RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
+        override def fail(
+            claim: ClaimedSearchSessionWork,
+            failure: SearchSessionWorkFailure,
+            failedAt: Instant
+        ): RepositoryIO[Unit] = RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
+      }
+      result <- SearchSessionHandoff
+        .resource(
+          repository,
+          SearchSessionHandoffConfig(parallelism = 1, lease = 45.seconds, pollInterval = 1.hour),
+          Diagnostics.noop,
+          FixedTestClock.at(now)
+        )
+        .use(_ => observed.get)
+    } yield assertEquals(result, (now, now.plusSeconds(45)))
   }
 
   private def failingRepository(

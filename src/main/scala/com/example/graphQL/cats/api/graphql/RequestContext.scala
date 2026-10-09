@@ -15,8 +15,8 @@ import com.example.graphQL.cats.service.{
 }
 import com.example.graphQL.cats.service.{AnalyticsReportingUseCases, EmbeddingCoverageUseCases}
 import com.example.graphQL.cats.service.Diagnostics.*
-import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
-import com.example.graphQL.cats.domain.model.{Job, User}
+import com.example.graphQL.cats.domain.model.CandidateProfile
+import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.service.protocol.{
   AccountUseCases,
   ApplicationUseCases,
@@ -27,7 +27,7 @@ import com.example.graphQL.cats.service.protocol.{
   UseCaseIO
 }
 import com.example.graphQL.cats.service.UseCaseError
-import com.example.graphQL.cats.service.events.SearchSessionHandoff
+import com.example.graphQL.cats.service.search.SearchSessionRecording
 import org.typelevel.otel4s.trace.{SpanContext, Tracer}
 
 import com.example.graphQL.cats.service.read.*
@@ -38,9 +38,9 @@ final case class HiringGraphQLServices(
     applicationService: ApplicationUseCases,
     cursorKey: CursorCodec.CursorKey,
     accountService: AccountUseCases,
+    interactionService: InteractionUseCases,
+    searchSessions: SearchSessionRecording,
     semanticSearchService: Option[SearchUseCases] = None,
-    interactionService: InteractionUseCases = InteractionUseCases.noop,
-    searchSessionHandoff: SearchSessionHandoff = SearchSessionHandoff.noop,
     analyticsReporting: AnalyticsReportingUseCases = AnalyticsReportingUseCases.unavailable,
     interviewScheduling: Option[com.example.graphQL.cats.service.application.InterviewSchedulingService] = None,
     embeddingCoverage: EmbeddingCoverageUseCases = EmbeddingCoverageUseCases.denyAll
@@ -124,11 +124,12 @@ final class RequestContext private (
   def relatedJobs(keys: List[JobRelationKey]): HiringGraphQLResult[List[RelatedJob]] =
     authenticatedActor.flatMap(actor => read(parameters.hiring.readModel.relatedJobs(actor, keys.distinct)))
 
-  def users(ids: List[UserId]): HiringGraphQLResult[List[User]] =
-    read(parameters.hiring.readModel.users(ids.distinct))
-
-  def jobs(ids: List[JobId]): HiringGraphQLResult[List[Job]] =
-    read(parameters.hiring.readModel.jobs(ids.distinct))
+  /** Owner-only profile attributes are masked by the service rule for the authenticated viewer. */
+  private[graphql] def candidateProfileFor(
+      ownerId: UserId,
+      profile: CandidateProfile
+  ): HiringGraphQLResult[CandidateProfile] =
+    authenticatedActor.map(actor => CandidateProfileProjection.forViewer(actor, ownerId, profile))
 
   def visibleEmailUsers(ids: List[UserId]): HiringGraphQLResult[List[EmailVisibility]] =
     parameters.actor match {

@@ -1,12 +1,13 @@
 package com.example.graphQL.cats.runtime
 
-import cats.effect.{Deferred, IO, Resource, Ref}
-import cats.effect.std.Semaphore
+import cats.effect.{Clock, Deferred, IO, Resource, Ref}
+import cats.effect.std.{Semaphore, UUIDGen}
 import cats.syntax.all.*
 import com.example.graphQL.cats.api.graphql.{CursorCodec, HiringGraphQLServices}
 import com.example.graphQL.cats.service.port.EmbeddingService
 import com.example.graphQL.cats.service.{
   AnalyticsReportingService,
+  BackgroundWorker,
   DatabaseProbe,
   EmbeddingCoverageService,
   EmbeddingCoverageUseCases,
@@ -27,7 +28,12 @@ import com.example.graphQL.cats.service.events.{
   SearchSessionHandoff,
   SearchSessionHandoffConfig
 }
-import com.example.graphQL.cats.service.search.{EmbeddingPipeline, EmbeddingWorkPublisher, SemanticSearchService}
+import com.example.graphQL.cats.service.search.{
+  EmbeddingPipeline,
+  EmbeddingWorkPublisher,
+  SearchSessionRecording,
+  SemanticSearchService
+}
 import com.example.graphQL.cats.config.{
   JwtAuthConfig,
   KafkaConfig,
@@ -90,8 +96,8 @@ private[runtime] final class SetupLifecycle private (
 private[runtime] object SetupLifecycle {
   def resource(setup: IO[Unit], diagnostics: Diagnostics): Resource[IO, SetupLifecycle] =
     Resource.eval(Deferred[IO, Either[Throwable, Unit]]).flatMap { completion =>
-      Resource
-        .make(
+      BackgroundWorker
+        .resource("mongo-setup", diagnostics)(
           setup.attempt
             .flatTap(
               _.fold(
@@ -100,8 +106,8 @@ private[runtime] object SetupLifecycle {
               )
             )
             .flatMap(completion.complete)
-            .start
-        )(_.cancel)
+            .void
+        )
         .as(new SetupLifecycle(completion))
     }
 
@@ -161,13 +167,14 @@ object MongoHiringRuntime {
           config.passwordHash.parallelism,
           passwordHashPermits
         )
-        .evalMap(hasher => MongoAdminSeed.run(database, seedAccounts, hasher, config.adminSeed))
+        .evalMap(hasher => MongoAdminSeed.run(database, seedAccounts, hasher, config.adminSeed, Clock[IO], UUIDGen[IO]))
       capability <- embeddingCapability(database, client, config, setup.await, embeddingHealth.set, discoveryPolicy)
       users = capability.users
       applications = MongoApplicationRepository.transactional(database, client, config.diagnostics)
       searchSessions = MongoSearchSessionRepository.transactional(database, client, config.diagnostics)
-      searchSessionWork = MongoSearchSessionWorkRepository.transactional(database, client, config.diagnostics)
-      outbox = MongoOperationalEventOutboxRepository.transactional(database, client, config.diagnostics)
+      searchSessionWork =
+        MongoSearchSessionWorkRepository.transactional(database, client, config.diagnostics, UUIDGen[IO])
+      outbox = MongoOperationalEventOutboxRepository.transactional(database, client, config.diagnostics, UUIDGen[IO])
       receipts = new MongoConsumerReceiptRepository(database, config.diagnostics)
       mutationReceipts = MongoMutationReceiptRepository.transactional(database, client, config.diagnostics)
       erasureRequests = MongoAnalyticsErasureRequestRepository.transactional(
@@ -202,7 +209,8 @@ object MongoHiringRuntime {
         passwordHashPermits,
         config.diagnostics
       )
-      _ <- OperationalEventKafkaRuntime.resource(config.kafka, outbox, receipts, quarantine, config.diagnostics)
+      _ <- OperationalEventKafkaRuntime
+        .resource(config.kafka, outbox, receipts, quarantine, config.diagnostics, Clock[IO], UUIDGen[IO])
       _ <- InterviewSchedulingRuntime.resource(
         config.kafka,
         interviewRepository,
@@ -236,7 +244,7 @@ object MongoHiringRuntime {
   ): Resource[IO, RuntimeEmbeddingCapability] =
     EmbeddingCapability.resource(
       config.vectorSearch,
-      IO(new MongoEmbeddingWorkRepository(database, config.diagnostics)),
+      IO(new MongoEmbeddingWorkRepository(database, config.diagnostics, UUIDGen[IO])),
       embeddingWork =>
         IO(
           MongoUserRepository.transactional(
@@ -295,7 +303,9 @@ object MongoHiringRuntime {
             config.vectorSearch.durableRetryBaseMillis.millis,
             config.vectorSearch.durableRetryCapMillis.millis,
             config.vectorSearch.workerRestartDelayMillis.millis,
-            embeddingHealth
+            embeddingHealth,
+            Clock[IO],
+            UUIDGen[IO]
           )
           .map(publisher => publisher: EmbeddingWorkPublisher)
       }
@@ -342,9 +352,9 @@ object MongoHiringRuntime {
         applicationService,
         cursorKey,
         accountService,
-        semanticSearch,
         interactionService,
-        searchSessionHandoff,
+        SearchSessionRecording(searchSessionHandoff),
+        semanticSearch,
         AnalyticsReportingService(users, analyticsReports),
         Option.when(kafka.interview.enabled)(
           new com.example.graphQL.cats.service.application.InterviewSchedulingService(
@@ -366,7 +376,7 @@ object MongoHiringRuntime {
         passwordHashPermits
       )
       .flatMap { hasher =>
-        SearchSessionHandoff.resource(searchSessionWork, SearchSessionHandoffConfig(), diagnostics).map {
+        SearchSessionHandoff.resource(searchSessionWork, SearchSessionHandoffConfig(), diagnostics, Clock[IO]).map {
           searchSessionHandoff =>
             capability match {
               case EmbeddingCapability.Disabled(_, _) =>
@@ -413,7 +423,7 @@ object MongoHiringRuntime {
                 assemble(
                   jobService,
                   accountService,
-                  EmbeddingCoverageService.live(users, embeddingCoverage, durableRetryCap),
+                  EmbeddingCoverageService.live(users, embeddingCoverage, durableRetryCap, clock = Clock[IO]),
                   Some(semanticSearch),
                   searchSessionHandoff
                 )
@@ -442,9 +452,6 @@ object MongoHiringRuntime {
       setupReady: IO[Boolean]
   ): DatabaseProbe = new DatabaseProbe {
     private val delegate = MongoDatabaseProbe.fromDatabase(database, metadata, diagnostics)
-
-    override def check: IO[ProbeResult] =
-      check(None)
 
     override def check(requestId: Option[String]): IO[ProbeResult] =
       delegate.check(requestId).flatMap {

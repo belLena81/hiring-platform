@@ -6,16 +6,11 @@ import com.example.graphQL.cats.config.VectorSearchConfig
 import com.example.graphQL.cats.service.port.EmbeddingService
 import com.example.graphQL.cats.service.search.EmbeddingWorkPublisher
 
-private[runtime] sealed trait EmbeddingCapability[Work, Users, Jobs, Search] {
-  def users: Users
-  def jobs: Jobs
-}
-
-private[runtime] object EmbeddingCapability {
-  final case class Disabled[Work, Users, Jobs, Search](users: Users, jobs: Jobs)
+private[runtime] enum EmbeddingCapability[Work, Users, Jobs, Search] {
+  case Disabled[Work, Users, Jobs, Search](users: Users, jobs: Jobs)
       extends EmbeddingCapability[Work, Users, Jobs, Search]
 
-  final case class Enabled[Work, Users, Jobs, Search](
+  case Enabled[Work, Users, Jobs, Search](
       work: Work,
       users: Users,
       jobs: Jobs,
@@ -25,6 +20,11 @@ private[runtime] object EmbeddingCapability {
       model: String
   ) extends EmbeddingCapability[Work, Users, Jobs, Search]
 
+  def users: Users
+  def jobs: Jobs
+}
+
+private[runtime] object EmbeddingCapability {
   def resource[Work, Users, Jobs, Search](
       config: VectorSearchConfig,
       makeWork: IO[Work],

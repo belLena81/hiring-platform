@@ -20,13 +20,13 @@ class AppConfigSpec extends FunSuite {
     }
 
   test("admin seed defaults disabled and requires credentials only when enabled") {
-    assertEquals(AppConfig.fromConfig(defaultConfig, Map.empty).map(_.adminSeed), Right(AdminSeedConfig()))
+    assertEquals(AppConfigFixtures.fromConfig(defaultConfig, Map.empty).map(_.adminSeed), Right(AdminSeedConfig()))
     assertContainsError(
-      AppConfig.fromConfig(defaultConfig + "\nauth.admin-seed.enabled=true", Map.empty),
+      AppConfigFixtures.fromConfig(defaultConfig + "\nauth.admin-seed.enabled=true", Map.empty),
       ConfigError.InvalidAdminSeed
     )
     val enabled = defaultConfig + "\nauth.admin-seed { enabled=true, name=Admin, password=synthetic-password }"
-    assertEquals(AppConfig.fromConfig(enabled, Map.empty).map(_.adminSeed.enabled), Right(true))
+    assertEquals(AppConfigFixtures.fromConfig(enabled, Map.empty).map(_.adminSeed.enabled), Right(true))
     assert(!AdminSeedConfig(true, Some("private-name"), Some("private-password")).toString.contains("private"))
   }
 
@@ -160,13 +160,13 @@ class AppConfigSpec extends FunSuite {
     )
 
   test("an absent interview configuration uses disabled local defaults") {
-    val parsed = AppConfig.fromConfig(defaultConfig, Map.empty)
+    val parsed = AppConfigFixtures.fromConfig(defaultConfig, Map.empty)
     assertEquals(parsed.map(_.kafka.interview), Right(InterviewRuntimeConfig()))
   }
 
   test("Kafka publisher and reader credentials are resolved independently") {
     val enabled = defaultConfig.replace("kafka {\n  enabled = false", "kafka {\n  enabled = true")
-    val parsed = AppConfig.fromConfig(
+    val parsed = AppConfigFixtures.fromConfig(
       enabled,
       Map(
         "KAFKA_PUBLISHER_USERNAME" -> "hiring_publisher_v2",
@@ -182,8 +182,8 @@ class AppConfigSpec extends FunSuite {
   }
 
   test("Kafka SASL transport defaults to TLS and supports explicit local plaintext") {
-    val tls = AppConfig.fromConfig(defaultConfig, Map.empty)
-    val plaintext = AppConfig.fromConfig(
+    val tls = AppConfigFixtures.fromConfig(defaultConfig, Map.empty)
+    val plaintext = AppConfigFixtures.fromConfig(
       defaultConfig + "kafka.sasl-security-protocol = ${?KAFKA_SASL_SECURITY_PROTOCOL}\n",
       Map("KAFKA_SASL_SECURITY_PROTOCOL" -> "SASL_PLAINTEXT")
     )
@@ -194,7 +194,7 @@ class AppConfigSpec extends FunSuite {
 
   test("Kafka SASL transport rejects unsupported protocols") {
     val config = defaultConfig + "kafka.sasl-security-protocol = \"PLAINTEXT\"\n"
-    assertContainsError(AppConfig.fromConfig(config, Map.empty), ConfigError.InvalidKafkaSaslSecurityProtocol)
+    assertContainsError(AppConfigFixtures.fromConfig(config, Map.empty), ConfigError.InvalidKafkaSaslSecurityProtocol)
   }
 
   test("Kafka SASL plaintext is rejected for non-loopback bootstrap servers") {
@@ -202,12 +202,12 @@ class AppConfigSpec extends FunSuite {
       "kafka.bootstrap-servers = \"broker.example:9092\"\n" +
       "kafka.sasl-security-protocol = \"SASL_PLAINTEXT\"\n"
 
-    assertContainsError(AppConfig.fromConfig(config, Map.empty), ConfigError.InvalidKafkaSaslSecurityProtocol)
+    assertContainsError(AppConfigFixtures.fromConfig(config, Map.empty), ConfigError.InvalidKafkaSaslSecurityProtocol)
   }
 
   test("enabled Kafka rejects missing authentication credentials") {
     val enabled = defaultConfig.replace("kafka {\n  enabled = false", "kafka {\n  enabled = true")
-    assertContainsError(AppConfig.fromConfig(enabled, Map.empty), ConfigError.InvalidKafkaCredentials)
+    assertContainsError(AppConfigFixtures.fromConfig(enabled, Map.empty), ConfigError.InvalidKafkaCredentials)
   }
 
   test("P1-AC01 loads grouped HOCON settings and resolves env placeholders") {
@@ -293,7 +293,7 @@ class AppConfigSpec extends FunSuite {
         |}
         |""".stripMargin
     assertEquals(
-      AppConfig.fromConfig(
+      AppConfigFixtures.fromConfig(
         config,
         Map(
           "MONGODB_URI" -> "mongodb://test-user:synthetic-secret@localhost:27018/?authSource=admin",
@@ -323,20 +323,20 @@ class AppConfigSpec extends FunSuite {
   test("VHS-AC07 rejects a vector candidate budget below the maximum page size") {
     val config = defaultConfig.replace("num-candidates = 100", "num-candidates = 99")
 
-    assertContainsError(AppConfig.fromConfig(config, Map.empty), ConfigError.InvalidVectorNumCandidates)
+    assertContainsError(AppConfigFixtures.fromConfig(config, Map.empty), ConfigError.InvalidVectorNumCandidates)
   }
 
   test("Mongo startup reset is disabled by default and opt-in") {
-    assertEquals(AppConfig.fromConfig(defaultConfig, Map.empty).map(_.resetOnStart), Right(false))
+    assertEquals(AppConfigFixtures.fromConfig(defaultConfig, Map.empty).map(_.resetOnStart), Right(false))
     assertEquals(
-      AppConfig.fromConfig(defaultConfig + "mongo.reset-on-start = true\n", Map.empty).map(_.resetOnStart),
+      AppConfigFixtures.fromConfig(defaultConfig + "mongo.reset-on-start = true\n", Map.empty).map(_.resetOnStart),
       Right(true)
     )
   }
 
   test("VHS-AC08 packaged application config is grouped, sanitized and fails safely without required local values") {
     val raw = resource("application.conf")
-    assertInvalidConfig(AppConfig.fromConfig(raw, Map.empty))
+    assertInvalidConfig(AppConfigFixtures.fromConfig(raw, Map.empty))
     assert(raw.contains("http {"))
     assert(raw.contains("uri = ${?MONGODB_URI}"))
     assert(raw.contains("hs256-secret = ${?AUTH_JWT_HS256_SECRET}"))
@@ -360,7 +360,7 @@ class AppConfigSpec extends FunSuite {
         |}
         |auth.jwt.hs256-secret = "01234567890123456789012345678901"
         |""".stripMargin
-    val result = AppConfig.fromConfig(raw + local, Map.empty)
+    val result = AppConfigFixtures.fromConfig(raw + local, Map.empty)
     assertEquals(
       result.map(config => (config.host.toString, config.port.value, config.admissionPermits, config.mongoUri)),
       Right(("127.0.0.1", 8080, 16, "mongodb://127.0.0.1:27017"))
@@ -372,7 +372,7 @@ class AppConfigSpec extends FunSuite {
       .replace("127.0.0.1:9092", "b" * 512)
       .replace("hiring.operational-events.v1", "t" * 249)
       .replace("hiring-phase5-consumer", "g" * 249)
-    assert(AppConfig.fromConfig(atLimits, Map.empty).isRight)
+    assert(AppConfigFixtures.fromConfig(atLimits, Map.empty).isRight)
 
     val invalidValues = List(
       ("127.0.0.1:9092", "b" * 513, ConfigError.InvalidKafkaBootstrapServers),
@@ -380,13 +380,13 @@ class AppConfigSpec extends FunSuite {
       ("hiring-phase5-consumer", " ", ConfigError.InvalidKafkaConsumerGroup)
     )
     invalidValues.foreach { case (existing, invalid, expected) =>
-      assertContainsError(AppConfig.fromConfig(defaultConfig.replace(existing, invalid), Map.empty), expected)
+      assertContainsError(AppConfigFixtures.fromConfig(defaultConfig.replace(existing, invalid), Map.empty), expected)
     }
   }
 
   test("VHS-AC08 packaged application config resolves cloud environment values at startup") {
     val raw = resource("application.conf")
-    val result = AppConfig.fromConfig(
+    val result = AppConfigFixtures.fromConfig(
       raw,
       Map(
         "HTTP_HOST" -> "::1",
@@ -409,7 +409,7 @@ class AppConfigSpec extends FunSuite {
     val raw = resource("application.conf")
     val base = Map("AUTH_JWT_HS256_SECRET" -> "01234567890123456789012345678901", "VOYAGE_MODEL" -> "voyage-4-lite")
     def keys(extra: (String, String)) =
-      AppConfig.fromConfig(raw, base + extra).swap.toOption.toList.flatMap(_.toList.map(_.key))
+      AppConfigFixtures.fromConfig(raw, base + extra).swap.toOption.toList.flatMap(_.toList.map(_.key))
     assert(keys("HTTP_REQUEST_TIMEOUT_MS" -> "99999999").contains("HTTP_REQUEST_TIMEOUT_MS"))
     assertEquals(ConfigError.InvalidKafkaRestartMaxDelay.key, "HIRING_KAFKA_RESTART_MAX_DELAY_SECONDS")
     assert(raw.contains("${?HIRING_KAFKA_RESTART_MAX_DELAY_SECONDS}"))
@@ -421,8 +421,8 @@ class AppConfigSpec extends FunSuite {
     try {
       val config =
         defaultConfig.replace("host = \"127.0.0.1\"", "host = ${?HTTP_HOST}")
-      assertInvalidConfig(AppConfig.fromConfig(config, Map.empty))
-      assert(AppConfig.fromConfig(config, Map("HTTP_HOST" -> "::1")).isRight)
+      assertInvalidConfig(AppConfigFixtures.fromConfig(config, Map.empty))
+      assert(AppConfigFixtures.fromConfig(config, Map("HTTP_HOST" -> "::1")).isRight)
     } finally {
       previous.fold {
         val _ = System.clearProperty("HTTP_HOST")
@@ -439,7 +439,7 @@ class AppConfigSpec extends FunSuite {
       """http.port = 9090
         |logging.mask-sensitive = false
         |""".stripMargin
-    val loaded = AppConfig.fromConfig(defaultConfig + local, Map.empty)
+    val loaded = AppConfigFixtures.fromConfig(defaultConfig + local, Map.empty)
     assertEquals(loaded.map(config => (config.port.value, config.maskSensitive)), Right((9090, false)))
   }
 
@@ -538,7 +538,7 @@ class AppConfigSpec extends FunSuite {
         |""".stripMargin
 
     assertEquals(
-      AppConfig
+      AppConfigFixtures
         .fromConfig(defaults + local, Map.empty)
         .map(config => (config.host.toString, config.port.value, config.admissionPermits, config.mongoUri)),
       Right(("127.42.10.8", 9091, 16, "mongodb://127.0.0.1:27018"))
@@ -546,14 +546,14 @@ class AppConfigSpec extends FunSuite {
   }
 
   test("P1-AC01 config text rejects malformed HOCON and missing required paths safely") {
-    assertInvalidConfig(AppConfig.fromConfig("http { host = 127.0.0.1\n", Map.empty))
-    assertInvalidConfig(AppConfig.fromConfig("mongo.uri=${MONGODB_URI}\n", Map.empty))
-    assertInvalidConfig(AppConfig.fromConfig(defaultConfig.replace("  host = \"127.0.0.1\"\n", ""), Map.empty))
+    assertInvalidConfig(AppConfigFixtures.fromConfig("http { host = 127.0.0.1\n", Map.empty))
+    assertInvalidConfig(AppConfigFixtures.fromConfig("mongo.uri=${MONGODB_URI}\n", Map.empty))
+    assertInvalidConfig(AppConfigFixtures.fromConfig(defaultConfig.replace("  host = \"127.0.0.1\"\n", ""), Map.empty))
     assertInvalidConfig(
-      AppConfig.fromConfig(defaultConfig.replace("  uri = \"mongodb://127.0.0.1:27017\"\n", ""), Map.empty)
+      AppConfigFixtures.fromConfig(defaultConfig.replace("  uri = \"mongodb://127.0.0.1:27017\"\n", ""), Map.empty)
     )
-    assertInvalidConfig(AppConfig.fromConfig(defaultConfig + "mongo.database = \"a\u0000b\"\n", Map.empty))
-    assertInvalidConfig(AppConfig.fromConfig("", Map.empty))
+    assertInvalidConfig(AppConfigFixtures.fromConfig(defaultConfig + "mongo.database = \"a\u0000b\"\n", Map.empty))
+    assertInvalidConfig(AppConfigFixtures.fromConfig("", Map.empty))
   }
 
   test("P1-AC01 rejects invalid values without returning their contents") {
@@ -572,7 +572,7 @@ class AppConfigSpec extends FunSuite {
       values.foreach { value =>
         val rendered = if (key == "http.port" || key == "http.admission-permits") then s"$key = $value"
         else key + " = \"" + value + "\""
-        val result = AppConfig.fromConfig(defaultConfig + rendered + "\n", Map.empty)
+        val result = AppConfigFixtures.fromConfig(defaultConfig + rendered + "\n", Map.empty)
         assertContainsError(result, error)
         assert(!result.toString.contains("synthetic-secret"))
       }
@@ -581,15 +581,15 @@ class AppConfigSpec extends FunSuite {
 
   test("P1-AC01 accepts boundary ports without application logging levels") {
     List("1", "65535").foreach { port =>
-      assert(AppConfig.fromConfig(defaultConfig + s"http.port = $port\n", Map.empty).isRight)
+      assert(AppConfigFixtures.fromConfig(defaultConfig + s"http.port = $port\n", Map.empty).isRight)
     }
     List("1", "1024").foreach { permits =>
-      assert(AppConfig.fromConfig(defaultConfig + s"http.admission-permits = $permits\n", Map.empty).isRight)
+      assert(AppConfigFixtures.fromConfig(defaultConfig + s"http.admission-permits = $permits\n", Map.empty).isRight)
     }
   }
 
   test("P1-AC01 config rendering never exposes a secret-bearing URI") {
-    val result = AppConfig.fromConfig(
+    val result = AppConfigFixtures.fromConfig(
       defaultConfig +
         """mongo.uri = "mongodb://user:synthetic-secret@localhost:27017"
         |""".stripMargin,
@@ -601,7 +601,7 @@ class AppConfigSpec extends FunSuite {
   }
 
   test("LOG-03 secure defaults come from application config") {
-    val result = AppConfig.fromConfig(defaultConfig, Map.empty)
+    val result = AppConfigFixtures.fromConfig(defaultConfig, Map.empty)
     assertEquals(result.map(_.maskSensitive), Right(true))
   }
 
@@ -616,7 +616,7 @@ class AppConfigSpec extends FunSuite {
       "0000:0000:0000:0000:0000:0000:0000:0001",
       "::ffff:127.0.0.1"
     ).foreach { host =>
-      val result = AppConfig.fromConfig(
+      val result = AppConfigFixtures.fromConfig(
         defaultConfig +
           s"""http.host = "$host"\nlogging.mask-sensitive = false\n""",
         Map.empty
@@ -633,16 +633,19 @@ class AppConfigSpec extends FunSuite {
     List("0.0.0.0", "::", "192.0.2.1", "126.255.255.255", "128.0.0.1", "::2", "2001:db8::1", "::ffff:192.0.2.1")
       .foreach { host =>
         assertEquals(
-          AppConfig
+          AppConfigFixtures
             .fromConfig(defaultConfig + s"""http.host = "$host"\nlogging.mask-sensitive = false\n""", Map.empty)
             .map(_.maskSensitive),
           Right(false),
           clues(host)
         )
-        assert(AppConfig.fromConfig(defaultConfig + s"""http.host = "$host"\n""", Map.empty).isRight, clues(host))
+        assert(
+          AppConfigFixtures.fromConfig(defaultConfig + s"""http.host = "$host"\n""", Map.empty).isRight,
+          clues(host)
+        )
       }
     assertEquals(
-      AppConfig.fromConfig(defaultConfig + "logging.mask-sensitive = false\n", Map.empty),
+      AppConfigFixtures.fromConfig(defaultConfig + "logging.mask-sensitive = false\n", Map.empty),
       Right(
         AppConfig(
           Host.fromString("127.0.0.1").get,
@@ -665,10 +668,10 @@ class AppConfigSpec extends FunSuite {
 
   test("VHS-AC08 vector search requires an explicit Voyage API key when enabled") {
     assertContainsError(
-      AppConfig.fromConfig(defaultConfig + "vector-search.enabled = true\n", Map.empty),
+      AppConfigFixtures.fromConfig(defaultConfig + "vector-search.enabled = true\n", Map.empty),
       ConfigError.InvalidVoyageApiKey
     )
-    val result = AppConfig.fromConfig(
+    val result = AppConfigFixtures.fromConfig(
       defaultConfig +
         """vector-search.enabled = true
         |vector-search.voyage.api-key = ${VOYAGE_API_KEY}
@@ -679,20 +682,21 @@ class AppConfigSpec extends FunSuite {
   }
 
   test("HGQL-AC02 JWT auth config requires a strong secret") {
-    assertEquals(AppConfig.fromConfig(defaultConfig, Map.empty).map(_.jwtAuth), Right(defaultJwtAuth))
+    assertEquals(AppConfigFixtures.fromConfig(defaultConfig, Map.empty).map(_.jwtAuth), Right(defaultJwtAuth))
     assertContainsError(
-      AppConfig.fromConfig(defaultConfig + "auth.jwt.hs256-secret = disabled\n", Map.empty),
+      AppConfigFixtures.fromConfig(defaultConfig + "auth.jwt.hs256-secret = disabled\n", Map.empty),
       ConfigError.InvalidJwtSecret
     )
     assertContainsError(
-      AppConfig.fromConfig(defaultConfig.replace("hs256-secret = \"01234567890123456789012345678901\"", ""), Map.empty),
+      AppConfigFixtures
+        .fromConfig(defaultConfig.replace("hs256-secret = \"01234567890123456789012345678901\"", ""), Map.empty),
       ConfigError.InvalidJwtSecret
     )
     assertContainsError(
-      AppConfig.fromConfig(defaultConfig + "auth.jwt.hs256-secret = \"short\"\n", Map.empty),
+      AppConfigFixtures.fromConfig(defaultConfig + "auth.jwt.hs256-secret = \"short\"\n", Map.empty),
       ConfigError.InvalidJwtSecret
     )
-    val loaded = AppConfig.fromConfig(
+    val loaded = AppConfigFixtures.fromConfig(
       defaultConfig + "auth.jwt.hs256-secret = ${AUTH_JWT_HS256_SECRET}\n",
       Map("AUTH_JWT_HS256_SECRET" -> "abcdefghijklmnopqrstuvwxyz123456")
     )
@@ -702,52 +706,57 @@ class AppConfigSpec extends FunSuite {
   test("authentication receipt secret is optional, strong when set, and falls back to the JWT secret") {
     val strong = "abcdefghijklmnopqrstuvwxyz123456"
     assertEquals(
-      AppConfig.fromConfig(defaultConfig, Map.empty).map(_.jwtAuth.receiptSecret),
+      AppConfigFixtures.fromConfig(defaultConfig, Map.empty).map(_.jwtAuth.receiptSecret),
       Right(defaultJwtAuth.hmacSecret)
     )
     assertEquals(
-      AppConfig
+      AppConfigFixtures
         .fromConfig(defaultConfig + "auth.jwt.receipt-fingerprint-secret = \"" + strong + "\"\n", Map.empty)
         .map(_.jwtAuth.receiptSecret),
       Right(strong)
     )
     assertEquals(
-      AppConfig
+      AppConfigFixtures
         .fromConfig(defaultConfig + "auth.jwt.receipt-fingerprint-secret = \"  \"\n", Map.empty)
         .map(_.jwtAuth.receiptSecret),
       Right(defaultJwtAuth.hmacSecret)
     )
     assertContainsError(
-      AppConfig.fromConfig(defaultConfig + "auth.jwt.receipt-fingerprint-secret = \"short\"\n", Map.empty),
+      AppConfigFixtures.fromConfig(defaultConfig + "auth.jwt.receipt-fingerprint-secret = \"short\"\n", Map.empty),
       ConfigError.InvalidReceiptFingerprintSecret
     )
     assert(!defaultJwtAuth.copy(receiptFingerprintSecret = Some(strong)).toString.contains(strong))
   }
 
   test("HGQL-AC02 cursor JWT TTL is bounded and defaults to fifteen minutes") {
-    assertEquals(AppConfig.fromConfig(defaultConfig, Map.empty).map(_.jwtAuth.cursorTtlSeconds), Right(900L))
+    assertEquals(AppConfigFixtures.fromConfig(defaultConfig, Map.empty).map(_.jwtAuth.cursorTtlSeconds), Right(900L))
     assertContainsError(
-      AppConfig.fromConfig(defaultConfig.replace("cursor-ttl-seconds = 900", "cursor-ttl-seconds = 59"), Map.empty),
+      AppConfigFixtures
+        .fromConfig(defaultConfig.replace("cursor-ttl-seconds = 900", "cursor-ttl-seconds = 59"), Map.empty),
       ConfigError.InvalidCursorTtl
     )
     assertContainsError(
-      AppConfig.fromConfig(defaultConfig.replace("cursor-ttl-seconds = 900", "cursor-ttl-seconds = 86401"), Map.empty),
+      AppConfigFixtures
+        .fromConfig(defaultConfig.replace("cursor-ttl-seconds = 900", "cursor-ttl-seconds = 86401"), Map.empty),
       ConfigError.InvalidCursorTtl
     )
   }
 
   test("HGQL-AC02 auth limiter config is bounded and explicit") {
-    assertEquals(AppConfig.fromConfig(defaultConfig, Map.empty).map(_.authRateLimit), Right(defaultAuthRateLimit))
+    assertEquals(
+      AppConfigFixtures.fromConfig(defaultConfig, Map.empty).map(_.authRateLimit),
+      Right(defaultAuthRateLimit)
+    )
     assertContainsError(
-      AppConfig.fromConfig(defaultConfig + "auth.rate-limit.window-seconds = 0\n", Map.empty),
+      AppConfigFixtures.fromConfig(defaultConfig + "auth.rate-limit.window-seconds = 0\n", Map.empty),
       ConfigError.InvalidAuthRateLimitWindow
     )
     assertContainsError(
-      AppConfig.fromConfig(defaultConfig + "auth.rate-limit.attempts = 0\n", Map.empty),
+      AppConfigFixtures.fromConfig(defaultConfig + "auth.rate-limit.attempts = 0\n", Map.empty),
       ConfigError.InvalidAuthRateLimitAttempts
     )
     assertContainsError(
-      AppConfig.fromConfig(defaultConfig + "auth.rate-limit.max-buckets = 0\n", Map.empty),
+      AppConfigFixtures.fromConfig(defaultConfig + "auth.rate-limit.max-buckets = 0\n", Map.empty),
       ConfigError.InvalidAuthRateLimitBuckets
     )
   }
@@ -760,18 +769,20 @@ class AppConfigSpec extends FunSuite {
         |  parallelism = 2
         |}
         |""".stripMargin
-    val configured = AppConfig.fromConfig(defaultConfig + passwordHash, Map.empty)
+    val configured = AppConfigFixtures.fromConfig(defaultConfig + passwordHash, Map.empty)
     assertEquals(configured.map(_.passwordHash), Right(PasswordHashConfig(3, 32768, 2)))
     assertContainsError(
-      AppConfig.fromConfig(defaultConfig + passwordHash.replace("iterations = 3", "iterations = 0"), Map.empty),
+      AppConfigFixtures.fromConfig(defaultConfig + passwordHash.replace("iterations = 3", "iterations = 0"), Map.empty),
       ConfigError.InvalidPasswordHashIterations
     )
     assertContainsError(
-      AppConfig.fromConfig(defaultConfig + passwordHash.replace("memory-kib = 32768", "memory-kib = 1"), Map.empty),
+      AppConfigFixtures
+        .fromConfig(defaultConfig + passwordHash.replace("memory-kib = 32768", "memory-kib = 1"), Map.empty),
       ConfigError.InvalidPasswordHashMemory
     )
     assertContainsError(
-      AppConfig.fromConfig(defaultConfig + passwordHash.replace("parallelism = 2", "parallelism = 0"), Map.empty),
+      AppConfigFixtures
+        .fromConfig(defaultConfig + passwordHash.replace("parallelism = 2", "parallelism = 0"), Map.empty),
       ConfigError.InvalidPasswordHashParallelism
     )
   }
@@ -786,22 +797,31 @@ class AppConfigSpec extends FunSuite {
     )
 
     bounded.foreach { case (path, minimum, maximum, error) =>
-      assert(AppConfig.fromConfig(defaultConfig + s"$path = $minimum\n", Map.empty).isRight, clues(path, minimum))
-      assert(AppConfig.fromConfig(defaultConfig + s"$path = $maximum\n", Map.empty).isRight, clues(path, maximum))
-      assertContainsError(AppConfig.fromConfig(defaultConfig + s"$path = ${minimum - 1}\n", Map.empty), error)
-      assertContainsError(AppConfig.fromConfig(defaultConfig + s"$path = ${maximum + 1}\n", Map.empty), error)
+      assert(
+        AppConfigFixtures.fromConfig(defaultConfig + s"$path = $minimum\n", Map.empty).isRight,
+        clues(path, minimum)
+      )
+      assert(
+        AppConfigFixtures.fromConfig(defaultConfig + s"$path = $maximum\n", Map.empty).isRight,
+        clues(path, maximum)
+      )
+      assertContainsError(AppConfigFixtures.fromConfig(defaultConfig + s"$path = ${minimum - 1}\n", Map.empty), error)
+      assertContainsError(AppConfigFixtures.fromConfig(defaultConfig + s"$path = ${maximum + 1}\n", Map.empty), error)
     }
   }
 
   test("branch result limit defaults to num-candidates and stays above maximum requested page size") {
-    assertEquals(AppConfig.fromConfig(defaultConfig, Map.empty).map(_.vectorSearch.branchResultLimit), Right(100))
-    assert(AppConfig.fromConfig(defaultConfig + "vector-search.branch-result-limit = 100\n", Map.empty).isRight)
+    assertEquals(
+      AppConfigFixtures.fromConfig(defaultConfig, Map.empty).map(_.vectorSearch.branchResultLimit),
+      Right(100)
+    )
+    assert(AppConfigFixtures.fromConfig(defaultConfig + "vector-search.branch-result-limit = 100\n", Map.empty).isRight)
     assertContainsError(
-      AppConfig.fromConfig(defaultConfig + "vector-search.branch-result-limit = 99\n", Map.empty),
+      AppConfigFixtures.fromConfig(defaultConfig + "vector-search.branch-result-limit = 99\n", Map.empty),
       ConfigError.InvalidVectorBranchResultLimit
     )
     assertContainsError(
-      AppConfig.fromConfig(
+      AppConfigFixtures.fromConfig(
         defaultConfig + "vector-search.branch-result-limit = 101\nvector-search.num-candidates = 100\n",
         Map.empty
       ),
@@ -816,54 +836,157 @@ class AppConfigSpec extends FunSuite {
     val rerankWithoutNativeFusion = defaultConfig + "vector-search.rerank.enabled = true\n"
     val invalidReranker = defaultConfig + "vector-search.rerank.model = unknown-model\n"
 
-    assert(AppConfig.fromConfig(rankFusion, Map.empty).isRight)
-    assert(AppConfig.fromConfig(scoreFusion, Map.empty).isRight)
-    assertContainsError(AppConfig.fromConfig(invalidFusion, Map.empty), ConfigError.InvalidVectorFusionStrategy)
+    assert(AppConfigFixtures.fromConfig(rankFusion, Map.empty).isRight)
+    assert(AppConfigFixtures.fromConfig(scoreFusion, Map.empty).isRight)
+    assertContainsError(AppConfigFixtures.fromConfig(invalidFusion, Map.empty), ConfigError.InvalidVectorFusionStrategy)
     assertContainsError(
-      AppConfig.fromConfig(rerankWithoutNativeFusion, Map.empty),
+      AppConfigFixtures.fromConfig(rerankWithoutNativeFusion, Map.empty),
       ConfigError.InvalidVectorFusionStrategy
     )
-    assertContainsError(AppConfig.fromConfig(invalidReranker, Map.empty), ConfigError.InvalidRerankModel)
+    assertContainsError(AppConfigFixtures.fromConfig(invalidReranker, Map.empty), ConfigError.InvalidRerankModel)
   }
 
-  test("discovery query budgets are typed and stay below the HTTP deadline") {
-    assertEquals(AppConfig.fromConfig(defaultConfig, Map.empty).map(_.discovery), Right(DiscoveryConfig()))
-    List("mongo.discovery.permits = 0", "mongo.discovery.max-roots = 65", "mongo.discovery.max-time-millis = 5000")
-      .foreach(setting =>
-        assertContainsError(
-          AppConfig.fromConfig(defaultConfig + setting + "\n", Map.empty),
-          ConfigError.InvalidDiscoveryQueryLimits
+  test("discovery query budgets name the violated field and the HTTP deadline separately") {
+    assertEquals(AppConfigFixtures.fromConfig(defaultConfig, Map.empty).map(_.discovery), Right(DiscoveryConfig()))
+    List(
+      ("mongo.discovery.permits = 0", ConfigError.InvalidDiscoveryPermits),
+      ("mongo.discovery.permits = 65", ConfigError.InvalidDiscoveryPermits),
+      ("mongo.discovery.max-roots = 0", ConfigError.InvalidDiscoveryMaxRoots),
+      ("mongo.discovery.max-roots = 65", ConfigError.InvalidDiscoveryMaxRoots),
+      ("mongo.discovery.max-time-millis = 99", ConfigError.InvalidDiscoveryMaxTime),
+      ("mongo.discovery.max-time-millis = \"fast\"", ConfigError.InvalidDiscoveryMaxTime),
+      ("mongo.discovery.max-time-millis = 5000", ConfigError.InvalidDiscoveryDeadline)
+    ).foreach { case (setting, expected) =>
+      assertContainsError(AppConfigFixtures.fromConfig(defaultConfig + setting + "\n", Map.empty), expected)
+    }
+    assert(AppConfigFixtures.fromConfig(defaultConfig + "mongo.discovery.max-time-millis = 4999\n", Map.empty).isRight)
+    assertEquals(
+      AppConfigFixtures
+        .fromConfig(defaultConfig + "mongo.discovery { permits = 0, max-roots = 65 }\n", Map.empty)
+        .swap
+        .map(_.toList.toSet),
+      Right(Set[ConfigError](ConfigError.InvalidDiscoveryPermits, ConfigError.InvalidDiscoveryMaxRoots))
+    )
+  }
+
+  test("durable embedding settings name each violated field and the retry window") {
+    assertEquals(
+      AppConfigFixtures.fromConfig(defaultConfig, Map.empty).map(_.vectorSearch.durableRetryAttempts),
+      Right(8)
+    )
+    List(
+      ("durable-retry-attempts = 0", ConfigError.InvalidEmbeddingDurableRetryAttempts),
+      ("durable-retry-attempts = 101", ConfigError.InvalidEmbeddingDurableRetryAttempts),
+      ("durable-retry-base-millis = 99", ConfigError.InvalidEmbeddingDurableRetryBase),
+      ("durable-retry-cap-millis = 3600001", ConfigError.InvalidEmbeddingDurableRetryCap),
+      ("durable-retry-cap-millis = 999", ConfigError.InvalidEmbeddingDurableRetryWindow),
+      ("worker-restart-delay-millis = 99", ConfigError.InvalidEmbeddingWorkerRestartDelay),
+      ("worker-restart-delay-millis = 60001", ConfigError.InvalidEmbeddingWorkerRestartDelay)
+    ).foreach { case (setting, expected) =>
+      assertContainsError(
+        AppConfigFixtures.fromConfig(defaultConfig + s"vector-search.embedding.$setting\n", Map.empty),
+        expected
+      )
+    }
+    List("durable-retry-attempts = 100", "durable-retry-cap-millis = 1000", "worker-restart-delay-millis = 100")
+      .foreach { setting =>
+        assert(
+          AppConfigFixtures.fromConfig(defaultConfig + s"vector-search.embedding.$setting\n", Map.empty).isRight,
+          clues(setting)
+        )
+      }
+    assertEquals(
+      AppConfigFixtures
+        .fromConfig(
+          defaultConfig + "vector-search.embedding { durable-retry-attempts = 0, worker-restart-delay-millis = 99 }\n",
+          Map.empty
+        )
+        .swap
+        .map(_.toList.toSet),
+      Right(
+        Set[ConfigError](
+          ConfigError.InvalidEmbeddingDurableRetryAttempts,
+          ConfigError.InvalidEmbeddingWorkerRestartDelay
         )
       )
+    )
   }
 
-  test("durable embedding and Kafka partition settings reject unsafe bounds") {
-    assertEquals(AppConfig.fromConfig(defaultConfig, Map.empty).map(_.vectorSearch.durableRetryAttempts), Right(8))
-    assertContainsError(
-      AppConfig.fromConfig(defaultConfig + "vector-search.embedding.durable-retry-attempts = 0\n", Map.empty),
-      ConfigError.InvalidEmbeddingRecovery
+  test("Kafka partition concurrency names its own field") {
+    List("0", "65", "\"many\"").foreach { value =>
+      assertContainsError(
+        AppConfigFixtures.fromConfig(defaultConfig + s"kafka.consumer.partition-concurrency = $value\n", Map.empty),
+        ConfigError.InvalidKafkaPartitionConcurrency
+      )
+    }
+    assertEquals(
+      AppConfigFixtures
+        .fromConfig(defaultConfig + "kafka.consumer.partition-concurrency = 64\n", Map.empty)
+        .map(_.kafka.consumer.partitionConcurrency),
+      Right(64)
     )
-    assertContainsError(
-      AppConfig.fromConfig(defaultConfig + "vector-search.embedding.durable-retry-cap-millis = 999\n", Map.empty),
-      ConfigError.InvalidEmbeddingRecovery
+  }
+
+  test("settings without a dedicated error before now name their own field") {
+    List(
+      ("mongo.reset-on-start = \"sometimes\"", ConfigError.InvalidMongoResetOnStart),
+      ("kafka.publisher.worker-id = \" \"", ConfigError.InvalidKafkaWorkerId),
+      ("kafka.consumer.enabled = \"maybe\"", ConfigError.InvalidKafkaConsumerEnabled),
+      ("vector-search.indexes.candidate-lexical = \"\"", ConfigError.InvalidCandidateLexicalIndex),
+      ("vector-search.rerank.enabled = \"later\"", ConfigError.InvalidRerankEnabled),
+      ("vector-search.fusion-strategy = \"application-rrf\"", ConfigError.InvalidVectorFusionStrategy)
+    ).foreach { case (setting, expected) =>
+      assertContainsError(AppConfigFixtures.fromConfig(defaultConfig + setting + "\n", Map.empty), expected)
+    }
+  }
+
+  test("a decode failure in one section does not hide validation failures in other sections") {
+    assertEquals(
+      AppConfigFixtures
+        .fromConfig(
+          defaultConfig + "kafka.consumer.partition-concurrency = 0\nhttp.host = \"not-an-ip\"\n",
+          Map.empty
+        )
+        .swap
+        .map(_.toList.toSet),
+      Right(Set[ConfigError](ConfigError.InvalidKafkaPartitionConcurrency, ConfigError.InvalidHost))
     )
-    assertContainsError(
-      AppConfig.fromConfig(defaultConfig + "kafka.consumer.partition-concurrency = 0\n", Map.empty),
-      ConfigError.InvalidKafkaPartitionConcurrency
+    assertEquals(
+      AppConfigFixtures
+        .fromConfig(
+          defaultConfig + "mongo.discovery.permits = 0\nauth.jwt.hs256-secret = \"short\"\nvector-search.enabled = true\n",
+          Map.empty
+        )
+        .swap
+        .map(_.toList.toSet),
+      Right(
+        Set[ConfigError](
+          ConfigError.InvalidDiscoveryPermits,
+          ConfigError.InvalidJwtSecret,
+          ConfigError.InvalidVoyageApiKey
+        )
+      )
     )
+  }
+
+  test("every typed error has a loggable key and every decoded path maps to one error") {
+    assertEquals(ConfigError.publicKeys.size, ConfigError.values.length)
+    ConfigError.values.foreach(error => assert(error.key.matches("[A-Z0-9_]+"), clues(error)))
+    val owners = ConfigError.values.toList.flatMap(error => error.paths.toList.map(_ -> error)).groupMap(_._1)(_._2)
+    assert(owners.values.forall(_.size == 1), clues(owners.filter(_._2.size > 1)))
   }
 
   test("request timeout is bounded") {
-    assertEquals(AppConfig.fromConfig(defaultConfig, Map.empty).map(_.requestTimeout), Right(5.seconds))
+    assertEquals(AppConfigFixtures.fromConfig(defaultConfig, Map.empty).map(_.requestTimeout), Right(5.seconds))
     assertContainsError(
-      AppConfig.fromConfig(defaultConfig + "http.request-timeout-ms = 99\n", Map.empty),
+      AppConfigFixtures.fromConfig(defaultConfig + "http.request-timeout-ms = 99\n", Map.empty),
       ConfigError.InvalidRequestTimeout
     )
   }
 
   test("trusted proxy CIDRs are explicit, typed, and never global") {
-    assertEquals(AppConfig.fromConfig(defaultConfig, Map.empty).map(_.trustedProxy.cidrs), Right(Nil))
-    val configured = AppConfig.fromConfig(
+    assertEquals(AppConfigFixtures.fromConfig(defaultConfig, Map.empty).map(_.trustedProxy.cidrs), Right(Nil))
+    val configured = AppConfigFixtures.fromConfig(
       defaultConfig +
         "http.trusted-proxy-cidrs = [\"10.0.0.5/32\", \"2001:db8:10::5/128\"]\n",
       Map.empty
@@ -871,7 +994,7 @@ class AppConfigSpec extends FunSuite {
     assertEquals(configured.map(_.trustedProxy.cidrs.map(_.toString)), Right(List("10.0.0.5/32", "2001:db8:10::5/128")))
     List("not-a-cidr", "0.0.0.0/0", "::/0").foreach { cidr =>
       assertContainsError(
-        AppConfig.fromConfig(defaultConfig + s"http.trusted-proxy-cidrs = [\"$cidr\"]\n", Map.empty),
+        AppConfigFixtures.fromConfig(defaultConfig + s"http.trusted-proxy-cidrs = [\"$cidr\"]\n", Map.empty),
         ConfigError.InvalidTrustedProxyCidrs
       )
     }
@@ -880,21 +1003,22 @@ class AppConfigSpec extends FunSuite {
   test("VHS-AC07 vector search dimension is fixed to the configured Atlas index contract") {
     List("256", "512", "2048").foreach { dimension =>
       assertContainsError(
-        AppConfig.fromConfig(defaultConfig + s"vector-search.voyage.dimension = $dimension\n", Map.empty),
+        AppConfigFixtures.fromConfig(defaultConfig + s"vector-search.voyage.dimension = $dimension\n", Map.empty),
         ConfigError.InvalidVoyageDimension
       )
     }
-    assert(AppConfig.fromConfig(defaultConfig + "vector-search.voyage.dimension = 1024\n", Map.empty).isRight)
+    assert(AppConfigFixtures.fromConfig(defaultConfig + "vector-search.voyage.dimension = 1024\n", Map.empty).isRight)
   }
 
   test("LOG-03 logging booleans are strict with safe configuration keys") {
     List("TRUE", "0", "synthetic-secret").foreach { value =>
-      val result = AppConfig.fromConfig(defaultConfig + s"""logging.mask-sensitive = "$value"\n""", Map.empty)
+      val result = AppConfigFixtures.fromConfig(defaultConfig + s"""logging.mask-sensitive = "$value"\n""", Map.empty)
       assertContainsError(result, ConfigError.InvalidMaskSensitive)
       assert(!result.toString.contains("synthetic-secret"))
     }
     assertContainsError(
-      AppConfig.fromConfig(defaultConfig + "http.host = \"not-an-ip\"\nlogging.mask-sensitive = false\n", Map.empty),
+      AppConfigFixtures
+        .fromConfig(defaultConfig + "http.host = \"not-an-ip\"\nlogging.mask-sensitive = false\n", Map.empty),
       ConfigError.InvalidHost
     )
   }
@@ -904,7 +1028,7 @@ class AppConfigSpec extends FunSuite {
       .replace("host = \"127.0.0.1\"", "host = \"not-an-ip\"")
       .replace("database = \"hiring\"", "database = \"bad/name\"")
       .replace("enabled = false", "enabled = true")
-    AppConfig.fromConfig(invalid, Map.empty) match {
+    AppConfigFixtures.fromConfig(invalid, Map.empty) match {
       case Left(issues) =>
         assertEquals(
           issues.toList.toSet,
@@ -912,7 +1036,8 @@ class AppConfigSpec extends FunSuite {
             ConfigError.InvalidHost,
             ConfigError.InvalidMongoDatabase,
             ConfigError.InvalidKafkaCredentials,
-            ConfigError.InvalidVoyageApiKey
+            ConfigError.InvalidVoyageApiKey,
+            ConfigError.InvalidVectorFusionStrategy
           )
         )
       case other => fail(s"Expected aggregated configuration failures, got $other")
@@ -920,7 +1045,7 @@ class AppConfigSpec extends FunSuite {
   }
 
   test("LOG-04 configuration remains redacted when local metadata is enabled") {
-    val result = AppConfig.fromConfig(
+    val result = AppConfigFixtures.fromConfig(
       defaultConfig +
         """logging.mask-sensitive = false
         |mongo.uri = "mongodb://user:synthetic-secret@127.0.0.1:1"

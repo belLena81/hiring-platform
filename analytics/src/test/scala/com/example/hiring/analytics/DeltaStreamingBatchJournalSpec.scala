@@ -2,7 +2,6 @@ package com.example.hiring.analytics
 
 import cats.effect.IO
 import cats.syntax.all.*
-import cats.effect.unsafe.implicits.global
 import com.example.hiring.analytics.adapter.spark.{DeltaStreamingBatchJournal, SparkBlockingExecution}
 import com.example.hiring.analytics.domain.*
 import com.example.hiring.analytics.errors.AnalyticsError
@@ -399,7 +398,10 @@ final class DeltaStreamingBatchJournalSpec extends CatsEffectSuite {
   private def removeTree(path: java.nio.file.Path): Unit = {
     if (Files.exists(path)) {
       val paths = Files.walk(path)
-      try paths.sorted(Comparator.reverseOrder()).forEach(file => Files.deleteIfExists(file))
+      try
+        paths.sorted(Comparator.reverseOrder()).forEach { file =>
+          val _ = Files.deleteIfExists(file)
+        }
       finally paths.close()
     }
   }

@@ -318,6 +318,28 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
     }
   }
 
+  test("a lease is reclaimable at exactly its expiry instant and held one millisecond earlier") {
+    database.use { case (db, _) =>
+      val work = new MongoEmbeddingWorkRepository(db, Diagnostics.noop)
+      val key = EmbeddingWorkKey(EmbeddingWorkKind.Job, UUID.randomUUID().toString)
+      val leaseUntil = now.plusSeconds(30)
+      for {
+        _ <- successful(work.enqueue(key, now))
+        first <- claimed(work, now)
+        held <- successful(work.claim("other", leaseUntil.minusMillis(1L), leaseUntil.plusSeconds(30)))
+        renewedAtExpiry <- successful(work.renew(first, leaseUntil, leaseUntil.plusSeconds(30)))
+        reclaimed <- successful(work.claim("other", leaseUntil, leaseUntil.plusSeconds(30)))
+        document <- stored(db, key)
+      } yield {
+        assertEquals(held, None)
+        assert(!renewedAtExpiry)
+        assert(reclaimed.exists(_.leaseToken != first.leaseToken))
+        assertEquals(document.getString(MongoFields.LeaseOwner), "other")
+        assertEquals(document.getDate(MongoFields.UpdatedAt), Date.from(leaseUntil))
+      }
+    }
+  }
+
   test("active embedding work can be enqueued transactionally without replacing its lease") {
     database.use { case (db, transactions) =>
       val repository = new MongoEmbeddingWorkRepository(db, Diagnostics.noop)

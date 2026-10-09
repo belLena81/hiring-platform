@@ -1,11 +1,11 @@
 package com.example.graphQL.cats.domain.model
 
+import com.example.graphQL.cats.shared.Parsing
 import java.util.UUID
-import cats.syntax.all.*
 
 object Identifiers {
   def parse[A](value: String)(wrap: UUID => A): Either[Throwable, A] =
-    Either.catchNonFatal(UUID.fromString(value)).map(wrap)
+    Parsing.parseUuid(value).map(wrap)
 
   sealed trait UserTag
   sealed trait JobTag

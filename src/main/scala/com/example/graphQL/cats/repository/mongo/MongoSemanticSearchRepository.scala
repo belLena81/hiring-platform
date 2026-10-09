@@ -154,7 +154,7 @@ final class MongoSemanticSearchRepository(
             collectWithin(aggregate(collection, pipeline), selected.size)
           })
           .subflatMap(_.traverse(decode))
-      }(_ => Left(RepositoryError.Unavailable))
+      }
   }
 
   override def jobEligibility(ids: List[JobId]): RepositoryIO[List[JobSearchEligibility]] =
@@ -185,7 +185,7 @@ final class MongoSemanticSearchRepository(
             collectWithin(aggregate(source, pipeline), selected.size)
           })
           .subflatMap(_.traverse(decode))
-      }(_ => Left(RepositoryError.Unavailable))
+      }
   }
 
   override def searchJobs(query: VectorSearchQuery): RepositoryIO[List[JobRetrievalHit]] =
@@ -226,7 +226,7 @@ final class MongoSemanticSearchRepository(
             }
           )
           .subflatMap(documents => MongoSemanticSearchResult.candidateHits(documents, query).map(_.flatten))
-      }(_ => Left(RepositoryError.Unavailable))
+      }
   }
 
   private def candidateLexicalSearch(
@@ -242,7 +242,7 @@ final class MongoSemanticSearchRepository(
             }
           )
           .subflatMap(documents => MongoSemanticSearchResult.candidateHits(documents, query).map(_.flatten))
-      }(_ => Left(RepositoryError.Unavailable))
+      }
   }
 
   private[mongo] def candidateFilter(query: VectorSearchQuery, includeEmbeddingModel: Boolean): Bson =
@@ -287,7 +287,7 @@ final class MongoSemanticSearchRepository(
             }
           )
           .subflatMap(documents => MongoSemanticSearchResult.jobHits(documents, query).map(_.flatten))
-      }(_ => Left(RepositoryError.Unavailable))
+      }
   }
 
   private[mongo] def nativeJobFusionStages(
@@ -368,7 +368,7 @@ final class MongoSemanticSearchRepository(
             }
           )
           .subflatMap(documents => MongoSemanticSearchResult.candidateHits(documents, query).map(_.flatten))
-      }(_ => Left(RepositoryError.Unavailable))
+      }
   }
 
   private[mongo] def nativeCandidateFusionStages(
@@ -437,7 +437,7 @@ final class MongoSemanticSearchRepository(
             }
           )
           .subflatMap(documents => MongoSemanticSearchResult.jobHits(documents, query).map(_.flatten))
-      }(_ => Left(RepositoryError.Unavailable))
+      }
   }
 
   private[mongo] def jobVectorPipeline(vector: List[Float], filter: Bson, limit: Int): java.util.List[Document] =
@@ -473,7 +473,7 @@ final class MongoSemanticSearchRepository(
             }
           )
           .subflatMap(documents => MongoSemanticSearchResult.jobHits(documents, query).map(_.flatten))
-      }(_ => Left(RepositoryError.Unavailable))
+      }
   }
 
   private[mongo] def jobFilter(query: VectorSearchQuery, filter: JobSearchFilter): Bson =

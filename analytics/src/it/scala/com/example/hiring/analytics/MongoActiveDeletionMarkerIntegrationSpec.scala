@@ -1,20 +1,13 @@
 package com.example.hiring.analytics
-import com.example.hiring.analytics.service.keyretirement.*
 import com.example.hiring.analytics.service.batch.*
 import com.example.hiring.analytics.errors.*
 import com.example.hiring.analytics.domain.*
-import com.example.hiring.analytics.config.*
-import com.example.hiring.analytics.adapter.spark.*
-import com.example.hiring.analytics.adapter.mongo.*
-import com.example.hiring.analytics.adapter.kafka.*
-import com.example.hiring.analytics.adapter.local.*
 import com.example.hiring.analytics.service.erasure.*
 
 import com.example.hiring.analytics.adapter.spark.*
 import com.example.hiring.analytics.adapter.mongo.*
 
-import cats.effect.{Clock, IO, Resource}
-import cats.effect.unsafe.implicits.global
+import cats.effect.{IO, Resource}
 import cats.syntax.all.*
 import com.mongodb.client.{MongoClient, MongoClients}
 import mongo4cats.client.{MongoClient as CatsMongoClient}
@@ -33,8 +26,6 @@ class MongoActiveDeletionMarkerIntegrationSpec extends AnalyticsMongoIntegration
 
   private val pseudonymizer =
     AnalyticsTestSubjectPseudonymizer.fromSecret("analytics-integration-secret".padTo(32, 'x').getBytes("UTF-8"))
-  private val markerClock = fixedClock(Instant.parse("2026-09-24T12:00:00Z"))
-  private given cats.effect.Clock[IO] = markerClock
   private val clients = ResourceSuiteLocalFixture(
     "analytics-marker-clients",
     Resource.eval(IO.delay(endpointUri)).flatMap { uri =>
@@ -73,12 +64,6 @@ class MongoActiveDeletionMarkerIntegrationSpec extends AnalyticsMongoIntegration
       .validated(runId, Vector(IntegrationPartitionOffsetRange.unsafe("topic", 0, 0L, 1L)))
       .toEither
       .fold(errors => fail(errors.toString), identity)
-
-  private def fixedClock(at: Instant): Clock[IO] = new Clock[IO] {
-    override val applicative: cats.Applicative[IO] = summon[cats.Applicative[IO]]
-    override def realTime: IO[FiniteDuration] = IO.pure(at.toEpochMilli.millis)
-    override def monotonic: IO[FiniteDuration] = IO.pure(0.nanos)
-  }
 
   test("Mongo marker source keeps unexpired completed markers active and ignores expired ones") {
     val database = mongoClient.getDatabase(testDatabaseName)
@@ -206,6 +191,10 @@ class MongoActiveDeletionMarkerIntegrationSpec extends AnalyticsMongoIntegration
       val root = Files.createTempDirectory("analytics-invalid-marker-state")
       val paths = IntegrationAnalyticsLakehousePaths.unsafe(root.toUri.toString)
       val rejectingPublisher = new AnalyticsReportPublisher[IO] {
+        override def publicationReceipt(
+            reservation: AnalyticsReportReservation
+        ): IO[AnalyticsReportPublicationReceipt] = IO.pure(AnalyticsReportPublicationReceipt.Absent)
+
         override def reservePinned(
             runId: RunId,
             rangeFingerprint: RangeFingerprint,
@@ -258,7 +247,7 @@ class MongoActiveDeletionMarkerIntegrationSpec extends AnalyticsMongoIntegration
         finally files.close()
       } finally {
         database.drop()
-        Files.deleteIfExists(root)
+        val _ = Files.deleteIfExists(root)
       }
     }
   }

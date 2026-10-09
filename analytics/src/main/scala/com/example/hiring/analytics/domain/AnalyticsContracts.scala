@@ -1,5 +1,5 @@
 package com.example.hiring.analytics.domain
-import cats.data.{NonEmptyChain, Validated, ValidatedNec}
+import cats.data.{Validated, ValidatedNec}
 import cats.syntax.all.*
 import io.github.iltotore.iron.*
 import io.github.iltotore.iron.constraint.any.Not
@@ -22,23 +22,23 @@ type AnalyticsOffset = Long :| Interval.Closed[0L, 9223372036854775807L]
 
 object AnalyticsTopic {
   def from(value: String): Either[String, AnalyticsTopic] =
-    value.refineEither[Not[Blank]].leftMap(_ => "topic must be non-empty").map(_.asInstanceOf[AnalyticsTopic])
+    value.refineEither[Not[Blank]].leftMap(_ => "topic must be non-empty")
 
-  def unwrap(value: AnalyticsTopic): String = value.asInstanceOf[String]
+  def unwrap(value: AnalyticsTopic): String = value
 }
 
 object AnalyticsPartition {
   def from(value: Int): Either[String, AnalyticsPartition] =
     value.refineEither[Interval.Closed[0, 2147483647]].leftMap(_ => "partition must be non-negative")
 
-  def unwrap(value: AnalyticsPartition): Int = value.asInstanceOf[Int]
+  def unwrap(value: AnalyticsPartition): Int = value
 }
 
 object AnalyticsOffset {
   def from(value: Long): Either[String, AnalyticsOffset] =
     value.refineEither[Interval.Closed[0L, 9223372036854775807L]].leftMap(_ => "offset must be non-negative")
 
-  def unwrap(value: AnalyticsOffset): Long = value.asInstanceOf[Long]
+  def unwrap(value: AnalyticsOffset): Long = value
 }
 
 object RunId {

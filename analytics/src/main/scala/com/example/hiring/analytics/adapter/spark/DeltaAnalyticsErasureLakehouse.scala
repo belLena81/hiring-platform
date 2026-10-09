@@ -2,7 +2,6 @@ package com.example.hiring.analytics.adapter.spark
 
 import com.example.hiring.analytics.domain.{AnalyticsReportOutput, SubjectPseudonymizer, SubjectToken}
 import com.example.hiring.analytics.config.{AnalyticsOperationalSettings, MaximumErasureEvidenceFiles}
-import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.batch.{
   AnalyticsBatchMaintenance,
   AnalyticsLakehouseLock,
@@ -11,7 +10,8 @@ import com.example.hiring.analytics.service.batch.{
 import com.example.hiring.analytics.service.erasure.AnalyticsErasureLakehouse
 import com.example.hiring.analytics.service.keyretirement.HmacKeyRetirementAuthorizationStore
 
-import cats.effect.Async
+import cats.effect.{Async, Clock}
+import cats.effect.std.UUIDGen
 import cats.syntax.all.*
 import io.delta.tables.DeltaTable
 import org.apache.spark.sql.{DataFrame, SparkSession}
@@ -21,7 +21,7 @@ import java.time.Instant
 import scala.jdk.CollectionConverters.*
 
 /** Coordinates Delta-backed erasure maintenance independently of batch publication. */
-private[analytics] final class DeltaAnalyticsErasureLakehouse[F[_]: Async](
+private[analytics] final class DeltaAnalyticsErasureLakehouse[F[_]: Async: UUIDGen](
     spark: SparkSession,
     paths: AnalyticsLakehousePaths,
     pseudonymizer: SubjectPseudonymizer,
@@ -30,18 +30,18 @@ private[analytics] final class DeltaAnalyticsErasureLakehouse[F[_]: Async](
     operational: AnalyticsOperationalSettings,
     execution: SparkExecution[F],
     logger: Logger[F],
-    private[analytics] val nowOverride: Option[F[Instant]] = None,
+    clock: Clock[F],
     deltaLogFactory: DeltaLogFactory = DeltaLogFactory.system
 ) extends AnalyticsErasureLakehouse[F]
     with AnalyticsBatchMaintenance[F] {
-  private val now = nowOverride.getOrElse(Async[F].realTimeInstant)
+  private val now = clock.realTimeInstant
   private val retention = new AnalyticsDeltaRetention[F](paths, operational, execution, logger)
   private val keyContinuity = new AnalyticsKeyContinuityStage(
     paths,
     pseudonymizer,
     execution,
     (lakehouseRoot: String) => retirementStore.list(lakehouseRoot),
-    Some(now)
+    clock
   )
   private val erasure = new AnalyticsBatchErasureStage(
     paths,
@@ -123,7 +123,7 @@ private[analytics] final class DeltaAnalyticsErasureLakehouse[F[_]: Async](
       val schema = org.apache.spark.sql.types.StructType(
         Seq(
           org.apache.spark.sql.types
-            .StructField("subjectToken", org.apache.spark.sql.types.StringType, nullable = false)
+            .StructField(Columns.SubjectToken, org.apache.spark.sql.types.StringType, nullable = false)
         )
       )
       spark.createDataFrame(tokens.map(token => org.apache.spark.sql.Row(token.value)).asJava, schema)

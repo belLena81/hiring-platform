@@ -163,7 +163,7 @@ final class HiringAnalyticsLateFactsSpec extends FunSuite {
       .attempt
       .unsafeRunSync()
 
-    assert(result.swap.toOption.exists(_.isInstanceOf[AnalyticsError.LakehouseFailure]))
+    assert(result.swap.toOption.exists(_.isInstanceOf[AnalyticsError.DeltaSchemaMismatch]))
     val unchanged = spark.read.format("delta").load(paths.lateFacts)
     assertEquals(unchanged.schema, oldShape)
     assertEquals(unchanged.collect().toVector.map(_.getString(0)), Vector("legacy-event"))

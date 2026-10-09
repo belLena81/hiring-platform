@@ -1,8 +1,6 @@
 package com.example.hiring.analytics
 
 import cats.effect.{IO, Ref}
-import cats.effect.syntax.all.*
-import cats.syntax.all.*
 import com.example.hiring.analytics.adapter.spark.SparkShutdownDrain
 import com.example.hiring.analytics.adapter.spark.SparkShutdownDrain.Attempt
 import com.example.hiring.analytics.app.AppModule

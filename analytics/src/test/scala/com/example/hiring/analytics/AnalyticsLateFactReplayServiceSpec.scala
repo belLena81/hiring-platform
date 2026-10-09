@@ -1,7 +1,6 @@
 package com.example.hiring.analytics
 
 import cats.effect.{IO, Ref}
-import cats.syntax.all.*
 import com.example.hiring.analytics.config.AnalyticsPositiveInt
 import com.example.hiring.analytics.domain.*
 import com.example.hiring.analytics.errors.AnalyticsError
@@ -147,7 +146,7 @@ final class AnalyticsLateFactReplayServiceSpec extends CatsEffectSuite {
       calls <- Ref.of[IO, Vector[String]](Vector.empty)
       state <- Ref.of[IO, Option[AnalyticsLateFactReplayRecord]](None)
       generation <- Ref.of[IO, Long](0L)
-      lock <- AnalyticsLakehouseLock.processLocal[IO].allocated.map(_._1)
+      lock <- AnalyticsTestLakehouseLocks.processLocal[IO].allocated.map(_._1)
     } yield {
       def trace(name: String): IO[Unit] = calls.update(_ :+ name)
       val journal = new AnalyticsLateFactReplayJournal[IO] {
@@ -228,7 +227,7 @@ final class AnalyticsLateFactReplayServiceSpec extends CatsEffectSuite {
           )
         override def publicationReceipt(
             reservation: AnalyticsReportReservation
-        )(using cats.Applicative[IO]): IO[AnalyticsReportPublicationReceipt] =
+        ): IO[AnalyticsReportPublicationReceipt] =
           trace("receipt") *> calls.get.map { values =>
             if (publishedReceipt) AnalyticsReportPublicationReceipt.CurrentGeneration
             else if (alwaysSuperseded || (supersedeFirstReceipt && values.count(_ == "receipt") == 1))
@@ -252,7 +251,7 @@ final class AnalyticsLateFactReplayServiceSpec extends CatsEffectSuite {
           publisher,
           lock,
           30.asInstanceOf[AnalyticsPositiveInt],
-          Some(IO.pure(Now))
+          AnalyticsTestClocks.fixed(Now)
         ),
         calls,
         state

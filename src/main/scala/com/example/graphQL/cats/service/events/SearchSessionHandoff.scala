@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.service.events
 
-import cats.effect.{IO, Resource}
+import cats.effect.{Clock, IO, Resource}
 import cats.syntax.all.*
 import com.example.graphQL.cats.service.port.{
   PendingSearchSessionWork,
@@ -8,7 +8,7 @@ import com.example.graphQL.cats.service.port.{
   SearchSessionWorkFailure,
   SearchSessionWorkRepository
 }
-import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField}
+import com.example.graphQL.cats.service.{BackgroundWorker, Diagnostics, LogEvent, LogField}
 import com.example.graphQL.cats.service.events.{OperationalEventEnvelope, SearchSession}
 
 import scala.concurrent.duration.*
@@ -27,18 +27,20 @@ trait SearchSessionHandoff {
 }
 
 object SearchSessionHandoff {
-  val noop: SearchSessionHandoff = new SearchSessionHandoff {
-    def enqueue(session: SearchSession, event: OperationalEventEnvelope): IO[Unit] = IO.unit
-  }
+  private val WorkerName = "search-session-handoff"
 
   def resource(
       repository: SearchSessionWorkRepository,
       config: SearchSessionHandoffConfig,
-      diagnostics: Diagnostics
+      diagnostics: Diagnostics,
+      clock: Clock[IO] = Clock[IO]
   ): Resource[IO, SearchSessionHandoff] = {
-    val worker = workerLoop(repository, config, diagnostics)
-    Resource
-      .make(List.fill(config.parallelism)(worker.start).sequence)(_.traverse_(_.cancel))
+    val worker = workerLoop(repository, config, diagnostics, clock)
+    List
+      .tabulate(config.parallelism)(index =>
+        BackgroundWorker.resource(s"$WorkerName-${index + 1}", diagnostics)(worker)
+      )
+      .sequence_
       .as(new SearchSessionHandoff {
         def enqueue(session: SearchSession, event: OperationalEventEnvelope): IO[Unit] =
           repository.enqueue(PendingSearchSessionWork(session, event), session.occurredAt).value.flatMap {
@@ -59,9 +61,10 @@ object SearchSessionHandoff {
   private def workerLoop(
       repository: SearchSessionWorkRepository,
       config: SearchSessionHandoffConfig,
-      diagnostics: Diagnostics
+      diagnostics: Diagnostics,
+      clock: Clock[IO]
   ): IO[Unit] =
-    (IO.realTimeInstant.flatMap { now =>
+    (clock.realTimeInstant.flatMap { now =>
       repository.claim(config.workerId, now, now.plusMillis(config.lease.toMillis)).value.flatMap {
         case Right(Some(claim)) =>
           processClaim(repository, config, claim, now).flatMap {

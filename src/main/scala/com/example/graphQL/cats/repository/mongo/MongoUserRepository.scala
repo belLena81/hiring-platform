@@ -8,10 +8,9 @@ import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.events.{OperationalEventType, OperationalEvents}
 import com.example.graphQL.cats.service.Diagnostics
-import com.mongodb.client.model.{Filters, Sorts, UpdateOptions}
+import com.mongodb.client.model.{Filters, UpdateOptions}
 import com.mongodb.client.result.UpdateResult
 import mongo4cats.client.{ClientSession, MongoClient}
-import mongo4cats.collection.MongoCollection
 import mongo4cats.database.MongoDatabase
 import org.bson.Document
 
@@ -51,7 +50,7 @@ final class MongoUserRepository(
         RepositoryIO
           .lift(collection.flatMap(_.find(Filters.eq(MongoFields.Id, id.value.toString)).first))
           .subflatMap(document => MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readUser)))
-      )(_ => Left(RepositoryError.Unavailable))
+      )
 
   override def findVersioned(id: UserId): RepositoryIO[Option[Versioned[User]]] =
     MongoRepositorySupport
@@ -61,7 +60,7 @@ final class MongoUserRepository(
           .subflatMap(document =>
             MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readVersionedUser))
           )
-      )(_ => Left(RepositoryError.Unavailable))
+      )
 
   private def findWithSession(
       id: UserId,
@@ -72,7 +71,7 @@ final class MongoUserRepository(
         RepositoryIO
           .lift(MongoSessionOperations.findOne(collection, session, MongoFilter.eq(MongoFields.Id, id.value.toString)))
           .subflatMap(document => MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readUser)))
-      )(_ => Left(RepositoryError.Unavailable))
+      )
 
   override def findMany(ids: List[UserId]): RepositoryIO[List[User]] =
     MongoKeysetPaging.byId(collection, ids.map(_.value.toString))(MongoHiringCodecs.readUser)(diagnostics)
@@ -192,7 +191,7 @@ final class MongoUserRepository(
         RepositoryIO
           .lift(registry.flatMap(_.find(Filters.eq(MongoFields.Id, "user-account-registry")).first))
           .map(document => document.exists(value => Option(value.getString(MongoFields.State)).contains("Initialized")))
-      )(_ => Left(RepositoryError.Unavailable))
+      )
 
   override def bootstrap(
       user: User,
@@ -302,7 +301,7 @@ final class MongoUserRepository(
       }
       .pipe(effect =>
         MongoRepositorySupport
-          .repositoryGuard(diagnostics, "MongoUserRepository.read")(effect)(_ => Left(RepositoryError.Unavailable))
+          .repositoryGuard(diagnostics, "MongoUserRepository.read")(effect)
       )
 
   override def updateProfile(
@@ -480,7 +479,7 @@ final class MongoUserRepository(
       .subflatMap(MongoRepositorySupport.writeResult(_).void)
       .pipe(effect =>
         MongoRepositorySupport
-          .repositoryGuard(diagnostics, "MongoUserRepository.read")(effect)(_ => Left(RepositoryError.Unavailable))
+          .repositoryGuard(diagnostics, "MongoUserRepository.read")(effect)
       )
   }
 
@@ -498,7 +497,7 @@ final class MongoUserRepository(
       val batchFilter =
         MongoFilter.and(List(Some(jobFilter), afterId.map(id => MongoFilter.gt(MongoFields.Id, id))).flatten*)
       RepositoryIO
-        .lift(findManyById(session, jobs, batchFilter, MaxJobsClosedByAccountDeletion))
+        .lift(MongoSessionOperations.findManyById(jobs, session, batchFilter, MaxJobsClosedByAccountDeletion))
         .subflatMap(documents => MongoStoredDocumentDecoding.values(documents.map(MongoHiringCodecs.readVersionedJob)))
         .flatMap {
           case Nil           => RepositoryIO.fromEither(Right(()))
@@ -547,32 +546,6 @@ final class MongoUserRepository(
     }
     closeJobs(None)
   }
-
-  private def findManyById(
-      session: Option[ClientSession[IO]],
-      target: IO[MongoCollection[IO, Document]],
-      filter: MongoFilter,
-      limit: Int
-  ): IO[List[Document]] =
-    target.flatMap(collection =>
-      session.fold(
-        collection
-          .find(filter.bson)
-          .sort(Sorts.ascending(MongoFields.Id))
-          .limit(limit)
-          .boundedStream(limit)
-          .compile
-          .toList
-      )(active =>
-        collection
-          .find(active, filter.sessionFilter)
-          .sort(Sorts.ascending(MongoFields.Id))
-          .limit(limit)
-          .boundedStream(limit)
-          .compile
-          .toList
-      )
-    )
 }
 
 object MongoUserRepository {

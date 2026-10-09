@@ -5,7 +5,7 @@ import cats.syntax.all.*
 import io.delta.tables.DeltaTable
 import munit.CatsEffectSuite
 import org.apache.spark.scheduler.{SparkListener, SparkListenerJobEnd, SparkListenerJobStart, SparkListenerTaskEnd}
-import org.apache.spark.sql.{DataFrame, Row, SparkSession}
+import org.apache.spark.sql.{Row, SparkSession}
 import org.apache.spark.sql.types.*
 import java.sql.Timestamp
 import java.time.Instant
@@ -129,7 +129,7 @@ final class JournalStatusUpdateSpec extends CatsEffectSuite {
       ).asJava,
       schema
     )
-    DeltaTable
+    val _ = DeltaTable
       .forPath(spark, path)
       .as("target")
       .merge(

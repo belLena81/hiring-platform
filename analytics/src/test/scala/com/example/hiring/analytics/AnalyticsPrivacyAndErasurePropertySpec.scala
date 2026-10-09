@@ -1,13 +1,6 @@
 package com.example.hiring.analytics
-import com.example.hiring.analytics.service.keyretirement.*
-import com.example.hiring.analytics.service.batch.*
-import com.example.hiring.analytics.errors.*
 import com.example.hiring.analytics.domain.*
 import com.example.hiring.analytics.config.*
-import com.example.hiring.analytics.adapter.spark.*
-import com.example.hiring.analytics.adapter.mongo.*
-import com.example.hiring.analytics.adapter.kafka.*
-import com.example.hiring.analytics.adapter.local.*
 import com.example.hiring.analytics.service.erasure.*
 
 import java.util.Base64
@@ -66,7 +59,7 @@ final class AnalyticsPrivacyAndErasurePropertySpec extends ScalaCheckSuite {
       val bytes = Array.tabulate[Byte](32)(index => generated.lift(index).getOrElse(0).toByte)
       val encoded = Base64.getEncoder.encodeToString(bytes)
       val config = runtimeConfig(encoded)
-      AnalyticsRuntimeConfig.batchFromHocon(config).isRight
+      AnalyticsConfigFixtures.batch(config).isRight
     }
   }
 
@@ -74,11 +67,11 @@ final class AnalyticsPrivacyAndErasurePropertySpec extends ScalaCheckSuite {
     forAll(Gen.choose(1, 31), Gen.alphaNumStr) { (length, marker) =>
       val encoded = Base64.getEncoder.encodeToString(Array.fill[Byte](length)(1))
       val invalid = runtimeConfig(encoded)
-      val shortRejected = AnalyticsRuntimeConfig.batchFromHocon(invalid).swap.toOption.exists { error =>
+      val shortRejected = AnalyticsConfigFixtures.batch(invalid).swap.toOption.exists { error =>
         error.getMessage.contains("at least 32 bytes") && !error.getMessage.contains(encoded)
       }
       val malformedValue = marker + "%%%"
-      val malformed = AnalyticsRuntimeConfig.batchFromHocon(runtimeConfig(malformedValue))
+      val malformed = AnalyticsConfigFixtures.batch(runtimeConfig(malformedValue))
       shortRejected && malformed.isLeft && !malformed.swap.toOption.exists(_.getMessage.contains(malformedValue))
     }
   }

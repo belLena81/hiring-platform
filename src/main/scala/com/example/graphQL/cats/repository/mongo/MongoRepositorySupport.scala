@@ -7,8 +7,16 @@ import mongo4cats.collection.MongoCollection
 import mongo4cats.database.MongoDatabase
 import mongo4cats.operations.{Filter, Update}
 import mongo4cats.client.ClientSession
-import com.mongodb.client.model.{InsertOneOptions, ReplaceOptions, UpdateOptions, Updates}
-import com.mongodb.client.result.{InsertOneResult, UpdateResult}
+import com.mongodb.client.model.{
+  DeleteOptions,
+  FindOneAndUpdateOptions,
+  InsertOneOptions,
+  ReplaceOptions,
+  ReturnDocument,
+  UpdateOptions,
+  Updates
+}
+import com.mongodb.client.result.{DeleteResult, InsertOneResult, UpdateResult}
 import com.example.graphQL.cats.domain.model.ApplicationEvent
 import com.example.graphQL.cats.service.port.{RepositoryError, RepositoryIO}
 import com.example.graphQL.cats.service.events.OperationalEventEnvelope
@@ -21,6 +29,7 @@ import org.bson.Document
 
 import scala.jdk.CollectionConverters.*
 import java.time.Instant
+import java.util.Date
 import org.bson.conversions.Bson
 
 /** Effectfully acquired document collections used by repository adapters. */
@@ -70,7 +79,6 @@ private[mongo] object MongoUpdate {
     MongoUpdate(Updates.setOnInsert(field, value), Update.setOnInsert(field, value))
   def inc(field: String, value: Number): MongoUpdate = MongoUpdate(Updates.inc(field, value), Update.inc(field, value))
   def unset(field: String): MongoUpdate = MongoUpdate(Updates.unset(field), Update.unset(field))
-  def push[A](field: String, value: A): MongoUpdate = MongoUpdate(Updates.push(field, value), Update.push(field, value))
   def addToSet[A](field: String, value: A): MongoUpdate =
     MongoUpdate(Updates.addToSet(field, value), Update.addToSet(field, value))
   def combine(updates: MongoUpdate*): MongoUpdate =
@@ -91,6 +99,20 @@ private[mongo] object MongoSessionOperations {
     collection.flatMap(c =>
       session.fold(c.find(filter.bson).first)(active => c.find(active, filter.sessionFilter).first)
     )
+
+  /** Reads at most `limit` documents in `_id` order; the stream is bounded to the same limit. */
+  def findManyById(
+      collection: IO[Documents],
+      session: Option[ClientSession[IO]],
+      filter: MongoFilter,
+      limit: Int
+  ): IO[List[Document]] =
+    collection.flatMap { c =>
+      val ordered = Sorts.ascending(MongoFields.Id)
+      session.fold(c.find(filter.bson).sort(ordered).limit(limit).boundedStream(limit).compile.toList)(active =>
+        c.find(active, filter.sessionFilter).sort(ordered).limit(limit).boundedStream(limit).compile.toList
+      )
+    }
 
   def insertOne(
       collection: IO[Documents],
@@ -160,6 +182,98 @@ private[mongo] object MongoSessionOperations {
         c.replaceOne(active, filter.sessionFilter, document, options).map(Some(_))
       )
     )
+
+  def findOneAndUpdate(
+      collection: IO[Documents],
+      session: Option[ClientSession[IO]],
+      filter: MongoFilter,
+      update: MongoUpdate,
+      options: FindOneAndUpdateOptions = new FindOneAndUpdateOptions
+  ): IO[Option[Document]] =
+    collection.flatMap(c =>
+      session.fold(c.findOneAndUpdate(filter.bson, update.bson, options))(active =>
+        c.findOneAndUpdate(active, filter.sessionFilter, update.sessionUpdate, options)
+      )
+    )
+
+  def deleteOne(
+      collection: IO[Documents],
+      session: Option[ClientSession[IO]],
+      filter: MongoFilter,
+      options: DeleteOptions = new DeleteOptions
+  ): IO[Option[DeleteResult]] =
+    collection.flatMap(c =>
+      session.fold(c.deleteOne(filter.bson, options).map(Some(_)))(active =>
+        c.deleteOne(active, filter.sessionFilter, options).map(Some(_))
+      )
+    )
+}
+
+/** Shared lease semantics for durable work queues (embedding work, search-session work, the event outbox).
+  *
+  * A lease is held while `leaseUntil > now` and reclaimable once `leaseUntil <= now`; every claim stamps the same lease
+  * fields plus `updatedAt`. State names and sort orders stay repository-owned because stored values differ per queue.
+  */
+private[mongo] object MongoLeaseQueue {
+  def leaseHeld(now: Instant): MongoFilter = MongoFilter.gt(MongoFields.LeaseUntil, Date.from(now))
+
+  def leaseExpired(now: Instant): MongoFilter = MongoFilter.lte(MongoFields.LeaseUntil, Date.from(now))
+
+  /** Work is claimable when it is available or when its in-progress lease has expired at `now`. */
+  def claimable(available: MongoFilter, inProgress: MongoFilter, now: Instant): MongoFilter =
+    MongoFilter.or(available, MongoFilter.and(inProgress, leaseExpired(now)))
+
+  def leaseStamp(
+      inProgressState: String,
+      workerId: String,
+      leaseToken: String,
+      leaseUntil: Instant,
+      now: Instant
+  ): MongoUpdate =
+    MongoUpdate.combine(
+      MongoUpdate.set(MongoFields.State, inProgressState),
+      MongoUpdate.set(MongoFields.LeaseOwner, workerId),
+      MongoUpdate.set(MongoFields.LeaseToken, leaseToken),
+      MongoUpdate.set(MongoFields.LeaseUntil, Date.from(leaseUntil)),
+      MongoUpdate.set(MongoFields.UpdatedAt, Date.from(now))
+    )
+
+  /** Atomically claims the first claimable document in `sort` order and decodes the post-claim document. */
+  def claimNext[A](
+      collection: IO[MongoSessionOperations.Documents],
+      session: Option[ClientSession[IO]],
+      claimable: MongoFilter,
+      claim: MongoUpdate,
+      sort: Bson
+  )(decode: Document => RepositoryIO[A]): RepositoryIO[Option[A]] =
+    RepositoryIO
+      .lift(
+        MongoSessionOperations.findOneAndUpdate(
+          collection,
+          session,
+          claimable,
+          claim,
+          new FindOneAndUpdateOptions().sort(sort).returnDocument(ReturnDocument.AFTER)
+        )
+      )
+      .flatMap(_.traverse(decode))
+
+  /** Extends a lease only while `held` still matches; `false` reports a lost lease without failing. */
+  def renewHeld(
+      collection: IO[MongoSessionOperations.Documents],
+      session: Option[ClientSession[IO]],
+      held: MongoFilter,
+      leaseUntil: Instant
+  ): RepositoryIO[Boolean] =
+    RepositoryIO
+      .lift(
+        MongoSessionOperations
+          .updateOne(collection, session, held, MongoUpdate.set(MongoFields.LeaseUntil, Date.from(leaseUntil)))
+      )
+      .subflatMap {
+        case Some(result) => Right(result.getMatchedCount == 1L)
+        case None         => Left(RepositoryError.MissingWriteResult)
+      }
 }
 
 private[mongo] object MongoRepositorySupport {
@@ -189,19 +303,42 @@ private[mongo] object MongoRepositorySupport {
       case error => reportFailure(diagnostics, operation, error).as(map(error))
     })
 
+  def transactionGuard[A](diagnostics: Diagnostics, operation: String, session: Option[ClientSession[IO]])(
+      result: RepositoryIO[A]
+  ): RepositoryIO[A] =
+    transactionGuard(diagnostics, operation, session)(result)(unavailable)
+
   def repositoryGuard[A](
       diagnostics: Diagnostics,
       operation: String
   )(result: RepositoryIO[A])(map: Throwable => Either[RepositoryError, A]): RepositoryIO[A] =
     // This boundary observes unexpected driver failures; typed failures pass through unchanged.
     RepositoryIO.fromIOEither(guard(diagnostics, operation)(result.value)(map))
+
+  /** Default boundary: an unexpected driver failure is reported and surfaces as `Unavailable`. */
+  def repositoryGuard[A](diagnostics: Diagnostics, operation: String)(result: RepositoryIO[A]): RepositoryIO[A] =
+    repositoryGuard(diagnostics, operation)(result)(unavailable)
+
+  def unavailable[A](@annotation.unused error: Throwable): Either[RepositoryError, A] = Left(
+    RepositoryError.Unavailable
+  )
+}
+
+/** Matches the MongoDB duplicate-key write failure (server error code 11000). */
+private[mongo] object MongoDuplicateKey {
+  val Code: Int = 11000
+
+  def unapply(error: Throwable): Option[MongoWriteException] = error match {
+    case write: MongoWriteException if write.getError.getCode == Code => Some(write)
+    case _                                                            => None
+  }
 }
 
 private[mongo] trait MongoConflictWriteMapping {
   protected final def mapWrite[A](error: Throwable): Either[RepositoryError, A] =
     error match {
-      case write: MongoWriteException if write.getError.getCode == 11000 => Left(RepositoryError.Conflict)
-      case _                                                             => Left(RepositoryError.Unavailable)
+      case MongoDuplicateKey(_) => Left(RepositoryError.Conflict)
+      case _                    => Left(RepositoryError.Unavailable)
     }
 }
 
@@ -231,8 +368,8 @@ private[mongo] trait MongoOperationalEventInsertion {
             .subflatMap(MongoRepositorySupport.writeResult(_).void)
         )
       ) {
-        case write: MongoWriteException if write.getError.getCode == 11000 => Left(RepositoryError.Conflict)
-        case _                                                             => Left(RepositoryError.Unavailable)
+        case MongoDuplicateKey(_) => Left(RepositoryError.Conflict)
+        case _                    => Left(RepositoryError.Unavailable)
       }
 
 }
@@ -287,7 +424,7 @@ private[mongo] object MongoKeysetPaging {
                 )
             )
             .subflatMap(documents => MongoStoredDocumentDecoding.values(documents.map(read)))
-        )(_ => Left(RepositoryError.Unavailable))
+        )
 
   def page[A](
       collection: IO[MongoCollection[IO, Document]],
@@ -312,7 +449,7 @@ private[mongo] object MongoKeysetPaging {
               )
           )
           .subflatMap(documents => MongoStoredDocumentDecoding.values(documents.map(read)))
-      )(_ => Left(RepositoryError.Unavailable))
+      )
 
   def filter(filters: List[Option[Bson]]): Bson =
     Filters.and(filters.flatten*)

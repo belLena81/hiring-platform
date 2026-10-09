@@ -53,8 +53,19 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
     assertEquals(properties.get("security.protocol"), Some("SASL_PLAINTEXT"))
   }
 
-  test("Kafka clients without credentials receive no SASL properties") {
-    assertEquals(OperationalEventKafkaRuntime.saslProperties(None, None), Map.empty)
+  test("Kafka clients without credentials state PLAINTEXT explicitly and carry no SASL properties") {
+    assertEquals(OperationalEventKafkaRuntime.saslProperties(None, None), Map("security.protocol" -> "PLAINTEXT"))
+  }
+
+  test("outbox failure reasons carry exception class names and never client messages or credentials") {
+    val error = new org.apache.kafka.common.KafkaException(
+      "Failed to construct kafka producer: sasl.jaas.config username=\"u\" password=\"hunter2\"",
+      new IllegalArgumentException("password=\"hunter2\"")
+    )
+    val reason = OperationalEventKafkaRuntime.sanitized(error)
+    assertEquals(reason, "org.apache.kafka.common.KafkaException <- java.lang.IllegalArgumentException")
+    assert(!reason.contains("hunter2"))
+    assert(OperationalEventKafkaRuntime.sanitized(new RuntimeException("x" * 2000)).length <= 512)
   }
 
   private def event(

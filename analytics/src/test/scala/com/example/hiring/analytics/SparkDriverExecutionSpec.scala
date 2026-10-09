@@ -2,7 +2,6 @@ package com.example.hiring.analytics
 
 import cats.effect.{Deferred, IO, Resource}
 import cats.effect.std.Mutex
-import cats.effect.syntax.all.*
 import cats.syntax.all.*
 import com.example.hiring.analytics.adapter.spark.SparkBlockingExecution
 import munit.CatsEffectSuite

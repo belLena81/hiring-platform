@@ -37,7 +37,7 @@ class HiringPlatformServerSpec extends CatsEffectSuite {
   private val authRateLimit = AuthRateLimitConfig(60, 100, 1000)
 
   private def probe(result: IO[ProbeResult]): DatabaseProbe = new DatabaseProbe {
-    def check: IO[ProbeResult] = result
+    def check(requestId: Option[String]): IO[ProbeResult] = result
   }
 
   private def server(host: String, port: Int, database: DatabaseProbe): Resource[IO, Server] =

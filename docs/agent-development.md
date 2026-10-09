@@ -35,6 +35,8 @@ Use the qa-engineer subagent to validate the final changes against the task crit
 
 Canonical Claude Code layout: role skills are real files at `.claude/skills/<role>/SKILL.md` (invoke with the Skill tool or `/<role>`). Delegated roles are subagent definitions at `.claude/agents/<role>.md`; reviewers and QA are read-only by tool list. Root rules live in `AGENTS.md`, imported by `CLAUDE.md`. Shared settings and the skill-layout hook are in `.claude/settings.json`; personal overrides belong in the ignored `.claude/settings.local.json`. Run `python3 -I scripts/check-skills.py` after changing skills or agents.
 
+Model policy: the session and every subagent use Sonnet at medium effort (`model: sonnet`, `effort: medium` in each agent, `model`/`effortLevel` in `.claude/settings.json`), including after plan mode; do not use `opusplan`. Documentation-only work goes to the `technical-writer` agent on Haiku. Do not pass a per-call `model` override to the Agent tool.
+
 Use these project skills and agents only; do not fall back to a global installation or substitute a same-named global role. Existing `.codex/config.toml` model/permission preferences remain local and separate.
 
 Product Manager coordinates; Architect decides technical boundaries; Scala Developer implements application code; Data Engineer owns operational data; Big Data Engineer owns analytical pipelines; Code Reviewer and Security Engineer review their scopes; QA independently validates the final result. Direct specialist tasks still follow the root review gates.

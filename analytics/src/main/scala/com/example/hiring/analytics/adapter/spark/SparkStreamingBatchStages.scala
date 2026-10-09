@@ -2,7 +2,7 @@ package com.example.hiring.analytics.adapter.spark
 
 import cats.effect.{Async, Resource}
 import cats.syntax.all.*
-import com.example.hiring.analytics.config.{AnalyticsPositiveInt, AnalyticsRetentionSettings}
+import com.example.hiring.analytics.config.AnalyticsRetentionSettings
 import com.example.hiring.analytics.domain.*
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.batch.{
@@ -23,7 +23,6 @@ import java.nio.charset.StandardCharsets
 import java.sql.Timestamp
 import java.time.Instant
 import scala.jdk.CollectionConverters.*
-import scala.util.control.NonFatal
 
 /** Adapter for one callback's parsed Kafka frame. The Resource owns its Spark cache through ingestion and publication.
   */
@@ -38,8 +37,8 @@ private[analytics] object SparkStreamingBatchStages {
       Resource
         .make(execution {
           val owned = frame.storageLevel == StorageLevel.NONE
-          if (owned) frame.persist(StorageLevel.MEMORY_AND_DISK)
-          (frame, owned)
+          val persisted = if (owned) frame.persist(StorageLevel.MEMORY_AND_DISK) else frame
+          (persisted, owned)
         }) { case (cached, owned) =>
           if (owned) execution(cached.unpersist(blocking = true)).void else Async[F].unit
         }
@@ -47,30 +46,6 @@ private[analytics] object SparkStreamingBatchStages {
     )
 
   private[analytics] final case class AdmissionQuality(malformed: Long, conflicts: Long, future: Long, closed: Long)
-
-  /** One aggregate action preserves malformed/future/closed row counts and distinct conflicting event IDs. */
-  private[analytics] def measureQuality(
-      malformedEvents: DataFrame,
-      conflictingEvents: DataFrame,
-      futureEvents: DataFrame,
-      closedEvents: DataFrame
-  ): AdmissionQuality = {
-    val category = "_hiringAdmissionQuality"
-    val records = malformedEvents
-      .select(lit("MALFORMED").as(category))
-      .unionByName(conflictingEvents.select(Columns.EventId).distinct().select(lit("CONFLICT").as(category)))
-      .unionByName(futureEvents.select(lit("FUTURE").as(category)))
-      .unionByName(closedEvents.select(lit("CLOSED").as(category)))
-    val measured = records
-      .agg(
-        count(when(col(category) === lit("MALFORMED"), lit(1))),
-        count(when(col(category) === lit("CONFLICT"), lit(1))),
-        count(when(col(category) === lit("FUTURE"), lit(1))),
-        count(when(col(category) === lit("CLOSED"), lit(1)))
-      )
-      .head()
-    AdmissionQuality(measured.getLong(0), measured.getLong(1), measured.getLong(2), measured.getLong(3))
-  }
 
   private[analytics] val AdmissionQualityCategory = "_hiringAdmissionQuality"
 
@@ -205,7 +180,7 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
   override def publicationReceipt(
       preparation: StreamingInputPreparation,
       decision: StreamingDecisionRevision
-  )(using cats.Applicative[F]): F[AnalyticsReportPublicationReceipt] =
+  ): F[AnalyticsReportPublicationReceipt] =
     authorizePublication *> reportPublisher.publicationReceipt(decision.publicationReservation)
 
   override def assess(
@@ -235,7 +210,6 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
       _ <- if (activeTokens.nonEmpty) applyActiveDeletions(activeTokens) else F.unit
       markerFrame <- withMarkers(activeTokens)
       bronze <- ingestionStage.persistParsed(
-        spark,
         parsedEvents,
         markerFrame,
         configureTables,
@@ -401,11 +375,7 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
       Left(AnalyticsError.InvalidLateFactSchema("persisted dataset does not match its declared schema"))
     else if (!silverShapeValid) Left(AnalyticsError.InvalidSilverSchema)
     else if (!bronzeShapeValid)
-      Left(
-        AnalyticsError.LakehouseFailure(
-          new IllegalStateException("persisted Bronze dataset has an incompatible schema")
-        )
-      )
+      Left(AnalyticsError.InvalidBronzeSchema)
     else {
       val localConflicts = OperationalEventTransforms.conflictingEventIds(safe)
       val activeSilver = withoutExpired(storedSilver, preparation.observedAt)
@@ -414,17 +384,7 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
         .select(Columns.EventId, Columns.EventFingerprint)
         .unionByName(activeLate.select(Columns.EventId, Columns.EventFingerprint))
         .distinct()
-      val historicalConflicts = safe
-        .select(Columns.EventId, Columns.RawValue)
-        .withColumn("incomingFingerprint", sha2(col(Columns.RawValue), 256))
-        .join(
-          persistedFingerprints.withColumnRenamed(Columns.EventFingerprint, "storedFingerprint"),
-          Seq(Columns.EventId),
-          "inner"
-        )
-        .filter(col("incomingFingerprint") =!= col("storedFingerprint"))
-        .select(Columns.EventId)
-        .distinct()
+      val historicalConflicts = OperationalEventTransforms.historicalFingerprintConflicts(safe, persistedFingerprints)
       val coordinateConflicts = safe
         .select(Columns.EventId, Columns.Topic, Columns.Partition, Columns.Offset, Columns.RawValue)
         .withColumn("incomingFingerprint", sha2(col(Columns.RawValue), 256))
@@ -581,9 +541,7 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
                   Either.cond(
                     facts.conflicts.join(prepared.conflicts, Seq(Columns.EventId), "left_anti").limit(1).count() == 0L,
                     facts.copy(conflicts = prepared.conflicts),
-                    AnalyticsError.LakehouseFailure(
-                      new IllegalStateException("streaming admission conflict set changed during ingestion")
-                    )
+                    AnalyticsError.StreamingAdmissionConflictsChanged
                   )
                 )
               }
@@ -606,9 +564,9 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
             sha2(
               to_json(
                 struct(
-                  col(Columns.Topic).as("topic"),
-                  col(Columns.Partition).as("partition"),
-                  col(Columns.Offset).as("offset")
+                  col(Columns.Topic).as(Columns.Topic),
+                  col(Columns.Partition).as(Columns.Partition),
+                  col(Columns.Offset).as(Columns.Offset)
                 )
               ),
               256

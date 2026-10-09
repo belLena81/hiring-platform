@@ -37,7 +37,7 @@ final class MongoJobRepository(
         RepositoryIO
           .lift(collection.flatMap(_.find(Filters.eq(MongoFields.Id, id.value.toString)).first))
           .subflatMap(document => MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readJob)))
-      )(_ => Left(RepositoryError.Unavailable))
+      )
 
   override def findVersioned(id: JobId): RepositoryIO[Option[Versioned[Job]]] =
     MongoRepositorySupport
@@ -47,7 +47,7 @@ final class MongoJobRepository(
           .subflatMap(document =>
             MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readVersionedJob))
           )
-      )(_ => Left(RepositoryError.Unavailable))
+      )
 
   override def findSubmissionSnapshot(id: JobId): RepositoryIO[Option[JobSubmissionSnapshot]] =
     MongoRepositorySupport.repositoryGuard(diagnostics, "MongoJobRepository.findSubmissionSnapshot")(
@@ -62,7 +62,7 @@ final class MongoJobRepository(
         .subflatMap(document =>
           MongoStoredDocumentDecoding.repository(document.traverse(MongoJobSubmissionSnapshotCodec.read))
         )
-    )(_ => Left(RepositoryError.Unavailable))
+    )
 
   override def findMany(ids: List[JobId]): RepositoryIO[List[Job]] =
     MongoKeysetPaging.byId(collection, ids.map(_.value.toString))(MongoHiringCodecs.readJob)(diagnostics)
@@ -180,7 +180,7 @@ final class MongoJobRepository(
               .mapN((job, distance) => NearbyJob(job, distance))
           })
         }
-    )(_ => Left(RepositoryError.Unavailable))
+    )
   }
 
   override def jobDiscoveryFacets(
@@ -260,7 +260,7 @@ final class MongoJobRepository(
         .subflatMap(results =>
           MongoStoredDocumentDecoding.repository(MongoJobDiscoveryCodecs.facets(results.headOption))
         )
-    )(_ => Left(RepositoryError.Unavailable))
+    )
   }
 
   private def authorizedDiscovery(scope: HiringReadScope, jobsPipeline: List[Document]): RepositoryIO[List[Document]] =

@@ -456,20 +456,6 @@ trait EventQuarantineRepository {
   def save(record: EventQuarantineRecord): RepositoryIO[Unit]
 }
 
-object SearchSessionRepository {
-  def noop: SearchSessionRepository = new SearchSessionRepository {
-    override def save(session: SearchSession, event: OperationalEventEnvelope): RepositoryIO[Unit] =
-      RepositoryIO.fromEither(Right(()))
-    override def find(id: java.util.UUID): RepositoryIO[Option[SearchSession]] =
-      RepositoryIO.fromEither(Right(None))
-    override def recordInteraction(
-        event: OperationalEventEnvelope,
-        context: MutationWriteContext
-    ): RepositoryIO[Boolean] =
-      RepositoryIO.fromEither(Right(true))
-  }
-}
-
 trait ApplicationRepository {
   def find(id: ApplicationId): RepositoryIO[Option[Application]]
   def findByCandidate(scope: HiringReadScope, page: ApplicationPageRequest): RepositoryIO[List[Application]]

@@ -2,7 +2,6 @@ package com.example.hiring.analytics.service.streaming
 
 import cats.effect.Async
 import cats.data.NonEmptyChain
-import cats.Applicative
 import cats.syntax.all.*
 import com.example.hiring.analytics.domain.{
   AnalyticsDigest,
@@ -91,8 +90,7 @@ trait StreamingBatchStages[F[_]] {
   def publicationReceipt(
       preparation: StreamingInputPreparation,
       decision: StreamingDecisionRevision
-  )(using Applicative[F]): F[AnalyticsReportPublicationReceipt] =
-    Applicative[F].pure(AnalyticsReportPublicationReceipt.Absent)
+  ): F[AnalyticsReportPublicationReceipt]
 
   /** Read-only admission pass. It must preserve source event times across durable-sink retries. */
   def assess(

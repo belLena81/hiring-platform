@@ -3,6 +3,7 @@ package com.example.graphQL.cats
 import cats.data.NonEmptyList
 import cats.effect.{ExitCode, IO, IOApp, Resource}
 import cats.data.Kleisli
+import cats.syntax.all.*
 import com.example.graphQL.cats.api.admission.AuthRateLimiter
 import com.example.graphQL.cats.api.auth.JwtActorAuthenticator
 import com.example.graphQL.cats.api.graphql.{GraphQLDocumentCache, RequestContextFactory}
@@ -89,12 +90,17 @@ object Main extends IOApp {
     AppConfig.loadMaskSensitive.flatMap { maskSensitive =>
       SafeDiagnostics.configure(maskSensitive).flatMap { diagnostics =>
         val event = error match {
-          case ConfigInvalid(errors) =>
-            diagnostics.emit(LogEvent.ConfigInvalid, fields = Map(LogField.ConfigKey -> errors.head.key))
-          case _ => diagnostics.emit(LogEvent.StartupFailed, fields = LogFields.failure(error))
+          case ConfigInvalid(errors) => configInvalidEvents(diagnostics, errors)
+          case _                     => diagnostics.emit(LogEvent.StartupFailed, fields = LogFields.failure(error))
         }
         event.as(ExitCode.Error)
       }
+    }
+
+  /** One `CONFIG_INVALID` event per distinct public key; values never leave the validation boundary. */
+  private[cats] def configInvalidEvents(diagnostics: Diagnostics, errors: NonEmptyList[ConfigError]): IO[Unit] =
+    errors.map(_.key).distinct.traverse_ { key =>
+      diagnostics.emit(LogEvent.ConfigInvalid, fields = Map(LogField.ConfigKey -> key))
     }
 
   def run(args: List[String]): IO[ExitCode] =

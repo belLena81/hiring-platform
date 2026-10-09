@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.infrastructure.kafka
 
-import cats.effect.{IO, Resource}
+import cats.effect.{Clock, IO, Resource}
 import cats.effect.std.UUIDGen
 import cats.syntax.all.*
 import com.example.graphQL.cats.config.{KafkaConfig, KafkaSaslSecurityProtocol}
@@ -13,7 +13,7 @@ import com.example.graphQL.cats.service.port.{
   OperationalEventOutboxRepository,
   RepositoryIO
 }
-import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogFields, LogField}
+import com.example.graphQL.cats.service.{BackgroundWorker, Diagnostics, LogEvent, LogFields, LogField}
 import com.example.graphQL.cats.service.Diagnostics.*
 import com.example.graphQL.cats.service.events.OperationalEventJson
 import fs2.Stream
@@ -21,13 +21,14 @@ import fs2.kafka.*
 import fs2.kafka.producer.MkProducer
 import org.apache.kafka.common.errors.{InvalidProducerEpochException, ProducerFencedException}
 import org.apache.kafka.clients.consumer.ConsumerConfig
-import org.apache.kafka.clients.producer.ProducerConfig
 import retry.{HandlerDecision, RetryPolicies, retryingOnErrors}
 
 import java.time.Instant
 import scala.concurrent.duration.*
 
 object OperationalEventKafkaRuntime {
+  private val PublisherWorker = "operational-event-publisher"
+  private val ConsumerWorker = "operational-event-consumer"
   private val PublicationWaveSize = 4
   private val OperationalRequestBytes = 1048576
 
@@ -36,13 +37,15 @@ object OperationalEventKafkaRuntime {
       outbox: OperationalEventOutboxRepository,
       receipts: ConsumerReceiptRepository,
       quarantine: EventQuarantineRepository,
-      diagnostics: Diagnostics
+      diagnostics: Diagnostics,
+      clock: Clock[IO] = Clock[IO],
+      uuidGen: UUIDGen[IO] = UUIDGen[IO]
   ): Resource[IO, Unit] =
     if (!config.enabled) Resource.unit
     else {
-      val publisher = publisherResource(config, outbox, diagnostics)
+      val publisher = publisherResource(config, outbox, diagnostics, clock, uuidGen)
       val consumer =
-        if (config.consumer.enabled) consumerResource(config, receipts, quarantine, diagnostics)
+        if (config.consumer.enabled) consumerResource(config, receipts, quarantine, diagnostics, clock)
         else Resource.unit
       publisher *> consumer
     }
@@ -50,28 +53,20 @@ object OperationalEventKafkaRuntime {
   private def publisherResource(
       config: KafkaConfig,
       outbox: OperationalEventOutboxRepository,
-      diagnostics: Diagnostics
+      diagnostics: Diagnostics,
+      clock: Clock[IO],
+      uuidGen: UUIDGen[IO]
   ): Resource[IO, Unit] = {
-    val baseSettings =
-      ProducerSettings(
-        keySerializer = Serializer[IO, String],
-        valueSerializer = Serializer[IO, Array[Byte]]
-      )
-        .withBootstrapServers(config.bootstrapServers)
-        .withProperty(ProducerConfig.ACKS_CONFIG, "all")
-        .withProperty(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, "true")
-        .withProperty(ProducerConfig.MAX_REQUEST_SIZE_CONFIG, OperationalRequestBytes.toString)
-        .withProperty(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG, "30000")
-        .withProperty(ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG, "10000")
-    val settings = saslProperties(
+    val settings = KafkaClientSettings.producer(
+      config.bootstrapServers,
       config.publisher.saslUsername,
       config.publisher.saslPassword,
-      config.saslSecurityProtocol
+      config.saslSecurityProtocol,
+      OperationalRequestBytes
     )
-      .foldLeft(baseSettings) { case (current, (key, value)) => current.withProperty(key, value) }
 
     def generation: Stream[IO, Unit] =
-      Stream.eval(UUIDGen[IO].randomUUID).flatMap { id =>
+      Stream.eval(uuidGen.randomUUID).flatMap { id =>
         val transactionalId = "hiring-publisher-" + id.toString
         Stream
           .resource(
@@ -85,7 +80,7 @@ object OperationalEventKafkaRuntime {
               diagnostics,
               Stream
                 .awakeEvery[IO](config.publisher.pollIntervalMillis.millis)
-                .evalMap(_ => publishBatch(config, outbox, diagnostics, transactionalId, producer)),
+                .evalMap(_ => publishBatch(config, outbox, diagnostics, transactionalId, producer, clock)),
               config.publisher.retryDelaySeconds.seconds,
               stopRetrying = isProducerFenced,
               maxDelay = config.restartMaxDelaySeconds.seconds
@@ -99,7 +94,7 @@ object OperationalEventKafkaRuntime {
           }
       }
 
-    background(Stream.suspend(generation).repeat)
+    BackgroundWorker.resource(PublisherWorker, diagnostics)(Stream.suspend(generation).repeat.compile.drain)
   }
 
   /** The outer finalizer reports release only after the acquired producer has actually closed. */
@@ -126,10 +121,11 @@ object OperationalEventKafkaRuntime {
       outbox: OperationalEventOutboxRepository,
       diagnostics: Diagnostics,
       transactionalId: String,
-      producer: TransactionalKafkaProducer.WithoutOffsets[IO, String, Array[Byte]]
+      producer: TransactionalKafkaProducer.WithoutOffsets[IO, String, Array[Byte]],
+      clock: Clock[IO]
   ): IO[Unit] =
     publishWaves(config.publisher.batchSize) { limit =>
-      IO.realTimeInstant.flatMap { now =>
+      clock.realTimeInstant.flatMap { now =>
         outbox
           .claim(
             config.publisher.workerId,
@@ -146,7 +142,9 @@ object OperationalEventKafkaRuntime {
       }
     } { claim =>
       val record = ProducerRecord(config.topic, claim.partitionKey, claim.envelopeBytes)
-      publishClaim(config, outbox, diagnostics, claim)(producer.produceWithoutOffsets(ProducerRecords.one(record)).void)
+      publishClaim(config, outbox, diagnostics, claim, clock)(
+        producer.produceWithoutOffsets(ProducerRecords.one(record)).void
+      )
     }
 
   /** Claim only work that can start its lease heartbeat immediately. Kafka owns transaction serialization. */
@@ -171,9 +169,10 @@ object OperationalEventKafkaRuntime {
       config: KafkaConfig,
       outbox: OperationalEventOutboxRepository,
       diagnostics: Diagnostics,
-      claim: ClaimedOperationalEvent
+      claim: ClaimedOperationalEvent,
+      clock: Clock[IO] = Clock[IO]
   )(send: IO[Unit]): IO[Unit] = {
-    def renew: IO[Unit] = IO.realTimeInstant.flatMap { now =>
+    def renew: IO[Unit] = clock.realTimeInstant.flatMap { now =>
       requireOutboxSuccess(
         outbox.renewLease(
           claim.event.eventId,
@@ -196,14 +195,14 @@ object OperationalEventKafkaRuntime {
       }
       .flatMap {
         case Right(_) =>
-          IO.realTimeInstant.flatMap(done =>
+          clock.realTimeInstant.flatMap(done =>
             requireOutboxSuccess(
               outbox.markPublished(claim.event.eventId, claim.leaseToken, done, done.plusSeconds(7.days.toSeconds))
             )
           )
         case Left(error) if isProducerFenced(error) => IO.raiseError(ProducerGenerationFenced(error))
         case Left(error)                            =>
-          diagnostics.emit(LogEvent.RuntimeFailed, fields = LogFields.failure(error)) *> IO.realTimeInstant
+          diagnostics.emit(LogEvent.RuntimeFailed, fields = LogFields.failure(error)) *> clock.realTimeInstant
             .flatMap { failedAt =>
               if (claim.attempts >= config.publisher.maxAttempts)
                 requireOutboxSuccess(
@@ -238,26 +237,22 @@ object OperationalEventKafkaRuntime {
       config: KafkaConfig,
       receipts: ConsumerReceiptRepository,
       quarantine: EventQuarantineRepository,
-      diagnostics: Diagnostics
+      diagnostics: Diagnostics,
+      clock: Clock[IO] = Clock[IO]
   ): Resource[IO, Unit] = {
-    val baseSettings =
-      ConsumerSettings(
-        keyDeserializer = Deserializer[IO, String],
-        valueDeserializer = Deserializer[IO, Array[Byte]]
+    val settings = KafkaClientSettings
+      .consumer(
+        config.bootstrapServers,
+        config.consumer.saslUsername,
+        config.consumer.saslPassword,
+        config.saslSecurityProtocol
       )
-        .withBootstrapServers(config.bootstrapServers)
-        .withGroupId(config.consumerGroup)
-        .withAutoOffsetReset(AutoOffsetReset.Earliest)
-        .withEnableAutoCommit(false)
-        .withProperty(ConsumerConfig.ISOLATION_LEVEL_CONFIG, "read_committed")
-    val settings = saslProperties(
-      config.consumer.saslUsername,
-      config.consumer.saslPassword,
-      config.saslSecurityProtocol
-    )
-      .foldLeft(baseSettings) { case (current, (key, value)) => current.withProperty(key, value) }
+      .withGroupId(config.consumerGroup)
+      .withAutoOffsetReset(AutoOffsetReset.Earliest)
+      .withEnableAutoCommit(false)
+      .withProperty(ConsumerConfig.ISOLATION_LEVEL_CONFIG, "read_committed")
 
-    background(
+    BackgroundWorker.resource(ConsumerWorker, diagnostics)(
       resilientStream(
         diagnostics,
         KafkaPartitionProcessing(
@@ -273,33 +268,23 @@ object OperationalEventKafkaRuntime {
               record.topic,
               record.partition,
               record.offset,
-              Option(record.value)
+              Option(record.value),
+              clock
             )
           )(message.offset.commit)
         },
         1.second,
         maxDelay = config.restartMaxDelaySeconds.seconds
-      )
+      ).compile.drain
     )
   }
 
+  /** Compatibility entry point for the interview runtime; the builder itself is [[KafkaClientSettings]]. */
   private[kafka] def saslProperties(
       username: Option[String],
       password: Option[String],
       protocol: KafkaSaslSecurityProtocol = KafkaSaslSecurityProtocol.Tls
-  ): Map[String, String] =
-    (username, password) match {
-      case (Some(user), Some(secret)) =>
-        Map(
-          "security.protocol" -> protocol.kafkaValue,
-          "sasl.mechanism" -> "PLAIN",
-          "sasl.jaas.config" ->
-            s"org.apache.kafka.common.security.plain.PlainLoginModule required username=\"${jaasEscape(user)}\" password=\"${jaasEscape(secret)}\";"
-        )
-      case _ => Map.empty
-    }
-
-  private def jaasEscape(value: String): String = value.replace("\\", "\\\\").replace("\"", "\\\"")
+  ): Map[String, String] = KafkaClientSettings.security(username, password, protocol)
 
   private[kafka] def handleRecord(
       config: KafkaConfig,
@@ -308,9 +293,10 @@ object OperationalEventKafkaRuntime {
       topic: String,
       partition: Int,
       offset: Long,
-      bytes: Option[Array[Byte]]
+      bytes: Option[Array[Byte]],
+      clock: Clock[IO] = Clock[IO]
   ): IO[Boolean] =
-    IO.realTimeInstant.flatMap { now =>
+    clock.realTimeInstant.flatMap { now =>
       bytes.toRight("MalformedEnvelope").flatMap(OperationalEventJson.decode) match {
         case Left(_) =>
           quarantineRecord(
@@ -393,11 +379,16 @@ object OperationalEventKafkaRuntime {
   private[kafka] def restartPolicy(baseDelay: FiniteDuration, maxDelay: FiniteDuration): retry.RetryPolicy[IO, Any] =
     RetryPolicies.capDelay(maxDelay, RetryPolicies.fullJitter[IO](baseDelay))
 
-  private def background(stream: Stream[IO, ?]): Resource[IO, Unit] =
-    Resource.make(stream.compile.drain.start)(_.cancel).void
-
-  private def sanitized(error: Throwable): String =
-    Option(error.getMessage).filter(_.nonEmpty).getOrElse(error.getClass.getSimpleName)
+  /** Client exception messages can embed rejected configuration values, so only class names reach the outbox. */
+  private[kafka] def sanitized(error: Throwable): String =
+    Iterator
+      .iterate(Option(error))(_.flatMap(value => Option(value.getCause).filterNot(_ eq value)))
+      .takeWhile(_.nonEmpty)
+      .flatten
+      .take(5)
+      .map(_.getClass.getName)
+      .mkString(" <- ")
+      .take(512)
 
   private final case class UndurableRecord(topic: String, partition: Int, offset: Long)
       extends RuntimeException(s"Kafka record could not be durably processed: $topic-$partition@$offset")

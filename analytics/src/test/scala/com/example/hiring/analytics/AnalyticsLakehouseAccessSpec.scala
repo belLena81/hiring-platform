@@ -1,7 +1,6 @@
 package com.example.hiring.analytics
 
 import cats.effect.{Deferred, IO, Ref, Resource}
-import cats.effect.syntax.all.*
 import cats.effect.testkit.TestControl
 import cats.syntax.all.*
 import com.example.hiring.analytics.errors.AnalyticsError
@@ -13,7 +12,7 @@ import scala.concurrent.duration.*
 final class AnalyticsLakehouseAccessSpec extends CatsEffectSuite {
   test("a lifetime stream-owner root does not block callback or maintenance ownership for the lakehouse root") {
     TestControl.executeEmbed {
-      AnalyticsLakehouseLock.processLocal[IO].use { persistent =>
+      AnalyticsTestLakehouseLocks.processLocal[IO].use { persistent =>
         AnalyticsLakehouseLock.serialized(persistent).use { lock =>
           val lakehouseRoot = "file:///tmp/hiring-access-fixture"
           IO.fromEither(AnalyticsStreamingRegistry.ownerLockRoot(lakehouseRoot)).flatMap { ownerRoot =>
@@ -43,7 +42,7 @@ final class AnalyticsLakehouseAccessSpec extends CatsEffectSuite {
       for {
         events <- Ref.of[IO, Vector[String]](Vector.empty)
         observations <- Ref.of[IO, Vector[AnalyticsStreamingMaintenance.Observation]](Vector.empty)
-        _ <- AnalyticsLakehouseLock.processLocal[IO].use { persistent =>
+        _ <- AnalyticsTestLakehouseLocks.processLocal[IO].use { persistent =>
           AnalyticsLakehouseLock.serialized(persistent).use { lock =>
             val maintenance = new AnalyticsStreamingMaintenance[IO](
               "file:///tmp/hiring-access-fifo",

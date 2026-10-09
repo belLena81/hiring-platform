@@ -16,23 +16,7 @@ private[config] object HttpMongoConfigValidation {
       validTrustedProxyCidrs(http.trustedProxyCidrs),
       validMongoUri(mongo.uri),
       validMongoDatabase(mongo.database),
-      Either
-        .cond(
-          mongo.discovery.flatMap(_.maxTimeMillis).getOrElse(2000) >= 100 && mongo.discovery
-            .flatMap(_.maxTimeMillis)
-            .getOrElse(2000) < http.requestTimeoutMs &&
-            mongo.discovery.flatMap(_.permits).getOrElse(4) >= 1 && mongo.discovery
-              .flatMap(_.permits)
-              .getOrElse(4) <= 64 && mongo.discovery.flatMap(_.maxRoots).getOrElse(4) >= 1 &&
-            mongo.discovery.flatMap(_.maxRoots).getOrElse(4) <= 64,
-          DiscoveryConfig(
-            mongo.discovery.flatMap(_.maxTimeMillis).getOrElse(2000),
-            mongo.discovery.flatMap(_.permits).getOrElse(4),
-            mongo.discovery.flatMap(_.maxRoots).getOrElse(4)
-          ),
-          ConfigError.InvalidDiscoveryQueryLimits
-        )
-        .toValidatedNel
+      validDiscovery(mongo.discovery.getOrElse(RawDiscoveryConfig()), http.requestTimeoutMs)
     ).mapN { (host, port, admissionPermits, trustedProxy, mongoUri, mongoDatabase, discovery) =>
       TransportSettings(
         host,
@@ -42,9 +26,23 @@ private[config] object HttpMongoConfigValidation {
         trustedProxy,
         mongoUri,
         mongoDatabase,
-        discovery
+        discovery,
+        mongo.resetOnStart.getOrElse(false)
       )
     }
+
+  /** Per-field bounds are decoded by their refined types; only the HTTP-deadline relation is checked here. */
+  def validDiscovery(raw: RawDiscoveryConfig, requestTimeoutMs: Int): ValidatedNel[ConfigError, DiscoveryConfig] = {
+    val defaults = DiscoveryConfig()
+    val discovery = DiscoveryConfig(
+      raw.maxTimeMillis.getOrElse(defaults.maxTimeMillis),
+      raw.permits.getOrElse(defaults.permits),
+      raw.maxRoots.getOrElse(defaults.maxRoots)
+    )
+    Either
+      .cond(discovery.maxTimeMillis < requestTimeoutMs, discovery, ConfigError.InvalidDiscoveryDeadline)
+      .toValidatedNel
+  }
 
   // HTTP_HOST is a bind address, so hostnames such as localhost are intentionally rejected.
   def validHost(value: String): ValidatedNel[ConfigError, Host] =

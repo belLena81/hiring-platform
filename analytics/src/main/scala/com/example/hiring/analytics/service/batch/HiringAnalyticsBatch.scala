@@ -7,7 +7,7 @@ import com.example.hiring.analytics.domain.AnalyticsTopic
 import com.example.hiring.analytics.errors.AnalyticsError
 
 import cats.data.NonEmptyChain
-import cats.effect.Async
+import cats.effect.{Async, Clock}
 import cats.syntax.all.*
 
 import java.nio.charset.StandardCharsets
@@ -23,11 +23,11 @@ final class HiringAnalyticsBatch[F[_]: Async](
     lakehouseLock: AnalyticsLakehouseLock[F],
     streamingRegistry: AnalyticsStreamingRegistry[F],
     operational: AnalyticsOperationalSettings,
-    private[analytics] val nowOverride: Option[F[Instant]] = None
+    clock: Clock[F]
 ) {
   private val effect = Async[F]
   private val retention = operational.retention
-  private val now = nowOverride.getOrElse(effect.realTimeInstant)
+  private val now = clock.realTimeInstant
 
   def run(manifest: AnalyticsRunManifest): F[AnalyticsPublication] =
     for {

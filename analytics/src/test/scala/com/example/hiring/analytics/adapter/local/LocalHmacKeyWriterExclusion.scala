@@ -193,7 +193,7 @@ private[analytics] object LocalHmacKeyWriterExclusion {
                             Files.createFile(challenge)
                             true
                           } catch { case _: java.nio.file.AccessDeniedException => false }
-                          if (created) Files.deleteIfExists(challenge)
+                          if (created) { val _ = Files.deleteIfExists(challenge) }
                           Either.cond(
                             !created,
                             (),

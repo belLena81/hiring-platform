@@ -131,38 +131,24 @@ private[graphql] object HiringGraphQLTypes {
       Field(
         "currentResidence",
         OptionType(candidateResidenceType),
-        resolve = context =>
-          context.ctx.effectAdapter.resolverFuture(
-            context.ctx,
-            context.ctx.authenticatedActor.map(actor =>
-              Option.when(actor.userId == context.value.ownerId)(context.value.value.currentResidence).flatten
-            )
-          )
+        resolve = context => visibleProfile(context.ctx, context.value)(_.currentResidence)
       ),
       Field(
         "availabilityStatus",
         OptionType(candidateAvailabilityStatus),
-        resolve = context =>
-          context.ctx.effectAdapter.resolverFuture(
-            context.ctx,
-            context.ctx.authenticatedActor.map(actor =>
-              Option.when(actor.userId == context.value.ownerId)(context.value.value.availabilityStatus).flatten
-            )
-          )
+        resolve = context => visibleProfile(context.ctx, context.value)(_.availabilityStatus)
       ),
       Field(
         "recruiterSearchOptIn",
         BooleanType,
-        resolve = context =>
-          context.ctx.effectAdapter.resolverFuture(
-            context.ctx,
-            context.ctx.authenticatedActor.map(actor =>
-              actor.userId == context.value.ownerId && context.value.value.recruiterSearchOptIn
-            )
-          )
+        resolve = context => visibleProfile(context.ctx, context.value)(_.recruiterSearchOptIn)
       )
     )
   )
+  private def visibleProfile[A](ctx: RequestContext, view: CandidateProfileView)(
+      project: CandidateProfile => A
+  ): scala.concurrent.Future[A] =
+    ctx.effectAdapter.resolverFuture(ctx, ctx.candidateProfileFor(view.ownerId, view.value).map(project))
   lazy val candidateResidenceType: ObjectType[RequestContext, CandidateResidence] = ObjectType(
     "CandidateResidence",
     fields[RequestContext, CandidateResidence](

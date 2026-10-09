@@ -3,10 +3,7 @@ package com.example.graphQL.cats.config
 import munit.FunSuite
 
 final class KafkaRestartConfigSpec extends FunSuite {
-  private def configuration(overrides: String) = AppConfig.fromConfig(
-    "include classpath(\"application.conf\")\nhttp.host=\"127.0.0.1\"\nhttp.port=8080\nmongo.uri=\"mongodb://127.0.0.1:27018\"\nauth.jwt.hs256-secret=\"synthetic-test-signing-key-material\"\n" + overrides,
-    Map.empty
-  )
+  private def configuration(overrides: String) = AppConfigFixtures.withPackagedDefaults(overrides)
 
   test("restart cap defaults to thirty seconds") {
     assertEquals(configuration("").fold(errors => fail(errors.toString), identity).kafka.restartMaxDelaySeconds, 30)

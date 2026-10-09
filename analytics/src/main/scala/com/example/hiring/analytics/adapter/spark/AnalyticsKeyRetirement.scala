@@ -148,6 +148,8 @@ private[analytics] object AnalyticsKeyRetirement {
     )
   }
 
+  private val unverifiedSurface = NonEmptyChain.one("key retirement audit could not verify every required surface")
+
   /** Inspects current Delta snapshots, all retained physical files/logs, required Mongo collections and registry. No
     * HMAC material is accepted by this API. Writer and retention evidence remains an explicit operator input.
     */
@@ -182,10 +184,11 @@ private[analytics] object AnalyticsKeyRetirement {
       }
       .attempt
       .map {
-        case Right(result)           => result
-        case Left(_: AnalyticsError) =>
+        case Right(result)                                        => result
+        case Left(_: AnalyticsError.KeyRetirementAuditUnverified) => Left(unverifiedSurface)
+        case Left(_: AnalyticsError)                              =>
           Left(NonEmptyChain.one("key retirement audit could not acquire the lakehouse audit boundary"))
-        case Left(_) => Left(NonEmptyChain.one("key retirement audit could not verify every required surface"))
+        case Left(_) => Left(unverifiedSurface)
       }
 
   /** Caller already owns the shared lakehouse mutex; used by the guarded authorization transaction. */
@@ -257,9 +260,7 @@ private[analytics] object AnalyticsKeyRetirement {
         registry
       )
     }
-      .adaptError { case NonFatal(_) =>
-        AnalyticsError.InvalidConfiguration("key retirement audit could not verify every required surface")
-      }
+      .adaptError { case NonFatal(cause) => AnalyticsError.KeyRetirementAuditUnverified(cause) }
       .flatMap { case (delta, registryBlockers) =>
         scanMongo[F](database, retiringKeyId, now, streams, paths.inventory.mongo.map(_.location)).map { mongo =>
           val blockers = keyBlockers ++ evidenceBlockers ++ delta.blockers ++ mongo.blockers ++ registryBlockers
@@ -520,7 +521,7 @@ private[analytics] object AnalyticsKeyRetirement {
               val find = database.getCollection(collectionName, classOf[Document]).find()
               if (collectionName == AnalyticsCollections.ErasureRequests)
                 find.limit(MaximumAuditedErasureSubjects + 1)
-              find
+              else find
             }
             .compile
             .fold((state, 0)) { case ((current, collectionDocuments), document) =>
@@ -569,8 +570,7 @@ private[analytics] object AnalyticsKeyRetirement {
   private def requiredStringList(document: Document, field: String): Option[Vector[String]] =
     Option(document.get(field))
       .collect { case values: java.util.List[?] => values.asScala.toVector }
-      .filter(_.forall(_.isInstanceOf[String]))
-      .map(_.map(_.asInstanceOf[String]))
+      .flatMap(_.traverse { case text: String => Some(text); case _ => None })
 
   private def optionalDate(document: Document, field: String): Either[Unit, Option[java.util.Date]] =
     Option(document.get(field)) match {
@@ -611,10 +611,10 @@ private[analytics] object AnalyticsKeyRetirement {
         Chain.one("permanent HMAC continuity registry is missing")
       } else {
         val registry = spark.read.format("delta").load(SparkPhysicalLocation.resolve(paths.hmacKeyRegistry))
-        if (!Set("keyId", "verifier").subsetOf(registry.columns.toSet))
+        if (!Set(Columns.KeyId, Columns.Verifier).subsetOf(registry.columns.toSet))
           Chain.one("permanent HMAC continuity registry schema is malformed")
         else {
-          val rows = registry.select("keyId", "verifier").limit(1001).collect().toVector
+          val rows = registry.select(Columns.KeyId, Columns.Verifier).limit(1001).collect().toVector
           val sizeBlockers =
             if (rows.size > 1000) Chain.one("permanent HMAC continuity registry exceeds the audited key limit")
             else Chain.empty[String]

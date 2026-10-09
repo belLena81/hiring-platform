@@ -4,11 +4,8 @@ import com.example.hiring.analytics.adapter.kafka.KafkaProducerFencer
 import com.example.hiring.analytics.adapter.mongo.{
   MongoActiveDeletionMarkerSource,
   MongoAnalyticsErasureBarrier,
-  MongoAnalyticsErasureProgress,
-  MongoAnalyticsErasureQueue,
   MongoAnalyticsErasureStores,
   MongoAnalyticsLakehouseLock,
-  MongoAnalyticsReportPublisher,
   MongoHmacKeyRetirementAuthorizationStore
 }
 import com.example.hiring.analytics.adapter.spark.{
@@ -27,7 +24,6 @@ import com.example.hiring.analytics.service.erasure.{
   AnalyticsErasureWorker,
   AnalyticsErasureKafkaRuntime,
   KafkaRetention,
-  KafkaRetentionBarrier,
   TransactionalProducerFencer
 }
 import com.example.hiring.analytics.domain.{AccountSubjectId, RangeFingerprint, RunId}
@@ -81,12 +77,7 @@ private[analytics] object AnalyticsErasureWorkerTestSupport {
         KafkaProducerFencer[IO](AnalyticsBatchTestSupport.driverExecution),
       kafkaRetention: Option[KafkaRetention[IO]] = None
   ): AnalyticsErasureWorker[IO] = {
-    val lock = new MongoAnalyticsLakehouseLock(
-      database,
-      AnalyticsTestOperationalConfig.streams,
-      Some(clock.realTimeInstant),
-      Some(clock.monotonic)
-    )
+    val lock = new MongoAnalyticsLakehouseLock[IO](database, AnalyticsTestOperationalConfig.streams, clock)
     val markers =
       new MongoActiveDeletionMarkerSource[IO](
         database,
@@ -105,7 +96,7 @@ private[analytics] object AnalyticsErasureWorkerTestSupport {
       AnalyticsTestOperationalConfig.operational,
       lakehouseExecution,
       Slf4jLogger.getLogger[IO],
-      Some(clock.realTimeInstant)
+      clock
     )
     val refinedTopic = AnalyticsTopic
       .from(topic)
@@ -135,7 +126,7 @@ private[analytics] object AnalyticsErasureWorkerTestSupport {
         AnalyticsTestOperationalConfig.operational.retention,
         AnalyticsErasureWorkerTimings(leaseDuration, deliveryTimeout, pollInterval)
       ),
-      Some(clock.realTimeInstant)
+      clock
     )
   }
 }

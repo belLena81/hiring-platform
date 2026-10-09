@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.api.admission
 
-import cats.effect.IO
+import cats.effect.{IO, Resource}
 import com.comcast.ip4s.{Cidr, IpAddress}
 import com.example.graphQL.cats.config.AuthRateLimitConfig
 import com.github.benmanes.caffeine.cache.{Cache, Caffeine, Expiry, Ticker}
@@ -51,11 +51,12 @@ object AuthRateLimiter {
   private final case class Bucket(hits: Int, expiresAtNanos: Long)
   private val NanosPerSecond = 1000000000L
 
+  /** Preferred constructor for composition roots: the limiter is process-local and holds no releasable resources. */
+  def resource(config: AuthRateLimitConfig): Resource[IO, AuthRateLimiter] =
+    Resource.eval(create(config))
+
   def create(config: AuthRateLimitConfig): IO[AuthRateLimiter] =
-    IO.delay {
-      val ticker = Ticker.systemTicker()
-      new AuthRateLimiter(buildCache(config, ticker), config, ticker)
-    }
+    create(config, Ticker.systemTicker())
 
   private[admission] def create(config: AuthRateLimitConfig, ticker: Ticker): IO[AuthRateLimiter] =
     IO.delay(new AuthRateLimiter(buildCache(config, ticker), config, ticker))

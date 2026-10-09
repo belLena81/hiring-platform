@@ -61,7 +61,7 @@ private[analytics] final class SparkAnalyticsBatchLakehouse[F[_]: Async](
       val schema = StructType(
         Seq(
           org.apache.spark.sql.types
-            .StructField("subjectToken", org.apache.spark.sql.types.StringType, nullable = false)
+            .StructField(Columns.SubjectToken, org.apache.spark.sql.types.StringType, nullable = false)
         )
       )
       spark
@@ -71,8 +71,8 @@ private[analytics] final class SparkAnalyticsBatchLakehouse[F[_]: Async](
 
   private def validateMarkerColumns(frame: DataFrame): F[Unit] =
     execution(frame.columns.toVector).flatMap { columns =>
-      if (columns.contains("subjectToken")) async.unit
-      else async.raiseError(AnalyticsError.InvalidSourceSchema(Vector("subjectToken")))
+      if (columns.contains(Columns.SubjectToken)) async.unit
+      else async.raiseError(AnalyticsError.InvalidSourceSchema(Vector(Columns.SubjectToken)))
     }
 
   private def runWithMarkers(

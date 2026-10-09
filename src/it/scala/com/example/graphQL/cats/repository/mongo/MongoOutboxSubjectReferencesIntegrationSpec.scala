@@ -685,6 +685,65 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
     }
   }
 
+  test("an outbox lease is reclaimable at exactly its expiry instant and held one millisecond earlier") {
+    replicaSet.use { instance =>
+      MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
+        LocalTestServices.database(client).use { database =>
+          val outbox = MongoOperationalEventOutboxRepository.transactional(database, client, Diagnostics.noop)
+          val actor = UserId(UUID.randomUUID())
+          val value = event(
+            900L,
+            OperationalEventType.JOB_CREATED,
+            OperationalAggregateType.Job,
+            uuid(901L),
+            actor,
+            Json.obj(
+              "job" -> Json.obj(
+                "jobId" -> Json.fromString(uuid(901L).toString),
+                "skills" -> Json.arr(Json.fromString("Scala")),
+                "status" -> Json.fromString("Open")
+              )
+            )
+          )
+          val leaseUntil = now.plusSeconds(60L)
+          for {
+            _ <- MongoHiringSetup.initialize(database, Diagnostics.noop)
+            _ <- MongoRepositoryTestSupport.first(
+              database.getCollection(MongoCollections.EventOutbox).insertOne(outboxRecord(value))
+            )
+            first <- outbox
+              .claim("boundary-a", "hiring-publisher-00000000-0000-0000-0000-000000000391", now, leaseUntil, 1)
+              .value
+            held <- outbox
+              .claim(
+                "boundary-b",
+                "hiring-publisher-00000000-0000-0000-0000-000000000392",
+                leaseUntil.minusMillis(1L),
+                leaseUntil.plusSeconds(60L),
+                1
+              )
+              .value
+            reclaimed <- outbox
+              .claim(
+                "boundary-b",
+                "hiring-publisher-00000000-0000-0000-0000-000000000393",
+                leaseUntil,
+                leaseUntil.plusSeconds(60L),
+                1
+              )
+              .value
+          } yield {
+            assertEquals(first.map(_.map(_.event.eventId)), Right(List(value.eventId)))
+            assertEquals(held.map(_.size), Right(0))
+            assertEquals(reclaimed.map(_.map(_.event.eventId)), Right(List(value.eventId)))
+            assertEquals(reclaimed.map(_.map(_.attempts)), Right(List(2)))
+            assert(reclaimed.exists(_.exists(claim => first.exists(_.exists(_.leaseToken != claim.leaseToken)))))
+          }
+        }
+      }
+    }
+  }
+
   test("expired-lease reclaim and account deletion serialize the publisher subject fence") {
     replicaSet.use { instance =>
       MongoDatabaseProbe.clientResource(uri(instance)).use { client =>

@@ -456,7 +456,7 @@ final class StreamingBatchCoordinatorSpec extends CatsEffectSuite {
       override def publicationReceipt(
           preparation: StreamingInputPreparation,
           decision: StreamingDecisionRevision
-      )(using cats.Applicative[IO]): IO[AnalyticsReportPublicationReceipt] = state.get.map(_.publicationReceipt)
+      ): IO[AnalyticsReportPublicationReceipt] = state.get.map(_.publicationReceipt)
 
       override def assess(
           preparation: StreamingInputPreparation,

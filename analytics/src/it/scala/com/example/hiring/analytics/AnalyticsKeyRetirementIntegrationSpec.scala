@@ -1,18 +1,12 @@
 package com.example.hiring.analytics
 import com.example.hiring.analytics.service.keyretirement.*
 import com.example.hiring.analytics.service.batch.*
-import com.example.hiring.analytics.errors.*
 import com.example.hiring.analytics.domain.*
-import com.example.hiring.analytics.config.*
 import com.example.hiring.analytics.adapter.spark.*
 import com.example.hiring.analytics.adapter.mongo.*
-import com.example.hiring.analytics.adapter.kafka.*
-import com.example.hiring.analytics.adapter.local.*
-import com.example.hiring.analytics.service.erasure.*
 
 import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
 import cats.effect.{Deferred, IO, Resource}
-import cats.effect.unsafe.implicits.global
 import com.mongodb.client.{MongoClient, MongoClients, MongoDatabase}
 import com.mongodb.reactivestreams.client.{
   MongoClient as ReactiveMongoClient,
@@ -152,12 +146,14 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.CatsEffectSuite 
     val firstLock =
       new com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock[IO](
         catsMongo.getDatabase(database.getName).unsafeRunSync(),
-        AnalyticsTestOperationalConfig.streams
+        AnalyticsTestOperationalConfig.streams,
+        cats.effect.Clock[IO]
       )
     val secondLock =
       new com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock[IO](
         catsPeerMongo.getDatabase(database.getName).unsafeRunSync(),
-        AnalyticsTestOperationalConfig.streams
+        AnalyticsTestOperationalConfig.streams,
+        cats.effect.Clock[IO]
       )
     val result = (for {
       firstEntered <- Deferred[IO, Unit]
@@ -248,7 +244,8 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.CatsEffectSuite 
         now,
         new com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock[IO](
           catsMongo.getDatabase(database.getName).unsafeRunSync(),
-          AnalyticsTestOperationalConfig.streams
+          AnalyticsTestOperationalConfig.streams,
+          cats.effect.Clock[IO]
         ),
         AnalyticsTestOperationalConfig.streams,
         com.example.hiring.analytics.adapter.spark.SparkBlockingExecution
@@ -273,7 +270,7 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.CatsEffectSuite 
     )
     val db = catsMongo.getDatabase(database.getName).unsafeRunSync()
     val store = new MongoHmacKeyRetirementAuthorizationStore[IO](db, AnalyticsTestOperationalConfig.streams)
-    val lock = new MongoAnalyticsLakehouseLock[IO](db, AnalyticsTestOperationalConfig.streams)
+    val lock = new MongoAnalyticsLakehouseLock[IO](db, AnalyticsTestOperationalConfig.streams, cats.effect.Clock[IO])
     val loaded = lock
       .resource(paths.root)
       .use { _ =>
@@ -307,7 +304,7 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.CatsEffectSuite 
       oldToken = AnalyticsTestSubjectPseudonymizer.tokenValue(old, java.util.UUID.randomUUID().toString)
       newToken = AnalyticsTestSubjectPseudonymizer.tokenValue(fresh, java.util.UUID.randomUUID().toString)
       store = new MongoHmacKeyRetirementAuthorizationStore[IO](db, AnalyticsTestOperationalConfig.streams)
-      lock = new MongoAnalyticsLakehouseLock[IO](db, AnalyticsTestOperationalConfig.streams)
+      lock = new MongoAnalyticsLakehouseLock[IO](db, AnalyticsTestOperationalConfig.streams, cats.effect.Clock[IO])
       schema = AnalyticsTableSchemas.struct(AnalyticsTableSchemas.silver ++ AnalyticsTableSchemas.expiry)
       _ <- SparkBlockingExecution.resource[IO].use { execution =>
         Resource.make(IO.pure(spark))(session => execution.blocking(session.stop())).use { session =>
@@ -317,7 +314,7 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.CatsEffectSuite 
               keys,
               execution,
               root => store.list(root),
-              Some(IO.pure(shifted))
+              AnalyticsTestClocks.fixed(shifted)
             )
               .validateHmacConfiguration(session)
           }
@@ -334,7 +331,7 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.CatsEffectSuite 
             short,
             execution,
             org.typelevel.log4cats.slf4j.Slf4jLogger.getLogger[IO],
-            Some(IO.pure(shifted)),
+            AnalyticsTestClocks.fixed(shifted),
             new DeltaLogFactory {
               override def apply(current: SparkSession, path: String) =
                 org.apache.spark.sql.delta.HiringAnalyticsRetentionClock.forTable(current, path, 32L * 86400L * 1000L)
@@ -490,7 +487,7 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.CatsEffectSuite 
                 keys,
                 execution,
                 root => store.list(root),
-                Some(IO.pure(shifted))
+                AnalyticsTestClocks.fixed(shifted)
               )
                 .validateHmacConfiguration(session)
             }

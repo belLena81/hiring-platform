@@ -6,7 +6,6 @@ import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
 import com.example.hiring.analytics.service.streaming.*
 
 import cats.data.NonEmptyChain
-import cats.effect.Async
 import cats.syntax.all.*
 import io.delta.tables.DeltaTable
 import org.apache.spark.sql.{Row, SparkSession}
@@ -22,7 +21,7 @@ import scala.util.control.NonFatal
 import com.example.hiring.analytics.service.batch.AnalyticsReportReservation
 
 /** Delta-backed journal for immutable input evidence, retry decisions, and publication progress. */
-private[analytics] final class DeltaStreamingBatchJournal[F[_]: Async](
+private[analytics] final class DeltaStreamingBatchJournal[F[_]](
     spark: SparkSession,
     paths: AnalyticsLakehousePaths,
     execution: SparkExecution[F]
@@ -185,7 +184,7 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]: Async](
         val cached = obsolete.persist()
         try {
           if (cached.limit(1).count() > 0L) {
-            DeltaTable
+            val _ = DeltaTable
               .forPath(spark, SparkPhysicalLocation.resolve(paths.streamingProgress))
               .as("target")
               .merge(cached.as("source"), identityCondition)
@@ -205,14 +204,15 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]: Async](
               .select(col(LineageColumn), col(BatchIdColumn))
               .distinct()
               .join(remaining, Seq(LineageColumn, BatchIdColumn), "left_anti")
-            if (orphaned.limit(1).count() > 0L)
-              DeltaTable
+            if (orphaned.limit(1).count() > 0L) {
+              val _ = DeltaTable
                 .forPath(spark, SparkPhysicalLocation.resolve(paths.streamingDecisions))
                 .as("target")
                 .merge(orphaned.as("source"), identityCondition)
                 .whenMatched()
                 .delete()
                 .execute()
+            }
           }
           Right(())
         } finally { cached.unpersist(); () }
@@ -488,8 +488,8 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]: Async](
 
   private def decodeOffset(row: Row): Either[AnalyticsError, StreamingPartitionSummary] =
     for {
-      topic <- Option(row.getAs[String]("topic")).toRight(malformedProgress)
-      partition <- readRequiredInt(row, "partition").toRight(malformedProgress)
+      topic <- Option(row.getAs[String](Columns.Topic)).toRight(malformedProgress)
+      partition <- readRequiredInt(row, Columns.Partition).toRight(malformedProgress)
       minimum <- readRequiredLong(row, "minimumDeliveredOffset").toRight(malformedProgress)
       maximum <- readRequiredLong(row, "maximumDeliveredOffset").toRight(malformedProgress)
       count <- readRequiredLong(row, "deliveredRecordCount").toRight(malformedProgress)
@@ -501,8 +501,8 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]: Async](
 
   private def decodeEndOffset(row: Row): Either[AnalyticsError, StreamingPartitionEndOffset] =
     for {
-      topic <- Option(row.getAs[String]("topic")).toRight(malformedProgress)
-      partition <- readRequiredInt(row, "partition").toRight(malformedProgress)
+      topic <- Option(row.getAs[String](Columns.Topic)).toRight(malformedProgress)
+      partition <- readRequiredInt(row, Columns.Partition).toRight(malformedProgress)
       end <- readRequiredLong(row, "endOffset").toRight(malformedProgress)
       offset <- StreamingPartitionEndOffset.from(topic, partition, end).toEither.leftMap(_ => malformedProgress)
     } yield offset
@@ -547,9 +547,6 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]: Async](
         _.forall(prior => decision.candidateWatermark.forall(candidate => !candidate.isBefore(prior)))
       )
     } catch { case NonFatal(_) => false }
-
-  private def decisionMatches(row: Row, decision: StreamingDecisionRevision): Boolean =
-    decodeDecision(row).contains(decision)
 
   private def verifyPreparation(row: Row, preparation: StreamingInputPreparation): Either[AnalyticsError, Unit] =
     decodeProgress(row).flatMap { stored =>
@@ -712,8 +709,8 @@ private object DeltaStreamingBatchJournal {
   // Delta cannot enforce NOT NULL inside arrays. Required values are checked by the typed journal decoder.
   private val OffsetType = StructType(
     Vector(
-      StructField("topic", StringType, nullable = true),
-      StructField("partition", IntegerType, nullable = true),
+      StructField(Columns.Topic, StringType, nullable = true),
+      StructField(Columns.Partition, IntegerType, nullable = true),
       StructField("minimumDeliveredOffset", LongType, nullable = true),
       StructField("maximumDeliveredOffset", LongType, nullable = true),
       StructField("deliveredRecordCount", LongType, nullable = true)
@@ -721,8 +718,8 @@ private object DeltaStreamingBatchJournal {
   )
   private val EndOffsetType = StructType(
     Vector(
-      StructField("topic", StringType, nullable = true),
-      StructField("partition", IntegerType, nullable = true),
+      StructField(Columns.Topic, StringType, nullable = true),
+      StructField(Columns.Partition, IntegerType, nullable = true),
       StructField("endOffset", LongType, nullable = true)
     )
   )

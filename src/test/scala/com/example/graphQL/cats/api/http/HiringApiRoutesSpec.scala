@@ -44,7 +44,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       diagnostics: Diagnostics = Diagnostics.noop,
       admissionPermits: Long = DefaultAdmissionPermits
   ): IO[HttpApp[IO]] =
-    val probe = new DatabaseProbe { def check: IO[ProbeResult] = effect }
+    val probe = new DatabaseProbe { def check(requestId: Option[String]): IO[ProbeResult] = effect }
     buildRoutes(new HealthService(probe, diagnostics), diagnostics)
       .flatMap(_.httpApp(HiringApiRoutes.HttpConfig(admissionPermits, 5.seconds)))
 
@@ -104,7 +104,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
 
   test("authentication repository unavailability returns a sanitized service-unavailable response") {
     for {
-      probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
+      probe = new DatabaseProbe { def check(requestId: Option[String]): IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
       http <- buildRoutes(
         new HealthService(probe, Diagnostics.noop),
         Diagnostics.noop,
@@ -178,7 +178,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       ]](Map.empty)
       eventsRef <- Ref.of[IO, Vector[com.example.graphQL.cats.domain.model.ApplicationEvent]](Vector.empty)
       createErrorRef <- Ref.of[IO, Option[com.example.graphQL.cats.service.RepositoryError]](None)
-      probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
+      probe = new DatabaseProbe { def check(requestId: Option[String]): IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
       users = ServiceFixtures.InMemoryUsers(
         usersRef,
         Some(ServiceFixtures.userRelations(usersRef, jobsRef, applicationsRef))
@@ -193,7 +193,9 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         com.example.graphQL.cats.service.TestHiringServices.job(users, jobs),
         com.example.graphQL.cats.service.TestHiringServices.applications(users, jobs, applications),
         TestGraphQLSupport.cursorKey,
-        TestGraphQLSupport.accountService
+        TestGraphQLSupport.accountService,
+        TestGraphQLSupport.interactions,
+        TestGraphQLSupport.searchSessions
       )
       authenticator = JwtActorAuthenticator(
         jwtConfig,
@@ -255,7 +257,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       ]](Map.empty)
       eventsRef <- Ref.of[IO, Vector[com.example.graphQL.cats.domain.model.ApplicationEvent]](Vector.empty)
       createErrorRef <- Ref.of[IO, Option[com.example.graphQL.cats.service.RepositoryError]](None)
-      probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
+      probe = new DatabaseProbe { def check(requestId: Option[String]): IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
       users = ServiceFixtures.InMemoryUsers(
         usersRef,
         Some(ServiceFixtures.userRelations(usersRef, jobsRef, applicationsRef))
@@ -270,7 +272,9 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         com.example.graphQL.cats.service.TestHiringServices.job(users, jobs),
         com.example.graphQL.cats.service.TestHiringServices.applications(users, jobs, applications),
         TestGraphQLSupport.cursorKey,
-        TestGraphQLSupport.accountService
+        TestGraphQLSupport.accountService,
+        TestGraphQLSupport.interactions,
+        TestGraphQLSupport.searchSessions
       )
       authenticator = JwtActorAuthenticator(
         jwtConfig,
@@ -317,7 +321,9 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       eventsRef <- Ref.of[IO, Vector[com.example.graphQL.cats.domain.model.ApplicationEvent]](Vector.empty)
       createErrorRef <- Ref.of[IO, Option[com.example.graphQL.cats.service.RepositoryError]](None)
       setupChecks <- Ref.of[IO, Int](0)
-      probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Unavailable) }
+      probe = new DatabaseProbe {
+        def check(requestId: Option[String]): IO[ProbeResult] = IO.pure(ProbeResult.Unavailable)
+      }
       users = ServiceFixtures.InMemoryUsers(
         usersRef,
         Some(ServiceFixtures.userRelations(usersRef, jobsRef, applicationsRef))
@@ -332,7 +338,9 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         com.example.graphQL.cats.service.TestHiringServices.job(users, jobs),
         com.example.graphQL.cats.service.TestHiringServices.applications(users, jobs, applications),
         TestGraphQLSupport.cursorKey,
-        TestGraphQLSupport.accountService
+        TestGraphQLSupport.accountService,
+        TestGraphQLSupport.interactions,
+        TestGraphQLSupport.searchSessions
       )
       authenticator = JwtActorAuthenticator(
         jwtConfig,
@@ -375,7 +383,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
          |  }
          |}""".stripMargin
     for {
-      probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
+      probe = new DatabaseProbe { def check(requestId: Option[String]): IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
       http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop).flatMap(defaultApp)
       response <- http(request(mutation))
       body <- response.as[Json]
@@ -404,7 +412,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
 
     for {
       records <- Ref.of[IO, Vector[DiagnosticRecord]](Vector.empty)
-      probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
+      probe = new DatabaseProbe { def check(requestId: Option[String]): IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
       diagnostics = capture(records)
       http <- buildRoutes(
         new HealthService(probe, diagnostics),
@@ -445,7 +453,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
 
   test("authentication failure returns a typed bearer challenge") {
     for {
-      probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
+      probe = new DatabaseProbe { def check(requestId: Option[String]): IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
       http <- buildRoutes(
         new HealthService(probe, Diagnostics.noop),
         Diagnostics.noop,
@@ -485,7 +493,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         |  signUp(input: { idempotencyKey: "00000000-0000-0000-0000-000000000009", name: "Candidate", role: CANDIDATE, password: "password-password", skills: ["Scala"] }) { __typename }
         |}""".stripMargin
     for {
-      probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
+      probe = new DatabaseProbe { def check(requestId: Option[String]): IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
       http <- buildRoutes(
         new HealthService(probe, Diagnostics.noop),
         Diagnostics.noop,
@@ -527,7 +535,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         |}""".stripMargin
 
     for {
-      probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
+      probe = new DatabaseProbe { def check(requestId: Option[String]): IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
       http <- buildRoutes(
         new HealthService(probe, Diagnostics.noop),
         Diagnostics.noop,
@@ -579,7 +587,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         |}""".stripMargin
 
     for {
-      probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
+      probe = new DatabaseProbe { def check(requestId: Option[String]): IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
       http <- buildRoutes(
         new HealthService(probe, Diagnostics.noop),
         Diagnostics.noop,
@@ -638,7 +646,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         |}""".stripMargin
 
     for {
-      probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
+      probe = new DatabaseProbe { def check(requestId: Option[String]): IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
       http <- buildRoutes(
         new HealthService(probe, Diagnostics.noop),
         Diagnostics.noop,
@@ -668,7 +676,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     val trustedProxy = TrustedProxyConfig(List(Cidr.fromString("10.0.0.0/8").get))
 
     for {
-      probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
+      probe = new DatabaseProbe { def check(requestId: Option[String]): IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
       http <- buildRoutes(
         new HealthService(probe, Diagnostics.noop),
         Diagnostics.noop,
@@ -708,7 +716,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         |}""".stripMargin
 
     for {
-      probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
+      probe = new DatabaseProbe { def check(requestId: Option[String]): IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
       http <- buildRoutes(
         new HealthService(probe, Diagnostics.noop),
         Diagnostics.noop,
@@ -735,7 +743,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     val trustedProxy = TrustedProxyConfig(List(Cidr.fromString("10.0.0.0/8").get))
 
     for {
-      probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
+      probe = new DatabaseProbe { def check(requestId: Option[String]): IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
       http <- buildRoutes(
         new HealthService(probe, Diagnostics.noop),
         Diagnostics.noop,
@@ -796,7 +804,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       result <- IO.fromEither(
         execution.left.map(failure => new AssertionError(s"Expected field error result: $failure"))
       )
-      probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
+      probe = new DatabaseProbe { def check(requestId: Option[String]): IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
       id <- IO.randomUUID.map(_.toString)
       response <- TestGraphQLSupport.dependencies().use { dependencies =>
         new GraphQLHttpRoutes(new HealthService(probe, sink), sink, dependencies).completedGraphQL(parsed, result, id)
@@ -847,7 +855,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         entered <- Deferred[IO, Unit]
         finalizing <- Deferred[IO, Unit]
         finish <- Deferred[IO, Unit]
-        probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
+        probe = new DatabaseProbe { def check(requestId: Option[String]): IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
         http <- buildRoutes(new HealthService(probe, sink), sink).flatMap(defaultApp)
         slow = health.withBodyStream(
           fs2.Stream
@@ -915,7 +923,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       authenticationCalls <- Ref.of[IO, Int](0)
       http <- buildRoutes(
         new HealthService(
-          new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) },
+          new DatabaseProbe { def check(requestId: Option[String]): IO[ProbeResult] = IO.pure(ProbeResult.Ready) },
           Diagnostics.noop
         ),
         Diagnostics.noop,
@@ -1110,7 +1118,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       readinessEntered <- Deferred[IO, Unit]
       calls <- Ref.of[IO, Int](0)
       probe = new DatabaseProbe {
-        def check: IO[ProbeResult] = calls.updateAndGet(_ + 1).flatMap {
+        def check(requestId: Option[String]): IO[ProbeResult] = calls.updateAndGet(_ + 1).flatMap {
           case 1 => graphqlEntered.complete(()) *> IO.never[ProbeResult]
           case _ => readinessEntered.complete(()) *> IO.pure(ProbeResult.Ready)
         }
@@ -1528,7 +1536,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
 
   test("UI and assets are absent, and probes remain live") {
     for {
-      probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
+      probe = new DatabaseProbe { def check(requestId: Option[String]): IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
       http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop).flatMap(defaultApp)
       ui <- http(Request[IO](Method.GET, Uri.unsafeFromString("/graphiql")))
       asset <- http(Request[IO](Method.GET, Uri.unsafeFromString("/graphiql/assets/graphiql.js")))

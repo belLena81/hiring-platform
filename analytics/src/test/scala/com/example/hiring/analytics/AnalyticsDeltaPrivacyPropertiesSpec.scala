@@ -26,7 +26,10 @@ final class AnalyticsDeltaPrivacyPropertiesSpec extends CatsEffectSuite {
     val temporary = Resource.make(IO.blocking(Files.createTempDirectory("hiring-delta-privacy-properties-")))(root =>
       IO.blocking {
         val entries = Files.walk(root)
-        try entries.sorted(Comparator.reverseOrder()).forEach(path => Files.deleteIfExists(path))
+        try
+          entries.sorted(Comparator.reverseOrder()).forEach { path =>
+            val _ = Files.deleteIfExists(path)
+          }
         finally entries.close()
       }
     )

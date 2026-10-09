@@ -5,7 +5,6 @@ import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.service.events.*
-import com.example.graphQL.cats.shared.Parsing
 import com.example.graphQL.cats.service.port.Versioned
 import MongoHiringPersistenceCodecs.*
 import io.circe.Json
@@ -483,10 +482,10 @@ private[mongo] object MongoHiringCodecs {
     )
 
   private def uuid(field: String, value: String): Either[StoredDocumentError, UUID] =
-    Parsing.parseUuid(value).leftMap(_ => InvalidField(field))
+    MongoDocumentFields.parseUuid(field, value)
 
   private def enumValue[A](field: String, value: String, values: Array[A]): Either[StoredDocumentError, A] =
-    values.find(_.toString == value).toRight(InvalidField(field))
+    MongoDocumentFields.byName(values)(value).toRight(InvalidField(field))
 
   private def optionalEnum[A](
       field: String,

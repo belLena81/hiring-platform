@@ -4,6 +4,5 @@ import cats.effect.IO
 import com.example.graphQL.cats.service.ProbeResult
 
 trait DatabaseProbe {
-  def check: IO[ProbeResult]
-  def check(@scala.annotation.unused requestId: Option[String]): IO[ProbeResult] = check
+  def check(requestId: Option[String]): IO[ProbeResult]
 }

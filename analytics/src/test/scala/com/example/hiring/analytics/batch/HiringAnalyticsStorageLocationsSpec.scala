@@ -1,7 +1,6 @@
 package com.example.hiring.analytics.adapter.spark
 
 import cats.effect.{IO, Resource}
-import cats.syntax.all.*
 import com.example.hiring.analytics.{AnalyticsTestSubjectPseudonymizer, TestAnalyticsLakehousePaths}
 import com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock
 import com.example.hiring.analytics.domain.{
@@ -85,7 +84,7 @@ final class HiringAnalyticsStorageLocationsSpec extends CatsEffectSuite {
       val lookup = new KeyRetirementLookup[IO] {
         override def list(root: String): IO[Vector[HmacKeyRetirementAuthorization]] = IO.pure(Vector.empty)
       }
-      val continuity = new AnalyticsKeyContinuityStage[IO](paths, keys, execution, lookup)
+      val continuity = new AnalyticsKeyContinuityStage[IO](paths, keys, execution, lookup, cats.effect.Clock[IO])
       val token = checked(keys.typedToken("084c58fe-787b-410b-b1bb-7193931f06e3")).value
       val at = Instant.parse("2026-10-01T12:00:00Z")
       val manifest = checked(
@@ -153,7 +152,7 @@ final class HiringAnalyticsStorageLocationsSpec extends CatsEffectSuite {
         _ <- journal.prepare(preparation)
         prepared <- journal.load(identity)
         _ <- IO(assert(prepared.nonEmpty))
-        wrongMaterial <- new AnalyticsKeyContinuityStage[IO](paths, changed, execution, lookup)
+        wrongMaterial <- new AnalyticsKeyContinuityStage[IO](paths, changed, execution, lookup, cats.effect.Clock[IO])
           .validateKeyMaterialContinuity(spark)
           .attempt
         _ <- IO(assert(wrongMaterial.left.exists(_.isInstanceOf[AnalyticsError.InvalidConfiguration])))

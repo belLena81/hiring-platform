@@ -23,7 +23,6 @@ import com.example.hiring.analytics.service.keyretirement.HmacKeyRetirementAutho
 
 import cats.effect.kernel.{Async, Clock}
 import cats.syntax.all.*
-import io.github.iltotore.iron.*
 import mongo4cats.database.MongoDatabase
 import io.delta.tables.DeltaTable
 import org.apache.spark.sql.SparkSession
@@ -48,7 +47,7 @@ private[analytics] final class HmacKeyRetirementCoordinator[F[_]: Async](
     storageInventory: Option[AnalyticsStorageInventory] = None
 ) {
   private val lakehouseExecution = new LakehouseOperation[F](sparkExecution)
-  private val preparations = new MongoHmacKeyRetirementPreparationStore[F](database, streams)
+  private val preparations = new MongoHmacKeyRetirementPreparationStore[F](database)
   private val authorizations = new MongoHmacKeyRetirementAuthorizationStore[F](database, streams)
   private val kafkaVolumeName = writerSettings.volumeName.stripSuffix("_hmac-rotation-analytics") +
     "_hmac-rotation-kafka"

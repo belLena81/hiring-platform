@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.service
 
-import cats.data.NonEmptyList
+import cats.data.{NonEmptyChain, NonEmptyList}
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.error.{DomainError, DomainValidationError}
 import com.example.graphQL.cats.service.RepositoryError
@@ -28,8 +28,23 @@ enum SearchError {
   case StaleEmbedding(entity: String)
   case InputTooLarge(field: String, maximum: Int)
   case InvalidFilter(field: String)
+  case InvalidFilters(fields: NonEmptyList[String])
   case ProviderUnavailable
   case VectorSearchUnavailable
+}
+
+object SearchError {
+
+  /** Reports every violated filter field: one stays `InvalidFilter`, several become `InvalidFilters`. */
+  def accumulated(errors: NonEmptyChain[SearchError]): SearchError = {
+    val fields = errors.toNonEmptyList.collect { case InvalidFilter(field) => field }.distinct
+    val others = errors.toNonEmptyList.filterNot(_.isInstanceOf[InvalidFilter])
+    (NonEmptyList.fromList(fields), others) match {
+      case (Some(NonEmptyList(field, Nil)), Nil) => InvalidFilter(field)
+      case (Some(many), Nil)                     => InvalidFilters(many)
+      case _                                     => errors.head
+    }
+  }
 }
 
 enum AvailabilityError {

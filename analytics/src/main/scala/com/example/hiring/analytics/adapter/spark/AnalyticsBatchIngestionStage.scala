@@ -13,10 +13,9 @@ import com.example.hiring.analytics.service.batch.{
   AnalyticsRunManifestStore
 }
 
-import cats.effect.Async
+import cats.effect.{Async, Clock}
 import cats.effect.Resource
 import cats.syntax.all.*
-import io.github.iltotore.iron.*
 import io.delta.tables.DeltaTable
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.functions.*
@@ -29,10 +28,10 @@ private[analytics] final class AnalyticsBatchIngestionStage[F[_]: Async](
     manifestStore: AnalyticsRunManifestStore[F],
     deltaWriter: DeltaWriter[F],
     retention: AnalyticsRetentionSettings,
-    private[analytics] val nowOverride: Option[F[java.time.Instant]] = None
+    clock: Clock[F]
 ) {
   private val blocking = execution
-  private val now = nowOverride.getOrElse(Async[F].realTimeInstant)
+  private val now = clock.realTimeInstant
 
   def ingest(
       spark: SparkSession,
@@ -55,7 +54,6 @@ private[analytics] final class AnalyticsBatchIngestionStage[F[_]: Async](
           _ <- source.verifyOffsets(parsed, manifest)
           _ <- validateRunIdentity(spark, manifest)
           bronze <- persistParsed(
-            spark,
             parsed,
             markerTokens,
             configureTables,
@@ -71,7 +69,6 @@ private[analytics] final class AnalyticsBatchIngestionStage[F[_]: Async](
     * consumes the provided frame as-is: it neither reads a source nor derives Kafka offset spans.
     */
   private[analytics] def persistParsed(
-      spark: SparkSession,
       parsed: DataFrame,
       markerTokens: DataFrame,
       configureTables: F[Unit],
@@ -117,7 +114,7 @@ private[analytics] final class AnalyticsBatchIngestionStage[F[_]: Async](
         .format("delta")
         .load(SparkPhysicalLocation.resolve(paths.manifests))
         .filter(col("runId") === lit(manifest.runId.value))
-        .select("topic", "partition", "startOffset", "endOffsetExclusive")
+        .select(Columns.Topic, Columns.Partition, "startOffset", "endOffsetExclusive")
         .distinct()
         .collect()
         .toVector

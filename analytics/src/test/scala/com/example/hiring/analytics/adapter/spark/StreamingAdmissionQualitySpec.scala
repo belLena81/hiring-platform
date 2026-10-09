@@ -2,7 +2,6 @@ package com.example.hiring.analytics.adapter.spark
 
 import cats.effect.{IO, Resource}
 import cats.syntax.all.*
-import io.delta.tables.DeltaTable
 import munit.CatsEffectSuite
 import org.apache.spark.scheduler.{SparkListener, SparkListenerJobEnd, SparkListenerJobStart, SparkListenerTaskEnd}
 import org.apache.spark.sql.{DataFrame, SparkSession}
@@ -385,12 +384,12 @@ final class StreamingAdmissionQualitySpec extends CatsEffectSuite {
         val future = facts.filter(col("status") === lit("FUTURE"))
         val closed = facts.filter(col("status") === lit("CLOSED"))
         assertEquals(
-          SparkStreamingBatchStages.measureQuality(malformed, conflicts, future, closed),
+          AdmissionQualityBaseline.measure(malformed, conflicts, future, closed),
           SparkStreamingBatchStages.AdmissionQuality(1L, 1L, 1L, 2L)
         )
         val empty = facts.limit(0)
         assertEquals(
-          SparkStreamingBatchStages.measureQuality(empty, empty, empty, empty),
+          AdmissionQualityBaseline.measure(empty, empty, empty, empty),
           SparkStreamingBatchStages.AdmissionQuality(0L, 0L, 0L, 0L)
         )
         def failure(action: => Any): Option[Class[?]] =
@@ -408,7 +407,7 @@ final class StreamingAdmissionQualitySpec extends CatsEffectSuite {
         }
         assert(originalFailure.nonEmpty)
         assertEquals(
-          failure(SparkStreamingBatchStages.measureQuality(malformed, invalid, future, closed)),
+          failure(AdmissionQualityBaseline.measure(malformed, invalid, future, closed)),
           originalFailure
         )
       }

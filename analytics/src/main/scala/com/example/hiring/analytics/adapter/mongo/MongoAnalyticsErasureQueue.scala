@@ -4,24 +4,23 @@ import com.example.hiring.analytics.domain.AccountSubjectId
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.erasure.*
 
-import cats.data.{Chain, EitherT}
+import cats.data.Chain
 import cats.effect.{Async, Resource}
+import cats.effect.std.UUIDGen
 import cats.syntax.all.*
-import mongo4cats.client.{ClientSession, MongoClient}
 import mongo4cats.collection.MongoCollection
 import mongo4cats.database.MongoDatabase
 import com.mongodb.client.model.{FindOneAndUpdateOptions, Filters, Projections, ReturnDocument, Sorts, Updates}
 import org.bson.Document
-import org.bson.conversions.Bson
 
 import java.time.Instant
 import scala.concurrent.duration.*
-import java.util.{Date, UUID}
+import java.util.Date
 import scala.jdk.CollectionConverters.*
 import scala.util.control.NonFatal
 
 /** Mongo persistence for erasure claiming, publisher drain, worker liveness, and repair operations. */
-final class MongoAnalyticsErasureQueue[F[_]: Async] private (
+final class MongoAnalyticsErasureQueue[F[_]: Async: UUIDGen] private (
     database: MongoDatabase[F],
     requests: MongoCollection[F, AnalyticsMongoRecords.ErasureRequest],
     heartbeats: MongoCollection[F, AnalyticsMongoRecords.WorkerHeartbeat],
@@ -131,70 +130,74 @@ final class MongoAnalyticsErasureQueue[F[_]: Async] private (
       }
 
   private def claimNext(now: Instant, leaseUntil: Instant): F[Option[ErasureClaim]] =
-    mongo {
-      val token = UUID.randomUUID().toString
-      val available = Filters.and(
-        Filters.or(
-          Filters.lte(AnalyticsCollections.Fields.LeaseUntil, Date.from(now)),
-          Filters.exists(AnalyticsCollections.Fields.LeaseUntil, false)
-        ),
-        Filters.or(
-          Filters.lte(AnalyticsCollections.Fields.ResumeAfter, Date.from(now)),
-          Filters.exists(AnalyticsCollections.Fields.ResumeAfter, false)
-        )
-      )
-      val nonFinalizer = Filters.and(
-        Filters.ne(AnalyticsCollections.Fields.RepairRequired, true),
-        Filters.ne(AnalyticsCollections.Fields.Phase, ErasurePhase.ReadyToPublish.persistedName),
-        Filters.or(
-          Filters.eq(AnalyticsCollections.Fields.State, ErasureRequestState.Pending.persistedName),
-          Filters.and(
-            Filters.eq(AnalyticsCollections.Fields.State, ErasureRequestState.Processing.persistedName),
-            available
+    UUIDGen[F].randomUUID
+      .map(_.toString)
+      .flatMap(token =>
+        mongo {
+          val available = Filters.and(
+            Filters.or(
+              Filters.lte(AnalyticsCollections.Fields.LeaseUntil, Date.from(now)),
+              Filters.exists(AnalyticsCollections.Fields.LeaseUntil, false)
+            ),
+            Filters.or(
+              Filters.lte(AnalyticsCollections.Fields.ResumeAfter, Date.from(now)),
+              Filters.exists(AnalyticsCollections.Fields.ResumeAfter, false)
+            )
           )
-        )
-      )
-      val finalizer = Filters.and(
-        Filters.ne(AnalyticsCollections.Fields.RepairRequired, true),
-        Filters.eq(AnalyticsCollections.Fields.Phase, ErasurePhase.ReadyToPublish.persistedName),
-        Filters.or(
-          Filters.eq(AnalyticsCollections.Fields.State, ErasureRequestState.Pending.persistedName),
-          Filters.and(
-            Filters.eq(AnalyticsCollections.Fields.State, ErasureRequestState.Processing.persistedName),
-            available
+          val nonFinalizer = Filters.and(
+            Filters.ne(AnalyticsCollections.Fields.RepairRequired, true),
+            Filters.ne(AnalyticsCollections.Fields.Phase, ErasurePhase.ReadyToPublish.persistedName),
+            Filters.or(
+              Filters.eq(AnalyticsCollections.Fields.State, ErasureRequestState.Pending.persistedName),
+              Filters.and(
+                Filters.eq(AnalyticsCollections.Fields.State, ErasureRequestState.Processing.persistedName),
+                available
+              )
+            )
           )
-        )
-      )
-      val update = Updates.combine(
-        Updates.set(AnalyticsCollections.Fields.State, ErasureRequestState.Processing.persistedName),
-        Updates.set(AnalyticsCollections.Fields.LeaseToken, token),
-        Updates.set(AnalyticsCollections.Fields.LeaseUntil, Date.from(leaseUntil)),
-        Updates.unset(AnalyticsCollections.Fields.ResumeAfter)
-      )
-      val options = new FindOneAndUpdateOptions()
-        .sort(Sorts.ascending(AnalyticsCollections.Fields.RequestedAt, AnalyticsCollections.Fields.Id))
-        .projection(
-          Projections.include(
-            AnalyticsCollections.Fields.Id,
-            AnalyticsCollections.Fields.FencingVersion,
-            AnalyticsCollections.Fields.Phase,
-            AnalyticsCollections.Fields.LeaseToken,
-            AnalyticsCollections.Fields.LeaseUntil,
-            AnalyticsCollections.Fields.Progress,
-            AnalyticsCollections.Fields.ProgressKey,
-            AnalyticsCollections.Fields.AttemptCount
+          val finalizer = Filters.and(
+            Filters.ne(AnalyticsCollections.Fields.RepairRequired, true),
+            Filters.eq(AnalyticsCollections.Fields.Phase, ErasurePhase.ReadyToPublish.persistedName),
+            Filters.or(
+              Filters.eq(AnalyticsCollections.Fields.State, ErasureRequestState.Pending.persistedName),
+              Filters.and(
+                Filters.eq(AnalyticsCollections.Fields.State, ErasureRequestState.Processing.persistedName),
+                available
+              )
+            )
           )
-        )
-        .returnDocument(ReturnDocument.AFTER)
-      requests
-        .findOneAndUpdate(nonFinalizer, update, options)
-        .flatMap {
-          case some @ Some(_) => Async[F].pure(some)
-          case None           => requests.findOneAndUpdate(finalizer, update, options)
+          val update = Updates.combine(
+            Updates.set(AnalyticsCollections.Fields.State, ErasureRequestState.Processing.persistedName),
+            Updates.set(AnalyticsCollections.Fields.LeaseToken, token),
+            Updates.set(AnalyticsCollections.Fields.LeaseUntil, Date.from(leaseUntil)),
+            Updates.unset(AnalyticsCollections.Fields.ResumeAfter)
+          )
+          val options = new FindOneAndUpdateOptions()
+            .sort(Sorts.ascending(AnalyticsCollections.Fields.RequestedAt, AnalyticsCollections.Fields.Id))
+            .projection(
+              Projections.include(
+                AnalyticsCollections.Fields.Id,
+                AnalyticsCollections.Fields.FencingVersion,
+                AnalyticsCollections.Fields.Phase,
+                AnalyticsCollections.Fields.LeaseToken,
+                AnalyticsCollections.Fields.LeaseUntil,
+                AnalyticsCollections.Fields.Progress,
+                AnalyticsCollections.Fields.ProgressKey,
+                AnalyticsCollections.Fields.AttemptCount
+              )
+            )
+            .returnDocument(ReturnDocument.AFTER)
+          requests
+            .findOneAndUpdate(nonFinalizer, update, options)
+            .flatMap {
+              case some @ Some(_) => Async[F].pure(some)
+              case None           => requests.findOneAndUpdate(finalizer, update, options)
+            }
         }
-    }.flatMap(document =>
-      Async[F].fromEither(document.traverse(decodeClaim(_).toRight(AnalyticsError.MalformedMarker)))
-    )
+      )
+      .flatMap(document =>
+        Async[F].fromEither(document.traverse(decodeClaim(_).toRight(AnalyticsError.MalformedMarker)))
+      )
 
   /** Deleted users must have a durable deleted fence before their publisher leases can drain. */
 
@@ -259,7 +262,7 @@ final class MongoAnalyticsErasureQueue[F[_]: Async] private (
             Updates.combine(
               Updates.set("state", "Fenced"),
               Updates.set("fencedAt", Date.from(now)),
-              Updates.set("expiresAt", Date.from(now.plusSeconds(8.days.toSeconds)))
+              Updates.set(AnalyticsCollections.Fields.ExpiresAt, Date.from(now.plusSeconds(8.days.toSeconds)))
             )
           )
           .flatMap(result =>
@@ -373,7 +376,7 @@ final class MongoAnalyticsErasureQueue[F[_]: Async] private (
       AnalyticsCollections.EventOutbox,
       AnalyticsCollections.OutboxSubjectFences,
       AnalyticsCollections.Users,
-      "producer_registrations"
+      AnalyticsCollections.ProducerRegistrations
     )
     database.listCollectionNames.map(_.toVector).flatMap { collectedNames =>
       val missing = required.diff(collectedNames.toSet)
@@ -483,7 +486,7 @@ final class MongoAnalyticsErasureQueue[F[_]: Async] private (
 }
 
 object MongoAnalyticsErasureQueue {
-  def resource[F[_]: Async](
+  def resource[F[_]: Async: UUIDGen](
       database: MongoDatabase[F],
       streams: MongoPublisherStream,
       collectionName: String = MongoAnalyticsErasureStoreSupport.RequestCollection
@@ -521,7 +524,7 @@ object MongoAnalyticsErasureQueue {
       )
       registrations <- Resource.eval(
         database.getCollection[AnalyticsMongoRecords.ProducerRegistration](
-          "producer_registrations",
+          AnalyticsCollections.ProducerRegistrations,
           AnalyticsMongoRecords.producerRegistrationRegistry
         )
       )

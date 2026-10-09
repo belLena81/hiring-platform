@@ -1,6 +1,7 @@
 package com.example.graphQL.cats.service
 
 import cats.effect.{IO, Ref}
+import com.example.graphQL.cats.FixedTestClock
 import com.example.graphQL.cats.domain.model.{AccountStatus, EntityEmbedding, User, UserRole}
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.service.port.{EmbeddingCoverageRepository, RepositoryError, RepositoryIO}
@@ -35,7 +36,7 @@ final class EmbeddingCoverageServiceSpec extends CatsEffectSuite {
   private def users(values: User*) = new TestUsers(values.map(user => user.id -> user).toMap)
 
   private def live(known: User*)(requests: Ref[IO, List[EmbeddingCoverageScanRequest]]) =
-    EmbeddingCoverageService.live(users(known*), new Recording(requests), 5.minutes, clock = IO.pure(now))
+    EmbeddingCoverageService.live(users(known*), new Recording(requests), 5.minutes, clock = FixedTestClock.at(now))
 
   private def actor(user: User) = ActorContext(user.id, user.role)
 
@@ -124,7 +125,7 @@ final class EmbeddingCoverageServiceSpec extends CatsEffectSuite {
         RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
     }
     EmbeddingCoverageService
-      .live(users(admin), failing, 5.minutes, clock = IO.pure(now))
+      .live(users(admin), failing, 5.minutes, clock = FixedTestClock.at(now))
       .report(actor(admin), None)
       .value
       .map { result =>

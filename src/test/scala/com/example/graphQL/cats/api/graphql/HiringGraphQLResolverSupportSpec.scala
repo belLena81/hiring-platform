@@ -294,6 +294,11 @@ final class HiringGraphQLResolverSupportSpec extends CatsEffectSuite {
         GraphQLFailure("INPUT_TOO_LARGE", "description must be at most 2000 characters", exceptional = true)
       ),
       Scenario(
+        "several invalid search filters",
+        UseCaseError.Search(SearchError.InvalidFilters(cats.data.NonEmptyList.of("city", "skills"))),
+        GraphQLFailure("INVALID_SEARCH_FILTER", "Invalid city, skills filters", exceptional = false)
+      ),
+      Scenario(
         "provider unavailable",
         UseCaseError.Search(SearchError.ProviderUnavailable),
         GraphQLFailure("PROVIDER_UNAVAILABLE", "Embedding provider unavailable", exceptional = true)

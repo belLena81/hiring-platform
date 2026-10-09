@@ -2,7 +2,6 @@ package com.example.hiring.analytics.adapter.spark
 
 import cats.effect.{IO, Resource}
 import cats.syntax.all.*
-import io.delta.tables.DeltaTable
 import com.example.hiring.analytics.{
   AnalyticsTestOperationalConfig,
   AnalyticsTestSubjectPseudonymizer,
@@ -16,7 +15,6 @@ import munit.CatsEffectSuite
 import org.apache.spark.scheduler.{SparkListener, SparkListenerJobEnd, SparkListenerJobStart, SparkListenerTaskEnd}
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.functions.*
-import org.apache.spark.storage.StorageLevel
 import java.nio.file.{Files, Path}
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.{CountDownLatch, TimeUnit}
@@ -142,7 +140,7 @@ final class StreamingOpenSilverSelectionSpec extends CatsEffectSuite {
     OperationalEventTransforms.parseKafkaRecords(raw)
   }
 
-  private def classified(frame: DataFrame, observed: Instant = at, watermark: Option[Instant] = None): DataFrame = {
+  private def classified(frame: DataFrame, observed: Instant, watermark: Option[Instant]): DataFrame = {
     val observedAt = observed
     val prior = watermark
     val shape = StructType(

@@ -2,7 +2,7 @@ package com.example.graphQL.cats.service.protocol
 
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId}
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
-import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, ApplicationStatus, Job, User}
+import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, ApplicationStatus, Job}
 import com.example.graphQL.cats.domain.pagination.{
   ApplicationEventPageRequest,
   ApplicationPageRequest,
@@ -28,13 +28,9 @@ import com.example.graphQL.cats.service.read.*
 trait HiringReadModel {
   def relatedUsers(actor: ActorContext, keys: List[UserRelationKey]): UseCaseIO[List[RelatedUser]]
   def relatedJobs(actor: ActorContext, keys: List[JobRelationKey]): UseCaseIO[List[RelatedJob]]
-  def user(id: com.example.graphQL.cats.domain.model.Identifiers.UserId): UseCaseIO[Option[User]]
   def viewer(actor: ActorContext): UseCaseIO[AuthenticatedActor]
-  def users(ids: List[com.example.graphQL.cats.domain.model.Identifiers.UserId]): UseCaseIO[List[User]]
   def canViewUserEmail(actor: ActorContext, userId: UserId): UseCaseIO[Boolean]
   def canViewUserEmails(actor: ActorContext, userIds: List[UserId]): UseCaseIO[Set[UserId]]
-  def job(id: JobId): UseCaseIO[Option[Job]]
-  def jobs(ids: List[JobId]): UseCaseIO[List[Job]]
   def application(id: ApplicationId): UseCaseIO[Option[Application]]
   def canViewApplication(actor: ActorContext, applicationId: ApplicationId): UseCaseIO[Unit]
   def applicationHistory(
@@ -131,29 +127,4 @@ trait InteractionUseCases {
       searchId: UUID,
       resultId: String
   ): UseCaseIO[Unit]
-}
-
-object InteractionUseCases {
-  def noop: InteractionUseCases = new InteractionUseCases {
-    override def recordJobView(
-        request: IdempotencyRequest,
-        actor: ActorContext,
-        eventId: UUID,
-        jobId: JobId,
-        searchId: Option[UUID]
-    ): UseCaseIO[Unit] = {
-      val _ = (request, actor, eventId, jobId, searchId)
-      UseCaseIO.pure(())
-    }
-    override def recordSearchResultClick(
-        request: IdempotencyRequest,
-        actor: ActorContext,
-        eventId: UUID,
-        searchId: UUID,
-        resultId: String
-    ): UseCaseIO[Unit] = {
-      val _ = (request, actor, eventId, searchId, resultId)
-      UseCaseIO.pure(())
-    }
-  }
 }

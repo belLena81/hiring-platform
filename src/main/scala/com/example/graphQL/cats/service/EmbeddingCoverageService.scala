@@ -1,7 +1,7 @@
 package com.example.graphQL.cats.service
 
 import cats.data.NonEmptyList
-import cats.effect.IO
+import cats.effect.{Clock, IO}
 import com.example.graphQL.cats.domain.error.DomainValidationError
 import com.example.graphQL.cats.domain.model.{AccountStatus, UserRole}
 import com.example.graphQL.cats.service.port.{EmbeddingCoverageRepository, UserRepository}
@@ -31,7 +31,7 @@ object EmbeddingCoverageUseCases {
 final class EmbeddingCoverageService private (
     users: UserRepository,
     source: Option[EmbeddingCoverageService.Source],
-    clock: IO[java.time.Instant]
+    clock: Clock[IO]
 ) extends EmbeddingCoverageUseCases {
   import EmbeddingCoverageService.*
 
@@ -43,7 +43,7 @@ final class EmbeddingCoverageService private (
       }
       model <- UseCaseIO.fromEither(validate(expectedModel))
       live <- UseCaseIO.fromEither(source.toRight(UseCaseError.Search(SearchError.VectorSearchUnavailable)))
-      now <- UseCaseIO.liftIO(clock)
+      now <- UseCaseIO.liftIO(clock.realTimeInstant)
       request = EmbeddingCoverageScanRequest(
         model,
         now,
@@ -70,13 +70,13 @@ object EmbeddingCoverageService {
       repository: EmbeddingCoverageRepository,
       durableRetryCap: FiniteDuration,
       limits: EmbeddingCoverageLimits = EmbeddingCoverageLimits.default,
-      clock: IO[java.time.Instant] = IO.realTimeInstant
+      clock: Clock[IO] = Clock[IO]
   ): EmbeddingCoverageService =
     new EmbeddingCoverageService(users, Some(Source(repository, durableRetryCap, limits)), clock)
 
   /** Vector search is off: the Admin is still authorized, then the typed unavailable error is returned. */
   def vectorSearchDisabled(users: UserRepository): EmbeddingCoverageService =
-    new EmbeddingCoverageService(users, None, IO.realTimeInstant)
+    new EmbeddingCoverageService(users, None, Clock[IO])
 
   private def validate(expectedModel: Option[String]): Either[UseCaseError, Option[String]] =
     expectedModel.map(_.trim) match {

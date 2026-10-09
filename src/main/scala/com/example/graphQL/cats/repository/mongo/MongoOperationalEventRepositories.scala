@@ -19,7 +19,7 @@ import com.example.graphQL.cats.service.port.{
 }
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.Diagnostics
-import com.mongodb.{MongoCommandException, MongoWriteException}
+import com.mongodb.MongoCommandException
 import com.mongodb.client.model.{FindOneAndUpdateOptions, ReturnDocument, Sorts, UpdateOptions, Projections}
 import org.bson.Document
 import org.bson.types.Binary
@@ -73,7 +73,7 @@ final class MongoSearchSessionRepository(
           .subflatMap(document =>
             MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readSearchSession))
           )
-      )(_ => Left(RepositoryError.Unavailable))
+      )
 
   def recordInteraction(event: OperationalEventEnvelope): RepositoryIO[Boolean] =
     recordInteractionWithSession(event, None)
@@ -107,7 +107,7 @@ final class MongoSearchSessionRepository(
                   case Some(existing) if sameEvent(existing, event) => Right(false)
                   case _                                            => Left(RepositoryError.Conflict)
                 }
-            )(_ => Left(RepositoryError.Unavailable))
+            )
         case error => RepositoryIO.fromEither(Left(error))
       }
 
@@ -135,6 +135,12 @@ final class MongoOperationalEventOutboxRepository(
   private val subjectFences = Mongo4catsCollections.documents(database, MongoCollections.OutboxSubjectFences)
   private val users = Mongo4catsCollections.documents(database, MongoCollections.Users)
 
+  /** Stored outbox lifecycle values; string forms are the persisted contract. */
+  private enum OutboxState {
+    case Retryable, InFlight, Published, Failed
+  }
+  private val inFlight = MongoFilter.eq(MongoFields.State, OutboxState.InFlight.toString)
+
   private def updateMany(
       collection: IO[MongoSessionOperations.Documents],
       session: Option[ClientSession[IO]],
@@ -151,7 +157,7 @@ final class MongoOperationalEventOutboxRepository(
   ): RepositoryIO[List[ClaimedOperationalEvent]] =
     MongoRepositorySupport.repositoryGuard(diagnostics, "outbox.claim")(
       claimPage(workerId, transactionalId, now, leaseUntil, limit)
-    )(_ => Left(RepositoryError.Unavailable))
+    )
 
   private def claimPage(
       workerId: String,
@@ -240,13 +246,13 @@ final class MongoOperationalEventOutboxRepository(
     } yield result
   }
 
-  private def due(now: Instant): MongoFilter = MongoFilter.or(
-    MongoFilter
-      .and(MongoFilter.eq(MongoFields.State, "Retryable"), MongoFilter.lte(MongoFields.AvailableAt, Date.from(now))),
+  private def due(now: Instant): MongoFilter = MongoLeaseQueue.claimable(
     MongoFilter.and(
-      MongoFilter.eq(MongoFields.State, "InFlight"),
-      MongoFilter.lte(MongoFields.LeaseUntil, Date.from(now))
-    )
+      MongoFilter.eq(MongoFields.State, OutboxState.Retryable.toString),
+      MongoFilter.lte(MongoFields.AvailableAt, Date.from(now))
+    ),
+    inFlight,
+    now
   )
 
   override def markPublished(
@@ -259,7 +265,7 @@ final class MongoOperationalEventOutboxRepository(
       eventId,
       leaseToken,
       MongoUpdate.combine(
-        MongoUpdate.set(MongoFields.State, "Published"),
+        MongoUpdate.set(MongoFields.State, OutboxState.Published.toString),
         MongoUpdate.set(MongoFields.PublishedAt, Date.from(now)),
         MongoUpdate.set(MongoFields.RetentionExpiresAt, Date.from(retentionExpiresAt)),
         MongoUpdate.unset(MongoFields.LeaseOwner),
@@ -279,7 +285,7 @@ final class MongoOperationalEventOutboxRepository(
       eventId,
       leaseToken,
       MongoUpdate.combine(
-        MongoUpdate.set(MongoFields.State, "Retryable"),
+        MongoUpdate.set(MongoFields.State, OutboxState.Retryable.toString),
         MongoUpdate.set(MongoFields.AvailableAt, Date.from(availableAt)),
         MongoUpdate.unset(MongoFields.LeaseOwner),
         MongoUpdate.unset(MongoFields.LeaseToken),
@@ -298,7 +304,7 @@ final class MongoOperationalEventOutboxRepository(
       eventId,
       leaseToken,
       MongoUpdate.combine(
-        MongoUpdate.set(MongoFields.State, "Failed"),
+        MongoUpdate.set(MongoFields.State, OutboxState.Failed.toString),
         MongoUpdate.set(MongoFields.LastError, reason.take(512)),
         MongoUpdate.unset(MongoFields.LeaseOwner),
         MongoUpdate.unset(MongoFields.LeaseToken),
@@ -317,21 +323,13 @@ final class MongoOperationalEventOutboxRepository(
       .repositoryGuard(diagnostics, "outbox.renewLease")(
         transactionRunner
           .run { session =>
-            val filter = MongoFilter.and(
+            val held = MongoFilter.and(
               MongoFilter.eq(MongoFields.Id, eventId.toString),
-              MongoFilter.eq(MongoFields.State, "InFlight"),
+              inFlight,
               MongoFilter.eq(MongoFields.LeaseToken, leaseToken)
             )
-            val updateOutbox = RepositoryIO.lift(
-              MongoSessionOperations.updateOne(
-                outbox,
-                session,
-                filter,
-                MongoUpdate.set(MongoFields.LeaseUntil, Date.from(leaseUntil))
-              )
-            )
-            updateOutbox.flatMap {
-              case Some(result) if result.getMatchedCount == 1L =>
+            MongoLeaseQueue.renewHeld(outbox, session, held, leaseUntil).flatMap {
+              case true =>
                 RepositoryIO
                   .lift(
                     updateMany(
@@ -350,11 +348,10 @@ final class MongoOperationalEventOutboxRepository(
                     case Some(_) => Left(RepositoryError.Conflict)
                     case None    => Left(RepositoryError.MissingWriteResult)
                   }
-              case Some(_) => RepositoryIO.fromEither(Left(RepositoryError.Conflict))
-              case None    => RepositoryIO.fromEither(Left(RepositoryError.MissingWriteResult))
+              case false => RepositoryIO.fromEither(Left(RepositoryError.Conflict))
             }
           }
-      )(_ => Left(RepositoryError.Unavailable))
+      )
 
   private def claimOne(
       workerId: String,
@@ -373,7 +370,7 @@ final class MongoOperationalEventOutboxRepository(
               case false => acquireSubjectLeases(session, claim, transactionalId, now, leaseUntil).as(Some(claim))
             }
         }
-      })(_ => Left(RepositoryError.Unavailable))
+      })
 
   private def claimOneInSession(
       session: Option[ClientSession[IO]],
@@ -381,56 +378,43 @@ final class MongoOperationalEventOutboxRepository(
       now: Instant,
       leaseUntil: Instant,
       eventId: String
-  ): RepositoryIO[Option[ClaimedOperationalEvent]] = {
+  ): RepositoryIO[Option[ClaimedOperationalEvent]] =
     RepositoryIO.lift(uuidGen.randomUUID).flatMap { id =>
       val token = id.toString
-      val filter = MongoFilter.and(due(now), MongoFilter.eq(MongoFields.Id, eventId))
-      val update = MongoUpdate.combine(
-        MongoUpdate.set(MongoFields.State, "InFlight"),
-        MongoUpdate.set(MongoFields.LeaseOwner, workerId),
-        MongoUpdate.set(MongoFields.LeaseToken, token),
-        MongoUpdate.set(MongoFields.LeaseUntil, Date.from(leaseUntil)),
-        MongoUpdate.inc(MongoFields.Attempts, 1),
-        MongoUpdate.set(MongoFields.UpdatedAt, Date.from(now))
-      )
-      val options = new FindOneAndUpdateOptions()
-        .sort(Sorts.ascending(MongoFields.AvailableAt, MongoFields.OccurredAt, MongoFields.Id))
-        .returnDocument(ReturnDocument.AFTER)
       MongoRepositorySupport
         .transactionGuard(diagnostics, "outbox.claimOne", session)(
-          RepositoryIO
-            .lift(
-              outbox
-                .flatMap(collection =>
-                  session.fold(
-                    collection.findOneAndUpdate(filter.bson, update.bson, options)
-                  )(active => collection.findOneAndUpdate(active, filter.sessionFilter, update.sessionUpdate, options))
-                )
-            )
-            .flatMap {
-              case None           => RepositoryIO.fromEither(Right(None))
-              case Some(document) =>
-                // Keep attributable control evidence even when the immutable event cannot be interpreted.
-                RepositoryIO
-                  .fromEither(
-                    (
-                      requiredSubjectIds(document),
-                      requiredSubjectRefsVersion(document),
-                      requiredInt(document, MongoFields.Attempts)
-                    )
-                      .mapN((_, _, _) => ())
-                      .leftMap(_ => RepositoryError.InvalidStoredData)
+          MongoLeaseQueue
+            .claimNext(
+              outbox,
+              session,
+              MongoFilter.and(due(now), MongoFilter.eq(MongoFields.Id, eventId)),
+              MongoUpdate.combine(
+                MongoLeaseQueue.leaseStamp(OutboxState.InFlight.toString, workerId, token, leaseUntil, now),
+                MongoUpdate.inc(MongoFields.Attempts, 1)
+              ),
+              Sorts.ascending(MongoFields.AvailableAt, MongoFields.OccurredAt, MongoFields.Id)
+            ) { document =>
+              // Keep attributable control evidence even when the immutable event cannot be interpreted.
+              RepositoryIO
+                .fromEither(
+                  (
+                    requiredSubjectIds(document),
+                    requiredSubjectRefsVersion(document),
+                    MongoDocumentFields.requiredInt(document, MongoFields.Attempts, min = 0)
                   )
-                  .flatMap { _ =>
-                    readClaimed(document) match {
-                      case Right(claim) => RepositoryIO.fromEither(Right(Some(claim)))
-                      case Left(_)      => failInvalidClaim(session, eventId, token, now).as(None)
-                    }
+                    .mapN((_, _, _) => ())
+                    .leftMap(_ => RepositoryError.InvalidStoredData)
+                )
+                .flatMap { _ =>
+                  readClaimed(document) match {
+                    case Right(claim) => RepositoryIO.fromEither(Right(Some(claim)))
+                    case Left(_)      => failInvalidClaim(session, eventId, token, now).as(None)
                   }
+                }
             }
-        )(_ => Left(RepositoryError.Unavailable))
+            .map(_.flatten)
+        )
     }
-  }
 
   private def failInvalidClaim(
       session: Option[ClientSession[IO]],
@@ -445,11 +429,11 @@ final class MongoOperationalEventOutboxRepository(
           session,
           MongoFilter.and(
             MongoFilter.eq(MongoFields.Id, eventId),
-            MongoFilter.eq(MongoFields.State, "InFlight"),
+            inFlight,
             MongoFilter.eq(MongoFields.LeaseToken, token)
           ),
           MongoUpdate.combine(
-            MongoUpdate.set(MongoFields.State, "Failed"),
+            MongoUpdate.set(MongoFields.State, OutboxState.Failed.toString),
             MongoUpdate.set(MongoFields.LastError, "INVALID_EVENT_CONTRACT"),
             MongoUpdate.set(MongoFields.UpdatedAt, Date.from(now)),
             MongoUpdate.unset(MongoFields.LeaseOwner),
@@ -491,22 +475,15 @@ final class MongoOperationalEventOutboxRepository(
       MongoRepositorySupport
         .transactionGuard(diagnostics, "outbox.acquireSubjectLease", session)(
           RepositoryIO
-            .lift(
-              subjectFences
-                .flatMap(collection =>
-                  session.fold(
-                    collection.findOneAndUpdate(filter.bson, update.bson, options)
-                  )(active => collection.findOneAndUpdate(active, filter.sessionFilter, update.sessionUpdate, options))
-                )
-            )
+            .lift(MongoSessionOperations.findOneAndUpdate(subjectFences, session, filter, update, options))
             .subflatMap {
               case Some(_) => Right(())
               case None    => Left(RepositoryError.Conflict)
             }
         ) {
-          case error: MongoWriteException if error.getError.getCode == 11000 =>
+          case MongoDuplicateKey(_) =>
             Left(RepositoryError.Conflict)
-          case error: MongoCommandException if error.getErrorCode == 11000 =>
+          case error: MongoCommandException if error.getErrorCode == MongoDuplicateKey.Code =>
             Left(RepositoryError.Conflict)
           case _ => Left(RepositoryError.Unavailable)
         }
@@ -533,7 +510,7 @@ final class MongoOperationalEventOutboxRepository(
               .findOne(users, session, filter)
           )
           .map(_.nonEmpty)
-      )(_ => Left(RepositoryError.Unavailable))
+      )
   }
 
   private def suppressDeletedClaim(
@@ -543,11 +520,11 @@ final class MongoOperationalEventOutboxRepository(
   ): RepositoryIO[Unit] = {
     val filter = MongoFilter.and(
       MongoFilter.eq(MongoFields.Id, claim.event.eventId.toString),
-      MongoFilter.eq(MongoFields.State, "InFlight"),
+      inFlight,
       MongoFilter.eq(MongoFields.LeaseToken, claim.leaseToken)
     )
     val update = MongoUpdate.combine(
-      MongoUpdate.set(MongoFields.State, "Failed"),
+      MongoUpdate.set(MongoFields.State, OutboxState.Failed.toString),
       MongoUpdate.set(MongoFields.LastError, "SUBJECT_DELETED"),
       MongoUpdate.set(MongoFields.UpdatedAt, Date.from(now)),
       MongoUpdate.unset(MongoFields.LeaseOwner),
@@ -559,7 +536,7 @@ final class MongoOperationalEventOutboxRepository(
         case Some(result) if result.getMatchedCount == 1L => Right(())
         case _                                            => Left(RepositoryError.Conflict)
       }
-    )(_ => Left(RepositoryError.Unavailable))
+    )
   }
 
   private def releaseSubjectLeases(leaseToken: String): RepositoryIO[Unit] =
@@ -583,7 +560,7 @@ final class MongoOperationalEventOutboxRepository(
             case Some(_)                                     => Left(RepositoryError.Conflict)
             case None                                        => Left(RepositoryError.MissingWriteResult)
           }
-      )(_ => Left(RepositoryError.Unavailable))
+      )
 
   private def updateClaimed(
       eventId: UUID,
@@ -600,7 +577,7 @@ final class MongoOperationalEventOutboxRepository(
                 None,
                 MongoFilter.and(
                   MongoFilter.eq(MongoFields.Id, eventId.toString),
-                  MongoFilter.eq(MongoFields.State, "InFlight"),
+                  inFlight,
                   MongoFilter.eq(MongoFields.LeaseToken, leaseToken)
                 ),
                 update
@@ -611,7 +588,7 @@ final class MongoOperationalEventOutboxRepository(
             case Some(_)                                      => Left(RepositoryError.Conflict)
             case None                                         => Left(RepositoryError.MissingWriteResult)
           }
-      )(_ => Left(RepositoryError.Unavailable))
+      )
 
   private def readClaimed(
       document: Document
@@ -619,9 +596,9 @@ final class MongoOperationalEventOutboxRepository(
     (
       MongoHiringCodecs.readOperationalEvent(document),
       envelopeBytes(document).toValidatedNel,
-      requiredString(document, MongoFields.PartitionKey).toValidatedNel,
-      requiredString(document, MongoFields.LeaseToken).toValidatedNel,
-      requiredInt(document, MongoFields.Attempts).toValidatedNel,
+      MongoDocumentFields.requiredString(document, MongoFields.PartitionKey).toValidatedNel,
+      MongoDocumentFields.requiredString(document, MongoFields.LeaseToken).toValidatedNel,
+      MongoDocumentFields.requiredInt(document, MongoFields.Attempts, min = 0).toValidatedNel,
       requiredSubjectIds(document).toValidatedNel,
       requiredSubjectRefsVersion(document).toValidatedNel
     ).mapN((event, bytes, key, token, attempts, subjects, _) =>
@@ -646,47 +623,24 @@ final class MongoOperationalEventOutboxRepository(
       case _ => Left(MongoHiringCodecs.StoredDocumentError.InvalidField(MongoFields.EnvelopeBytes))
     }
 
-  private def requiredString(document: Document, field: String): Either[MongoHiringCodecs.StoredDocumentError, String] =
-    Option(document.get(field)) match {
-      case Some(value: String) => Right(value)
-      case None                => Left(MongoHiringCodecs.StoredDocumentError.MissingField(field))
-      case _                   => Left(MongoHiringCodecs.StoredDocumentError.InvalidField(field))
-    }
-
-  private def requiredInt(document: Document, field: String): Either[MongoHiringCodecs.StoredDocumentError, Int] =
-    Option(document.get(field)) match {
-      case Some(value: java.lang.Integer) if value.intValue >= 0 => Right(value.intValue)
-      case Some(value: java.lang.Long) if value.longValue >= 0 && value.longValue <= Int.MaxValue =>
-        Right(value.intValue)
-      case None => Left(MongoHiringCodecs.StoredDocumentError.MissingField(field))
-      case _    => Left(MongoHiringCodecs.StoredDocumentError.InvalidField(field))
-    }
-
   private def requiredSubjectIds(
       document: Document
   ): Either[MongoHiringCodecs.StoredDocumentError, List[String]] =
-    Option(document.get(MongoFields.SubjectIds)) match {
-      case Some(values: java.util.List[?]) =>
-        val subjects = values.asScala.toList.collect { case value: String => value }
-        if (
-          subjects.nonEmpty && subjects.size == values.size() && subjects.distinct.size == subjects.size &&
-          subjects.forall(value => com.example.graphQL.cats.shared.Parsing.parseUuid(value).exists(_.toString == value))
-        )
-          Right(subjects)
-        else Left(MongoHiringCodecs.StoredDocumentError.InvalidField(MongoFields.SubjectIds))
-      case None => Left(MongoHiringCodecs.StoredDocumentError.MissingField(MongoFields.SubjectIds))
-      case _    => Left(MongoHiringCodecs.StoredDocumentError.InvalidField(MongoFields.SubjectIds))
+    MongoDocumentFields.requiredStringList(document, MongoFields.SubjectIds).flatMap { subjects =>
+      Either.cond(
+        subjects.nonEmpty && subjects.distinct.size == subjects.size &&
+          subjects.forall(MongoDocumentFields.parseUuid(MongoFields.SubjectIds, _).isRight),
+        subjects,
+        MongoHiringCodecs.StoredDocumentError.InvalidField(MongoFields.SubjectIds)
+      )
     }
 
   private def requiredSubjectRefsVersion(
       document: Document
   ): Either[MongoHiringCodecs.StoredDocumentError, Int] =
-    Option(document.get(MongoFields.SubjectRefsVersion)) match {
-      case Some(value: java.lang.Integer) if value.intValue() == 1 => Right(1)
-      case Some(value: java.lang.Long) if value.longValue() == 1L  => Right(1)
-      case None => Left(MongoHiringCodecs.StoredDocumentError.MissingField(MongoFields.SubjectRefsVersion))
-      case _    => Left(MongoHiringCodecs.StoredDocumentError.InvalidField(MongoFields.SubjectRefsVersion))
-    }
+    MongoDocumentFields
+      .requiredInt(document, MongoFields.SubjectRefsVersion)
+      .filterOrElse(_ == 1, MongoHiringCodecs.StoredDocumentError.InvalidField(MongoFields.SubjectRefsVersion))
 }
 
 object MongoOperationalEventOutboxRepository {
@@ -717,7 +671,7 @@ final class MongoConsumerReceiptRepository(database: MongoDatabase[IO], diagnost
               .findOne(receipts, None, MongoFilter.eq(MongoFields.Id, s"$consumerGroup:${eventId.toString}"))
           )
           .map(_.nonEmpty)
-      )(_ => Left(RepositoryError.Unavailable))
+      )
 
   override def record(
       consumerGroup: String,
@@ -746,8 +700,8 @@ final class MongoConsumerReceiptRepository(database: MongoDatabase[IO], diagnost
             _.fold[Either[RepositoryError, Boolean]](Left(RepositoryError.MissingWriteResult))(_ => Right(true))
           )
       ) {
-        case write: MongoWriteException if write.getError.getCode == 11000 => Right(false)
-        case _                                                             => Left(RepositoryError.Unavailable)
+        case MongoDuplicateKey(_) => Right(false)
+        case _                    => Left(RepositoryError.Unavailable)
       }
 
 }
@@ -778,8 +732,8 @@ final class MongoEventQuarantineRepository(database: MongoDatabase[IO], diagnost
           )
           .subflatMap(_.fold[Either[RepositoryError, Unit]](Left(RepositoryError.MissingWriteResult))(_ => Right(())))
       ) {
-        case write: MongoWriteException if write.getError.getCode == 11000 => Right(())
-        case _                                                             => Left(RepositoryError.Unavailable)
+        case MongoDuplicateKey(_) => Right(())
+        case _                    => Left(RepositoryError.Unavailable)
       }
 
 }

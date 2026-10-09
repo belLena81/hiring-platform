@@ -1,5 +1,7 @@
 package com.example.graphQL.cats.api.graphql
 
+import com.example.graphQL.cats.FixedTestClock
+
 import com.example.graphQL.cats.AccountValueFixtures.email
 import cats.effect.IO
 import cats.effect.Ref
@@ -231,7 +233,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       users,
       repository,
       scala.concurrent.duration.DurationInt(5).minutes,
-      clock = IO.pure(now)
+      clock = FixedTestClock.at(now)
     )
   }
 
@@ -319,7 +321,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
           users,
           repository,
           scala.concurrent.duration.DurationInt(5).minutes,
-          clock = IO.pure(now)
+          clock = FixedTestClock.at(now)
         )
       aliased = (1 to 500).map(n => s"a$n: embeddingCoverage { asOf }").mkString("query { ", " ", " }")
       twoRoots = "query { a: embeddingCoverage { asOf } b: embeddingCoverage { asOf } }"
@@ -549,6 +551,83 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       assertEquals(privateView.get[Option[Json]]("currentResidence"), Right(None))
       assertEquals(privateView.get[Option[Json]]("availabilityStatus"), Right(None))
       assertEquals(privateView.get[Boolean]("recruiterSearchOptIn"), Right(false))
+    }
+  }
+
+  private val candidateProfileSelection =
+    "profile { ... on CandidateProfile { skills currentResidence { country } availabilityStatus recruiterSearchOptIn } }"
+
+  private def jobApplicationCandidateProfile(json: Json) =
+    json.hcursor
+      .downField("data")
+      .downField("jobApplications")
+      .downField("edges")
+      .downArray
+      .downField("node")
+      .downField("candidate")
+      .downField("profile")
+
+  test("an admin sees another candidate's public profile with owner-only matching fields masked") {
+    val query =
+      s"""query { jobApplications(jobId: "${jobId.value}", first: 10) { edges { node { candidate { $candidateProfileSelection } } } } }"""
+    executeWithUsers(query, Some(ActorContext(adminId, UserRole.Admin)), List(candidate, recruiter, admin)).map {
+      json =>
+        val profile = jobApplicationCandidateProfile(json)
+        assert(profile.succeeded, json.noSpaces)
+        assertEquals(profile.get[List[String]]("skills"), Right(List("Scala")))
+        assertEquals(profile.get[Option[Json]]("currentResidence"), Right(None))
+        assertEquals(profile.get[Option[Json]]("availabilityStatus"), Right(None))
+        assertEquals(profile.get[Boolean]("recruiterSearchOptIn"), Right(false))
+    }
+  }
+
+  test("a different candidate cannot reach another candidate's profile or its owner-only fields") {
+    val otherId = UserId(UUID.fromString("10000000-0000-0000-0000-000000000007"))
+    val other = candidate.copy(id = otherId, email = Some(email("other@example.com")), name = "Other")
+    val query =
+      s"""query { jobApplications(jobId: "${jobId.value}", first: 10) { edges { node { candidate { $candidateProfileSelection } } } } }"""
+    executeWithUsers(query, Some(ActorContext(otherId, UserRole.Candidate)), List(candidate, recruiter, other)).map {
+      json =>
+        assert(json.hcursor.downField("errors").succeeded, json.noSpaces)
+        assert(!jobApplicationCandidateProfile(json).succeeded, json.noSpaces)
+        assert(!json.noSpaces.contains("Cyprus") && !json.noSpaces.contains("AVAILABLE_NOW"), json.noSpaces)
+    }
+  }
+
+  test("an unauthenticated payload errors on each owner-only profile field and still resolves skills alone") {
+    def signUp(selection: String) =
+      s"""mutation { signUp(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001", name: "Candidate", role: CANDIDATE, password: "password-password", skills: ["Scala"] }) { ... on AuthSuccess { user { profile { ... on CandidateProfile { $selection } } } } } }"""
+    val privateFields = List("currentResidence", "availabilityStatus", "recruiterSearchOptIn")
+    (
+      executeWithUsers(
+        signUp("skills currentResidence { country } availabilityStatus recruiterSearchOptIn"),
+        None,
+        List(candidate, recruiter),
+        SignUpReturningCandidateService
+      ),
+      executeWithUsers(signUp("skills"), None, List(candidate, recruiter), SignUpReturningCandidateService)
+    ).mapN { (all, skillsOnly) =>
+      // The non-null recruiterSearchOptIn error nulls the nullable profile, as before the service-owned rule.
+      assertEquals(
+        all.hcursor.downField("data").downField("signUp").downField("user").get[Option[Json]]("profile"),
+        Right(None)
+      )
+      val errors = all.hcursor.downField("errors").as[List[Json]].getOrElse(Nil)
+      assertEquals(
+        errors.flatMap(_.hcursor.downField("path").as[List[String]].toOption.flatMap(_.lastOption)),
+        privateFields
+      )
+      assert(errors.forall(_.hcursor.downField("extensions").get[String]("code") == Right("UNAUTHORIZED")))
+      assertEquals(
+        skillsOnly.hcursor
+          .downField("data")
+          .downField("signUp")
+          .downField("user")
+          .downField("profile")
+          .get[List[String]]("skills"),
+        Right(List("Scala"))
+      )
+      assert(skillsOnly.hcursor.downField("errors").failed, skillsOnly.noSpaces)
     }
   }
 
@@ -839,7 +918,9 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
         com.example.graphQL.cats.service.TestHiringServices.job(users, jobs),
         com.example.graphQL.cats.service.TestHiringServices.applications(users, jobs, applications),
         TestGraphQLSupport.cursorKey,
-        TestGraphQLSupport.accountService
+        TestGraphQLSupport.accountService,
+        TestGraphQLSupport.interactions,
+        TestGraphQLSupport.searchSessions
       )
       request <- parseRequest(query)
       result <- TestGraphQLSupport
@@ -1250,6 +1331,8 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
         com.example.graphQL.cats.service.TestHiringServices.applications(users, jobs, applications),
         TestGraphQLSupport.cursorKey,
         TestGraphQLSupport.accountService,
+        TestGraphQLSupport.interactions,
+        TestGraphQLSupport.searchSessions,
         Some(searchService)
       )
       request <- parseRequest(query)
@@ -1319,6 +1402,8 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
         com.example.graphQL.cats.service.TestHiringServices.applications(users, jobs, applications),
         TestGraphQLSupport.cursorKey,
         accountService = accountService,
+        interactionService = TestGraphQLSupport.interactions,
+        searchSessions = TestGraphQLSupport.searchSessions,
         analyticsReporting = analyticsReporting,
         embeddingCoverage = embeddingCoverage(users)
       )
@@ -1446,6 +1531,24 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
 
     override def listUsers(actor: ActorContext, page: UserPageRequest): UseCaseIO[List[User]] =
       UseCaseIO.left(unsupported)
+  }
+
+  private object SignUpReturningCandidateService extends AccountUseCases {
+    private def unsupported[A]: UseCaseIO[A] =
+      UseCaseIO.left(UseCaseError.Account(com.example.graphQL.cats.service.AccountError.ProfileUnsupportedForRole))
+    override def signUp(request: IdempotencyRequest, input: SignUpInput): UseCaseIO[(User, AccountToken)] =
+      UseCaseIO.pure(candidate -> AccountToken("token", now.plusSeconds(60)))
+    override def login(request: IdempotencyRequest, input: LoginInput): UseCaseIO[(User, AccountToken)] = unsupported
+    override def me(actor: ActorContext): UseCaseIO[User] = unsupported
+    override def updateMyProfile(
+        request: IdempotencyRequest,
+        actor: ActorContext,
+        input: AccountProfileInput
+    ): UseCaseIO[User] = unsupported
+    override def deleteMyAccount(request: IdempotencyRequest, actor: ActorContext): UseCaseIO[String] = unsupported
+    override def accountDeletionStatus(actor: ActorContext, receiptId: String): UseCaseIO[AccountDeletionStatus] =
+      UseCaseIO.pure(AccountDeletionStatus.NotFound)
+    override def listUsers(actor: ActorContext, page: UserPageRequest): UseCaseIO[List[User]] = unsupported
   }
 
   private final class PublicAccountService(calls: Ref[IO, Int]) extends AccountUseCases {

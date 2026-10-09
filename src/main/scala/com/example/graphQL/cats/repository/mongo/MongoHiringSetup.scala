@@ -6,8 +6,8 @@ import mongo4cats.database.MongoDatabase
 import mongo4cats.collection.MongoCollection
 import mongo4cats.codecs.CodecRegistry
 import mongo4cats.models.database.CreateCollectionOptions
-import com.mongodb.ReadPreference
-import org.bson.Document
+import com.mongodb.{MongoCommandException, ReadPreference}
+import org.bson.{BsonDocument, Document}
 import org.bson.conversions.Bson
 import com.example.graphQL.cats.service.Diagnostics
 import com.example.graphQL.cats.domain.workflow.InterviewTopicPair
@@ -31,61 +31,25 @@ object MongoHiringSetup {
   ) {
     def getCollection(name: String): SetupCollection = collections(name)
     def createCollection(name: String): IO[Unit] = underlying.createCollection(name, CreateCollectionOptions())
-    def runCommand(command: Bson): IO[Unit] = underlying.runCommand(command, ReadPreference.primary()).void
+
+    /** Idempotent creation: an already existing namespace (code 48) is the expected restart outcome. */
+    def ensureCollection(name: String): IO[Unit] = createCollection(name).recoverWith {
+      case error: MongoCommandException if error.getErrorCode == 48 => IO.unit
+    }
+    def runCommand(command: Bson): IO[BsonDocument] =
+      underlying.runCommand(command, ReadPreference.primary()).map(_.toBsonDocument)
     def dropCollection(name: String): IO[Unit] = getCollection(name).drop
   }
 
-  private def setupDatabase(database: MongoDatabase[IO]): IO[SetupDatabase] =
+  private[mongo] def setupDatabase(database: MongoDatabase[IO]): IO[SetupDatabase] =
     MongoHiringMigrations.ownedCollections.toList
       .traverse(name => database.getCollection[Document](name, CodecRegistry.Default).map(name -> _))
       .map(values => SetupDatabase(database, values.toMap))
 
-  val EmbeddingWorkAvailableIndex = "embedding_work_available_lease"
-  val UsersEmailIndex = "users_emailCanonical_unique"
-  val UsersNameIndex = "users_nameCanonical_unique"
-  val UsersStatusCreatedIndex = "users_accountStatus_created_id"
-  val UsersRoleStatusCreatedIndex = "users_role_accountStatus_created_id"
-  val UsersAdminSingletonIndex = "users_adminSingleton_unique"
-  val ApplicationsCandidateJobIndex = "applications_candidate_job_unique"
-  val JobsRecruiterStatusCreatedIndex = "jobs_recruiter_status_created_id"
-  val JobsRecruiterCreatedIndex = "jobs_recruiter_created_id"
-  val ApplicationsCandidateStatusCreatedIndex = "applications_candidate_status_created_id"
-  val ApplicationsCandidateCreatedIndex = "applications_candidate_created_id"
-  val ApplicationsJobStatusCreatedIndex = "applications_job_status_created_id"
-  val ApplicationsJobCreatedIndex = "applications_job_created_id"
-  val ApplicationEventsApplicationCreatedIndex = "application_events_application_created_id"
-  val JobsCreatedIndex = "jobs_created_id"
-  val JobsOpenCreatedIndex = "jobs_open_created_id"
-  val JobsOpenCityCreatedIndex = "jobs_open_city_created_id"
-  val JobsLocationPointIndex = "jobs_location_point_2dsphere"
-  val JobsEmbeddingMetaIndex = "jobs_embedding_meta_filters"
-  val UsersEmbeddingMetaIndex = "users_embedding_meta_filters"
-  val EventOutboxClaimIndex = "event_outbox_claim"
-  val EventOutboxPublishedRetentionIndex = "event_outbox_published_retention"
-  val EventOutboxSubjectIdsIndex = "event_outbox_subject_ids"
-  val OutboxSubjectFenceLeaseIndex = "outbox_subject_fences_lease_until"
-  val SearchSessionsActorIndex = "search_sessions_actor_created"
-  val SearchSessionsExpiryIndex = "search_sessions_expiry"
-  val SearchSessionWorkClaimIndex = "search_session_work_claim"
-  val SearchSessionWorkRetentionIndex = "search_session_work_retention"
-  val ConsumerReceiptsIdIndex = "consumer_receipts_group_event"
-  val ConsumerReceiptsExpiryIndex = "consumer_receipts_expiry"
-  val MutationReceiptsKeyIndex = "mutation_receipts_operation_scope_key"
-  val MutationReceiptsExpiryIndex = "mutation_receipts_expiry"
-  val EventQuarantineOffsetIndex = "event_quarantine_offset"
-  val EventQuarantineExpiryIndex = "event_quarantine_expiry"
-  val AnalyticsErasureRequestStateIndex = "analytics_erasure_requests_state_requested"
-  val AnalyticsReportPublishedIndex = "analytics_report_snapshots_published_as_of"
-  val AnalyticsReportExpiryIndex = "analytics_report_snapshots_expiry"
-  val AnalyticsReportRunExpiryIndex = "analytics_report_runs_expiry"
-  val InterviewWorkflowCandidateIndex = "interview_workflows_candidate_id"
-  val InterviewWorkflowRecruiterIndex = "interview_workflows_recruiter_id"
-  val InterviewWorkflowCommandDueIndex = "interview_workflow_commands_due"
-  val InterviewWorkflowCommandLeaseIndex = "interview_workflow_commands_lease"
-  val InterviewWorkflowInboxIdentityIndex = "interview_workflow_inbox_identity_unique"
-  val FakeInterviewCalendarParticipantsIndex = "fake_interview_calendar_participants_active"
-  val FakeInterviewCalendarReleaseIndex = "fake_interview_calendar_release_unique"
-  val FakeInterviewNotificationRecipientIndex = "fake_interview_notification_recipient"
+  // TODO(RF-06): forwarding aliases for integration specs owned by concurrent slices; use MongoIndexNames directly.
+  val JobsLocationPointIndex: String = MongoIndexNames.JobsLocationPoint
+  val EventOutboxSubjectIdsIndex: String = MongoIndexNames.EventOutboxSubjectIds
+  val InterviewWorkflowInboxIdentityIndex: String = MongoIndexNames.InterviewWorkflowInboxIdentity
 
   def initialize(database: MongoDatabase[IO], diagnostics: Diagnostics): IO[Unit] =
     initialize(database, None, resetOnStart = false, diagnostics = diagnostics)
@@ -97,6 +61,10 @@ object MongoHiringSetup {
       diagnostics: Diagnostics
   ): IO[Unit] =
     initialize(database, atlas, resetOnStart = false, diagnostics = diagnostics)
+
+  /** Ordered setup: ledger migrations, strict validators, verified indexes, optional Atlas search provisioning. The
+    * residence proof is checked before the user validator is installed so completed-proof drift is never overwritten.
+    */
   def initialize(
       database: MongoDatabase[IO],
       atlas: Option[AtlasSearchIndexConfig],
@@ -105,15 +73,16 @@ object MongoHiringSetup {
       topics: InterviewTopicPair = InterviewTopicPair.Default
   ): IO[Unit] =
     setupDatabase(database).flatMap { setup =>
-      (if (resetOnStart) IO.unit else MongoCandidateResidenceIntegrityMigrations.verifyCompleted(setup)) *>
-        MongoHiringMigrations.initialize(setup, resetOnStart, diagnostics, topics) *>
-        MongoHiringValidators.createUserValidator(database) *>
-        MongoCandidateResidenceIntegrityMigrations.initialize(setup) *>
-        MongoHiringValidators.createJobValidator(database) *>
-        MongoHiringMigrations.verifyJobGeoPoints(setup) *>
-        MongoHiringIndexSetup.create(database) *>
-        MongoHiringValidators.createOutboxValidator(database) *>
+      List(
+        IO.unlessA(resetOnStart)(MongoCandidateResidenceIntegrityMigrations.verifyCompleted(setup)),
+        MongoHiringMigrations.initialize(setup, resetOnStart, diagnostics, topics),
+        MongoHiringValidators.createUserValidator(setup),
+        MongoCandidateResidenceIntegrityMigrations.initialize(setup),
+        MongoHiringValidators.createJobValidator(setup),
+        MongoHiringMigrations.verifyJobGeoPoints(setup),
+        MongoHiringIndexSetup.create(database),
+        MongoHiringValidators.createOutboxValidator(setup),
         atlas.traverse_(MongoAtlasSearchSetup.provision(setup, _))
+      ).sequence_
     }
-
 }

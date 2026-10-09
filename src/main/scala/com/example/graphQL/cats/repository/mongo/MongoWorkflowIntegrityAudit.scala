@@ -8,10 +8,15 @@ import com.mongodb.client.model.{Filters, Sorts, Updates, UpdateOptions}
 import org.bson.{BsonValue, Document}
 import scala.jdk.CollectionConverters.*
 
-/** Explicit bounded, resumable semantic audit. Invalid rows retain the previous checkpoint for repair and rerun. */
+/** Explicit bounded, resumable semantic audit. Invalid rows retain the previous checkpoint for repair and rerun.
+  *
+  * Its `audit_hiring_workflow_integrity` ledger row belongs to this operator tool, not to the 16 runner-owned migration
+  * steps: it is written without a `version` field and is never read by `MongoMigrationRunner`.
+  */
 object MongoWorkflowIntegrityAudit extends IOApp {
   private val BatchSize = 500
-  private val AuditId = "audit_hiring_workflow_integrity"
+  private val Audit = MigrationId("audit_hiring_workflow_integrity")
+  private val AuditId = Audit.value
 
   private[mongo] def audit(
       database: mongo4cats.database.MongoDatabase[IO],
@@ -28,7 +33,7 @@ object MongoWorkflowIntegrityAudit extends IOApp {
       collection
         .flatMap(
           _.find(MongoInterviewCleanupSweepCodec.afterFilter(after))
-            .sort(Sorts.ascending("_id"))
+            .sort(Sorts.ascending(MongoFields.Id))
             .limit(BatchSize)
             .boundedStream(32)
             .compile
@@ -42,7 +47,7 @@ object MongoWorkflowIntegrityAudit extends IOApp {
                   MongoInterviewWorkflowCommandCodec
                     .decode(row)
                     .left
-                    .map(_ => new IllegalStateException("Integrity audit rejected a command"))
+                    .map(_ => MigrationError.StepFailed(Audit, "rejected a command"))
                 ).void
               )
             else if (collectionName == MongoCollections.InterviewSubjectCleanup)
@@ -50,25 +55,32 @@ object MongoWorkflowIntegrityAudit extends IOApp {
                 IO.fromEither(
                   MongoInterviewCleanupCodec
                     .decodeCurrent(row, topics)
-                    .leftMap(_ => new IllegalStateException("Integrity audit rejected cleanup evidence"))
+                    .leftMap(_ => MigrationError.StepFailed(Audit, "rejected cleanup evidence"))
                 ).void
               )
             else {
               val invalid = new Document("$nor", List(MongoHiringValidators.outboxValidator).asJava)
               collection
-                .flatMap(_.find(Filters.and(Filters.in("_id", rows.map(_.get("_id"))*), invalid)).limit(1).first)
+                .flatMap(
+                  _.find(Filters.and(Filters.in(MongoFields.Id, rows.map(_.get(MongoFields.Id))*), invalid))
+                    .limit(1)
+                    .first
+                )
                 .flatMap {
                   case None    => IO.unit
-                  case Some(_) => IO.raiseError(new IllegalStateException("Integrity audit rejected an outbox row"))
+                  case Some(_) => IO.raiseError(MigrationError.StepFailed(Audit, "rejected an outbox row"))
                 }
             }
           validate *> rows.lastOption.traverse_(row =>
             ledger
               .flatMap(
                 _.updateOne(
-                  Filters.eq("_id", AuditId),
+                  Filters.eq(MongoFields.Id, AuditId),
                   Updates
-                    .combine(Updates.set("collection", collectionName), Updates.set("lastId", row.get("_id"))),
+                    .combine(
+                      Updates.set("collection", collectionName),
+                      Updates.set(MongoFields.LastId, row.get(MongoFields.Id))
+                    ),
                   new UpdateOptions().upsert(true)
                 )
               )
@@ -78,29 +90,30 @@ object MongoWorkflowIntegrityAudit extends IOApp {
                IO.fromEither(
                  rows.lastOption
                    .traverse(MongoInterviewCleanupSweepCodec.identity)
-                   .leftMap(_ => new IllegalStateException("Invalid integrity audit identity"))
+                   .leftMap(_ => MigrationError.StepFailed(Audit, "invalid audit identity"))
                ).flatMap(scan(collectionName, _))
              else IO.unit)
         }
     }
     for {
-      previous <- ledger.flatMap(_.find(Filters.eq("_id", AuditId)).first)
-      resume = previous.filter(row => row.getString("state") != "Complete")
+      previous <- ledger.flatMap(_.find(Filters.eq(MongoFields.Id, AuditId)).first)
+      resume = previous.filter(row => row.getString(MongoFields.State) != "Complete")
       selected = resume.flatMap(row => Option(row.getString("collection")))
       _ <- IO.raiseUnless(selected.forall(collections.contains))(
-        new IllegalStateException("Unsupported audit checkpoint")
+        MigrationError.StepFailed(Audit, "unsupported audit checkpoint")
       )
       _ <- ledger
         .flatMap(
           _.updateOne(
-            Filters.eq("_id", AuditId),
-            Updates.combine(Updates.set("state", "Running"), Updates.setOnInsert("_id", AuditId)),
+            Filters.eq(MongoFields.Id, AuditId),
+            Updates.combine(Updates.set(MongoFields.State, "Running"), Updates.setOnInsert(MongoFields.Id, AuditId)),
             new UpdateOptions().upsert(true)
           )
         )
         .void
       _ <- collections.dropWhile(name => selected.exists(_ != name)).traverse_ { name =>
-        val checkpoint = Option.when(selected.contains(name))(resume.flatMap(row => Option(row.get("lastId")))).flatten
+        val checkpoint =
+          Option.when(selected.contains(name))(resume.flatMap(row => Option(row.get(MongoFields.LastId)))).flatten
         // Persist collection switches before reading; a restart must not reuse the previous collection's cursor.
         val setCollection =
           if (selected.contains(name)) IO.unit
@@ -108,24 +121,28 @@ object MongoWorkflowIntegrityAudit extends IOApp {
             ledger
               .flatMap(
                 _.updateOne(
-                  Filters.eq("_id", AuditId),
-                  Updates.combine(Updates.set("collection", name), Updates.unset("lastId"))
+                  Filters.eq(MongoFields.Id, AuditId),
+                  Updates.combine(Updates.set("collection", name), Updates.unset(MongoFields.LastId))
                 )
               )
               .void
         setCollection *> IO
           .fromEither(
             checkpoint
-              .traverse(value => MongoInterviewCleanupSweepCodec.identity(new Document("_id", value)))
-              .leftMap(_ => new IllegalStateException("Invalid integrity audit checkpoint"))
+              .traverse(value => MongoInterviewCleanupSweepCodec.identity(new Document(MongoFields.Id, value)))
+              .leftMap(_ => MigrationError.StepFailed(Audit, "invalid audit checkpoint"))
           )
           .flatMap(scan(name, _))
       }
       _ <- ledger
         .flatMap(
           _.updateOne(
-            Filters.eq("_id", AuditId),
-            Updates.combine(Updates.set("state", "Complete"), Updates.unset("lastId"), Updates.unset("collection"))
+            Filters.eq(MongoFields.Id, AuditId),
+            Updates.combine(
+              Updates.set(MongoFields.State, "Complete"),
+              Updates.unset(MongoFields.LastId),
+              Updates.unset("collection")
+            )
           )
         )
         .void

@@ -5,8 +5,8 @@ import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.{UserId, parse as parseIdentifier}
 import com.example.graphQL.cats.service.port.RepositoryError
 import com.example.graphQL.cats.service.search.*
+import com.example.graphQL.cats.repository.mongo.MongoHiringCodecs.StoredDocumentError
 import org.bson.Document
-import scala.jdk.CollectionConverters.*
 
 /** Projected BSON is untrusted; malformed present values fail closed at this adapter. */
 private[mongo] object MongoSearchEligibilityCodecs {
@@ -41,24 +41,17 @@ private[mongo] object MongoSearchEligibilityCodecs {
   def projection(fields: List[String]): Document = fields.foldLeft(new Document())((doc, field) => doc.append(field, 1))
 
   def metadata(document: Document): Either[RepositoryError, Option[EmbeddingMeta]] =
-    Either
-      .catchNonFatal(Option(document.get(MongoFields.EmbeddingMeta, classOf[Document])))
-      .leftMap(_ => RepositoryError.InvalidStoredData)
-      .flatMap(_.traverse { value =>
-        def text(field: String): Either[RepositoryError, String] =
-          Either
-            .catchNonFatal(Option(value.getString(field)))
-            .leftMap(_ => RepositoryError.InvalidStoredData)
-            .flatMap(_.toRight(RepositoryError.InvalidStoredData))
-        for {
-          model <- text(MongoFields.Model)
-          hash <- text(MongoFields.SourceHash)
-          timestamp <- Either
-            .catchNonFatal(Option(value.getDate(MongoFields.UpdatedAt)))
-            .leftMap(_ => RepositoryError.InvalidStoredData)
-            .flatMap(_.toRight(RepositoryError.InvalidStoredData))
-        } yield EmbeddingMeta(model, hash, timestamp.toInstant)
-      })
+    MongoDocumentFields.toRepository(
+      MongoDocumentFields
+        .optionalDocument(document, MongoFields.EmbeddingMeta)
+        .flatMap(_.traverse { value =>
+          (
+            MongoDocumentFields.requiredString(value, MongoFields.Model),
+            MongoDocumentFields.requiredString(value, MongoFields.SourceHash),
+            MongoDocumentFields.requiredInstant(value, MongoFields.UpdatedAt)
+          ).mapN(EmbeddingMeta.apply)
+        })
+    )
 
   def job(document: Document): Either[RepositoryError, JobSearchEligibility] = {
     val source = new Document(document)
@@ -69,34 +62,7 @@ private[mongo] object MongoSearchEligibilityCodecs {
 
   def candidate(document: Document): Either[RepositoryError, CandidateSearchEligibility] =
     for {
-      rawId <- Either.catchNonFatal(document.getString(MongoFields.Id)).leftMap(_ => RepositoryError.InvalidStoredData)
-      id <- parseIdentifier(rawId)(UserId.apply).leftMap(_ => RepositoryError.InvalidStoredData)
-      source <- Either
-        .catchNonFatal {
-          val role = UserRole.valueOf(document.getString(MongoFields.Role))
-          val status = AccountStatus.valueOf(document.getString(MongoFields.AccountStatus))
-          val profile = Option
-            .when(role == UserRole.Candidate && status == AccountStatus.Active)(
-              document.get(MongoFields.Profile, classOf[Document])
-            )
-            .flatMap(Option(_))
-            .map { value =>
-              val skills = value.get(MongoFields.Skills, classOf[java.util.List[String]]).asScala.toSet
-              val summary = Option(value.getString(MongoFields.ExperienceSummary))
-              val residence = Option(value.get(MongoFields.CurrentResidence, classOf[Document])).map { residence =>
-                val country = residence.getString(MongoFields.Country)
-                require(country != null)
-                CandidateResidence(country, Option(residence.getString(MongoFields.City)))
-              }
-              val availability =
-                Option(value.getString(MongoFields.AvailabilityStatus)).map(CandidateAvailabilityStatus.valueOf)
-              val optIn =
-                Option(value.get(MongoFields.RecruiterSearchOptIn, classOf[java.lang.Boolean])).exists(_.booleanValue())
-              CandidateProfile(skills, summary, None, residence, availability, optIn)
-            }
-          CandidateSearchEligibility(id, role, status, profile, None, Option(document.getString(MongoFields.Name)))
-        }
-        .leftMap(_ => RepositoryError.InvalidStoredData)
+      source <- MongoDocumentFields.toRepository(candidateSource(document))
       _ <- Either.cond(
         source.role != UserRole.Candidate || source.accountStatus != AccountStatus.Active ||
           source.name.exists(_.nonEmpty),
@@ -105,4 +71,37 @@ private[mongo] object MongoSearchEligibilityCodecs {
       )
       meta <- metadata(document)
     } yield source.copy(metadata = meta)
+
+  private def candidateSource(document: Document): MongoDocumentFields.Read[CandidateSearchEligibility] =
+    for {
+      rawId <- MongoDocumentFields.requiredString(document, MongoFields.Id)
+      id <- parseIdentifier(rawId)(UserId.apply).leftMap(_ => StoredDocumentError.InvalidField(MongoFields.Id))
+      role <- MongoDocumentFields.requiredEnum(document, MongoFields.Role)(MongoDocumentFields.byName(UserRole.values))
+      status <- MongoDocumentFields.requiredEnum(document, MongoFields.AccountStatus)(
+        MongoDocumentFields.byName(AccountStatus.values)
+      )
+      profile <-
+        if (role == UserRole.Candidate && status == AccountStatus.Active)
+          MongoDocumentFields.optionalDocument(document, MongoFields.Profile).flatMap(_.traverse(candidateProfile))
+        else Right(None)
+      name <- MongoDocumentFields.optionalString(document, MongoFields.Name)
+    } yield CandidateSearchEligibility(id, role, status, profile, None, name)
+
+  private def candidateProfile(value: Document): MongoDocumentFields.Read[CandidateProfile] =
+    for {
+      skills <- MongoDocumentFields.requiredStringVector(value, MongoFields.Skills)
+      summary <- MongoDocumentFields.optionalString(value, MongoFields.ExperienceSummary)
+      residence <- MongoDocumentFields
+        .optionalDocument(value, MongoFields.CurrentResidence)
+        .flatMap(_.traverse { r =>
+          (
+            MongoDocumentFields.requiredString(r, MongoFields.Country),
+            MongoDocumentFields.optionalString(r, MongoFields.City)
+          ).mapN(CandidateResidence.apply)
+        })
+      availability <- MongoDocumentFields.optionalEnum(value, MongoFields.AvailabilityStatus)(
+        MongoDocumentFields.byName(CandidateAvailabilityStatus.values)
+      )
+      optIn <- MongoDocumentFields.optionalBoolean(value, MongoFields.RecruiterSearchOptIn)
+    } yield CandidateProfile(skills.toSet, summary, None, residence, availability, optIn.getOrElse(false))
 }

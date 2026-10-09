@@ -3,7 +3,7 @@ package com.example.graphQL.cats.repository.mongo
 import cats.effect.IO
 import com.example.graphQL.cats.domain.model.{AccountStatus, JobStatus, UserRole}
 import com.example.graphQL.cats.service.Diagnostics
-import com.example.graphQL.cats.service.port.{RepositoryError, RepositoryIO}
+import com.example.graphQL.cats.service.port.RepositoryIO
 import com.example.graphQL.cats.service.read.HiringReadScope
 import mongo4cats.database.MongoDatabase
 import org.bson.Document
@@ -112,5 +112,5 @@ private[mongo] object MongoAuthorizedReadQueries {
             _.aggregate[Document](pipeline :+ new Document("$limit", limit)).boundedStream(limit).compile.toList
           )
       )
-    )(_ => Left(RepositoryError.Unavailable))
+    )
 }

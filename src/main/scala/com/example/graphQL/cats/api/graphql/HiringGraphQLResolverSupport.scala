@@ -12,16 +12,14 @@ import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, UserId}
 import com.example.graphQL.cats.service.{ActorContext, AvailabilityError, SearchError, UseCaseError}
 import com.example.graphQL.cats.service.ProbeResult
 import com.example.graphQL.cats.service.protocol.{IdempotencyRequest, UseCaseIO}
-import com.example.graphQL.cats.service.events.{OperationalEvents, SearchSession, SearchSessionResult}
+import com.example.graphQL.cats.service.events.OperationalEventPayload
 import com.example.graphQL.cats.domain.pagination.*
-import com.example.graphQL.cats.service.search.JobSearchFilter
+import com.example.graphQL.cats.service.search.{JobSearchFilter, SearchSessionEntry}
 import io.circe.{Json, Printer}
 import io.circe.syntax.*
 import sangria.schema.Context
 
-import java.nio.charset.StandardCharsets
 import java.util.{Locale, UUID}
-import scala.concurrent.duration.*
 
 private[graphql] object HiringGraphQLResolverSupport {
   private val CanonicalJsonPrinter = Printer.noSpaces.copy(sortKeys = true)
@@ -58,9 +56,6 @@ private[graphql] object HiringGraphQLResolverSupport {
       "reason" -> reason.asJson
     )
 
-  def searchEventId(searchId: UUID): UUID =
-    UUID.nameUUIDFromBytes(s"search-performed:$searchId".getBytes(StandardCharsets.UTF_8))
-
   def jobFilter(value: Option[JobFilterGraphQLInput]): JobSearchFilter =
     value match {
       case None         => JobSearchFilter(None, Set.empty, None)
@@ -75,34 +70,28 @@ private[graphql] object HiringGraphQLResolverSupport {
       "createdAfter" -> value.createdAfter.fold(Json.Null)(instant => Json.fromString(instant.toString))
     )
 
-  def saveSearchSession[A](
+  /** Resolves the client-supplied search id or lets the service generate one. */
+  def searchIdFor(hiring: HiringGraphQLServices, supplied: Option[UUID]): HiringGraphQLResult[UUID] =
+    EitherT.liftF[IO, HiringGraphQLFailure, UUID](hiring.searchSessions.searchId(supplied))
+
+  def recordSearch[A](
       hiring: HiringGraphQLServices,
       actorId: UserId,
-      kind: String,
+      kind: OperationalEventPayload.SearchKind,
       searchId: UUID,
       filter: Json,
       model: Option[String] = None
-  )(results: List[A])(idOf: A => String, scoreOf: A => Double): IO[Unit] =
-    IO.realTimeInstant.flatMap { now =>
-      val session = SearchSession(
-        searchId,
+  )(results: List[A])(idOf: A => String, scoreOf: A => Double): HiringGraphQLResult[Unit] =
+    EitherT.liftF[IO, HiringGraphQLFailure, Unit](
+      hiring.searchSessions.record(
         actorId,
         kind,
-        None,
+        searchId,
         filter,
         model,
-        results.zipWithIndex.map { case (result, index) =>
-          SearchSessionResult(idOf(result), index + 1, scoreOf(result))
-        },
-        now,
-        now.plusSeconds(7.days.toSeconds)
+        results.map(result => SearchSessionEntry(idOf(result), scoreOf(result)))
       )
-      IO.fromEither(
-        OperationalEvents
-          .searchPerformed(searchEventId(searchId), session)
-          .leftMap(_ => new IllegalStateException("Invalid search event contract"))
-      ).flatMap(event => hiring.searchSessionHandoff.enqueue(session, event))
-    }
+    )
 
   def authenticated[A](context: Context[RequestContext, Unit])(
       action: (ActorContext, HiringGraphQLServices) => HiringGraphQLResult[A]
@@ -199,12 +188,7 @@ private[graphql] object HiringGraphQLResolverSupport {
     pageSize(first).flatMap { size =>
       after
         .traverse(decode)
-        .leftMap {
-          case CursorCodec.CursorError.WrongKind(_) =>
-            GraphQLFailure("WRONG_CURSOR_KIND", "Cursor belongs to a different connection", exceptional = false)
-          case CursorCodec.CursorError.Malformed(_) =>
-            GraphQLFailure("INVALID_CURSOR", "Invalid cursor", exceptional = false)
-        }
+        .leftMap(GraphQLFailureCatalog.classifyCursor)
         .map(cursor => build(cursor, PageSize.next(size)) -> size.value)
     }
 

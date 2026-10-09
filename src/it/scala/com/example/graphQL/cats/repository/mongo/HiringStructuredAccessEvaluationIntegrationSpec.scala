@@ -164,7 +164,9 @@ final class HiringStructuredAccessEvaluationIntegrationSpec extends MongoIntegra
       JobService.live(users, jobRepository, publisher, idempotent, Diagnostics.noop),
       ApplicationService.live(users, jobRepository, applicationRepository, idempotent),
       CursorCodec.keyFromSecret(auth.hmacSecret),
-      TestGraphQLSupport.accountService
+      TestGraphQLSupport.accountService,
+      TestGraphQLSupport.interactions,
+      TestGraphQLSupport.searchSessions
     )
     val authenticator = new JwtActorAuthenticator(auth, UserAuthenticationService(users), cats.effect.Clock[IO])
     val probe = MongoDatabaseProbe.fromDatabase(fixture.database, Map.empty, Diagnostics.noop)

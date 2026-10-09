@@ -37,30 +37,30 @@ final class MongoHiringIndexRecoveryIntegrationSpec extends MongoIntegrationSuit
     IndexSpec(
       MongoCollections.Jobs,
       Indexes.ascending(MongoFields.Id, MongoFields.CreatedAt),
-      new IndexOptions().name(MongoHiringSetup.JobsCreatedIndex)
+      new IndexOptions().name(MongoIndexNames.JobsCreated)
     ),
     IndexSpec(
       MongoCollections.Users,
       Indexes.ascending(MongoFields.NameCanonical),
-      new IndexOptions().name(MongoHiringSetup.UsersNameIndex).unique(false)
+      new IndexOptions().name(MongoIndexNames.UsersName).unique(false)
     ),
     IndexSpec(
       MongoCollections.Users,
       Indexes.ascending(MongoFields.EmailCanonical),
-      new IndexOptions().name(MongoHiringSetup.UsersEmailIndex).unique(true).sparse(false)
+      new IndexOptions().name(MongoIndexNames.UsersEmail).unique(true).sparse(false)
     ),
     IndexSpec(
       MongoCollections.Users,
       Indexes.ascending(MongoFields.AdminSingletonKey),
       new IndexOptions()
-        .name(MongoHiringSetup.UsersAdminSingletonIndex)
+        .name(MongoIndexNames.UsersAdminSingleton)
         .unique(true)
         .partialFilterExpression(Filters.eq(MongoFields.Role, "Recruiter"))
     ),
     IndexSpec(
       MongoCollections.SearchSessions,
       Indexes.ascending(MongoFields.ExpiresAt),
-      new IndexOptions().name(MongoHiringSetup.SearchSessionsExpiryIndex).expireAfter(60L, TimeUnit.SECONDS)
+      new IndexOptions().name(MongoIndexNames.SearchSessionsExpiry).expireAfter(60L, TimeUnit.SECONDS)
     )
   )
 
@@ -90,7 +90,11 @@ final class MongoHiringIndexRecoveryIntegrationSpec extends MongoIntegrationSuit
           _ <- assertApplicationUniqueness(fixture.database)
         } yield {
           assert(result.isLeft)
-          assert(result.left.toOption.exists(_.getMessage.contains("index definition mismatch")))
+          assert(result.left.toOption.exists {
+            case MigrationError.IndexMismatch(collection, index, _) =>
+              collection == spec.collection && index == spec.options.getName
+            case _ => false
+          })
           assertEquals(after, before)
         }
       }
@@ -103,7 +107,7 @@ final class MongoHiringIndexRecoveryIntegrationSpec extends MongoIntegrationSuit
         coll <- MongoRepositoryTestSupport.collection(fixture.database, MongoCollections.Applications)
         _ <- coll.createIndex(
           Indexes.ascending(MongoFields.CandidateId, MongoFields.JobId),
-          new IndexOptions().name(MongoHiringSetup.ApplicationsCandidateJobIndex).unique(true)
+          new IndexOptions().name(MongoIndexNames.ApplicationsCandidateJob).unique(true)
         )
         admin <- fixture.client.getDatabase("admin")
         _ <- support.command(
@@ -121,7 +125,7 @@ final class MongoHiringIndexRecoveryIntegrationSpec extends MongoIntegrationSuit
         _ <- assertApplicationUniqueness(fixture.database)
       } yield {
         assert(interrupted.isLeft)
-        assert(retained.exists(_.getString("name") == MongoHiringSetup.ApplicationsCandidateJobIndex))
+        assert(retained.exists(_.getString("name") == MongoIndexNames.ApplicationsCandidateJob))
         assertEquals(repeated, complete)
       }
     }

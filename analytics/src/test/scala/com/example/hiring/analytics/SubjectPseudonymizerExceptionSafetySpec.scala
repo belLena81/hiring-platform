@@ -1,6 +1,6 @@
 package com.example.hiring.analytics
 
-import com.example.hiring.analytics.domain.{SubjectPseudonymizer, SubjectToken}
+import com.example.hiring.analytics.domain.SubjectToken
 
 import munit.FunSuite
 

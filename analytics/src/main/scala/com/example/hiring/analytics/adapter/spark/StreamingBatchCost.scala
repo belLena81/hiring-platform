@@ -1,6 +1,5 @@
 package com.example.hiring.analytics.adapter.spark
 
-import cats.Applicative
 import cats.effect.{Async, Outcome, Resource}
 import cats.effect.syntax.all.*
 import cats.syntax.all.*
@@ -85,8 +84,9 @@ final class StreamingBatchCost[F[_]: Async] private[analytics] (
     ): F[AnalyticsReportReservation] =
       timed(Stage.Reserve)(stages.reservePublication(preparation, revision))
 
-    override def publicationReceipt(preparation: StreamingInputPreparation, decision: StreamingDecisionRevision)(using
-        Applicative[F]
+    override def publicationReceipt(
+        preparation: StreamingInputPreparation,
+        decision: StreamingDecisionRevision
     ): F[AnalyticsReportPublicationReceipt] = timed(Stage.Receipt)(stages.publicationReceipt(preparation, decision))
 
     override def assess(

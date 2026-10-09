@@ -1,0 +1,63 @@
+{
+  "description": "Shared contract for Kafka SASL client settings. Asserted by KafkaClientSettingsSpec (root) and KafkaClientPropertiesSpec (analytics) so the two builders cannot drift. JAAS literals escape backslash, double quote, and the control characters newline, carriage return, tab, backspace and form feed.",
+  "credentialed": [
+    {
+      "name": "tls-plain-credentials",
+      "protocol": "SASL_SSL",
+      "username": "reader",
+      "password": "credential",
+      "expected": {
+        "security.protocol": "SASL_SSL",
+        "sasl.mechanism": "PLAIN",
+        "sasl.jaas.config": "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"reader\" password=\"credential\";"
+      }
+    },
+    {
+      "name": "local-plaintext-transport",
+      "protocol": "SASL_PLAINTEXT",
+      "username": "publisher",
+      "password": "publish-secret",
+      "expected": {
+        "security.protocol": "SASL_PLAINTEXT",
+        "sasl.mechanism": "PLAIN",
+        "sasl.jaas.config": "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"publisher\" password=\"publish-secret\";"
+      }
+    },
+    {
+      "name": "quote-and-backslash",
+      "protocol": "SASL_SSL",
+      "username": "us\"er\\x",
+      "password": "pa\"ss\\",
+      "expected": {
+        "security.protocol": "SASL_SSL",
+        "sasl.mechanism": "PLAIN",
+        "sasl.jaas.config": "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"us\\\"er\\\\x\" password=\"pa\\\"ss\\\\\";"
+      }
+    },
+    {
+      "name": "control-characters",
+      "protocol": "SASL_SSL",
+      "username": "line\nuser",
+      "password": "tab\tvalue\r",
+      "expected": {
+        "security.protocol": "SASL_SSL",
+        "sasl.mechanism": "PLAIN",
+        "sasl.jaas.config": "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"line\\nuser\" password=\"tab\\tvalue\\r\";"
+      }
+    }
+  ],
+  "anonymous": [
+    {
+      "name": "no-credentials-tls-configured",
+      "protocol": "SASL_SSL",
+      "expectedRoot": { "security.protocol": "PLAINTEXT" },
+      "expectedAnalytics": { "security.protocol": "SASL_SSL" }
+    },
+    {
+      "name": "no-credentials-plaintext-configured",
+      "protocol": "SASL_PLAINTEXT",
+      "expectedRoot": { "security.protocol": "PLAINTEXT" },
+      "expectedAnalytics": { "security.protocol": "SASL_PLAINTEXT" }
+    }
+  ]
+}

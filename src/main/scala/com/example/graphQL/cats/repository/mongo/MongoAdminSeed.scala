@@ -1,6 +1,7 @@
 package com.example.graphQL.cats.repository.mongo
 
-import cats.effect.IO
+import cats.effect.{Clock, IO}
+import cats.effect.std.UUIDGen
 import com.example.graphQL.cats.config.AdminSeedConfig
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
@@ -20,7 +21,9 @@ object MongoAdminSeed {
       database: MongoDatabase[IO],
       accounts: UserAccountRepository,
       hasher: PasswordHasher,
-      config: AdminSeedConfig
+      config: AdminSeedConfig,
+      clock: Clock[IO] = Clock[IO],
+      uuidGen: UUIDGen[IO] = UUIDGen[IO]
   ): IO[Unit] =
     if (!config.enabled) IO.unit
     else
@@ -36,7 +39,7 @@ object MongoAdminSeed {
           def existing: IO[Unit] = registryState.flatMap {
             case Some(document)
                 if Option(document.get(MongoFields.State)).contains("Initialized") &&
-                  scala.util.Try(UUID.fromString(String.valueOf(document.get(MongoFields.AdminId)))).isSuccess =>
+                  MongoDocumentFields.requiredUuid(document, MongoFields.AdminId).isRight =>
               IO.unit
             case _ => rejected
           }
@@ -57,8 +60,8 @@ object MongoAdminSeed {
             case Right(true)  => existing
             case Right(false) =>
               for {
-                now <- IO.realTimeInstant
-                id <- IO(UUID.randomUUID()).map(UserId.apply)
+                now <- clock.realTimeInstant
+                id <- uuidGen.randomUUID.map(UserId.apply)
                 hash <- hasher.hash(password)
                 user = User(id, None, Normalizer.normalize(name.trim, Normalizer.Form.NFKC), UserRole.Admin, None, now)
                   .copy(adminSingleton = true)

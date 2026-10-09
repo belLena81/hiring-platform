@@ -2,27 +2,24 @@ package com.example.graphQL.cats.config
 
 import cats.data.ValidatedNel
 import cats.syntax.all.*
+import com.example.graphQL.cats.domain.workflow.InterviewTopicPair
 
 private[config] object KafkaConfigValidation {
   def read(kafka: RawKafkaConfig): ValidatedNel[ConfigError, KafkaConfig] =
     (
       validKafkaSaslSecurityProtocol(kafka.saslSecurityProtocol, kafka.bootstrapServers),
-      ConfigBounds.bounded(1, 300, ConfigError.InvalidKafkaRestartMaxDelay)(kafka.restartMaxDelaySeconds.getOrElse(30)),
       validKafkaCredentials(kafka.enabled, kafka.publisher.saslUsername, kafka.publisher.saslPassword),
       validKafkaCredentials(
         kafka.enabled && kafka.consumer.enabled,
         kafka.consumer.saslUsername,
         kafka.consumer.saslPassword
       ),
-      ConfigBounds.bounded(1, 64, ConfigError.InvalidKafkaPartitionConcurrency)(
-        kafka.consumer.partitionConcurrency.getOrElse(4)
-      ),
       validInterview(
         kafka.interview.getOrElse(RawInterviewRuntimeConfig()),
         kafka.enabled,
         List(kafka.publisher.saslUsername, kafka.consumer.saslUsername).flatten
       )
-    ).mapN { (saslSecurityProtocol, restartMaxDelaySeconds, _, _, _, interview) =>
+    ).mapN { (saslSecurityProtocol, _, _, interview) =>
       KafkaConfig(
         kafka.enabled,
         kafka.bootstrapServers,
@@ -44,52 +41,32 @@ private[config] object KafkaConfigValidation {
           kafka.consumer.quarantineTtlDays,
           kafka.consumer.saslUsername,
           kafka.consumer.saslPassword,
-          kafka.consumer.partitionConcurrency.getOrElse(4)
+          kafka.consumer.partitionConcurrency.getOrElse(KafkaConsumerConfig.DefaultPartitionConcurrency)
         ),
         saslSecurityProtocol,
         interview,
-        restartMaxDelaySeconds
+        kafka.restartMaxDelaySeconds.getOrElse(KafkaConfig.DefaultRestartMaxDelaySeconds)
       )
     }
 
+  /** Per-field bounds are decoded by the refined raw types; this combines the cross-field interview rules. */
   private[config] def validInterview(
       raw: RawInterviewRuntimeConfig,
       kafkaEnabled: Boolean = true,
       operationalPrincipals: List[String] = Nil
-  ): ValidatedNel[ConfigError, InterviewRuntimeConfig] =
+  ): ValidatedNel[ConfigError, InterviewRuntimeConfig] = {
+    val defaults = InterviewRuntimeConfig()
     (
       validKafkaCredentials(raw.enabled, raw.orchestratorUsername, raw.orchestratorPassword),
       validKafkaCredentials(raw.enabled, raw.workerUsername, raw.workerPassword),
       validKafkaCredentials(raw.enabled, raw.fencerUsername, raw.fencerPassword),
-      Either
-        .cond(
-          raw.publicationBatchSize.getOrElse(16) >= 1 && raw.publicationBatchSize.getOrElse(
-            16
-          ) <= 64 && raw.publicationPollIntervalMs.getOrElse(1000) >= 100 &&
-            raw.publicationPollIntervalMs.getOrElse(1000) <= 60000 && raw.clockSkewToleranceMillis.getOrElse(
-              5000
-            ) >= 0 && raw.clockSkewToleranceMillis.getOrElse(
-              5000
-            ) <= 60000 &&
-            validInterviewTransportNames(raw) && raw.partitionConcurrency.getOrElse(4) >= 1 && raw.partitionConcurrency
-              .getOrElse(
-                4
-              ) <= 64 && raw.maxAttempts >= 1 && raw.maxAttempts <= 100 && raw.retryBaseSeconds >= 1 &&
-            raw.retryCapSeconds >= raw.retryBaseSeconds && raw.retryCapSeconds <= 300 &&
-            raw.providerTimeoutSeconds >= 1 && raw.providerTimeoutSeconds.toLong + 30L < raw.claimSeconds.toLong &&
-            raw.claimSeconds <= 3600 && raw.preCommitDeadlineSeconds >= 1 && raw.preCommitDeadlineSeconds <= 300 && raw.replayRetentionSeconds == 604800L &&
-            raw.completedDedupRetentionSeconds >= 691200L && raw.completedDedupRetentionSeconds <= 31536000L &&
-            (!raw.enabled || (kafkaEnabled && raw.orchestratorUsername != raw.workerUsername &&
-              raw.fencerUsername != raw.orchestratorUsername && raw.fencerUsername != raw.workerUsername &&
-              !operationalPrincipals.exists(principal =>
-                raw.orchestratorUsername.contains(principal) || raw.workerUsername
-                  .contains(principal) || raw.fencerUsername.contains(principal)
-              ))),
-          (),
-          ConfigError.InvalidKafkaCredentials
-        )
-        .toValidatedNel
-    ).mapN { (_, _, _, _) =>
+      validInterviewActivation(raw.enabled, kafkaEnabled),
+      validInterviewPrincipals(raw, operationalPrincipals),
+      validRetryWindow(raw.retryBaseSeconds, raw.retryCapSeconds),
+      validClaimWindow(raw.providerTimeoutSeconds, raw.claimSeconds),
+      validTopicPair(raw.commandsTopic, raw.resultsTopic),
+      validGroupPair(raw.workerGroup, raw.orchestratorGroup)
+    ).mapN { (_, _, _, _, _, _, _, topics, _) =>
       InterviewRuntimeConfig(
         raw.enabled,
         raw.orchestratorUsername,
@@ -106,22 +83,55 @@ private[config] object KafkaConfigValidation {
         raw.completedDedupRetentionSeconds,
         raw.fencerUsername,
         raw.fencerPassword,
-        raw.publicationBatchSize.getOrElse(16),
-        raw.publicationPollIntervalMs.getOrElse(1000),
-        raw.clockSkewToleranceMillis.getOrElse(5000),
-        raw.partitionConcurrency.getOrElse(4),
-        com.example.graphQL.cats.domain.workflow.InterviewTopicPair(raw.commandsTopic, raw.resultsTopic),
+        raw.publicationBatchSize.getOrElse(defaults.publicationBatchSize),
+        raw.publicationPollIntervalMs.getOrElse(defaults.publicationPollIntervalMs),
+        raw.clockSkewToleranceMillis.getOrElse(defaults.clockSkewToleranceMillis),
+        raw.partitionConcurrency.getOrElse(defaults.partitionConcurrency),
+        topics,
         raw.workerGroup,
-        raw.orchestratorGroup
+        raw.orchestratorGroup,
+        raw.proposalTtlSeconds
       )
     }
-
-  private def validInterviewTransportNames(raw: RawInterviewRuntimeConfig): Boolean = {
-    def topic(value: String): Boolean = value.matches("[A-Za-z0-9._-]{1,249}") && value != "." && value != ".."
-    def group(value: String): Boolean = value.matches("[A-Za-z0-9._-]{1,200}")
-    topic(raw.commandsTopic) && topic(raw.resultsTopic) && raw.commandsTopic != raw.resultsTopic &&
-    group(raw.workerGroup) && group(raw.orchestratorGroup) && raw.workerGroup != raw.orchestratorGroup
   }
+
+  /** The interview workflow runs over Kafka, so it cannot be enabled while Kafka publication is disabled. */
+  private def validInterviewActivation(enabled: Boolean, kafkaEnabled: Boolean): ValidatedNel[ConfigError, Unit] =
+    Either.cond(!enabled || kafkaEnabled, (), ConfigError.InvalidInterviewEnabled).toValidatedNel
+
+  /** Enabled workflows need three distinct principals that do not reuse operational publisher/reader principals. */
+  private def validInterviewPrincipals(
+      raw: RawInterviewRuntimeConfig,
+      operationalPrincipals: List[String]
+  ): ValidatedNel[ConfigError, Unit] = {
+    val principals = List(raw.orchestratorUsername, raw.workerUsername, raw.fencerUsername).flatten
+    val distinct = principals.distinct.length == principals.length
+    val isolated = !principals.exists(operationalPrincipals.contains)
+    Either.cond(!raw.enabled || (distinct && isolated), (), ConfigError.InvalidInterviewPrincipals).toValidatedNel
+  }
+
+  private def validRetryWindow(baseSeconds: Int, capSeconds: Int): ValidatedNel[ConfigError, Unit] =
+    Either.cond(capSeconds >= baseSeconds, (), ConfigError.InvalidInterviewRetryWindow).toValidatedNel
+
+  /** A claim must outlive the provider call by a fixed margin so a slow provider cannot outlast its lease. */
+  private def validClaimWindow(providerTimeoutSeconds: Int, claimSeconds: Int): ValidatedNel[ConfigError, Unit] =
+    Either
+      .cond(
+        providerTimeoutSeconds.toLong + ClaimMarginSeconds < claimSeconds.toLong,
+        (),
+        ConfigError.InvalidInterviewClaimWindow
+      )
+      .toValidatedNel
+
+  private def validTopicPair(commands: String, results: String): ValidatedNel[ConfigError, InterviewTopicPair] =
+    Either
+      .cond(commands != results, InterviewTopicPair(commands, results), ConfigError.InvalidInterviewTopicPair)
+      .toValidatedNel
+
+  private def validGroupPair(workerGroup: String, orchestratorGroup: String): ValidatedNel[ConfigError, Unit] =
+    Either.cond(workerGroup != orchestratorGroup, (), ConfigError.InvalidInterviewGroupPair).toValidatedNel
+
+  private val ClaimMarginSeconds = 30L
 
   def validKafkaSaslSecurityProtocol(
       value: Option[String],

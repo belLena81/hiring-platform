@@ -59,3 +59,6 @@ __pycache__/
 
 ### Claude Code personal overrides ###
 /.claude/settings.local.json
+
+### Spark local warehouse created by analytics sessions ###
+spark-warehouse/

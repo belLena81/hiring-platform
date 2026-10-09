@@ -3,7 +3,7 @@ package com.example.graphQL.cats.repository.mongo
 import cats.effect.{IO, Resource}
 import com.example.graphQL.cats.service.port.{RepositoryError, RepositoryIO}
 import com.example.graphQL.cats.service.Diagnostics
-import com.mongodb.{MongoCommandException, MongoException, MongoWriteException}
+import com.mongodb.{MongoCommandException, MongoException}
 import mongo4cats.client.{ClientSession, MongoClient}
 import mongo4cats.models.client.ClientSessionOptions
 import retry.*
@@ -190,10 +190,10 @@ private[mongo] object MongoTransactionRunner {
       transientExhaustionError: RepositoryError = RepositoryError.Conflict
   ): Either[RepositoryError, A] =
     error match {
-      case write: MongoWriteException if write.getError.getCode == 11000 => Left(duplicateKeyError)
-      case command: MongoCommandException if isWriteConflict(command)    => Left(transientExhaustionError)
-      case mongo: MongoException if isTransientTransactionError(mongo)   => Left(transientExhaustionError)
-      case _                                                             => Left(RepositoryError.Unavailable)
+      case MongoDuplicateKey(_)                                        => Left(duplicateKeyError)
+      case command: MongoCommandException if isWriteConflict(command)  => Left(transientExhaustionError)
+      case mongo: MongoException if isTransientTransactionError(mongo) => Left(transientExhaustionError)
+      case _                                                           => Left(RepositoryError.Unavailable)
     }
 
   private[mongo] def isWriteConflict(error: MongoCommandException): Boolean =

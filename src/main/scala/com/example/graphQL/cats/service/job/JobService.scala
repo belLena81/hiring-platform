@@ -3,7 +3,7 @@ package com.example.graphQL.cats.service.job
 import cats.effect.{Clock, IO}
 import cats.effect.std.UUIDGen
 import cats.syntax.all.*
-import com.example.graphQL.cats.service.{ActorContext, Diagnostics, LogEvent, LogFields, UseCaseError}
+import com.example.graphQL.cats.service.{ActorContext, Diagnostics, LogEvent, LogFields, SearchError, UseCaseError}
 import com.example.graphQL.cats.service.Diagnostics.*
 import com.example.graphQL.cats.service.UseCaseError.*
 import com.example.graphQL.cats.service.port.{
@@ -155,7 +155,10 @@ final class JobService(
   def nearbyJobs(actor: ActorContext, query: NearbyJobsQuery, limit: Int): UseCaseIO[List[NearbyJob]] =
     for {
       normalized <- UseCase.fromEither(
-        JobDiscoveryValidation.nearby(query).toEither.leftMap(errors => UseCaseError.Search(errors.head))
+        JobDiscoveryValidation
+          .nearby(query)
+          .toEither
+          .leftMap(errors => UseCaseError.Search(SearchError.accumulated(errors)))
       )
       _ <- UseCase.fromEither(
         Either.cond(
@@ -181,7 +184,10 @@ final class JobService(
   def jobDiscoveryFacets(actor: ActorContext, query: JobFacetQuery): UseCaseIO[JobDiscoveryFacets] =
     for {
       normalized <- UseCase.fromEither(
-        JobDiscoveryValidation.facets(query).toEither.leftMap(errors => UseCaseError.Search(errors.head))
+        JobDiscoveryValidation
+          .facets(query)
+          .toEither
+          .leftMap(errors => UseCaseError.Search(SearchError.accumulated(errors)))
       )
       user <- authorization.resolve(actor)
       _ <- UseCase.fromEither(

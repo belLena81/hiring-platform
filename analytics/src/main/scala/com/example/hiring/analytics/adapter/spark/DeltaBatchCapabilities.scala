@@ -3,7 +3,6 @@ package com.example.hiring.analytics.adapter.spark
 import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
 import com.example.hiring.analytics.errors.AnalyticsError
 
-import cats.effect.Async
 import io.delta.tables.DeltaTable
 import org.apache.spark.sql.{Column, DataFrame, Row, SparkSession}
 import org.apache.spark.sql.functions.{col, concat, count, lit, min, sha2, struct, to_json, when}
@@ -13,7 +12,7 @@ import java.sql.Timestamp
 import java.time.Instant
 
 /** Owns idempotent Delta writes used by the bounded batch pipeline. */
-private[analytics] final class DeltaBatchWriter[F[_]: Async](
+private[analytics] final class DeltaBatchWriter[F[_]](
     paths: AnalyticsLakehousePaths,
     execution: SparkExecution[F]
 ) extends DeltaWriter[F] {
@@ -41,9 +40,7 @@ private[analytics] final class DeltaBatchWriter[F[_]: Async](
       raw = path == paths.bronze || path == paths.quarantine || path == paths.lateFacts
     )
     if (!AnalyticsTableSchemas.matches(source.schema, shape))
-      throw com.example.hiring.analytics.errors.AnalyticsError.LakehouseFailure(
-        new IllegalStateException(s"incoming Delta schema differs from the expected analytics schema at $path")
-      )
+      throw com.example.hiring.analytics.errors.AnalyticsError.DeltaSchemaMismatch(path)
     val mutation = DeltaTable
       .forPath(source.sparkSession, SparkPhysicalLocation.resolve(path))
       .as("target")
@@ -62,7 +59,7 @@ private[analytics] final class DeltaBatchWriter[F[_]: Async](
           AnalyticsError.LateFactReplayRejected
         )
     }
-    eligible.map(_ => mutation.execute())
+    eligible.map(_ => mutation.execute()).map(_ => ())
   }
 
   override def withExpiry(frame: DataFrame, now: Instant, days: Int): DataFrame =
@@ -72,7 +69,7 @@ private[analytics] final class DeltaBatchWriter[F[_]: Async](
 }
 
 /** Reads an existing Delta table or creates an empty frame with the caller's expected schema. */
-private[analytics] final class DeltaBatchReader[F[_]: Async](execution: SparkExecution[F]) extends DeltaReader[F] {
+private[analytics] final class DeltaBatchReader[F[_]](execution: SparkExecution[F]) extends DeltaReader[F] {
   override def readOrEmpty(spark: SparkSession, path: String, schema: StructType): F[DataFrame] = execution {
     if (DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(path)))
       spark.read.format("delta").load(SparkPhysicalLocation.resolve(path))
@@ -84,10 +81,16 @@ private[analytics] final class DeltaBatchReader[F[_]: Async](execution: SparkExe
 private[analytics] object QuarantineIdentifier extends QuarantineId {
   override def apply(): Column =
     when(
-      col("rawValue").isNull,
+      col(Columns.RawValue).isNull,
       concat(
         lit("tombstone:"),
-        to_json(struct(col("topic").as("topic"), col("partition").as("partition"), col("offset").as("offset")))
+        to_json(
+          struct(
+            col(Columns.Topic).as(Columns.Topic),
+            col(Columns.Partition).as(Columns.Partition),
+            col(Columns.Offset).as(Columns.Offset)
+          )
+        )
       )
-    ).otherwise(sha2(col("rawValue"), 256))
+    ).otherwise(sha2(col(Columns.RawValue), 256))
 }

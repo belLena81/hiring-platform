@@ -3,10 +3,10 @@ package com.example.hiring.analytics.adapter.mongo
 import com.example.hiring.analytics.domain.AccountSubjectId
 import com.example.hiring.analytics.domain.AnalyticsTopic
 import com.example.hiring.analytics.domain.{AnalyticsOffset, AnalyticsPartition}
-import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.erasure.*
 
 import cats.effect.{Async, Resource}
+import cats.effect.std.UUIDGen
 import cats.syntax.all.*
 import mongo4cats.client.MongoClient
 import mongo4cats.collection.MongoCollection
@@ -81,7 +81,7 @@ private[analytics] final case class MongoAnalyticsErasureStores[F[_]](
 )
 
 private[analytics] object MongoAnalyticsErasureStores {
-  def resource[F[_]: Async](
+  def resource[F[_]: Async: UUIDGen](
       client: MongoClient[F],
       database: MongoDatabase[F],
       streams: MongoPublisherStream

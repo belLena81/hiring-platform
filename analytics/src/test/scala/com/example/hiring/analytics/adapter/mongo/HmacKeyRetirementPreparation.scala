@@ -337,10 +337,7 @@ private[analytics] object HmacKeyRetirementKafkaLineage {
     } yield observed
 }
 
-private[analytics] final class MongoHmacKeyRetirementPreparationStore[F[_]: Async](
-    database: MongoDatabase[F],
-    streams: MongoPublisherStream
-) {
+private[analytics] final class MongoHmacKeyRetirementPreparationStore[F[_]: Async](database: MongoDatabase[F]) {
   private val collection = database
     .withReadConcern(ReadConcern.MAJORITY)
     .getCollection[HmacKeyRetirementPreparation.MongoRecord](

@@ -3,6 +3,8 @@ package com.example.graphQL.cats.service.search
 import com.example.graphQL.cats.domain.model.{EmbeddingMeta, GeoPoint, Job, SearchMode}
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.pagination.PageSize
+import com.example.graphQL.cats.shared.crypto.SourceHash
+import io.circe.Json
 import java.time.Instant
 import java.util.UUID
 
@@ -19,9 +21,33 @@ final case class NearbyJobsQuery(
     after: Option[NearbyJobCursor] = None
 ) {
   def isValid: Boolean = JobDiscoveryValidation.nearby(this).isValid
-  def fingerprint: String = NearbyJobCursorCodec.fingerprint(this)
+  def fingerprint: String = NearbyJobCursor.fingerprint(this)
 }
-final case class NearbyJobCursor(distanceKm: Double, jobId: JobId, queryFingerprint: String)
+final case class NearbyJobCursor(distanceKm: Double, jobId: JobId, queryFingerprint: String) {
+  def hasValidDistance: Boolean = distanceKm.isFinite && distanceKm >= 0d
+  def isBoundTo(query: NearbyJobsQuery): Boolean = queryFingerprint == query.fingerprint
+}
+
+object NearbyJobCursor {
+
+  /** Canonical digest of the criteria and ordering a nearby cursor is bound to. */
+  private[search] def fingerprint(query: NearbyJobsQuery): String =
+    SourceHash.sha256(
+      Json
+        .arr(
+          Json.fromDoubleOrNull(query.center.latitude),
+          Json.fromDoubleOrNull(query.center.longitude),
+          Json.fromDoubleOrNull(query.radiusKm),
+          query.filter.city.map(value => Json.fromString(value.trim)).getOrElse(Json.Null),
+          Json.fromValues(
+            query.filter.skills.toList.map(_.trim).filter(_.nonEmpty).distinct.sorted.map(Json.fromString)
+          ),
+          query.filter.createdAfter.map(value => Json.fromString(value.toString)).getOrElse(Json.Null),
+          Json.fromString("distanceKm,id")
+        )
+        .noSpaces
+    )
+}
 final case class NearbyRadius(center: GeoPoint, radiusKm: Double) {
   def isValid: Boolean = JobDiscoveryValidation.validRadius(center, radiusKm)
 }
@@ -31,12 +57,6 @@ final case class JobFacetQuery(filter: JobSearchFilter, radius: Option[NearbyRad
 
 object NearbyJobsQuery {
   val MaxRadiusKm: Double = 500d
-
-  def encodeCursor(distanceKm: Double, jobId: JobId, query: NearbyJobsQuery): String =
-    NearbyJobCursorCodec.encode(distanceKm, jobId, query)
-
-  def decodeCursor(value: String, query: NearbyJobsQuery): Either[NearbyCursorError, NearbyJobCursor] =
-    NearbyJobCursorCodec.decode(value, query)
 }
 
 final case class NearbyJob(job: Job, distanceKm: Double)

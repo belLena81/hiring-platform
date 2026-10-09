@@ -1,15 +1,18 @@
 package com.example.hiring.analytics
 
 import cats.effect.{Deferred, IO, Resource}
-import cats.effect.syntax.all.*
 import cats.syntax.all.*
 import com.example.hiring.analytics.adapter.kafka.KafkaClientProperties
 import com.example.hiring.analytics.adapter.mongo.MongoAnalyticsStreamingRegistry
 import com.example.hiring.analytics.adapter.spark.*
-import com.example.hiring.analytics.config.{AnalyticsStreamingSettings, KafkaConnection, KafkaSecurityProtocol}
+import com.example.hiring.analytics.config.{
+  AnalyticsConfigFixtures,
+  AnalyticsStreamingSettings,
+  KafkaConnection,
+  KafkaSecurityProtocol
+}
 import com.example.hiring.analytics.domain.{AnalyticsTopic, StreamingActivationIdentity, StreamingBatchId}
 import com.example.hiring.analytics.service.streaming.StreamingActivationGate
-import com.example.hiring.analytics.HiringAnalyticsRecoveryTestSupport.*
 import org.apache.kafka.clients.admin.{Admin, NewTopic}
 import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig, ProducerRecord}
 import org.apache.kafka.common.serialization.StringSerializer
@@ -114,7 +117,7 @@ final class HiringAnalyticsStreamingCancellationIntegrationSpec extends Analytic
     }
 
   private def settings(checkpoint: Path): IO[AnalyticsStreamingSettings] = IO.fromEither(
-    AnalyticsStreamingSettings.fromHocon(s"""analytics.streaming {
+    AnalyticsConfigFixtures.streaming(s"""analytics.streaming {
       stream-id = "hiring-callback-cancellation"
       activation-grant-id = "synthetic-callback-grant"
       checkpoint-location = "${checkpoint.toUri}"

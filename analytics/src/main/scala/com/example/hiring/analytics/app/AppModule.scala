@@ -13,7 +13,9 @@ import com.example.hiring.analytics.config.{
   AnalyticsWorkerSettings,
   AnalyticsStreamingRuntimeSettings,
   AnalyticsNonBlank,
-  AnalyticsLateFactReplaySettings
+  AnalyticsKeyRetirementAuditSettings,
+  AnalyticsLateFactReplaySettings,
+  AnalyticsRuntimeDirectory
 }
 import com.example.hiring.analytics.domain.*
 import com.example.hiring.analytics.errors.AnalyticsError
@@ -21,7 +23,9 @@ import com.example.hiring.analytics.service.batch.*
 import com.example.hiring.analytics.service.erasure.*
 import com.example.hiring.analytics.service.streaming.*
 
-import cats.effect.{Async, Resource}
+import cats.data.NonEmptyChain
+import cats.effect.{Async, Clock, Resource}
+import cats.effect.std.{SecureRandom, UUIDGen}
 import cats.syntax.all.*
 import mongo4cats.client.MongoClient
 import mongo4cats.database.MongoDatabase
@@ -42,6 +46,9 @@ object AppModule {
   final case class WorkerProgram[F[_]] private[app] (run: F[Unit])
   final case class StreamingProgram[F[_]] private[app] (run: F[Unit])
   final case class ReplayProgram[F[_]] private[app] (run: F[AnalyticsLateFactReplayOutcome])
+  final case class KeyRetirementAuditProgram[F[_]] private[app] (
+      run: F[Either[NonEmptyChain[String], AnalyticsKeyRetirement.AuditSummary]]
+  )
 
   private final case class Shared[F[_]](
       paths: AnalyticsLakehousePaths,
@@ -56,6 +63,12 @@ object AppModule {
       maintenance: DeltaAnalyticsErasureLakehouse[F]
   )
 
+  /** One OS-backed generator per program replaces direct `UUID.randomUUID` calls in composed adapters. */
+  private def withSecureUuids[F[_]: Async, A](use: UUIDGen[F] ?=> Resource[F, A]): Resource[F, A] =
+    Resource.eval(SecureRandom.javaSecuritySecureRandom[F]).flatMap { random =>
+      use(using UUIDGen.fromSecureRandom[F](using Async[F], random))
+    }
+
   private[analytics] def resolveLakehousePaths(root: String): Either[AnalyticsError, AnalyticsLakehousePaths] =
     AnalyticsLakehousePaths
       .from(root)
@@ -63,84 +76,91 @@ object AppModule {
       .leftMap(errors => AnalyticsError.InvalidConfiguration(errors.toNonEmptyList.toList.mkString("; ")))
 
   def batch[F[_]: Async](settings: AnalyticsBatchSettings): Resource[F, BatchProgram[F]] =
-    for {
-      pseudonymizer <- Resource.eval(buildPseudonymizer[F](settings.common))
-      shared <- shared[F](settings.common, pseudonymizer, appName = "hiring-analytics-batch")
-    } yield {
-      val common = settings.common
-      val manifestStore = new DeltaManifestStore[F](shared.spark, shared.paths, shared.sparkExecution)
-      val deltaWriter = new DeltaBatchWriter[F](shared.paths, shared.lakehouseExecution)
-      val deltaReader = new DeltaBatchReader[F](shared.lakehouseExecution)
-      val ingestionStage = new AnalyticsBatchIngestionStage[F](
-        shared.paths,
-        pseudonymizer,
-        shared.lakehouseExecution,
-        manifestStore,
-        deltaWriter,
-        common.operational.retention
-      )
-      val silverStage = new AnalyticsBatchSilverStage[F](
-        shared.paths,
-        pseudonymizer,
-        shared.lakehouseExecution,
-        deltaWriter,
-        deltaReader,
-        QuarantineIdentifier,
-        common.operational.retention
-      )
-      val job = new HiringAnalyticsBatch[F](
-        shared.paths,
-        shared.markers,
-        new MongoAnalyticsReportPublisher[F](shared.client, shared.database, common.operational),
-        manifestStore,
-        new SparkAnalyticsBatchLakehouse[F](
-          shared.spark,
+    withSecureUuids[F, BatchProgram[F]] {
+      for {
+        pseudonymizer <- Resource.eval(buildPseudonymizer[F](settings.common))
+        shared <- shared[F](settings.common, pseudonymizer, appName = "hiring-analytics-batch")
+      } yield {
+        val common = settings.common
+        val manifestStore = new DeltaManifestStore[F](shared.spark, shared.paths, shared.sparkExecution)
+        val deltaWriter = new DeltaBatchWriter[F](shared.paths, shared.lakehouseExecution)
+        val deltaReader = new DeltaBatchReader[F](shared.lakehouseExecution)
+        val ingestionStage = new AnalyticsBatchIngestionStage[F](
           shared.paths,
-          new KafkaOffsetRangeSource[F](common.kafka, shared.sparkExecution, shared.sparkExecution),
+          pseudonymizer,
           shared.lakehouseExecution,
-          shared.maintenance,
-          ingestionStage,
-          silverStage
-        ),
-        shared.lock,
-        new MongoAnalyticsStreamingRegistry[F](shared.database, shared.streams),
-        common.operational
-      )
-      BatchProgram(
-        job.run(settings.manifest)
-      )
+          manifestStore,
+          deltaWriter,
+          common.operational.retention,
+          Clock[F]
+        )
+        val silverStage = new AnalyticsBatchSilverStage[F](
+          shared.paths,
+          pseudonymizer,
+          shared.lakehouseExecution,
+          deltaWriter,
+          deltaReader,
+          QuarantineIdentifier,
+          common.operational.retention
+        )
+        val job = new HiringAnalyticsBatch[F](
+          shared.paths,
+          shared.markers,
+          new MongoAnalyticsReportPublisher[F](shared.client, shared.database, common.operational),
+          manifestStore,
+          new SparkAnalyticsBatchLakehouse[F](
+            shared.spark,
+            shared.paths,
+            new KafkaOffsetRangeSource[F](common.kafka, shared.sparkExecution, shared.sparkExecution),
+            shared.lakehouseExecution,
+            shared.maintenance,
+            ingestionStage,
+            silverStage
+          ),
+          shared.lock,
+          new MongoAnalyticsStreamingRegistry[F](shared.database, shared.streams),
+          common.operational,
+          Clock[F]
+        )
+        BatchProgram(
+          job.run(settings.manifest)
+        )
+      }
     }
 
   def worker[F[_]: Async](settings: AnalyticsWorkerSettings): Resource[F, WorkerProgram[F]] =
-    for {
-      pseudonymizer <- Resource.eval(buildPseudonymizer[F](settings.common))
-      shared <- shared[F](settings.common, pseudonymizer, appName = "hiring-analytics-erasure-worker")
-      program <- MongoAnalyticsErasureStores.resource(shared.client, shared.database, shared.streams).map { stores =>
-        val common = settings.common
-        val publisher = new MongoAnalyticsReportPublisher[F](shared.client, shared.database, common.operational)
-        val job = new AnalyticsErasureWorker[F](
-          stores.queue,
-          stores.progress,
-          stores.barrier,
-          AnalyticsErasureKafkaRuntime(
-            settings.fencerKafka,
-            KafkaProducerFencer[F](shared.sparkExecution),
-            KafkaRetentionAdapter.liveRetention[F](common.kafka, settings.topic, shared.sparkExecution)
-          ),
-          shared.paths,
-          publisher,
-          shared.markers,
-          shared.maintenance,
-          shared.lock,
-          Slf4jLogger.getLogger[F],
-          AnalyticsErasureWorkerPolicy(
-            common.operational.retention,
-            common.operational.erasureWorkerTimings
+    withSecureUuids[F, WorkerProgram[F]] {
+      for {
+        pseudonymizer <- Resource.eval(buildPseudonymizer[F](settings.common))
+        shared <- shared[F](settings.common, pseudonymizer, appName = "hiring-analytics-erasure-worker")
+        program <- MongoAnalyticsErasureStores.resource(shared.client, shared.database, shared.streams).map { stores =>
+          val common = settings.common
+          val publisher = new MongoAnalyticsReportPublisher[F](shared.client, shared.database, common.operational)
+          val job = new AnalyticsErasureWorker[F](
+            stores.queue,
+            stores.progress,
+            stores.barrier,
+            AnalyticsErasureKafkaRuntime(
+              settings.fencerKafka,
+              KafkaProducerFencer[F](shared.sparkExecution),
+              KafkaRetentionAdapter.liveRetention[F](common.kafka, settings.topic, shared.sparkExecution)
+            ),
+            shared.paths,
+            publisher,
+            shared.markers,
+            shared.maintenance,
+            shared.lock,
+            Slf4jLogger.getLogger[F],
+            AnalyticsErasureWorkerPolicy(
+              common.operational.retention,
+              common.operational.erasureWorkerTimings
+            ),
+            Clock[F]
           )
-        )
-        WorkerProgram(job.run)
-      }
-    } yield program
+          WorkerProgram(job.run)
+        }
+      } yield program
+    }
 
   /** Long-lived, opt-in Structured Streaming runtime. The Mongo activation gate is read-only and fail-closed. */
   def streaming[F[_]: Async](settings: AnalyticsStreamingRuntimeSettings): Resource[F, StreamingProgram[F]] =
@@ -152,180 +172,223 @@ object AppModule {
       observer: Option[StreamingDurableBoundaryObserver[F]],
       costObserver: Option[StreamingBatchCost.Summary => F[Unit]] = None
   ): Resource[F, StreamingProgram[F]] =
-    for {
-      pseudonymizer <- Resource.eval(buildPseudonymizer[F](settings.common))
-      localDirectory <- ownedStreamingDirectory[F](settings.common.sparkLocalDirectory)
-      common = settings.common.copy(sparkLocalDirectory = localDirectory)
-      shared <- shared[F](common, pseudonymizer, appName = "hiring-analytics-streaming")
-      streamingLock <- AnalyticsLakehouseLock.serialized(shared.lock)
-      cost <- costObserver.traverse(emit => StreamingBatchCost.resource(shared.spark, emit))
-      program <- Resource.eval {
-        val journal = new DeltaStreamingBatchJournal[F](shared.spark, shared.paths, shared.sparkExecution)
-        val observedJournal = cost.fold[StreamingBatchJournal[F]](journal)(_.wrapJournal(journal))
-        val checkpoint = new DeltaStreamingCheckpointAcknowledgement[F](observedJournal)
-        val observedLock = cost.fold[AnalyticsLakehouseLock[F]](streamingLock)(_.wrapLock(streamingLock))
-        val writer = new DeltaBatchWriter[F](shared.paths, shared.lakehouseExecution)
-        val reader = new DeltaBatchReader[F](shared.lakehouseExecution)
-        val publisher = new MongoAnalyticsReportPublisher[F](shared.client, shared.database, common.operational)
-        val stream = new SparkHiringAnalyticsStream[F](
-          shared.spark,
-          shared.lakehouseExecution,
-          shared.sparkExecution,
-          common.kafka,
-          settings.topic,
-          settings.streaming,
-          new MongoStreamingActivationGate[F](shared.database, shared.streams),
-          new MongoAnalyticsStreamingRegistry[F](shared.database, shared.streams),
-          observedLock,
-          common.lakehouseRoot,
-          checkpoint,
-          (rawFrame, batchId, lineage, sourceEndOffsets, authorize) => {
-            val callback = for {
-              observedAt <- Async[F].realTimeInstant
-              _ <- cost.fold(shared.maintenance.validateHmacConfigurationLocked)(
-                _.timed(StreamingBatchCost.Stage.HmacValidation)(shared.maintenance.validateHmacConfigurationLocked)
-              )
-              parsed <- shared.lakehouseExecution(OperationalEventTransforms.parseKafkaRecords(rawFrame))
-              preparing = prepareStreamingBatch(
-                shared,
-                parsed,
-                lineage,
-                batchId,
-                observedAt,
-                sourceEndOffsets,
-                observedJournal
-              )
-              preparation <- cost.fold(preparing)(_.timed(StreamingBatchCost.Stage.Prepare)(preparing))
-              observedWriter = observer.fold[DeltaWriter[F]](writer)(value =>
-                StreamingDurableBoundaryObserver.writer(writer, shared.paths, preparation.identity, value)
-              )
-              ingestion = new AnalyticsBatchIngestionStage[F](
-                shared.paths,
-                pseudonymizer,
-                shared.lakehouseExecution,
-                new DeltaManifestStore[F](shared.spark, shared.paths, shared.sparkExecution),
-                observedWriter,
-                common.operational.retention
-              )
-              silver = new AnalyticsBatchSilverStage[F](
-                shared.paths,
-                pseudonymizer,
-                shared.lakehouseExecution,
-                observedWriter,
-                reader,
-                QuarantineIdentifier,
-                common.operational.retention
-              )
-              _ <- SparkStreamingBatchStages
-                .resource(
-                  shared.spark,
+    withSecureUuids[F, StreamingProgram[F]] {
+      for {
+        pseudonymizer <- Resource.eval(buildPseudonymizer[F](settings.common))
+        localDirectory <- ownedStreamingDirectory[F](settings.common.sparkLocalDirectory)
+        common = settings.common.copy(sparkLocalDirectory = localDirectory)
+        shared <- shared[F](common, pseudonymizer, appName = "hiring-analytics-streaming")
+        streamingLock <- AnalyticsLakehouseLock.serialized(shared.lock)
+        cost <- costObserver.traverse(emit => StreamingBatchCost.resource(shared.spark, emit))
+        program <- Resource.eval {
+          val journal = new DeltaStreamingBatchJournal[F](shared.spark, shared.paths, shared.sparkExecution)
+          val observedJournal = cost.fold[StreamingBatchJournal[F]](journal)(_.wrapJournal(journal))
+          val checkpoint = new DeltaStreamingCheckpointAcknowledgement[F](observedJournal)
+          val observedLock = cost.fold[AnalyticsLakehouseLock[F]](streamingLock)(_.wrapLock(streamingLock))
+          val writer = new DeltaBatchWriter[F](shared.paths, shared.lakehouseExecution)
+          val reader = new DeltaBatchReader[F](shared.lakehouseExecution)
+          val publisher = new MongoAnalyticsReportPublisher[F](shared.client, shared.database, common.operational)
+          val stream = new SparkHiringAnalyticsStream[F](
+            shared.spark,
+            shared.lakehouseExecution,
+            shared.sparkExecution,
+            common.kafka,
+            settings.topic,
+            settings.streaming,
+            new MongoStreamingActivationGate[F](shared.database, shared.streams),
+            new MongoAnalyticsStreamingRegistry[F](shared.database, shared.streams),
+            observedLock,
+            common.lakehouseRoot,
+            checkpoint,
+            (rawFrame, batchId, lineage, sourceEndOffsets, authorize) => {
+              val callback = for {
+                observedAt <- Async[F].realTimeInstant
+                _ <- cost.fold(shared.maintenance.validateHmacConfigurationLocked)(
+                  _.timed(StreamingBatchCost.Stage.HmacValidation)(shared.maintenance.validateHmacConfigurationLocked)
+                )
+                parsed <- shared.lakehouseExecution(OperationalEventTransforms.parseKafkaRecords(rawFrame))
+                preparing = prepareStreamingBatch(
+                  shared,
                   parsed,
+                  lineage,
+                  batchId,
+                  observedAt,
+                  sourceEndOffsets,
+                  observedJournal
+                )
+                preparation <- cost.fold(preparing)(_.timed(StreamingBatchCost.Stage.Prepare)(preparing))
+                observedWriter = observer.fold[DeltaWriter[F]](writer)(value =>
+                  StreamingDurableBoundaryObserver.writer(writer, shared.paths, preparation.identity, value)
+                )
+                ingestion = new AnalyticsBatchIngestionStage[F](
                   shared.paths,
                   pseudonymizer,
                   shared.lakehouseExecution,
-                  ingestion,
-                  silver,
-                  new AnalyticsLateFactStage[F](shared.paths, shared.lakehouseExecution, observedWriter),
+                  new DeltaManifestStore[F](shared.spark, shared.paths, shared.sparkExecution),
+                  observedWriter,
+                  common.operational.retention,
+                  Clock[F]
+                )
+                silver = new AnalyticsBatchSilverStage[F](
+                  shared.paths,
+                  pseudonymizer,
+                  shared.lakehouseExecution,
                   observedWriter,
                   reader,
-                  publisher,
-                  common.operational.retention,
-                  shared.maintenance.configureRawTables,
-                  shared.maintenance.purgeMarkedSubjects,
-                  authorize
+                  QuarantineIdentifier,
+                  common.operational.retention
                 )
-                .use(stages =>
-                  new StreamingBatchCoordinator[F](
-                    observer.fold[StreamingBatchJournal[F]](observedJournal)(value =>
-                      StreamingDurableBoundaryObserver.journal(observedJournal, value)
-                    ),
-                    shared.markers,
-                    observer.fold[StreamingBatchStages[F]](cost.fold(stages)(_.wrap(stages)))(value =>
-                      StreamingDurableBoundaryObserver.stages(cost.fold(stages)(_.wrap(stages)), value)
-                    ),
-                    checkpoint
+                _ <- SparkStreamingBatchStages
+                  .resource(
+                    shared.spark,
+                    parsed,
+                    shared.paths,
+                    pseudonymizer,
+                    shared.lakehouseExecution,
+                    ingestion,
+                    silver,
+                    new AnalyticsLateFactStage[F](shared.paths, shared.lakehouseExecution, observedWriter),
+                    observedWriter,
+                    reader,
+                    publisher,
+                    common.operational.retention,
+                    shared.maintenance.configureRawTables,
+                    shared.maintenance.purgeMarkedSubjects,
+                    authorize
                   )
-                    .process(preparation, authorize)
-                    .void
-                )
-            } yield ()
-            cost.fold(callback)(_.timed(StreamingBatchCost.Stage.Callback)(callback))
-          },
-          () => KafkaOffsetRangeSource.sourceIdentity(common.kafka, settings.topic, shared.sparkExecution),
-          maintenance = Some((identity, lineage, retainedCheckpoint, authorize) =>
-            new AnalyticsStreamingMaintenance[F](
-              common.lakehouseRoot,
-              observedLock,
-              settings.streaming.maintenanceInterval,
-              at => {
-                val maintaining = maintainStreaming(
-                  shared,
-                  common,
-                  settings,
-                  publisher,
-                  journal,
-                  identity,
-                  lineage,
-                  retainedCheckpoint,
-                  authorize,
-                  at
-                )
-                cost.fold(maintaining)(_.timed(StreamingBatchCost.Stage.Maintenance)(maintaining))
-              },
-              Some(observation =>
-                Slf4jLogger
-                  .getLoggerFromName[F]("com.example.hiring.analytics.streaming.maintenance")
-                  .info(
-                    s"STREAMING_MAINTENANCE outcome=${observation.outcome.fold("none")(_.toString)} " +
-                      s"elapsedSinceSuccessMillis=${observation.elapsedSinceSuccess.toMillis} " +
-                      s"maximumElapsedSinceSuccessMillis=${observation.maximumElapsedSinceSuccess.toMillis} " +
-                      s"consecutiveDeferrals=${observation.consecutiveDeferrals} " +
-                      s"lastSuccess=${observation.lastSuccess.fold("none")(_.toString)}"
+                  .use(stages =>
+                    new StreamingBatchCoordinator[F](
+                      observer.fold[StreamingBatchJournal[F]](observedJournal)(value =>
+                        StreamingDurableBoundaryObserver.journal(observedJournal, value)
+                      ),
+                      shared.markers,
+                      observer.fold[StreamingBatchStages[F]](cost.fold(stages)(_.wrap(stages)))(value =>
+                        StreamingDurableBoundaryObserver.stages(cost.fold(stages)(_.wrap(stages)), value)
+                      ),
+                      checkpoint
+                    )
+                      .process(preparation, authorize)
+                      .void
                   )
-              )
-            ).resource
+              } yield ()
+              cost.fold(callback)(_.timed(StreamingBatchCost.Stage.Callback)(callback))
+            },
+            () => KafkaOffsetRangeSource.sourceIdentity(common.kafka, settings.topic, shared.sparkExecution),
+            maintenance = Some((identity, lineage, retainedCheckpoint, authorize) =>
+              new AnalyticsStreamingMaintenance[F](
+                common.lakehouseRoot,
+                observedLock,
+                settings.streaming.maintenanceInterval,
+                at => {
+                  val maintaining = maintainStreaming(
+                    shared,
+                    common,
+                    settings,
+                    publisher,
+                    journal,
+                    identity,
+                    lineage,
+                    retainedCheckpoint,
+                    authorize,
+                    at
+                  )
+                  cost.fold(maintaining)(_.timed(StreamingBatchCost.Stage.Maintenance)(maintaining))
+                },
+                Some(observation =>
+                  Slf4jLogger
+                    .getLoggerFromName[F]("com.example.hiring.analytics.streaming.maintenance")
+                    .info(
+                      s"STREAMING_MAINTENANCE outcome=${observation.outcome.fold("none")(_.toString)} " +
+                        s"elapsedSinceSuccessMillis=${observation.elapsedSinceSuccess.toMillis} " +
+                        s"maximumElapsedSinceSuccessMillis=${observation.maximumElapsedSinceSuccess.toMillis} " +
+                        s"consecutiveDeferrals=${observation.consecutiveDeferrals} " +
+                        s"lastSuccess=${observation.lastSuccess.fold("none")(_.toString)}"
+                    )
+                )
+              ).resource
+            )
           )
-        )
-        publisher.ensurePinnedRetentionIndex.as(StreamingProgram(stream.resource.use(_ => Async[F].unit)))
-      }
-    } yield program
+          publisher.ensurePinnedRetentionIndex.as(StreamingProgram(stream.resource.use(_ => Async[F].unit)))
+        }
+      } yield program
+    }
 
   def lateFactReplay[F[_]: Async](settings: AnalyticsLateFactReplaySettings): Resource[F, ReplayProgram[F]] =
-    for {
-      pseudonymizer <- Resource.eval(buildPseudonymizer[F](settings.common))
-      shared <- shared[F](settings.common, pseudonymizer, appName = "hiring-analytics-late-replay")
-    } yield {
-      val common = settings.common
-      val journal = new MongoAnalyticsLateFactReplayJournal[F](shared.database, shared.streams, common.lakehouseRoot)
-      val stages = new SparkAnalyticsLateFactReplayStages[F](
-        shared.spark,
-        shared.paths,
-        shared.lakehouseExecution,
-        new DeltaBatchReader[F](shared.lakehouseExecution),
-        new DeltaBatchWriter[F](shared.paths, shared.lakehouseExecution),
-        shared.maintenance
-      )
-      val publisher = new MongoAnalyticsReportPublisher[F](shared.client, shared.database, common.operational)
-      val service = new AnalyticsLateFactReplayService[F](
-        common.lakehouseRoot,
-        journal,
-        shared.markers,
-        stages,
-        publisher,
-        shared.lock,
-        common.operational.retention.publishedSnapshotDays
-      )
-      ReplayProgram(journal.ensureIndexes *> service.run(settings.request))
+    withSecureUuids[F, ReplayProgram[F]] {
+      for {
+        pseudonymizer <- Resource.eval(buildPseudonymizer[F](settings.common))
+        shared <- shared[F](settings.common, pseudonymizer, appName = "hiring-analytics-late-replay")
+      } yield {
+        val common = settings.common
+        val journal = new MongoAnalyticsLateFactReplayJournal[F](shared.database, shared.streams, common.lakehouseRoot)
+        val stages = new SparkAnalyticsLateFactReplayStages[F](
+          shared.spark,
+          shared.paths,
+          shared.lakehouseExecution,
+          new DeltaBatchReader[F](shared.lakehouseExecution),
+          new DeltaBatchWriter[F](shared.paths, shared.lakehouseExecution),
+          shared.maintenance,
+          Clock[F]
+        )
+        val publisher = new MongoAnalyticsReportPublisher[F](shared.client, shared.database, common.operational)
+        val service = new AnalyticsLateFactReplayService[F](
+          common.lakehouseRoot,
+          journal,
+          shared.markers,
+          stages,
+          publisher,
+          shared.lock,
+          common.operational.retention.publishedSnapshotDays,
+          Clock[F]
+        )
+        ReplayProgram(journal.ensureIndexes *> service.run(settings.request))
+      }
+    }
+
+  def keyRetirementAudit[F[_]: Async](
+      settings: AnalyticsKeyRetirementAuditSettings
+  ): Resource[F, KeyRetirementAuditProgram[F]] =
+    withSecureUuids[F, KeyRetirementAuditProgram[F]] {
+      for {
+        inputs <- Resource.eval(Async[F].fromEither(KeyRetirementAuditInputs.from(settings)))
+        (spark, client, sparkExecution) <- sparkMongo[F](
+          inputs.mongoUri,
+          inputs.sparkMaster,
+          appName = "hiring-analytics-key-retirement-audit",
+          sparkUiEnabled = Some(false)
+        )
+        database <- Resource.eval(mongoDatabase[F](client, inputs.mongoDatabase))
+      } yield {
+        val streams = new MongoPublisherStream(inputs.operational)
+        KeyRetirementAuditProgram(
+          Clock[F].realTimeInstant.flatMap(now =>
+            AnalyticsKeyRetirement.audit(
+              spark,
+              inputs.paths,
+              database.underlying,
+              inputs.retiringKeyId,
+              inputs.retention,
+              inputs.writers,
+              now,
+              new MongoAnalyticsLakehouseLock[F](database, streams, Clock[F]),
+              streams,
+              sparkExecution
+            )
+          )
+        )
+      }
     }
 
   def repair[F[_]: Async](settings: AnalyticsWorkerSettings): Resource[F, MongoAnalyticsErasureQueue[F]] =
-    for {
-      client <- mongoClient[F](settings.common.mongoUri)
-      database <- Resource.eval(mongoDatabase[F](client, settings.common.mongoDatabase))
-      queue <- MongoAnalyticsErasureQueue.resource(database, new MongoPublisherStream(settings.common.operational))
-    } yield queue
+    withSecureUuids[F, MongoAnalyticsErasureQueue[F]] {
+      for {
+        client <- mongoClient[F](settings.common.mongoUri)
+        database <- Resource.eval(mongoDatabase[F](client, settings.common.mongoDatabase))
+        queue <- MongoAnalyticsErasureQueue.resource(database, new MongoPublisherStream(settings.common.operational))
+      } yield queue
+    }
 
-  private def shared[F[_]: Async](
+  private def shared[F[_]: Async: UUIDGen](
       common: AnalyticsCommonSettings,
       pseudonymizer: SubjectPseudonymizer,
       appName: String
@@ -342,7 +405,7 @@ object AppModule {
       database <- Resource.eval(mongoDatabase[F](client, common.mongoDatabase))
     } yield {
       val streams = new MongoPublisherStream(common.operational)
-      val lock = new MongoAnalyticsLakehouseLock[F](database, streams)
+      val lock = new MongoAnalyticsLakehouseLock[F](database, streams, Clock[F])
       val lakehouseExecution = new LakehouseOperation[F](sparkExecution)
       Shared(
         paths,
@@ -362,7 +425,8 @@ object AppModule {
           new MongoHmacKeyRetirementAuthorizationStore[F](database, streams),
           common.operational,
           lakehouseExecution,
-          Slf4jLogger.getLogger[F]
+          Slf4jLogger.getLogger[F],
+          Clock[F]
         )
       )
     }
@@ -380,7 +444,7 @@ object AppModule {
         .leftMap(errors => AnalyticsError.InvalidConfiguration(errors.toChain.toList.mkString("; ")))
     )
 
-  private def maintainStreaming[F[_]: Async](
+  private def maintainStreaming[F[_]: Async: UUIDGen](
       shared: Shared[F],
       common: AnalyticsCommonSettings,
       settings: AnalyticsStreamingRuntimeSettings,
@@ -396,8 +460,8 @@ object AppModule {
       _ <- authorize
       _ <- shared.maintenance.validateHmacConfigurationLocked
       _ <- shared.maintenance.configureRawTables
-      runId <- Async[F]
-        .delay(java.util.UUID.randomUUID().toString)
+      runId <- UUIDGen[F].randomUUID
+        .map(_.toString)
         .flatMap(value =>
           Async[F]
             .fromEither(RunId.from(s"stream-maintenance-$value").leftMap(AnalyticsError.InvalidConfiguration.apply))
@@ -432,7 +496,7 @@ object AppModule {
                   .publish(
                     reserved,
                     report,
-                    at.plusSeconds(common.operational.retention.publishedSnapshotDays.asInstanceOf[Int].toLong * 86400L)
+                    at.plusSeconds(common.operational.retention.publishedSnapshotDays.toLong * 86400L)
                   )
                   .handleErrorWith {
                     case AnalyticsError.GuardedErasurePublicationRejected => Async[F].unit
@@ -519,21 +583,26 @@ object AppModule {
     }
   }
 
-  private def ownedStreamingDirectory[F[_]: Async](baseDirectory: String): Resource[F, AnalyticsNonBlank] =
+  private def ownedStreamingDirectory[F[_]: Async: UUIDGen](baseDirectory: String): Resource[F, AnalyticsNonBlank] =
     Resource
       .make(
-        Async[F].blocking {
-          val base = Paths.get(baseDirectory).toAbsolutePath.normalize()
-          val owned = base.resolve(s"streaming-${java.util.UUID.randomUUID()}")
-          Files.createDirectories(owned)
-          owned.toString
-        }
+        UUIDGen[F].randomUUID.flatMap(id =>
+          Async[F].blocking {
+            val base = Paths.get(baseDirectory).toAbsolutePath.normalize()
+            val owned = base.resolve(s"streaming-$id")
+            Files.createDirectories(owned)
+            owned.toString
+          }
+        )
       )(directory =>
         Async[F].blocking {
           val root = Paths.get(directory)
           if (Files.exists(root)) {
             val paths = Files.walk(root)
-            try paths.sorted(Comparator.reverseOrder()).forEach(path => Files.deleteIfExists(path))
+            try
+              paths.sorted(Comparator.reverseOrder()).forEach { path =>
+                val _ = Files.deleteIfExists(path)
+              }
             finally paths.close()
           }
         }.void
@@ -552,7 +621,7 @@ object AppModule {
       sparkMaster: String,
       appName: String,
       sparkUiEnabled: Option[Boolean] = None,
-      sparkLocalDirectory: String = "/var/lib/hiring-analytics/spark-temp"
+      sparkLocalDirectory: String = AnalyticsRuntimeDirectory.container(AnalyticsRuntimeDirectory.SparkTemp).toString
   ): Resource[F, (SparkSession, MongoClient[F], SparkBlockingExecution[F])] =
     managedSparkMongo(
       execution => sparkSession(sparkMaster, appName, sparkUiEnabled, sparkLocalDirectory, execution),
@@ -611,7 +680,7 @@ object AppModule {
       case NonFatal(cause)             => AnalyticsError.MongoConnectionFailure(cause)
     }
 
-  private def sparkSession[F[_]: Async](
+  private def sparkSession[F[_]](
       master: String,
       appName: String,
       sparkUiEnabled: Option[Boolean],

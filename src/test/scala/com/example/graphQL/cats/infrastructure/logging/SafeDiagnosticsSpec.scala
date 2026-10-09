@@ -4,7 +4,7 @@ import cats.effect.{Deferred, IO, Ref, Resource}
 import cats.syntax.all.*
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFields}
 import com.example.graphQL.cats.service.Diagnostics.*
-import com.example.graphQL.cats.config.AppConfig
+import com.example.graphQL.cats.config.AppConfigFixtures
 import io.circe.parser.parse
 import java.time.Instant
 import munit.CatsEffectSuite
@@ -117,7 +117,7 @@ class SafeDiagnosticsSpec extends CatsEffectSuite {
       emitted <- Ref.of[IO, Vector[String]](Vector.empty)
       diagnostics = SafeDiagnostics.withSink(line => emitted.update(_ :+ line))
       invalid <- IO(
-        AppConfig.fromConfig(
+        AppConfigFixtures.fromConfig(
           s"""http {
            |  host = "127.0.0.1"
            |  port = 8080

@@ -97,7 +97,7 @@ class MongoDatabaseProbeIntegrationSpec extends CatsEffectSuite {
     s"mongodb://${instance.getHost}:${instance.getMappedPort(27017)}"
 
   private def ready(probe: DatabaseProbe, remaining: Int = 30): IO[Unit] =
-    probe.check.flatMap {
+    probe.check(None).flatMap {
       case ProbeResult.Ready  => IO.unit
       case _ if remaining > 0 => IO.sleep(200.millis) *> ready(probe, remaining - 1)
       case other              => IO.raiseError(new AssertionError(s"Expected ready, received $other"))
@@ -277,7 +277,7 @@ class MongoDatabaseProbeIntegrationSpec extends CatsEffectSuite {
                 IO.blocking(instance.getDockerClient.pauseContainerCmd(instance.getContainerId).exec())
               )(_ => IO.blocking(instance.getDockerClient.unpauseContainerCmd(instance.getContainerId).exec()).void)
               .use { _ =>
-                probe.check.flatMap(result => IO(assertEquals(result, ProbeResult.Unavailable)))
+                probe.check(None).flatMap(result => IO(assertEquals(result, ProbeResult.Unavailable)))
               }
             _ <- ready(probe)
             _ <- IO.blocking(instance.getDockerClient.stopContainerCmd(instance.getContainerId).exec())

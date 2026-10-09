@@ -19,7 +19,7 @@ private[config] final case class RawMongoConfig(
 private[config] final case class RawLoggingConfig(maskSensitive: Boolean) derives ConfigReader
 
 private[config] final case class RawDiscoveryConfig(
-    maxTimeMillis: Option[Int] = None,
-    permits: Option[Int] = None,
-    maxRoots: Option[Int] = None
+    maxTimeMillis: Option[DiscoveryMaxTimeMs] = None,
+    permits: Option[DiscoveryPermits] = None,
+    maxRoots: Option[DiscoveryMaxRoots] = None
 ) derives ConfigReader

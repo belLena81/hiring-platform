@@ -1,9 +1,9 @@
 package com.example.hiring.analytics
 
 import com.example.hiring.analytics.adapter.spark.SparkHiringAnalyticsStream
-import com.example.hiring.analytics.config.{AnalyticsStreamingSettings, KafkaConnection}
+import com.example.hiring.analytics.config.{AnalyticsConfigFixtures, KafkaConnection}
 import com.example.hiring.analytics.domain.StreamingActivationIdentity
-import com.example.hiring.analytics.domain.{StreamingBatchId, StreamingBatchIdentity, StreamingLineage}
+import com.example.hiring.analytics.domain.{StreamingBatchIdentity, StreamingLineage}
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.batch.{AnalyticsLakehouseLock, AnalyticsStreamingRegistry}
 import com.example.hiring.analytics.service.streaming.{
@@ -16,8 +16,8 @@ import cats.effect.{IO, Ref, Resource}
 import munit.CatsEffectSuite
 
 final class HiringAnalyticsStreamingActivationSpec extends CatsEffectSuite {
-  private val settings = AnalyticsStreamingSettings
-    .fromHocon("""
+  private val settings = AnalyticsConfigFixtures
+    .streaming("""
     |analytics.streaming {
     |  stream-id = "hiring-events"
     |  activation-grant-id = "grant-2026-09"

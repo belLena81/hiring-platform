@@ -1,9 +1,10 @@
 package com.example.graphQL.cats.api.graphql
 
+import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId, UserId}
-import com.example.graphQL.cats.domain.model.UserCursor
 import com.example.graphQL.cats.shared.Parsing
-import com.example.graphQL.cats.domain.pagination.{ApplicationCursor, ApplicationEventCursor, JobCursor}
+import com.example.graphQL.cats.domain.pagination.TimestampIdCursor
+import com.example.graphQL.cats.service.search.NearbyJobCursor
 import pdi.jwt.{JwtAlgorithm, JwtCirce, JwtClaim, JwtOptions}
 
 import java.nio.charset.StandardCharsets
@@ -11,7 +12,6 @@ import java.time.{Clock as JavaClock, Instant, ZoneOffset}
 import java.util.UUID
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
-import scala.util.Try
 
 private[cats] object CursorCodec {
   private val HmacAlgorithm = "HmacSHA256"
@@ -25,11 +25,11 @@ private[cats] object CursorCodec {
     private[graphql] val secretKey = new SecretKeySpec(bytes, HmacAlgorithm)
   }
 
+  /** Wire shape of one cursor type: the payload is `kind|field|field...` signed inside the JWT subject. */
   trait Keyed[A] {
     def kind: CursorKind
-    def at(value: A): Instant
-    def id(value: A): UUID
-    def make(at: Instant, id: UUID): A
+    def fields(value: A): List[String]
+    def read(fields: List[String]): Either[CursorError, A]
   }
 
   enum CursorKind(val tag: String) {
@@ -37,36 +37,69 @@ private[cats] object CursorCodec {
     case Application extends CursorKind("a")
     case Event extends CursorKind("e")
     case User extends CursorKind("u")
+    case Nearby extends CursorKind("n")
   }
 
   enum CursorError {
     case Malformed(message: String)
     case WrongKind(actual: String)
+    case CriteriaMismatch
   }
 
-  given Keyed[JobCursor] with
-    def kind: CursorKind = CursorKind.Job
-    def at(value: JobCursor): Instant = value.createdAt
-    def id(value: JobCursor): UUID = value.id.value
-    def make(at: Instant, id: UUID): JobCursor = JobCursor(at, JobId(id))
+  /** Identifier types usable in a `(timestamp, id)` keyset cursor, with the connection kind they belong to. */
+  trait CursorId[I] {
+    def kind: CursorKind
+    def uuid(id: I): UUID
+    def fromUuid(value: UUID): I
+  }
 
-  given Keyed[ApplicationCursor] with
-    def kind: CursorKind = CursorKind.Application
-    def at(value: ApplicationCursor): Instant = value.createdAt
-    def id(value: ApplicationCursor): UUID = value.id.value
-    def make(at: Instant, id: UUID): ApplicationCursor = ApplicationCursor(at, ApplicationId(id))
+  object CursorId {
+    private def of[I](cursorKind: CursorKind, toUuid: I => UUID, fromUuidValue: UUID => I): CursorId[I] =
+      new CursorId[I] {
+        def kind: CursorKind = cursorKind
+        def uuid(id: I): UUID = toUuid(id)
+        def fromUuid(value: UUID): I = fromUuidValue(value)
+      }
 
-  given Keyed[ApplicationEventCursor] with
-    def kind: CursorKind = CursorKind.Event
-    def at(value: ApplicationEventCursor): Instant = value.occurredAt
-    def id(value: ApplicationEventCursor): UUID = value.id.value
-    def make(at: Instant, id: UUID): ApplicationEventCursor = ApplicationEventCursor(at, ApplicationEventId(id))
+    given CursorId[JobId] = of(CursorKind.Job, _.value, JobId.apply)
+    given CursorId[ApplicationId] = of(CursorKind.Application, _.value, ApplicationId.apply)
+    given CursorId[ApplicationEventId] = of(CursorKind.Event, _.value, ApplicationEventId.apply)
+    given CursorId[UserId] = of(CursorKind.User, _.value, UserId.apply)
+  }
 
-  given Keyed[UserCursor] with
-    def kind: CursorKind = CursorKind.User
-    def at(value: UserCursor): Instant = value.createdAt
-    def id(value: UserCursor): UUID = value.id.value
-    def make(at: Instant, id: UUID): UserCursor = UserCursor(at, UserId(id))
+  given [I](using cursorId: CursorId[I]): Keyed[TimestampIdCursor[I]] with
+    def kind: CursorKind = cursorId.kind
+    def fields(value: TimestampIdCursor[I]): List[String] =
+      List(value.createdAt.toString, cursorId.uuid(value.id).toString)
+    def read(fields: List[String]): Either[CursorError, TimestampIdCursor[I]] =
+      fields match {
+        case List(at, id) =>
+          for {
+            timestamp <- Either
+              .catchNonFatal(Instant.parse(at))
+              .left
+              .map(_ => CursorError.Malformed("Invalid cursor timestamp"))
+            uuid <- Parsing.parseUuid(id).left.map(_ => CursorError.Malformed("Invalid cursor id"))
+          } yield TimestampIdCursor(timestamp, cursorId.fromUuid(uuid))
+        case _ => Left(CursorError.Malformed("Invalid cursor shape"))
+      }
+
+  given Keyed[NearbyJobCursor] with
+    def kind: CursorKind = CursorKind.Nearby
+    def fields(value: NearbyJobCursor): List[String] =
+      List(value.distanceKm.toString, value.jobId.value.toString, value.queryFingerprint)
+    def read(fields: List[String]): Either[CursorError, NearbyJobCursor] =
+      fields match {
+        case List(distance, id, fingerprint) =>
+          for {
+            km <- Either
+              .catchNonFatal(distance.toDouble)
+              .left
+              .map(_ => CursorError.Malformed("Invalid cursor distance"))
+            uuid <- Parsing.parseUuid(id).left.map(_ => CursorError.Malformed("Invalid cursor id"))
+          } yield NearbyJobCursor(km, JobId(uuid), fingerprint)
+        case _ => Left(CursorError.Malformed("Invalid cursor shape"))
+      }
 
   def keyFromSecret(secret: String, ttlSeconds: Long = 900L): CursorKey = {
     val mac = Mac.getInstance(HmacAlgorithm)
@@ -75,7 +108,7 @@ private[cats] object CursorCodec {
   }
 
   def encode[A](value: A, now: Instant)(using keyed: Keyed[A], key: CursorKey): String = {
-    val payload = s"${keyed.kind.tag}|${keyed.at(value)}|${keyed.id(value)}"
+    val payload = (keyed.kind.tag :: keyed.fields(value)).mkString("|")
     val claim = JwtClaim()
       .about(payload)
       .by(CursorIssuer)
@@ -96,15 +129,14 @@ private[cats] object CursorCodec {
         .map(_ => CursorError.Malformed("Invalid cursor"))
       _ <- Either.cond(claim.isValid(CursorIssuer, CursorAudience), (), CursorError.Malformed("Invalid cursor"))
       payload <- claim.subject.toRight(CursorError.Malformed("Invalid cursor subject"))
-      parts <- payload.split("\\|", -1) match {
-        case Array(tag, at, id) => Right((tag, at, id))
-        case _                  => Left(CursorError.Malformed("Invalid cursor shape"))
+      tagged <- payload.split("\\|", -1).toList match {
+        case tag :: rest => Right((tag, rest))
+        case Nil         => Left(CursorError.Malformed("Invalid cursor shape"))
       }
-      (tag, at, id) = parts
+      (tag, fields) = tagged
       actualKind <- CursorKind.values.find(_.tag == tag).toRight(CursorError.Malformed("Unknown cursor kind"))
       _ <- Either.cond(actualKind == keyed.kind, (), CursorError.WrongKind(actualKind.tag))
-      timestamp <- Try(Instant.parse(at)).toEither.left.map(_ => CursorError.Malformed("Invalid cursor timestamp"))
-      uuid <- Parsing.parseUuid(id).left.map(_ => CursorError.Malformed("Invalid cursor id"))
-    } yield keyed.make(timestamp, uuid)
+      cursor <- keyed.read(fields)
+    } yield cursor
   }
 }

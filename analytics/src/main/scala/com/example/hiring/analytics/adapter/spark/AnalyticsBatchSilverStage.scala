@@ -8,7 +8,6 @@ import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
 
 import cats.effect.{Async, Resource}
 import cats.syntax.all.*
-import io.github.iltotore.iron.*
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.functions.*
 
@@ -98,25 +97,17 @@ private[analytics] final class AnalyticsBatchSilverStage[F[_]: Async](
           AnalyticsTableSchemas.matches(storedLateFacts.schema, AnalyticsTableSchemas.lateFacts),
           storedLateFacts
             .filter(col(Columns.ExpiresAt).isNull || col(Columns.ExpiresAt) > lit(Timestamp.from(bronze.startedAt)))
-            .select("eventId", "eventFingerprint"),
+            .select(Columns.EventId, Columns.EventFingerprint),
           AnalyticsError.InvalidLateFactSchema("persisted dataset does not match its declared schema")
         )
       }
       historicalConflicts <- blocking(
-        safeValid
-          .select("eventId", "rawValue")
-          .withColumn("incomingFingerprint", sha2(col("rawValue"), 256))
-          .join(
-            storedSilver
-              .select("eventId", "eventFingerprint")
-              .unionByName(storedLateFactFingerprints)
-              .withColumnRenamed("eventFingerprint", "storedFingerprint"),
-            Seq("eventId"),
-            "inner"
-          )
-          .filter(col("incomingFingerprint") =!= col("storedFingerprint"))
-          .select("eventId")
-          .distinct()
+        OperationalEventTransforms.historicalFingerprintConflicts(
+          safeValid,
+          storedSilver
+            .select(Columns.EventId, Columns.EventFingerprint)
+            .unionByName(storedLateFactFingerprints)
+        )
       )
       conflicts <- blocking(newConflicts.unionByName(historicalConflicts).distinct())
     } yield QuarantineEvidence(safeValid, malformedToPersist, incomingSilver, conflicts)
@@ -155,7 +146,7 @@ private[analytics] final class AnalyticsBatchSilverStage[F[_]: Async](
       conflictQuarantine <- blocking(
         deltaWriter.withExpiry(
           AnalyticsSubjectPrivacy
-            .withSubjectToken(safeValid.join(conflicts, Seq("eventId"), "inner"), pseudonymizer)
+            .withSubjectToken(safeValid.join(conflicts, Seq(Columns.EventId), "inner"), pseudonymizer)
             .withColumn("quarantineId", quarantineId())
             .withColumn("quarantineReason", lit("CONFLICTING_EVENT_ID")),
           bronze.startedAt,
@@ -165,17 +156,17 @@ private[analytics] final class AnalyticsBatchSilverStage[F[_]: Async](
       quarantine <- blocking(
         malformedToPersist
           .unionByName(conflictQuarantine)
-          .withColumn("payloadHash", sha2(col("rawValue"), 256))
-          .drop("rawValue", "actorId", "payload", "subjectToken")
+          .withColumn("payloadHash", sha2(col(Columns.RawValue), 256))
+          .drop(Columns.RawValue, "actorId", "payload", Columns.SubjectToken)
           .select(
-            "topic",
-            "partition",
-            "offset",
+            Columns.Topic,
+            Columns.Partition,
+            Columns.Offset,
             "payloadHash",
-            "subjectTokens",
+            Columns.SubjectTokens,
             "quarantineId",
             "quarantineReason",
-            "expiresAt"
+            Columns.ExpiresAt
           )
       )
       // Keep native target creation, schema validation and MERGE analysis even when measured input is empty.
@@ -198,7 +189,7 @@ private[analytics] final class AnalyticsBatchSilverStage[F[_]: Async](
     for {
       silver <- blocking(
         deltaWriter.withExpiry(
-          prepared.incomingSilver.join(prepared.conflicts, Seq("eventId"), "left_anti"),
+          prepared.incomingSilver.join(prepared.conflicts, Seq(Columns.EventId), "left_anti"),
           startedAt,
           retention.silverDays.value
         )

@@ -50,5 +50,19 @@ object AnalyticsError {
       extends AnalyticsError("analytics Spark session could not start", Some(underlying))
   final case class MongoConnectionFailure(underlying: Throwable)
       extends AnalyticsError("analytics Mongo client could not start", Some(underlying))
+  case object LakehouseLockOwnershipLost extends AnalyticsError("lakehouse mutex owner changed before release")
+  case object LakehouseLockOwnershipUncertain
+      extends AnalyticsError("lakehouse mutex acquisition is uncertain; manual ownership recovery required")
+  final case class DeltaSchemaMismatch(path: String)
+      extends AnalyticsError(s"Delta dataset schema differs from the expected analytics schema at $path")
+  final case class MarkedSubjectRetained(path: String)
+      extends AnalyticsError(s"marked subject remains in Delta dataset $path")
+  case object InvalidBronzeSchema extends AnalyticsError("persisted Bronze dataset has an incompatible schema")
+  case object StreamingAdmissionConflictsChanged
+      extends AnalyticsError("streaming admission conflict set changed during ingestion")
+  case object ReportNotSingular extends AnalyticsError("time-to-hire report is not singular")
+  final case class ReportRowLimitExceeded(limit: Int) extends AnalyticsError(s"report output exceeds $limit rows")
+  final case class KeyRetirementAuditUnverified(underlying: Throwable)
+      extends AnalyticsError("key retirement audit could not verify every required surface", Some(underlying))
   case object LakehouseLockTimeout extends AnalyticsError("timed out waiting for the analytics lakehouse lock")
 }

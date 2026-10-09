@@ -60,4 +60,68 @@ final class MongoSearchEligibilityCodecsSpec extends FunSuite {
     job.append(MongoFields.EmbeddingMeta, new Document(MongoFields.Model, "model"))
     assertEquals(MongoSearchEligibilityCodecs.job(job), Left(RepositoryError.InvalidStoredData))
   }
+
+  private def candidateDocument(): Document = {
+    val document = MongoHiringCodecs.user(candidate.copy(profile = Some(UserProfile.Candidate(profile))))
+    document.remove(MongoFields.Embedding)
+    document
+  }
+
+  test("candidate decoding is total: malformed role, status, identifier and name yield Left without throwing") {
+    val expected = Left(RepositoryError.InvalidStoredData)
+    assertEquals(
+      MongoSearchEligibilityCodecs.candidate(candidateDocument().append(MongoFields.Role, "Wizard")),
+      expected
+    )
+    assertEquals(MongoSearchEligibilityCodecs.candidate(candidateDocument().append(MongoFields.Role, 7)), expected)
+    assertEquals(MongoSearchEligibilityCodecs.candidate(candidateDocument().append(MongoFields.Role, null)), expected)
+    assertEquals(
+      MongoSearchEligibilityCodecs.candidate(candidateDocument().append(MongoFields.AccountStatus, "Gone")),
+      expected
+    )
+    assertEquals(
+      MongoSearchEligibilityCodecs.candidate(candidateDocument().append(MongoFields.Id, "not-a-uuid")),
+      expected
+    )
+    assertEquals(MongoSearchEligibilityCodecs.candidate(candidateDocument().append(MongoFields.Id, 5)), expected)
+    assertEquals(MongoSearchEligibilityCodecs.candidate(candidateDocument().append(MongoFields.Name, 5)), expected)
+  }
+
+  test("candidate decoding is total: malformed profile, residence country and skills yield Left without throwing") {
+    val expected = Left(RepositoryError.InvalidStoredData)
+    def withProfile(change: Document => Any): Either[RepositoryError, CandidateSearchEligibility] = {
+      val document = candidateDocument()
+      change(document.get(MongoFields.Profile, classOf[Document]))
+      MongoSearchEligibilityCodecs.candidate(document)
+    }
+    val residence = new Document(MongoFields.City, "Kyiv")
+    assertEquals(withProfile(_.append(MongoFields.CurrentResidence, residence)), expected)
+    assertEquals(
+      withProfile(_.append(MongoFields.CurrentResidence, new Document(MongoFields.Country, null))),
+      expected
+    )
+    assertEquals(
+      withProfile(_.append(MongoFields.CurrentResidence, new Document(MongoFields.Country, 3))),
+      expected
+    )
+    assertEquals(withProfile(_.remove(MongoFields.Skills)), expected)
+    assertEquals(withProfile(_.append(MongoFields.Skills, "Scala")), expected)
+    assertEquals(
+      withProfile(_.append(MongoFields.Skills, java.util.Arrays.asList("Scala", Integer.valueOf(1)))),
+      expected
+    )
+    assertEquals(withProfile(_.append(MongoFields.RecruiterSearchOptIn, "yes")), expected)
+    assertEquals(
+      withProfile(_.append(MongoFields.CurrentResidence, new Document(MongoFields.Country, "UA"))).map(
+        _.profile.flatMap(_.currentResidence)
+      ),
+      Right(Some(CandidateResidence("UA", None)))
+    )
+  }
+
+  test("candidate profile is only read for active candidates") {
+    val document = candidateDocument().append(MongoFields.Role, UserRole.Recruiter.toString)
+    document.append(MongoFields.Profile, "garbage")
+    assertEquals(MongoSearchEligibilityCodecs.candidate(document).map(_.profile), Right(None))
+  }
 }

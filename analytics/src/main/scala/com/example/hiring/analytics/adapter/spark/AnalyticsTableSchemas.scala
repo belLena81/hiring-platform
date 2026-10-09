@@ -113,12 +113,10 @@ private[analytics] object AnalyticsTableSchemas {
     val location = SparkPhysicalLocation.resolve(path)
     if (!DeltaTable.isDeltaTable(spark, location)) {
       val builder = DeltaTable.createIfNotExists(spark).location(location).addColumns(struct(shape))
-      (if (raw) builder.property("delta.dataSkippingNumIndexedCols", "0") else builder).execute()
+      val _ = (if (raw) builder.property("delta.dataSkippingNumIndexedCols", "0") else builder).execute()
     }
     val actual = spark.read.format("delta").load(location).schema
     if (!matches(actual, shape))
-      throw AnalyticsError.LakehouseFailure(
-        new IllegalStateException(s"Delta table schema differs from the expected analytics schema at $path")
-      )
+      throw AnalyticsError.DeltaSchemaMismatch(path)
   }
 }

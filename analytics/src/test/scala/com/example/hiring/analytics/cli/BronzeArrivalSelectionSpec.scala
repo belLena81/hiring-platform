@@ -8,7 +8,6 @@ import io.delta.tables.DeltaTable
 import munit.CatsEffectSuite
 import org.apache.spark.scheduler.{SparkListener, SparkListenerJobEnd, SparkListenerJobStart, SparkListenerTaskEnd}
 import org.apache.spark.sql.{Row, SparkSession}
-import org.apache.spark.sql.types.*
 import org.apache.spark.sql.functions.*
 import java.nio.file.{Files, Path}
 import java.util.concurrent.atomic.AtomicLong
@@ -301,7 +300,7 @@ final class BronzeArrivalSelectionSpec extends CatsEffectSuite {
         assertEquals(read(spark, missing, Vector(0 -> 0L)), Vector.empty)
         val broken = root.resolve("broken").toString
         spark.range(1).write.format("delta").save(broken)
-        intercept[org.apache.spark.sql.AnalysisException] { read(spark, broken, Vector.empty) }
+        val _ = intercept[org.apache.spark.sql.AnalysisException] { read(spark, broken, Vector.empty) }
       }
     }
   }

@@ -1,7 +1,7 @@
 package com.example.graphQL.cats.api.graphql
 
-import cats.effect.IO
 import cats.data.EitherT
+import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLInputs.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.*
@@ -11,30 +11,30 @@ import com.example.graphQL.cats.service.search.{
   JobFacetQuery,
   NearbyRadius,
   JobSearchFilter,
+  NearbyJobCursor,
   NearbyJobsQuery,
   JobDiscoveryValidation
 }
-import com.example.graphQL.cats.service.UseCaseError
+import com.example.graphQL.cats.service.{SearchError, UseCaseError}
+import com.example.graphQL.cats.service.events.OperationalEventPayload.SearchKind
 import com.example.graphQL.cats.domain.model.GeoPoint
 import com.example.graphQL.cats.service.search.CandidateMatchFilters
 import io.circe.Json
+import java.time.Instant
 import sangria.schema.Context
 
 private[graphql] object HiringGraphQLSearchResolvers {
   def nearbyJobs(context: Context[RequestContext, Unit]): HiringGraphQLResult[NearbyJobsResults] =
     authenticated(context) { case (actor, hiring) =>
+      given CursorCodec.CursorKey = hiring.cursorKey
       val center = context.arg(nearbyCenterArgument)
       val inputFilter = context.arg(nearbyFilterArgument)
       for {
+        now <- EitherT.liftF[IO, HiringGraphQLFailure, Instant](IO.realTimeInstant)
         limit <- inputResult(pageSize(context.arg(firstArgument)))
         filter <- inputResult(discoveryFilter(inputFilter))
         baseQuery = NearbyJobsQuery(GeoPoint(center.latitude, center.longitude), context.arg(radiusKmArgument), filter)
-        cursor <- inputResult(
-          context
-            .arg(afterArgument)
-            .traverse(value => NearbyJobsQuery.decodeCursor(value, baseQuery))
-            .leftMap(error => GraphQLFailure("INVALID_CURSOR", error.message, exceptional = false))
-        )
+        cursor <- inputResult(context.arg(afterArgument).traverse(decodeNearbyCursor(_, baseQuery, now)))
         query = baseQuery.copy(after = cursor)
         values <- raiseOnUseCaseError(
           hiring.jobService.nearbyJobs(
@@ -50,13 +50,24 @@ private[graphql] object HiringGraphQLSearchResolvers {
             NearbyJobResult(
               value.job,
               value.distanceKm,
-              NearbyJobsQuery.encodeCursor(value.distanceKm, value.job.id, baseQuery)
+              CursorCodec.encode(NearbyJobCursor(value.distanceKm, value.job.id, baseQuery.fingerprint), now)
             )
           ),
           values.size > limit.value
         )
       }
     }
+
+  private def decodeNearbyCursor(value: String, query: NearbyJobsQuery, now: Instant)(using
+      CursorCodec.CursorKey
+  ): Either[GraphQLFailure, NearbyJobCursor] =
+    CursorCodec
+      .decode[NearbyJobCursor](value, now)
+      .flatMap(cursor =>
+        Either.cond(cursor.hasValidDistance, cursor, CursorCodec.CursorError.Malformed("Invalid cursor distance"))
+      )
+      .flatMap(cursor => Either.cond(cursor.isBoundTo(query), cursor, CursorCodec.CursorError.CriteriaMismatch))
+      .leftMap(GraphQLFailureCatalog.classifyCursor)
 
   def jobDiscoveryFacets(
       context: Context[RequestContext, Unit]
@@ -68,7 +79,7 @@ private[graphql] object HiringGraphQLSearchResolvers {
         case (Some(center), Some(radius)) =>
           Right(Some(NearbyRadius(GeoPoint(center.latitude, center.longitude), radius)))
         case _ =>
-          Left(GraphQLFailure("INVALID_FILTER", "Center and radiusKm must be supplied together", exceptional = false))
+          Left(GraphQLFailureCatalog.inconsistentArguments("Center and radiusKm must be supplied together"))
       }
       for {
         filter <- inputResult(discoveryFilter(inputFilter))
@@ -87,29 +98,25 @@ private[graphql] object HiringGraphQLSearchResolvers {
         )
       )
       .toEither
-      .leftMap(errors => toGraphQLFailure(UseCaseError.Search(errors.head)))
+      .leftMap(errors => toGraphQLFailure(UseCaseError.Search(SearchError.accumulated(errors))))
 
   def semanticJobSearch(context: Context[RequestContext, Unit]): HiringGraphQLResult[RankedJobResults] =
     authenticatedSearch(context).flatMap { case (actor, hiring, service) =>
       val filter = jobFilter(context.arg(jobFilterArgument))
       for {
         size <- inputResult(pageSize(context.arg(firstArgument)))
-        searchId <- EitherT.liftF[IO, HiringGraphQLFailure, java.util.UUID](
-          context.arg(searchIdArgument).fold(IO.randomUUID)(IO.pure)
-        )
+        searchId <- searchIdFor(hiring, context.arg(searchIdArgument))
         results <- raiseOnUseCaseError(
           service.semanticJobSearch(actor, context.arg(queryArgument), filter, size, searchId)
         )
-        _ <- EitherT.liftF[IO, HiringGraphQLFailure, Unit](
-          saveSearchSession(
-            hiring,
-            actor.userId,
-            "semanticJobSearch",
-            searchId,
-            filterJson(filter),
-            results.headOption.map(_.meta.model)
-          )(results)(_.job.id.value.toString, _.score)
-        )
+        _ <- recordSearch(
+          hiring,
+          actor.userId,
+          SearchKind.SemanticJobSearch,
+          searchId,
+          filterJson(filter),
+          results.headOption.map(_.meta.model)
+        )(results)(_.job.id.value.toString, _.score)
       } yield rankedJobResults(results)
     }
 
@@ -117,20 +124,16 @@ private[graphql] object HiringGraphQLSearchResolvers {
     authenticatedSearch(context).flatMap { case (actor, hiring, service) =>
       for {
         size <- inputResult(pageSize(context.arg(firstArgument)))
-        searchId <- EitherT.liftF[IO, HiringGraphQLFailure, java.util.UUID](
-          context.arg(searchIdArgument).fold(IO.randomUUID)(IO.pure)
-        )
+        searchId <- searchIdFor(hiring, context.arg(searchIdArgument))
         results <- raiseOnUseCaseError(service.recommendedJobs(actor, size, searchId))
-        _ <- EitherT.liftF[IO, HiringGraphQLFailure, Unit](
-          saveSearchSession(
-            hiring,
-            actor.userId,
-            "recommendedJobs",
-            searchId,
-            Json.obj(),
-            results.headOption.map(_.meta.model)
-          )(results)(_.job.id.value.toString, _.score)
-        )
+        _ <- recordSearch(
+          hiring,
+          actor.userId,
+          SearchKind.RecommendedJobs,
+          searchId,
+          Json.obj(),
+          results.headOption.map(_.meta.model)
+        )(results)(_.job.id.value.toString, _.score)
       } yield rankedJobResults(results)
     }
 
@@ -146,9 +149,7 @@ private[graphql] object HiringGraphQLSearchResolvers {
       )
       for {
         size <- inputResult(pageSize(context.arg(firstArgument)))
-        searchId <- EitherT.liftF[IO, HiringGraphQLFailure, java.util.UUID](
-          context.arg(searchIdArgument).fold(IO.randomUUID)(IO.pure)
-        )
+        searchId <- searchIdFor(hiring, context.arg(searchIdArgument))
         results <- raiseOnUseCaseError(
           service.candidateMatches(
             actor,
@@ -159,16 +160,14 @@ private[graphql] object HiringGraphQLSearchResolvers {
             searchId
           )
         )
-        _ <- EitherT.liftF[IO, HiringGraphQLFailure, Unit](
-          saveSearchSession(
-            hiring,
-            actor.userId,
-            "candidateMatches",
-            searchId,
-            Json.obj("jobId" -> Json.fromString(jobId.value.toString)),
-            results.headOption.map(_.meta.model)
-          )(results)(_.candidate.id.value.toString, _.score)
-        )
+        _ <- recordSearch(
+          hiring,
+          actor.userId,
+          SearchKind.CandidateMatches,
+          searchId,
+          Json.obj("jobId" -> Json.fromString(jobId.value.toString)),
+          results.headOption.map(_.meta.model)
+        )(results)(_.candidate.id.value.toString, _.score)
       } yield rankedCandidateResults(results)
     }
 

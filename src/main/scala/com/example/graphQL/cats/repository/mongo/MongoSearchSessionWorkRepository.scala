@@ -1,14 +1,15 @@
 package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.IO
+import cats.effect.std.UUIDGen
 import cats.syntax.all.*
-import mongo4cats.client.{ClientSession, MongoClient}
+import mongo4cats.client.MongoClient
 import mongo4cats.database.MongoDatabase
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.Diagnostics
 import com.example.graphQL.cats.service.events.OperationalEventJson
-import com.mongodb.client.model.{FindOneAndUpdateOptions, ReturnDocument, Sorts, UpdateOptions}
+import com.mongodb.client.model.{Sorts, UpdateOptions}
 import org.bson.Document
 
 import java.time.Instant
@@ -19,13 +20,15 @@ import scala.jdk.CollectionConverters.*
 final class MongoSearchSessionWorkRepository(
     database: MongoDatabase[IO],
     transactionRunner: MongoTransactionRunner,
-    diagnostics: Diagnostics
+    diagnostics: Diagnostics,
+    uuidGen: UUIDGen[IO] = UUIDGen[IO]
 ) extends SearchSessionWorkRepository
     with MongoOperationalEventInsertion
     with MongoConflictWriteMapping {
   private val work = Mongo4catsCollections.documents(database, MongoCollections.SearchSessionWork)
   private val sessions = Mongo4catsCollections.documents(database, MongoCollections.SearchSessions)
   private val outbox = Mongo4catsCollections.documents(database, MongoCollections.EventOutbox)
+  private val processing = MongoFilter.eq(MongoFields.State, SearchSessionWorkState.Processing.toString)
 
   override def enqueue(value: PendingSearchSessionWork, now: Instant): RepositoryIO[Unit] =
     RepositoryIO
@@ -105,49 +108,33 @@ final class MongoSearchSessionWorkRepository(
                       }
                 }
           }
-      }(_ => Left(RepositoryError.Unavailable))
+      }
 
   override def claim(
       workerId: String,
       now: Instant,
       leaseUntil: Instant
   ): RepositoryIO[Option[ClaimedSearchSessionWork]] =
-    RepositoryIO.lift(IO.randomUUID.map(_.toString)).flatMap { token =>
-      val ready = MongoFilter.and(
+    RepositoryIO.lift(uuidGen.randomUUID.map(_.toString)).flatMap { token =>
+      val available = MongoFilter.and(
         MongoFilter
-          .in(MongoFields.State, List(SearchSessionWorkState.Ready.toString, SearchSessionWorkState.Retry.toString)),
+          .in(MongoFields.State, List(SearchSessionWorkState.Ready, SearchSessionWorkState.Retry).map(_.toString)),
         MongoFilter.lte(MongoFields.AvailableAt, Date.from(now))
       )
-      val expired = MongoFilter.and(
-        MongoFilter.eq(MongoFields.State, SearchSessionWorkState.Processing.toString),
-        MongoFilter.lt(MongoFields.LeaseUntil, Date.from(now))
-      )
-      val update = MongoUpdate.combine(
-        MongoUpdate.set(MongoFields.State, SearchSessionWorkState.Processing.toString),
-        MongoUpdate.set(MongoFields.LeaseOwner, workerId),
-        MongoUpdate.set(MongoFields.LeaseToken, token),
-        MongoUpdate.set(MongoFields.LeaseUntil, Date.from(leaseUntil)),
-        MongoUpdate.set(MongoFields.UpdatedAt, Date.from(now))
-      )
-      val options = new FindOneAndUpdateOptions()
-        .sort(Sorts.ascending(MongoFields.AvailableAt, MongoFields.CreatedAt, MongoFields.Id))
-        .returnDocument(ReturnDocument.AFTER)
       MongoRepositorySupport
         .repositoryGuard(diagnostics, "searchSessionWork.claim") {
-          RepositoryIO
-            .lift(
-              work
-                .flatMap(_.findOneAndUpdate(MongoFilter.or(ready, expired).bson, update.bson, options))
+          MongoLeaseQueue.claimNext(
+            work,
+            None,
+            MongoLeaseQueue.claimable(available, processing, now),
+            MongoLeaseQueue.leaseStamp(SearchSessionWorkState.Processing.toString, workerId, token, leaseUntil, now),
+            Sorts.ascending(MongoFields.AvailableAt, MongoFields.CreatedAt, MongoFields.Id)
+          )(document =>
+            RepositoryIO.fromEither(
+              MongoSearchSessionWorkCodecs.readClaim(document).leftMap(_ => RepositoryError.InvalidStoredData)
             )
-            .subflatMap {
-              case None           => Right(None)
-              case Some(document) =>
-                MongoSearchSessionWorkCodecs
-                  .readClaim(document)
-                  .leftMap(_ => RepositoryError.InvalidStoredData)
-                  .map(Some(_))
-            }
-        }(_ => Left(RepositoryError.Unavailable))
+          )
+        }
     }
 
   override def complete(claim: ClaimedSearchSessionWork, now: Instant): RepositoryIO[Unit] =
@@ -159,7 +146,7 @@ final class MongoSearchSessionWorkRepository(
             val sessionDocument = MongoHiringCodecs.searchSession(claim.work.session.copy(query = None))
             sessionDocument.remove("query")
             val saveSession = RepositoryIO.lift(
-              updateOne(
+              MongoSessionOperations.updateOne(
                 sessions,
                 active,
                 MongoFilter.and(
@@ -174,9 +161,10 @@ final class MongoSearchSessionWorkRepository(
               case None    => RepositoryIO.fromEither(Left(RepositoryError.MissingWriteResult))
               case Some(_) =>
                 insertOperationalEvents(outbox, active, List(claim.work.event), now, diagnostics).flatMap { _ =>
-                  RepositoryIO.lift(deleteOne(active, lease)).subflatMap {
-                    case result if result.getDeletedCount == 1L => Right(())
-                    case _                                      => Left(RepositoryError.Conflict)
+                  RepositoryIO.lift(MongoSessionOperations.deleteOne(work, active, lease)).subflatMap {
+                    case Some(result) if result.getDeletedCount == 1L => Right(())
+                    case Some(_)                                      => Left(RepositoryError.Conflict)
+                    case None                                         => Left(RepositoryError.MissingWriteResult)
                   }
                 }
             }
@@ -223,17 +211,17 @@ final class MongoSearchSessionWorkRepository(
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "searchSessionWork.transition") {
         RepositoryIO
-          .lift(updateOne(work, None, leaseFilter(claim), update))
+          .lift(MongoSessionOperations.updateOne(work, None, leaseFilter(claim), update))
           .subflatMap {
             case Some(result) if result.getMatchedCount == 1L => Right(())
             case Some(_)                                      => Left(RepositoryError.Conflict)
             case None                                         => Left(RepositoryError.MissingWriteResult)
           }
-      }(_ => Left(RepositoryError.Unavailable))
+      }
 
   private def leaseFilter(claim: ClaimedSearchSessionWork): MongoFilter = MongoFilter.and(
     MongoFilter.eq(MongoFields.Id, claim.work.session.id.toString),
-    MongoFilter.eq(MongoFields.State, SearchSessionWorkState.Processing.toString),
+    processing,
     MongoFilter.eq(MongoFields.LeaseToken, claim.leaseToken)
   )
 
@@ -242,32 +230,19 @@ final class MongoSearchSessionWorkRepository(
       document.entrySet().asScala.toList.map(field => MongoUpdate.setOnInsert(field.getKey, field.getValue))*
     )
 
-  private def updateOne(
-      collection: IO[MongoSessionOperations.Documents],
-      session: Option[ClientSession[IO]],
-      filter: MongoFilter,
-      update: MongoUpdate,
-      options: UpdateOptions = new UpdateOptions()
-  ) =
-    MongoSessionOperations.updateOne(collection, session, filter, update, options)
-
-  private def deleteOne(session: Option[ClientSession[IO]], filter: MongoFilter) =
-    work.flatMap(collection =>
-      session.fold(
-        collection.deleteOne(filter.bson, new com.mongodb.client.model.DeleteOptions)
-      )(active => collection.deleteOne(active, filter.sessionFilter, new com.mongodb.client.model.DeleteOptions))
-    )
 }
 
 object MongoSearchSessionWorkRepository {
   def transactional(
       database: MongoDatabase[IO],
       client: MongoClient[IO],
-      diagnostics: Diagnostics
+      diagnostics: Diagnostics,
+      uuidGen: UUIDGen[IO] = UUIDGen[IO]
   ): MongoSearchSessionWorkRepository =
     new MongoSearchSessionWorkRepository(
       database,
       MongoTransactionRunner.sessions(client, RepositoryError.Conflict, diagnostics = diagnostics),
-      diagnostics
+      diagnostics,
+      uuidGen
     )
 }

@@ -1,11 +1,13 @@
 package com.example.graphQL.cats.config
 
-import io.github.iltotore.iron.*
-import io.github.iltotore.iron.constraint.any.*
-import io.github.iltotore.iron.constraint.numeric.*
-import io.github.iltotore.iron.constraint.string.*
+import com.example.graphQL.cats.domain.search.SearchFusionStrategy
 import io.github.iltotore.iron.pureconfig.given
 import _root_.pureconfig.*
+import _root_.pureconfig.generic.derivation.EnumConfigReaderDerivation
+
+/** Enum settings are written in lower camel case (`applicationRrf`), matching the domain case names. */
+private object CamelCaseEnumReaders extends EnumConfigReaderDerivation(ConfigFieldMapping(PascalCase, CamelCase))
+private[config] given ConfigReader[SearchFusionStrategy] = CamelCaseEnumReaders.EnumConfigReader.derived
 
 private[config] final case class RawVectorSearchConfig(
     enabled: Boolean,
@@ -14,10 +16,10 @@ private[config] final case class RawVectorSearchConfig(
     indexes: RawVectorIndexesConfig,
     numCandidates: Int,
     branchResultLimit: Option[Int],
-    fusionStrategy: String,
+    fusionStrategy: SearchFusionStrategy,
     rerank: RawRerankConfig
 ) derives ConfigReader
-private[config] final case class RawRerankConfig(enabled: Boolean, model: NonBlankStr) derives ConfigReader
+private[config] final case class RawRerankConfig(enabled: Boolean, model: RerankModel) derives ConfigReader
 private[config] final case class RawVoyageConfig(
     apiKey: Option[String],
     endpoint: HttpsUrl,
@@ -30,10 +32,10 @@ private[config] final case class RawEmbeddingConfig(
     timeoutMs: TimeoutMs,
     retryAttempts: EmbeddingRetryAttempts,
     retryDelayMs: EmbeddingRetryDelayMs,
-    durableRetryAttempts: Option[Int] = None,
-    durableRetryBaseMillis: Option[Int] = None,
-    durableRetryCapMillis: Option[Int] = None,
-    workerRestartDelayMillis: Option[Int] = None
+    durableRetryAttempts: Option[EmbeddingDurableRetryAttempts] = None,
+    durableRetryBaseMillis: Option[EmbeddingDurableRetryMs] = None,
+    durableRetryCapMillis: Option[EmbeddingDurableRetryMs] = None,
+    workerRestartDelayMillis: Option[EmbeddingWorkerRestartDelayMs] = None
 ) derives ConfigReader
 private[config] final case class RawVectorIndexesConfig(
     jobs: NonBlankStr,

@@ -77,9 +77,7 @@ private[spark] object AnalyticsGoldStage {
       timeRows <- rows(spark, paths.timeToHireGold, AnalyticsTableSchemas.timeToHire, sparkExecution)
       _ <-
         if (timeRows.size > 1)
-          Async[F].raiseError[Unit](
-            AnalyticsError.LakehouseFailure(new IllegalStateException("time-to-hire report is not singular"))
-          )
+          Async[F].raiseError[Unit](AnalyticsError.ReportNotSingular)
         else Async[F].unit
       timeToHire = timeRows.headOption.map(row =>
         AnalyticsTimeToHireOutput(
@@ -118,9 +116,7 @@ private[spark] object AnalyticsGoldStage {
       sparkExecution
     ).flatMap { result =>
       if (result.size > MaximumReportRows)
-        Async[F].raiseError(
-          AnalyticsError.LakehouseFailure(new IllegalStateException(s"report output exceeds $MaximumReportRows rows"))
-        )
+        Async[F].raiseError(AnalyticsError.ReportRowLimitExceeded(MaximumReportRows))
       else if (result.exists(_.anyNull)) Async[F].raiseError(AnalyticsError.InvalidGoldSchema)
       else Async[F].pure(result)
     }

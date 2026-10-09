@@ -2,11 +2,9 @@ package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.IO
 import cats.syntax.all.*
-import fs2.interop.reactivestreams.*
 import com.mongodb.{MongoClientSettings, MongoCommandException}
 import com.mongodb.client.model.{Filters, IndexOptions, Indexes}
 import mongo4cats.database.MongoDatabase
-import mongo4cats.codecs.CodecRegistry
 import org.bson.{BsonDocument, Document}
 import org.bson.conversions.Bson
 import java.util.concurrent.TimeUnit
@@ -14,50 +12,64 @@ import scala.jdk.CollectionConverters.*
 
 private[mongo] final case class IndexSpec(collection: String, keys: Bson, options: IndexOptions)
 
-/** Ordinary Mongo indexes grouped as declarative collection specifications. */
+/** Every ordinary Mongo index, declared once. Migration steps that introduce an index reuse these specifications. */
 private[mongo] object MongoHiringIndexSetup {
-  import MongoHiringSetup.*
+  import MongoIndexNames.*
 
-  private val publisherBufferSize = 32
   private val bsonRegistry = MongoClientSettings.getDefaultCodecRegistry
+
+  private def receiptUniqueIndex(collection: String, name: String): IndexSpec = IndexSpec(
+    collection,
+    Indexes.ascending(MongoFields.ReceiptId),
+    new IndexOptions()
+      .name(name)
+      .unique(true)
+      .partialFilterExpression(Filters.exists(MongoFields.ReceiptId, true))
+  )
+
+  /** Introduced by `005_analytics_deletion_receipts`; verified with every other index on each startup. */
+  val analyticsErasureReceiptIndexes: List[IndexSpec] = List(
+    receiptUniqueIndex(MongoCollections.AnalyticsErasureRequests, AnalyticsErasureRequestReceipt),
+    receiptUniqueIndex(MongoCollections.AnalyticsErasureCompletions, AnalyticsErasureCompletionReceipt)
+  )
 
   private val indexSpecs: List[IndexSpec] = List(
     IndexSpec(
       MongoCollections.InterviewSubjectCleanup,
-      Indexes.ascending("_id", "requestedAt"),
+      Indexes.ascending(MongoFields.Id, MongoFields.RequestedAt),
       new IndexOptions()
         .name(MongoInterviewCleanupSweepCodec.ActiveIndex)
         .partialFilterExpression(MongoInterviewCleanupSweepCodec.activeFilter)
     ),
     IndexSpec(
       MongoProducerRegistrations.Collection,
-      Indexes.ascending("subjectId", "kind", "state", "_id"),
-      new IndexOptions().name("producer_registration_subject_state")
+      Indexes.ascending("subjectId", MongoFields.Kind, MongoFields.State, MongoFields.Id),
+      new IndexOptions().name(ProducerRegistrationSubjectState)
     ),
     IndexSpec(
       MongoProducerRegistrations.Collection,
-      Indexes.ascending("transactionalId", "state", "_id"),
-      new IndexOptions().name("producer_registration_generation_state")
+      Indexes.ascending("transactionalId", MongoFields.State, MongoFields.Id),
+      new IndexOptions().name(ProducerRegistrationGenerationState)
     ),
     IndexSpec(
       MongoProducerRegistrations.Collection,
-      Indexes.ascending("expiresAt"),
-      new IndexOptions().name("producer_registration_fenced_expiry").expireAfter(0L, TimeUnit.SECONDS)
+      Indexes.ascending(MongoFields.ExpiresAt),
+      new IndexOptions().name(ProducerRegistrationFencedExpiry).expireAfter(0L, TimeUnit.SECONDS)
     ),
     IndexSpec(
       MongoCollections.InterviewSubjectCleanup,
-      Indexes.ascending("state", "requestedAt"),
-      new IndexOptions().name("interview_subject_cleanup_due")
+      Indexes.ascending(MongoFields.State, MongoFields.RequestedAt),
+      new IndexOptions().name(InterviewSubjectCleanupDue)
     ),
     IndexSpec(
       MongoCollections.Users,
       Indexes.ascending(MongoFields.EmailCanonical),
-      new IndexOptions().name(UsersEmailIndex).unique(true).sparse(true)
+      new IndexOptions().name(UsersEmail).unique(true).sparse(true)
     ),
     IndexSpec(
       MongoCollections.Users,
       Indexes.ascending(MongoFields.NameCanonical),
-      new IndexOptions().name(UsersNameIndex).unique(true)
+      new IndexOptions().name(UsersName).unique(true)
     ),
     IndexSpec(
       MongoCollections.Users,
@@ -65,7 +77,7 @@ private[mongo] object MongoHiringIndexSetup {
         Indexes.ascending(MongoFields.AccountStatus),
         Indexes.descending(MongoFields.CreatedAt, MongoFields.Id)
       ),
-      new IndexOptions().name(UsersStatusCreatedIndex)
+      new IndexOptions().name(UsersStatusCreated)
     ),
     IndexSpec(
       MongoCollections.Users,
@@ -73,20 +85,20 @@ private[mongo] object MongoHiringIndexSetup {
         Indexes.ascending(MongoFields.Role, MongoFields.AccountStatus),
         Indexes.descending(MongoFields.CreatedAt, MongoFields.Id)
       ),
-      new IndexOptions().name(UsersRoleStatusCreatedIndex)
+      new IndexOptions().name(UsersRoleStatusCreated)
     ),
     IndexSpec(
       MongoCollections.Users,
       Indexes.ascending(MongoFields.AdminSingletonKey),
       new IndexOptions()
-        .name(UsersAdminSingletonIndex)
+        .name(UsersAdminSingleton)
         .unique(true)
         .partialFilterExpression(Filters.eq(MongoFields.Role, "Admin"))
     ),
     IndexSpec(
       MongoCollections.Users,
       Indexes.ascending(MongoFields.EmbeddingMetaModel, MongoFields.Role),
-      new IndexOptions().name(UsersEmbeddingMetaIndex)
+      new IndexOptions().name(UsersEmbeddingMeta)
     ),
     IndexSpec(
       MongoCollections.Jobs,
@@ -94,7 +106,7 @@ private[mongo] object MongoHiringIndexSetup {
         Indexes.ascending(MongoFields.RecruiterId, MongoFields.Status),
         Indexes.descending(MongoFields.CreatedAt, MongoFields.Id)
       ),
-      new IndexOptions().name(JobsRecruiterStatusCreatedIndex)
+      new IndexOptions().name(JobsRecruiterStatusCreated)
     ),
     IndexSpec(
       MongoCollections.Jobs,
@@ -102,12 +114,12 @@ private[mongo] object MongoHiringIndexSetup {
         Indexes.ascending(MongoFields.RecruiterId),
         Indexes.descending(MongoFields.CreatedAt, MongoFields.Id)
       ),
-      new IndexOptions().name(JobsRecruiterCreatedIndex)
+      new IndexOptions().name(JobsRecruiterCreated)
     ),
     IndexSpec(
       MongoCollections.Jobs,
       Indexes.descending(MongoFields.CreatedAt, MongoFields.Id),
-      new IndexOptions().name(JobsCreatedIndex)
+      new IndexOptions().name(JobsCreated)
     ),
     IndexSpec(
       MongoCollections.Jobs,
@@ -115,7 +127,7 @@ private[mongo] object MongoHiringIndexSetup {
         Indexes.ascending(MongoFields.Status),
         Indexes.descending(MongoFields.CreatedAt, MongoFields.Id)
       ),
-      new IndexOptions().name(JobsOpenCreatedIndex)
+      new IndexOptions().name(JobsOpenCreated)
     ),
     IndexSpec(
       MongoCollections.Jobs,
@@ -123,12 +135,12 @@ private[mongo] object MongoHiringIndexSetup {
         Indexes.ascending(MongoFields.Status, MongoFields.LocationCity),
         Indexes.descending(MongoFields.CreatedAt, MongoFields.Id)
       ),
-      new IndexOptions().name(JobsOpenCityCreatedIndex)
+      new IndexOptions().name(JobsOpenCityCreated)
     ),
     IndexSpec(
       MongoCollections.Jobs,
-      Indexes.geo2dsphere("location.point"),
-      new IndexOptions().name(JobsLocationPointIndex)
+      Indexes.geo2dsphere(MongoFields.LocationPoint),
+      new IndexOptions().name(JobsLocationPoint)
     ),
     IndexSpec(
       MongoCollections.Jobs,
@@ -138,12 +150,12 @@ private[mongo] object MongoHiringIndexSetup {
         MongoFields.LocationCity,
         MongoFields.RecruiterId
       ),
-      new IndexOptions().name(JobsEmbeddingMetaIndex)
+      new IndexOptions().name(JobsEmbeddingMeta)
     ),
     IndexSpec(
       MongoCollections.Applications,
       Indexes.ascending(MongoFields.CandidateId, MongoFields.JobId),
-      new IndexOptions().name(ApplicationsCandidateJobIndex).unique(true)
+      new IndexOptions().name(ApplicationsCandidateJob).unique(true)
     ),
     IndexSpec(
       MongoCollections.Applications,
@@ -151,7 +163,7 @@ private[mongo] object MongoHiringIndexSetup {
         Indexes.ascending(MongoFields.CandidateId, MongoFields.Status),
         Indexes.descending(MongoFields.CreatedAt, MongoFields.Id)
       ),
-      new IndexOptions().name(ApplicationsCandidateStatusCreatedIndex)
+      new IndexOptions().name(ApplicationsCandidateStatusCreated)
     ),
     IndexSpec(
       MongoCollections.Applications,
@@ -159,7 +171,7 @@ private[mongo] object MongoHiringIndexSetup {
         Indexes.ascending(MongoFields.CandidateId),
         Indexes.descending(MongoFields.CreatedAt, MongoFields.Id)
       ),
-      new IndexOptions().name(ApplicationsCandidateCreatedIndex)
+      new IndexOptions().name(ApplicationsCandidateCreated)
     ),
     IndexSpec(
       MongoCollections.Applications,
@@ -167,13 +179,13 @@ private[mongo] object MongoHiringIndexSetup {
         Indexes.ascending(MongoFields.JobId, MongoFields.Status),
         Indexes.descending(MongoFields.CreatedAt, MongoFields.Id)
       ),
-      new IndexOptions().name(ApplicationsJobStatusCreatedIndex)
+      new IndexOptions().name(ApplicationsJobStatusCreated)
     ),
     IndexSpec(
       MongoCollections.Applications,
       Indexes
         .compoundIndex(Indexes.ascending(MongoFields.JobId), Indexes.descending(MongoFields.CreatedAt, MongoFields.Id)),
-      new IndexOptions().name(ApplicationsJobCreatedIndex)
+      new IndexOptions().name(ApplicationsJobCreated)
     ),
     IndexSpec(
       MongoCollections.ApplicationEvents,
@@ -181,12 +193,12 @@ private[mongo] object MongoHiringIndexSetup {
         Indexes.ascending(MongoFields.ApplicationId),
         Indexes.descending(MongoFields.OccurredAt, MongoFields.Id)
       ),
-      new IndexOptions().name(ApplicationEventsApplicationCreatedIndex)
+      new IndexOptions().name(ApplicationEventsApplicationCreated)
     ),
     IndexSpec(
       MongoCollections.EmbeddingWork,
       Indexes.ascending(MongoFields.State, MongoFields.AvailableAt, MongoFields.LeaseUntil),
-      new IndexOptions().name(EmbeddingWorkAvailableIndex)
+      new IndexOptions().name(EmbeddingWorkAvailable)
     ),
     IndexSpec(
       MongoCollections.EventOutbox,
@@ -197,25 +209,25 @@ private[mongo] object MongoHiringIndexSetup {
         MongoFields.OccurredAt,
         MongoFields.Id
       ),
-      new IndexOptions().name(EventOutboxClaimIndex)
+      new IndexOptions().name(EventOutboxClaim)
     ),
     IndexSpec(
       MongoCollections.EventOutbox,
       Indexes.ascending(MongoFields.RetentionExpiresAt),
       new IndexOptions()
-        .name(EventOutboxPublishedRetentionIndex)
+        .name(EventOutboxPublishedRetention)
         .expireAfter(0L, TimeUnit.SECONDS)
         .partialFilterExpression(Filters.eq(MongoFields.State, "Published"))
     ),
     IndexSpec(
       MongoCollections.EventOutbox,
       Indexes.ascending(MongoFields.SubjectIds),
-      new IndexOptions().name(EventOutboxSubjectIdsIndex)
+      new IndexOptions().name(EventOutboxSubjectIds)
     ),
     IndexSpec(
       MongoCollections.OutboxSubjectFences,
       Indexes.ascending(MongoFields.Deleted, MongoFields.LeaseUntil),
-      new IndexOptions().name(OutboxSubjectFenceLeaseIndex)
+      new IndexOptions().name(OutboxSubjectFenceLease)
     ),
     IndexSpec(
       MongoCollections.SearchSessions,
@@ -223,145 +235,130 @@ private[mongo] object MongoHiringIndexSetup {
         Indexes.ascending(MongoFields.ActorId),
         Indexes.descending(MongoFields.OccurredAt, MongoFields.Id)
       ),
-      new IndexOptions().name(SearchSessionsActorIndex)
+      new IndexOptions().name(SearchSessionsActor)
     ),
     IndexSpec(
       MongoCollections.SearchSessions,
       Indexes.ascending(MongoFields.ExpiresAt),
-      new IndexOptions().name(SearchSessionsExpiryIndex).expireAfter(0L, TimeUnit.SECONDS)
+      new IndexOptions().name(SearchSessionsExpiry).expireAfter(0L, TimeUnit.SECONDS)
     ),
     IndexSpec(
       MongoCollections.SearchSessionWork,
       Indexes.ascending(MongoFields.State, MongoFields.AvailableAt, MongoFields.LeaseUntil, MongoFields.CreatedAt),
-      new IndexOptions().name(SearchSessionWorkClaimIndex)
+      new IndexOptions().name(SearchSessionWorkClaim)
     ),
     IndexSpec(
       MongoCollections.SearchSessionWork,
       Indexes.ascending(MongoFields.RetentionExpiresAt),
       new IndexOptions()
-        .name(SearchSessionWorkRetentionIndex)
+        .name(SearchSessionWorkRetention)
         .expireAfter(0L, TimeUnit.SECONDS)
         .partialFilterExpression(Filters.eq(MongoFields.State, "Failed"))
     ),
     IndexSpec(
       MongoCollections.ConsumerReceipts,
       Indexes.ascending(MongoFields.ConsumerGroup, MongoFields.EventId),
-      new IndexOptions().name(ConsumerReceiptsIdIndex).unique(true)
+      new IndexOptions().name(ConsumerReceiptsId).unique(true)
     ),
     IndexSpec(
       MongoCollections.ConsumerReceipts,
       Indexes.ascending(MongoFields.ExpiresAt),
-      new IndexOptions().name(ConsumerReceiptsExpiryIndex).expireAfter(0L, TimeUnit.SECONDS)
+      new IndexOptions().name(ConsumerReceiptsExpiry).expireAfter(0L, TimeUnit.SECONDS)
     ),
     IndexSpec(
       MongoCollections.MutationReceipts,
       Indexes.ascending(MongoFields.Operation, MongoFields.ActorScope, MongoFields.IdempotencyKey),
-      new IndexOptions().name(MutationReceiptsKeyIndex).unique(true)
+      new IndexOptions().name(MutationReceiptsKey).unique(true)
     ),
     IndexSpec(
       MongoCollections.MutationReceipts,
       Indexes.ascending(MongoFields.ExpiresAt),
-      new IndexOptions().name(MutationReceiptsExpiryIndex).expireAfter(0L, TimeUnit.SECONDS)
+      new IndexOptions().name(MutationReceiptsExpiry).expireAfter(0L, TimeUnit.SECONDS)
     ),
     IndexSpec(
       MongoCollections.EventQuarantine,
-      Indexes.ascending(MongoFields.Topic, "partition", "offset"),
-      new IndexOptions().name(EventQuarantineOffsetIndex).unique(true)
+      Indexes.ascending(MongoFields.Topic, MongoFields.Partition, MongoFields.Offset),
+      new IndexOptions().name(EventQuarantineOffset).unique(true)
     ),
     IndexSpec(
       MongoCollections.EventQuarantine,
       Indexes.ascending(MongoFields.ExpiresAt),
-      new IndexOptions().name(EventQuarantineExpiryIndex).expireAfter(0L, TimeUnit.SECONDS)
+      new IndexOptions().name(EventQuarantineExpiry).expireAfter(0L, TimeUnit.SECONDS)
     ),
     IndexSpec(
       MongoCollections.AnalyticsErasureRequests,
       Indexes.ascending(MongoFields.State, MongoFields.RequestedAt),
-      new IndexOptions().name(AnalyticsErasureRequestStateIndex)
-    ),
-    IndexSpec(
-      MongoCollections.AnalyticsErasureRequests,
-      Indexes.ascending(MongoFields.ReceiptId),
-      new IndexOptions()
-        .name("analytics_erasure_request_receipt_unique")
-        .unique(true)
-        .partialFilterExpression(Filters.exists(MongoFields.ReceiptId, true))
-    ),
-    IndexSpec(
-      MongoCollections.AnalyticsErasureCompletions,
-      Indexes.ascending(MongoFields.ReceiptId),
-      new IndexOptions()
-        .name("analytics_erasure_completion_receipt_unique")
-        .unique(true)
-        .partialFilterExpression(Filters.exists(MongoFields.ReceiptId, true))
-    ),
+      new IndexOptions().name(AnalyticsErasureRequestState)
+    )
+  ) ++ analyticsErasureReceiptIndexes ++ List(
     IndexSpec(
       MongoCollections.AnalyticsErasureRequests,
       Indexes.ascending(MongoFields.ExpiresAt),
-      new IndexOptions().name("analytics_erasure_request_expiry").expireAfter(0L, TimeUnit.SECONDS)
+      new IndexOptions().name(AnalyticsErasureRequestExpiry).expireAfter(0L, TimeUnit.SECONDS)
     ),
     IndexSpec(
       MongoCollections.AnalyticsWorkerHeartbeats,
       Indexes.ascending(MongoFields.LeaseUntil),
-      new IndexOptions().name("analytics_worker_heartbeat_expiry").expireAfter(0L, TimeUnit.SECONDS)
+      new IndexOptions().name(AnalyticsWorkerHeartbeatExpiry).expireAfter(0L, TimeUnit.SECONDS)
     ),
     IndexSpec(
       MongoCollections.AnalyticsReportSnapshots,
       Indexes.compoundIndex(Indexes.ascending(MongoFields.State), Indexes.descending(MongoFields.AsOf)),
-      new IndexOptions().name(AnalyticsReportPublishedIndex)
+      new IndexOptions().name(AnalyticsReportPublished)
     ),
     IndexSpec(
       MongoCollections.AnalyticsReportSnapshots,
       Indexes.ascending(MongoFields.ExpiresAt),
-      new IndexOptions().name(AnalyticsReportExpiryIndex).expireAfter(0L, TimeUnit.SECONDS)
+      new IndexOptions().name(AnalyticsReportExpiry).expireAfter(0L, TimeUnit.SECONDS)
     ),
     IndexSpec(
       MongoCollections.AnalyticsReportRuns,
       Indexes.ascending(MongoFields.ExpiresAt),
-      new IndexOptions().name(MongoHiringSetup.AnalyticsReportRunExpiryIndex).expireAfter(0L, TimeUnit.SECONDS)
+      new IndexOptions().name(AnalyticsReportRunExpiry).expireAfter(0L, TimeUnit.SECONDS)
     ),
     IndexSpec(
       MongoCollections.InterviewWorkflows,
-      Indexes.ascending("candidateId", MongoFields.Id),
-      new IndexOptions().name(MongoHiringSetup.InterviewWorkflowCandidateIndex)
+      Indexes.ascending(MongoFields.CandidateId, MongoFields.Id),
+      new IndexOptions().name(InterviewWorkflowCandidate)
     ),
     IndexSpec(
       MongoCollections.InterviewWorkflows,
-      Indexes.ascending("recruiterId", MongoFields.Id),
-      new IndexOptions().name(MongoHiringSetup.InterviewWorkflowRecruiterIndex)
+      Indexes.ascending(MongoFields.RecruiterId, MongoFields.Id),
+      new IndexOptions().name(InterviewWorkflowRecruiter)
     ),
     IndexSpec(
       MongoCollections.InterviewWorkflowCommands,
       Indexes.ascending("commandState", MongoFields.AvailableAt, MongoFields.Id),
-      new IndexOptions().name(MongoHiringSetup.InterviewWorkflowCommandDueIndex)
+      new IndexOptions().name(InterviewWorkflowCommandDue)
     ),
     IndexSpec(
       MongoCollections.InterviewWorkflowCommands,
       Indexes.ascending("commandState", "claimUntil", MongoFields.Id),
-      new IndexOptions().name(MongoHiringSetup.InterviewWorkflowCommandLeaseIndex)
+      new IndexOptions().name(InterviewWorkflowCommandLease)
     ),
     IndexSpec(
       MongoCollections.InterviewWorkflowInbox,
-      Indexes.ascending("workflowId", "messageId"),
+      Indexes.ascending(MongoFields.WorkflowId, MongoFields.MessageId),
       new IndexOptions()
-        .name(MongoHiringSetup.InterviewWorkflowInboxIdentityIndex)
+        .name(InterviewWorkflowInboxIdentity)
         .unique(true)
-        .partialFilterExpression(Filters.eq("documentType", "inboxReceipt"))
+        .partialFilterExpression(Filters.eq(MongoFields.DocumentType, "inboxReceipt"))
     ),
     IndexSpec(
       MongoCollections.FakeInterviewCalendarReservations,
       Indexes.ascending("participants", "startsAt", "endsAt"),
       new IndexOptions()
-        .name(MongoHiringSetup.FakeInterviewCalendarParticipantsIndex)
+        .name(FakeInterviewCalendarParticipants)
     ),
     IndexSpec(
       MongoCollections.FakeInterviewCalendarReservations,
       Indexes.ascending("releaseKey"),
-      new IndexOptions().name(MongoHiringSetup.FakeInterviewCalendarReleaseIndex).unique(true)
+      new IndexOptions().name(FakeInterviewCalendarRelease).unique(true)
     ),
     IndexSpec(
       MongoCollections.FakeInterviewNotificationReceipts,
       Indexes.ascending("recipientId", "deliveredAt"),
-      new IndexOptions().name(MongoHiringSetup.FakeInterviewNotificationRecipientIndex)
+      new IndexOptions().name(FakeInterviewNotificationRecipient)
     )
   )
 
@@ -375,7 +372,7 @@ private[mongo] object MongoHiringIndexSetup {
     IndexSpec(
       name,
       Indexes.ascending(MongoFields.RetentionExpiresAt),
-      new IndexOptions().name(s"${name}_completed_evidence_expiry").expireAfter(0L, TimeUnit.SECONDS)
+      new IndexOptions().name(completedEvidenceExpiry(name)).expireAfter(0L, TimeUnit.SECONDS)
     )
   )
 
@@ -383,53 +380,59 @@ private[mongo] object MongoHiringIndexSetup {
     MongoCollections.InterviewWorkflowCommands,
     MongoCollections.InterviewWorkflowInbox,
     MongoCollections.FakeInterviewNotificationReceipts
-  ).map(name => IndexSpec(name, Indexes.ascending("workflowId"), new IndexOptions().name(s"${name}_workflow_identity")))
+  ).map(name =>
+    IndexSpec(name, Indexes.ascending(MongoFields.WorkflowId), new IndexOptions().name(workflowIdentity(name)))
+  )
 
-  def create(database: MongoDatabase[IO]): IO[Unit] =
-    (indexSpecs ++ interviewRetentionSpecs ++ interviewSubjectSpecs)
+  val allSpecs: List[IndexSpec] = indexSpecs ++ interviewRetentionSpecs ++ interviewSubjectSpecs
+
+  def create(database: MongoDatabase[IO]): IO[Unit] = ensure(database, allSpecs)
+
+  /** Verifies existing definitions first, creates only the missing indexes, then re-verifies every definition. */
+  def ensure(database: MongoDatabase[IO], specs: List[IndexSpec]): IO[Unit] =
+    specs
       .groupBy(_.collection)
       .toList
-      .traverse { case (collectionName, specs) =>
-        listIndexes(database, collectionName).map(indexes => (collectionName, specs, indexes))
+      .traverse { case (collectionName, collectionSpecs) =>
+        listIndexes(database, collectionName).map(indexes => (collectionName, collectionSpecs, indexes))
       }
       .flatMap { snapshots =>
-        snapshots.traverse_ { case (_, specs, existing) =>
-          specs.traverse_ { spec =>
-            existing
-              .find(_.getString("name") == spec.options.getName)
-              .traverse_(index =>
-                definitionMismatch(spec, index).traverse_(reason => IO.raiseError(indexMismatch(spec, reason)))
-              )
+        snapshots.traverse_ { case (_, collectionSpecs, existing) =>
+          collectionSpecs.traverse_ { spec =>
+            existing.find(_.getString("name") == spec.options.getName).traverse_(verifyDefinition(spec, _))
           }
-        } *> snapshots.traverse_ { case (_, specs, existing) =>
-          specs.filterNot(spec => existing.exists(_.getString("name") == spec.options.getName)).traverse_ { spec =>
-            database
-              .getCollection[Document](spec.collection, CodecRegistry.Default)
-              .flatMap(_.createIndex(spec.keys, spec.options))
-              .void
+        } *> snapshots.traverse_ { case (collectionName, collectionSpecs, existing) =>
+          collectionSpecs.filterNot(spec => existing.exists(_.getString("name") == spec.options.getName)).traverse_ {
+            spec =>
+              Mongo4catsCollections
+                .documents(database, collectionName)
+                .flatMap(_.createIndex(spec.keys, spec.options))
+                .void
           }
-        } *> snapshots.traverse_ { case (collectionName, specs, _) =>
+        } *> snapshots.traverse_ { case (collectionName, collectionSpecs, _) =>
           listIndexes(database, collectionName).flatMap { created =>
-            specs.traverse_ { spec =>
+            collectionSpecs.traverse_ { spec =>
               created
                 .find(_.getString("name") == spec.options.getName)
-                .fold(IO.raiseError[Unit](indexMismatch(spec, "missing after setup"))) { index =>
-                  definitionMismatch(spec, index).traverse_(reason => IO.raiseError(indexMismatch(spec, reason)))
-                }
+                .fold(IO.raiseError[Unit](indexMismatch(spec, "missing after setup")))(verifyDefinition(spec, _))
             }
           }
         }
       }
 
+  private def verifyDefinition(spec: IndexSpec, index: Document): IO[Unit] =
+    definitionMismatch(spec, index).traverse_(reason => IO.raiseError(indexMismatch(spec, reason)))
+
+  /** A collection that does not exist yet (code 26) simply has no indexes. */
   private def listIndexes(database: MongoDatabase[IO], collectionName: String): IO[List[Document]] =
-    IO.delay(database.underlying.getCollection(collectionName, classOf[Document]).listIndexes())
-      .flatMap(_.toStreamBuffered[IO](bufferSize = publisherBufferSize).compile.toList)
+    Mongo4catsCollections
+      .documents(database, collectionName)
+      .flatMap(_.listIndexes[Document])
+      .map(_.toList)
       .recoverWith { case error: MongoCommandException if error.getErrorCode == 26 => IO.pure(Nil) }
 
-  private def indexMismatch(spec: IndexSpec, reason: String): IllegalStateException =
-    new IllegalStateException(
-      s"Mongo index definition mismatch for collection '${spec.collection}' index '${spec.options.getName}': $reason"
-    )
+  private def indexMismatch(spec: IndexSpec, reason: String): MigrationError =
+    MigrationError.IndexMismatch(spec.collection, spec.options.getName, reason)
 
   /** Returns only the mismatched definition field, never the potentially sensitive index predicate. */
   private[mongo] def definitionMismatch(spec: IndexSpec, actual: Document): Option[String] = {

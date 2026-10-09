@@ -2,40 +2,42 @@ package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.IO
 import cats.syntax.all.*
-import com.mongodb.MongoCommandException
-import com.mongodb.client.model.{Filters, Sorts, Updates, UpdateOptions}
-import fs2.interop.reactivestreams.*
+import com.mongodb.client.model.{Filters, Sorts}
 import org.bson.Document
 import scala.jdk.CollectionConverters.*
 
 /** A new cutover establishes an audited baseline and store-enforced command semantics before avoiding old scans. */
 private[mongo] object MongoWorkflowIntegrityMigrations {
-  val MigrationId = "013_hiring_workflow_integrity"
+  private val Id: MigrationId = MigrationIds.HiringWorkflowIntegrity
+
+  /** Ledger literal kept as `String` for existing callers; the typed identity is
+    * `MigrationIds.HiringWorkflowIntegrity`.
+    */
+  val MigrationId: String = Id.value
   private val BatchSize = 500
-  private val Uuid = "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+  private val CoveredProofs = List(MigrationIds.EventOutboxSubjectReferences, MigrationIds.InterviewWorkflowAttempts)
 
   def commandValidator: Document = {
-    def text = new Document("bsonType", "string").append("minLength", 1).append("maxLength", 256)
-    def enumSchema(values: String*) = new Document("enum", values.toList.asJava)
-    def stringUuid = text.append("pattern", Uuid)
-    def objectSchema(required: List[String], properties: Document) = new Document("bsonType", "object")
-      .append("required", required.asJava)
-      .append("properties", properties)
+    import MongoValidatorSchemas.{enumSchema, objectSchema, shortText as text, stringUuid}
     def kind(name: String, fields: (String, Document)*) = objectSchema(
-      "kind" :: fields.toList.map(_._1),
-      fields.foldLeft(new Document("kind", enumSchema(name))) { case (result, (field, schema)) =>
+      MongoFields.Kind :: fields.toList.map(_._1),
+      fields.foldLeft(new Document(MongoFields.Kind, enumSchema(name))) { case (result, (field, schema)) =>
         result.append(field, schema)
       }
     )
     val commands = List(
-      kind("reserveCalendar", "idempotencyKey" -> text),
-      kind("releaseCalendar", "idempotencyKey" -> text),
-      kind("lookupCalendar", "workflowId" -> stringUuid),
-      kind("lookupStatusCommit", "workflowId" -> stringUuid),
+      kind("reserveCalendar", MongoFields.IdempotencyKey -> text),
+      kind("releaseCalendar", MongoFields.IdempotencyKey -> text),
+      kind("lookupCalendar", MongoFields.WorkflowId -> stringUuid),
+      kind("lookupStatusCommit", MongoFields.WorkflowId -> stringUuid),
       kind("commitInterview", "expectedStatus" -> enumSchema("Accepted")),
-      kind("notify", "participant" -> enumSchema("Candidate", "Recruiter"), "idempotencyKey" -> text),
-      kind("lookupNotification", "participant" -> enumSchema("Candidate", "Recruiter"), "idempotencyKey" -> text),
-      kind("requireRepair", "reason" -> text)
+      kind("notify", "participant" -> enumSchema("Candidate", "Recruiter"), MongoFields.IdempotencyKey -> text),
+      kind(
+        "lookupNotification",
+        "participant" -> enumSchema("Candidate", "Recruiter"),
+        MongoFields.IdempotencyKey -> text
+      ),
+      kind("requireRepair", MongoFields.Reason -> text)
     )
     val states = List(
       "Pending",
@@ -53,25 +55,25 @@ private[mongo] object MongoWorkflowIntegrityMigrations {
     }
     val schema = objectSchema(
       List(
-        "_id",
-        "workflowId",
+        MongoFields.Id,
+        MongoFields.WorkflowId,
         "stepId",
-        "revision",
+        MongoFields.Revision,
         "command",
         "commandState",
-        "attempts",
+        MongoFields.Attempts,
         "executionAttempts",
-        "availableAt",
-        "occurredAt"
+        MongoFields.AvailableAt,
+        MongoFields.OccurredAt
       ),
-      new Document("_id", text)
-        .append("workflowId", stringUuid)
+      new Document(MongoFields.Id, text)
+        .append(MongoFields.WorkflowId, stringUuid)
         .append("stepId", text)
-        .append("revision", new Document("bsonType", "long").append("minimum", 0L))
-        .append("attempts", new Document("bsonType", "int").append("minimum", 0))
+        .append(MongoFields.Revision, new Document("bsonType", "long").append("minimum", 0L))
+        .append(MongoFields.Attempts, new Document("bsonType", "int").append("minimum", 0))
         .append("executionAttempts", new Document("bsonType", "int").append("minimum", 0))
-        .append("availableAt", new Document("bsonType", "date"))
-        .append("occurredAt", new Document("bsonType", "date"))
+        .append(MongoFields.AvailableAt, new Document("bsonType", "date"))
+        .append(MongoFields.OccurredAt, new Document("bsonType", "date"))
         .append("command", new Document("oneOf", commands.asJava))
         .append("commandState", enumSchema(states*))
         .append("result", enumSchema("Succeeded", "Rejected", "OutcomeUnknown", "Found", "Absent"))
@@ -159,125 +161,53 @@ private[mongo] object MongoWorkflowIntegrityMigrations {
     )
   }
 
-  private def currentDefinitions(database: MongoHiringSetup.SetupDatabase): IO[Boolean] = {
-    val names = List(MongoCollections.InterviewWorkflowCommands, MongoCollections.EventOutbox)
-    val command =
-      new Document("listCollections", 1).append("filter", new Document("name", new Document("$in", names.asJava)))
-    IO.delay(database.underlying.underlying.runCommand(command, classOf[Document]))
-      .flatMap(_.toStreamBuffered[IO](1).compile.lastOrError)
-      .map { result =>
-        val entries = Option(result.get("cursor", classOf[Document])).toList
-          .flatMap(cursor => Option(cursor.getList("firstBatch", classOf[Document])).toList.flatMap(_.asScala))
-        names.forall { name =>
-          entries.find(_.getString("name") == name).exists { entry =>
-            Option(entry.get("options", classOf[Document])).exists { options =>
-              options.getString("validationLevel") == "strict" && options.getString("validationAction") == "error" &&
-              Option(options.get("validator", classOf[Document])).contains(
-                if (name == MongoCollections.InterviewWorkflowCommands) commandValidator
-                else MongoHiringValidators.outboxValidator
-              )
-            }
-          }
+  private val validators: List[(String, Document)] = List(
+    MongoCollections.InterviewWorkflowCommands -> commandValidator,
+    MongoCollections.EventOutbox -> MongoHiringValidators.outboxValidator
+  )
+
+  /** Exact installed validators plus the covered 003/010 proofs are required before their old scans are skipped. */
+  private def verifyCompleted(database: MongoHiringSetup.SetupDatabase): IO[CompletedProof] =
+    MongoHiringValidators.assertStrictValidators(database, validators) *>
+      MongoMigrationLedger.requireComplete(database, CoveredProofs).as(CompletedProof.Trusted)
+
+  private def cutover(run: MigrationRun): IO[Unit] = {
+    val commands = run.database.getCollection(MongoCollections.InterviewWorkflowCommands)
+    def scan(after: Option[String]): IO[Unit] =
+      commands
+        .find(after.fold(Filters.empty())(id => Filters.gt(MongoFields.Id, id)))
+        .sort(Sorts.ascending(MongoFields.Id))
+        .limit(BatchSize)
+        .boundedStream(32)
+        .compile
+        .toList
+        .flatMap { rows =>
+          rows.traverse_(row =>
+            IO.fromEither(
+              MongoInterviewWorkflowCommandCodec
+                .decode(row)
+                .leftMap(_ => MigrationError.StepFailed(run.id, "cutover rejected a command"))
+            ).void
+          ) *>
+            (if (rows.size == BatchSize) scan(rows.lastOption.map(_.getString(MongoFields.Id))) else IO.unit)
         }
-      }
-  }
-
-  private def verifyCoveredLedgers(database: MongoHiringSetup.SetupDatabase): IO[Unit] =
-    List("003_event_outbox_subject_references", "010_interview_workflow_attempts").traverse_ { id =>
-      database.getCollection(MongoCollections.HiringMigrationLedger).find(Filters.eq("_id", id)).first.flatMap {
-        case Some(row)
-            if Option(row.get("version"))
-              .collect { case value: java.lang.Long if value.longValue() == 1L => () }
-              .contains(()) &&
-              Option(row.get("state")).contains("Complete") =>
-          IO.unit
-        case _ => IO.raiseError(new IllegalStateException("Unsupported covered hiring migration proof"))
-      }
-    }
-
-  def trusted(database: MongoHiringSetup.SetupDatabase): IO[Boolean] =
-    database.getCollection(MongoCollections.HiringMigrationLedger).find(Filters.eq("_id", MigrationId)).first.flatMap {
-      case None => IO.pure(false)
-      case Some(row)
-          if Option(row.get("version"))
-            .collect { case value: java.lang.Long if value.longValue() == 1L => () }
-            .contains(()) && row.getString("state") == "Running" =>
-        IO.pure(false)
-      case Some(row)
-          if Option(row.get("version"))
-            .collect { case value: java.lang.Long if value.longValue() == 1L => () }
-            .contains(()) && row.getString("state") == "Complete" =>
-        currentDefinitions(database).flatMap {
-          case true  => verifyCoveredLedgers(database).as(true)
-          case false =>
-            IO.raiseError(
-              new IllegalStateException("Hiring integrity validator changed; explicit audit and repair required")
-            )
-        }
-      case Some(_) => IO.raiseError(new IllegalStateException("Unsupported hiring integrity migration state"))
-    }
-
-  def initialize(database: MongoHiringSetup.SetupDatabase): IO[Unit] = trusted(database).flatMap {
-    case true  => IO.unit
-    case false =>
-      val ledger = database.getCollection(MongoCollections.HiringMigrationLedger)
-      val identity = Filters.eq("_id", MigrationId)
-      def scan(after: Option[String]): IO[Unit] = {
-        val collection = database.getCollection(MongoCollections.InterviewWorkflowCommands)
-        collection
-          .find(after.fold(Filters.empty())(id => Filters.gt("_id", id)))
-          .sort(Sorts.ascending("_id"))
-          .limit(BatchSize)
-          .boundedStream(32)
-          .compile
-          .toList
-          .flatMap { rows =>
-            rows.traverse_(row =>
-              IO.fromEither(
-                MongoInterviewWorkflowCommandCodec
-                  .decode(row)
-                  .left
-                  .map(_ => new IllegalStateException("Hiring integrity cutover rejected a command"))
-              ).void
-            ) *>
-              (if (rows.size == BatchSize) scan(rows.lastOption.map(_.getString("_id"))) else IO.unit)
-          }
-      }
-      def install(name: String, validator: Document): IO[Unit] =
-        database.createCollection(name).recoverWith {
-          case error: MongoCommandException if error.getErrorCode == 48 => IO.unit
-        } *> database.runCommand(
-          new Document("collMod", name)
-            .append("validator", validator)
-            .append("validationLevel", "strict")
-            .append("validationAction", "error")
-        )
-      ledger
-        .updateOne(
-          identity,
-          Updates.combine(
-            Updates.setOnInsert("_id", MigrationId),
-            Updates.set("version", Long.box(1L)),
-            Updates.set("state", "Running")
-          ),
-          new UpdateOptions().upsert(true)
-        )
-        .void *>
-        scan(None) *> install(MongoCollections.InterviewWorkflowCommands, commandValidator) *>
-        install(MongoCollections.EventOutbox, MongoHiringValidators.outboxValidator) *>
-        verifyStored(database) *> verifyCoveredLedgers(database) *>
-        ledger.updateOne(identity, Updates.set("state", "Complete")).void
+    scan(None) *>
+      validators.traverse_ { case (name, validator) => MongoHiringValidators.install(run.database, name, validator) } *>
+      verifyStored(run) *> MongoMigrationLedger.requireComplete(run.database, CoveredProofs)
   }
 
   /** Strict validators are not retroactive: the cutover checks all existing rows once. */
-  private def verifyStored(database: MongoHiringSetup.SetupDatabase): IO[Unit] =
-    List(
-      MongoCollections.InterviewWorkflowCommands -> commandValidator,
-      MongoCollections.EventOutbox -> MongoHiringValidators.outboxValidator
-    ).traverse_ { case (name, validator) =>
-      database.getCollection(name).find(new Document("$nor", List(validator).asJava)).limit(1).first.flatMap {
+  private def verifyStored(run: MigrationRun): IO[Unit] =
+    validators.traverse_ { case (name, validator) =>
+      run.database.getCollection(name).find(new Document("$nor", List(validator).asJava)).limit(1).first.flatMap {
         case None    => IO.unit
-        case Some(_) => IO.raiseError(new IllegalStateException("Hiring integrity cutover found invalid stored data"))
+        case Some(_) => run.fail(s"cutover found invalid stored data in $name")
       }
     }
+
+  val step: MongoMigrationStep = MongoMigrationStep(Id, cutover, verifyCompleted)
+
+  def trusted(database: MongoHiringSetup.SetupDatabase): IO[Boolean] = MongoMigrationRunner.trusted(database, step)
+
+  def initialize(database: MongoHiringSetup.SetupDatabase): IO[Unit] = MongoMigrationRunner.run(database, step)
 }

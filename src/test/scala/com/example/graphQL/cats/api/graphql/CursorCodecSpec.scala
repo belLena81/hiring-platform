@@ -5,6 +5,7 @@ import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.UserCursor
 import com.example.graphQL.cats.domain.pagination.{ApplicationCursor, ApplicationEventCursor, JobCursor}
+import com.example.graphQL.cats.service.search.NearbyJobCursor
 import munit.CatsEffectSuite
 import pdi.jwt.{JwtAlgorithm, JwtCirce, JwtClaim}
 
@@ -159,4 +160,72 @@ final class CursorCodecSpec extends CatsEffectSuite {
 
   private def encodeSegment(value: String): String =
     Base64.getUrlEncoder.withoutPadding().encodeToString(value.getBytes(StandardCharsets.UTF_8))
+
+  test("connection cursors minted before the generic keyset model still decode byte-identically") {
+    // Known tokens: payload "j|<instant>|<uuid>" signed with the test key; must stay stable across refactors.
+    val legacyPayload = s"j|$issuedAt|$id"
+    val legacy = JwtCirce.encode(
+      JwtClaim()
+        .about(legacyPayload)
+        .by("hiring-platform-cursor")
+        .to("hiring-graphql-api")
+        .issuedAt(issuedAt.getEpochSecond)
+        .expiresAt(issuedAt.plusSeconds(ttlSeconds).getEpochSecond),
+      summon[CursorCodec.CursorKey].secretKey,
+      JwtAlgorithm.HS256
+    )
+    assertEquals(CursorCodec.encode(JobCursor(issuedAt, JobId(id)), issuedAt), legacy)
+    assertEquals(CursorCodec.decode[JobCursor](legacy, issuedAt), Right(JobCursor(issuedAt, JobId(id))))
+    List("a" -> "application", "e" -> "event", "u" -> "user").foreach { case (tag, _) =>
+      val token = JwtCirce.encode(
+        JwtClaim()
+          .about(s"$tag|$issuedAt|$id")
+          .by("hiring-platform-cursor")
+          .to("hiring-graphql-api")
+          .issuedAt(issuedAt.getEpochSecond)
+          .expiresAt(issuedAt.plusSeconds(ttlSeconds).getEpochSecond),
+        summon[CursorCodec.CursorKey].secretKey,
+        JwtAlgorithm.HS256
+      )
+      tag match {
+        case "a" => assertEquals(CursorCodec.encode(ApplicationCursor(issuedAt, ApplicationId(id)), issuedAt), token)
+        case "e" =>
+          assertEquals(CursorCodec.encode(ApplicationEventCursor(issuedAt, ApplicationEventId(id)), issuedAt), token)
+        case _ => assertEquals(CursorCodec.encode(UserCursor(issuedAt, UserId(id)), issuedAt), token)
+      }
+    }
+  }
+
+  test("nearby cursors use the signed codec with their own kind and reject other connections") {
+    val nearby = NearbyJobCursor(1.234567890123456d, JobId(id), "fingerprint")
+    val encoded = CursorCodec.encode(nearby, issuedAt)
+    assertEquals(CursorCodec.decode[NearbyJobCursor](encoded, issuedAt), Right(nearby))
+    assertEquals(CursorCodec.decode[JobCursor](encoded, issuedAt), Left(CursorCodec.CursorError.WrongKind("n")))
+    val job = CursorCodec.encode(JobCursor(issuedAt, JobId(id)), issuedAt)
+    assertEquals(CursorCodec.decode[NearbyJobCursor](job, issuedAt), Left(CursorCodec.CursorError.WrongKind("j")))
+    val nan = CursorCodec.encode(NearbyJobCursor(Double.NaN, JobId(id), "fingerprint"), issuedAt)
+    assert(CursorCodec.decode[NearbyJobCursor](nan, issuedAt).exists(!_.hasValidDistance))
+    assert(CursorCodec.decode[NearbyJobCursor](encoded, issuedAt.plusSeconds(ttlSeconds + 1)).isLeft)
+    val unsignedBase64 =
+      Base64.getUrlEncoder.withoutPadding.encodeToString(s"1.0|$id|fp".getBytes(StandardCharsets.UTF_8))
+    assert(CursorCodec.decode[NearbyJobCursor](unsignedBase64, issuedAt).isLeft)
+    List("n|NaN-text|" + id + "|fp", s"n|1.0|not-a-uuid|fp", "n|1.0").foreach { payload =>
+      val token = JwtCirce.encode(
+        JwtClaim()
+          .about(payload)
+          .by("hiring-platform-cursor")
+          .to("hiring-graphql-api")
+          .issuedAt(issuedAt.getEpochSecond)
+          .expiresAt(issuedAt.plusSeconds(ttlSeconds).getEpochSecond),
+        summon[CursorCodec.CursorKey].secretKey,
+        JwtAlgorithm.HS256
+      )
+      assert(
+        CursorCodec
+          .decode[NearbyJobCursor](token, issuedAt)
+          .left
+          .exists(_.isInstanceOf[CursorCodec.CursorError.Malformed])
+      )
+    }
+  }
 }

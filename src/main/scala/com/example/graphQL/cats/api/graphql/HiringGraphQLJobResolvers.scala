@@ -11,6 +11,7 @@ import com.example.graphQL.cats.service.job.{CreateJobInput, UpdateJobInput}
 import com.example.graphQL.cats.service.protocol.{IdempotencyRequest, JobUseCases, UseCaseIO}
 import com.example.graphQL.cats.service.search.JobSearchFilter
 import com.example.graphQL.cats.domain.pagination.JobCursor
+import com.example.graphQL.cats.service.events.OperationalEventPayload.SearchKind
 import sangria.schema.Context
 
 import java.time.Instant
@@ -33,15 +34,11 @@ private[graphql] object HiringGraphQLJobResolvers {
             cursor => CursorCodec.decode[JobCursor](cursor, now)
           )
         )
-        searchId <- EitherT.liftF[IO, HiringGraphQLFailure, java.util.UUID](
-          context.arg(searchIdArgument).fold(IO.randomUUID)(IO.pure)
-        )
+        searchId <- searchIdFor(hiring, context.arg(searchIdArgument))
         values <- raiseOnUseCaseError(hiring.jobService.searchOpenJobs(actor, filter, pageRequest))
-        _ <- EitherT.liftF[IO, HiringGraphQLFailure, Unit](
-          saveSearchSession(hiring, actor.userId, "jobs", searchId, filterJson(filter))(values)(
-            _.id.value.toString,
-            _ => 0d
-          )
+        _ <- recordSearch(hiring, actor.userId, SearchKind.Jobs, searchId, filterJson(filter))(values)(
+          _.id.value.toString,
+          _ => 0d
         )
       } yield jobConnection(values, requested, now).copy(searchId = Some(searchId.toString))
     }

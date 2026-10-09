@@ -2,7 +2,7 @@ package com.example.graphQL.cats.service.search
 
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.{AccountStatus, GeoPoint}
-import com.example.graphQL.cats.service.{ActorContext, ServiceFixtures}
+import com.example.graphQL.cats.service.{ActorContext, SearchError, ServiceFixtures, UseCaseError}
 import munit.CatsEffectSuite
 
 final class JobDiscoveryServiceSpec extends CatsEffectSuite {
@@ -40,6 +40,22 @@ final class JobDiscoveryServiceSpec extends CatsEffectSuite {
           assert(facets.isLeft)
         }
       } *> fixture.calls.get.map(calls => assertEquals(calls, JobDiscoveryTestSupport.Calls()))
+    }
+  }
+
+  test("discovery reports every violated filter field instead of only the first") {
+    val both = filter.copy(city = Some(" "), skills = Set("a" * 257))
+    JobDiscoveryTestSupport.fixture(List(candidate)).flatMap { fixture =>
+      (
+        fixture.service.nearbyJobs(actor, query.copy(filter = both), 20).value,
+        fixture.service.nearbyJobs(actor, query.copy(filter = both.copy(skills = Set.empty)), 20).value
+      ).mapN { (many, one) =>
+        assertEquals(
+          many.left.toOption,
+          Some(UseCaseError.Search(SearchError.InvalidFilters(cats.data.NonEmptyList.of("city", "skills"))))
+        )
+        assertEquals(one.left.toOption, Some(UseCaseError.Search(SearchError.InvalidFilter("city"))))
+      }
     }
   }
 

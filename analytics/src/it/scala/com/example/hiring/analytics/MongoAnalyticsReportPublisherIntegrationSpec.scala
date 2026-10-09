@@ -1,20 +1,12 @@
 package com.example.hiring.analytics
-import com.example.hiring.analytics.service.keyretirement.*
 import com.example.hiring.analytics.service.batch.*
 import com.example.hiring.analytics.errors.*
 import com.example.hiring.analytics.domain.*
-import com.example.hiring.analytics.config.*
-import com.example.hiring.analytics.adapter.spark.*
-import com.example.hiring.analytics.adapter.mongo.*
-import com.example.hiring.analytics.adapter.kafka.*
-import com.example.hiring.analytics.adapter.local.*
 import com.example.hiring.analytics.service.erasure.*
 
-import com.example.hiring.analytics.adapter.spark.*
 import com.example.hiring.analytics.adapter.mongo.*
 
 import cats.effect.IO
-import cats.effect.unsafe.implicits.global
 import com.mongodb.client.{MongoClient, MongoClients}
 import com.mongodb.client.model.Updates
 import org.bson.Document
@@ -203,6 +195,7 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends AnalyticsMongoIntegra
         val mutex = new MongoAnalyticsLakehouseLock[IO](
           AnalyticsMongo4catsTestSupport.database(reactive, database.getName),
           AnalyticsTestOperationalConfig.streams,
+          cats.effect.Clock[IO],
           afterInsertOverride = Some(IO.raiseError(failure))
         )
         mutex
@@ -231,14 +224,21 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends AnalyticsMongoIntegra
       val root = "file:///tmp/mutex-cancellation-" + UUID.randomUUID()
       val mutex = new com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock[IO](
         db,
-        AnalyticsTestOperationalConfig.streams
+        AnalyticsTestOperationalConfig.streams,
+        cats.effect.Clock[IO]
       )
       (for {
         attempted <- cats.effect.Deferred[IO, Unit]
+        // The waiter reads the wall clock immediately before each insert attempt, which signals the contention.
+        signalingClock = new cats.effect.Clock[IO] {
+          override val applicative: cats.Applicative[IO] = IO.asyncForIO
+          override def monotonic: IO[FiniteDuration] = IO.monotonic
+          override def realTime: IO[FiniteDuration] = attempted.complete(()).void *> IO.realTime
+        }
         waiting = new com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock[IO](
           db,
           AnalyticsTestOperationalConfig.streams,
-          nowOverride = Some(attempted.complete(()).void *> IO.realTimeInstant)
+          signalingClock
         )
         _ <- mutex.resource(root).use { _ =>
           for {
@@ -378,7 +378,8 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends AnalyticsMongoIntegra
               if (!checkedPage) {
                 checkedPage = true
                 runs.insertOne(oldPublished("zzzz-created-after-maintenance-start"))
-                control.updateOne(new Document("_id", "analytics-report"), Updates.set("lastRunId", lastEligible))
+                val _ =
+                  control.updateOne(new Document("_id", "analytics-report"), Updates.set("lastRunId", lastEligible))
               }
               ids.filter(id => protectedPrefix(id.value) || id.value == "protected-replay")
             },

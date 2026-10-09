@@ -74,9 +74,8 @@ private[analytics] object StreamingDurableBoundaryObserver {
   ): StreamingBatchStages[F] = new StreamingBatchStages[F] {
     override def reservePublication(value: StreamingInputPreparation, revision: Long): F[AnalyticsReportReservation] =
       delegate.reservePublication(value, revision)
-    override def publicationReceipt(value: StreamingInputPreparation, decision: StreamingDecisionRevision)(using
-        cats.Applicative[F]
-    ) = delegate.publicationReceipt(value, decision)
+    override def publicationReceipt(value: StreamingInputPreparation, decision: StreamingDecisionRevision) =
+      delegate.publicationReceipt(value, decision)
     override def assess(value: StreamingInputPreparation, tokens: Vector[SubjectToken], recovery: Boolean) =
       delegate.assess(value, tokens, recovery)
     override def ingest(

@@ -15,7 +15,7 @@ class HealthServiceSpec extends CatsEffectSuite {
     }
 
   private def probe(result: IO[ProbeResult]): DatabaseProbe = new DatabaseProbe {
-    def check: IO[ProbeResult] = result
+    def check(requestId: Option[String]): IO[ProbeResult] = result
   }
 
   test("readiness forwards correlation and records safe failure classification") {
@@ -23,8 +23,7 @@ class HealthServiceSpec extends CatsEffectSuite {
       forwarded <- Ref.of[IO, Option[String]](None)
       recorded <- Ref.of[IO, Map[LogField, String]](Map.empty)
       contextual = new DatabaseProbe {
-        def check: IO[ProbeResult] = IO.raiseError(new AssertionError("Context overload required"))
-        override def check(id: Option[String]): IO[ProbeResult] =
+        def check(id: Option[String]): IO[ProbeResult] =
           forwarded.set(id) *> IO.raiseError(new IllegalStateException("synthetic-service-secret"))
       }
       sink = new Diagnostics {

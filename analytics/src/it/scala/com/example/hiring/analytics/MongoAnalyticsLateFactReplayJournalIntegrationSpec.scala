@@ -1,8 +1,6 @@
 package com.example.hiring.analytics
 
 import cats.effect.IO
-import cats.effect.unsafe.implicits.global
-import cats.syntax.all.*
 import com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLateFactReplayJournal
 import com.example.hiring.analytics.domain.*
 import com.example.hiring.analytics.errors.AnalyticsError
@@ -11,7 +9,6 @@ import com.mongodb.client.MongoClients
 import org.bson.Document
 
 import java.time.Instant
-import java.util.UUID
 import scala.concurrent.duration.*
 
 final class MongoAnalyticsLateFactReplayJournalIntegrationSpec extends AnalyticsMongoIntegrationSuite {

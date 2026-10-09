@@ -1,7 +1,6 @@
 package com.example.hiring.analytics
 
 import cats.effect.{Deferred, IO, Ref, Resource}
-import cats.effect.syntax.all.*
 import cats.effect.testkit.TestControl
 import cats.syntax.all.*
 import com.example.hiring.analytics.service.batch.AnalyticsLakehouseLock
@@ -36,7 +35,7 @@ final class AnalyticsStreamingMaintenanceSpec extends CatsEffectSuite {
   test("maintenance failure reaches the joined owner and does not silently retry") {
     val failure = new IllegalStateException("maintenance failed")
     TestControl.executeEmbed {
-      AnalyticsLakehouseLock.processLocal[IO].use { lock =>
+      AnalyticsTestLakehouseLocks.processLocal[IO].use { lock =>
         new AnalyticsStreamingMaintenance[IO]("hiring", lock, 60.seconds, _ => IO.raiseError(failure)).resource
           .use(_.attempt)
           .flatMap(result => IO(assertEquals(result, Left(failure))))
@@ -47,7 +46,7 @@ final class AnalyticsStreamingMaintenanceSpec extends CatsEffectSuite {
   test("maintenance shares callback ownership and a cancelled queued operation never runs") {
     for {
       calls <- Ref.of[IO, Int](0)
-      _ <- AnalyticsLakehouseLock.processLocal[IO].use { lock =>
+      _ <- AnalyticsTestLakehouseLocks.processLocal[IO].use { lock =>
         val maintenance = new AnalyticsStreamingMaintenance[IO]("hiring", lock, 60.seconds, _ => calls.update(_ + 1))
         lock.resource("hiring").use { _ =>
           maintenance.runOnce.start.flatMap(fiber => IO.cede *> fiber.cancel)
@@ -143,7 +142,7 @@ final class AnalyticsStreamingMaintenanceSpec extends CatsEffectSuite {
 
   test("cancelling an acquired maintenance tick joins its body before releasing the real mutex") {
     TestControl.executeEmbed {
-      AnalyticsLakehouseLock.processLocal[IO].use { underlying =>
+      AnalyticsTestLakehouseLocks.processLocal[IO].use { underlying =>
         for {
           entered <- Deferred[IO, Unit]
           finish <- Deferred[IO, Unit]
@@ -333,7 +332,7 @@ final class AnalyticsStreamingMaintenanceSpec extends CatsEffectSuite {
 
   test("maximum maintenance age includes a slow successful body before its age resets") {
     TestControl.executeEmbed {
-      AnalyticsLakehouseLock.processLocal[IO].use { lock =>
+      AnalyticsTestLakehouseLocks.processLocal[IO].use { lock =>
         new AnalyticsStreamingMaintenance[IO]("hiring", lock, 60.seconds, _ => IO.sleep(250.seconds)).observedResource
           .use { runtime =>
             IO.sleep(315.seconds) *> runtime.observation.flatMap { observed =>
@@ -352,7 +351,7 @@ final class AnalyticsStreamingMaintenanceSpec extends CatsEffectSuite {
     TestControl.executeEmbed {
       for {
         observations <- Ref.of[IO, Vector[AnalyticsStreamingMaintenance.Observation]](Vector.empty)
-        _ <- AnalyticsLakehouseLock.processLocal[IO].use { lock =>
+        _ <- AnalyticsTestLakehouseLocks.processLocal[IO].use { lock =>
           new AnalyticsStreamingMaintenance[IO](
             "hiring",
             lock,

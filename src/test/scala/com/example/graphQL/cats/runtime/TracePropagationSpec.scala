@@ -70,9 +70,13 @@ final class TracePropagationSpec extends CatsEffectSuite {
             com.example.graphQL.cats.service.TestHiringServices.job(users, jobs),
             com.example.graphQL.cats.service.TestHiringServices.applications(users, jobs, applications),
             TestGraphQLSupport.cursorKey,
-            TestGraphQLSupport.accountService
+            TestGraphQLSupport.accountService,
+            TestGraphQLSupport.interactions,
+            TestGraphQLSupport.searchSessions
           )
-          probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
+          probe = new DatabaseProbe {
+            def check(requestId: Option[String]): IO[ProbeResult] = IO.pure(ProbeResult.Ready)
+          }
           captured <- TestGraphQLSupport
             .dependencies(
               hiring = services,

@@ -1,15 +1,90 @@
 package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.IO
-import fs2.interop.reactivestreams.*
-import mongo4cats.database.MongoDatabase
-import com.mongodb.MongoCommandException
-import org.bson.Document
+import cats.syntax.all.*
+import com.mongodb.MongoClientSettings
+import org.bson.{BsonDocument, BsonString, Document}
 
 import scala.jdk.CollectionConverters.*
 
-/** Collection validators are maintained beside their collection setup behavior. */
+/** JSON-schema fragments shared by every strict collection validator. */
+private[mongo] object MongoValidatorSchemas {
+  val UuidPattern = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+  val AnchoredUuidPattern: String = s"^$UuidPattern$$"
+  val ShortTextMaxLength = 256
+
+  def enumSchema(values: String*): Document = new Document("enum", values.toList.asJava)
+  def objectSchema(required: List[String], properties: Document): Document =
+    new Document("bsonType", "object").append("required", required.asJava).append("properties", properties)
+  def shortText: Document =
+    new Document("bsonType", "string").append("minLength", 1).append("maxLength", ShortTextMaxLength)
+  def stringUuid: Document = shortText.append("pattern", AnchoredUuidPattern)
+  def nonNegativeLong: Document = new Document("bsonType", "long").append("minimum", 0L)
+  def nonNegativeInt: Document = new Document("bsonType", "int").append("minimum", 0)
+  def date: Document = new Document("bsonType", "date")
+}
+
+/** Collection validators are maintained beside their collection setup behavior: one `collMod` builder, one installer
+  * and one exact-definition check serve every strict validator.
+  */
 private[mongo] object MongoHiringValidators {
+  import MongoHiringSetup.SetupDatabase
+
+  private val bsonRegistry = MongoClientSettings.getDefaultCodecRegistry
+  private val StrictLevel = "strict"
+  private val ErrorAction = "error"
+
+  /** The only `collMod` shape the platform installs: strict level, error action, the given validator. */
+  def strictValidation(collection: String, validator: Document): Document =
+    new Document("collMod", collection)
+      .append("validator", validator)
+      .append("validationLevel", StrictLevel)
+      .append("validationAction", ErrorAction)
+
+  def install(database: SetupDatabase, collection: String, validator: Document): IO[Unit] =
+    database.ensureCollection(collection) *> database.runCommand(strictValidation(collection, validator)).void
+
+  /** Current `options` of the listed collections, keyed by name; absent collections are absent from the map. */
+  def collectionOptions(database: SetupDatabase, collections: List[String]): IO[Map[String, BsonDocument]] =
+    database
+      .runCommand(
+        new Document("listCollections", 1)
+          .append("filter", new Document("name", new Document("$in", collections.asJava)))
+      )
+      .map { result =>
+        Option(result.getDocument("cursor", null)).toList
+          .flatMap(cursor => Option(cursor.getArray("firstBatch", null)).toList.flatMap(_.getValues.asScala))
+          .collect { case entry: BsonDocument => entry }
+          .flatMap { entry =>
+            Option(entry.getString("name", null))
+              .map(name => name.getValue -> Option(entry.getDocument("options", null)).getOrElse(new BsonDocument()))
+          }
+          .toMap
+      }
+
+  /** Pure exact-definition check: strict level, error action and a validator equal to the expected document. */
+  def strictValidatorMatches(options: Option[BsonDocument], expected: Document): Boolean =
+    options.exists { value =>
+      Option(value.get("validationLevel")).contains(new BsonString(StrictLevel)) &&
+      Option(value.get("validationAction")).contains(new BsonString(ErrorAction)) &&
+      Option(value.get("validator")).contains(expected.toBsonDocument(classOf[Document], bsonRegistry))
+    }
+
+  def validatorMatches(database: SetupDatabase, collection: String, expected: Document): IO[Boolean] =
+    collectionOptions(database, List(collection)).map(options =>
+      strictValidatorMatches(options.get(collection), expected)
+    )
+
+  /** Fails closed with the first drifted collection; one round trip verifies every listed definition. */
+  def assertStrictValidators(database: SetupDatabase, expected: List[(String, Document)]): IO[Unit] =
+    collectionOptions(database, expected.map(_._1)).flatMap { options =>
+      expected.traverse_ { case (collection, validator) =>
+        IO.raiseUnless(strictValidatorMatches(options.get(collection), validator))(
+          MigrationError.ValidatorMismatch(collection)
+        )
+      }
+    }
+
   def outboxValidator: Document = {
     val subjectIds = new Document("bsonType", "array")
       .append("minItems", 1)
@@ -25,15 +100,8 @@ private[mongo] object MongoHiringValidators {
     new Document("$jsonSchema", schema)
   }
 
-  def createOutboxValidator(database: MongoDatabase[IO]): IO[Unit] =
-    database
-      .runCommand(
-        new Document("collMod", MongoCollections.EventOutbox)
-          .append("validator", outboxValidator)
-          .append("validationLevel", "strict")
-          .append("validationAction", "error")
-      )
-      .void
+  def createOutboxValidator(database: SetupDatabase): IO[Unit] =
+    database.runCommand(strictValidation(MongoCollections.EventOutbox, outboxValidator)).void
 
   def userValidator: Document = {
     def active(role: String, required: String) = new Document("required", List(required).asJava).append(
@@ -111,44 +179,20 @@ private[mongo] object MongoHiringValidators {
     )
   }
 
-  def userValidatorMatches(database: MongoDatabase[IO]): IO[Boolean] = {
-    val command = new Document("listCollections", 1)
-      .append("filter", new Document("name", MongoCollections.Users))
-    IO.delay(database.underlying.runCommand(command, classOf[Document]))
-      .flatMap(_.toStreamBuffered[IO](1).compile.lastOrError)
-      .map { result =>
-        Option(result.get("cursor", classOf[Document])).toList
-          .flatMap(cursor => Option(cursor.getList("firstBatch", classOf[Document])).toList.flatMap(_.asScala))
-          .exists { entry =>
-            Option(entry.get("options", classOf[Document])).exists { options =>
-              Option(options.get("validationLevel")).contains("strict") &&
-              Option(options.get("validationAction")).contains("error") &&
-              Option(options.get("validator", classOf[Document])).contains(userValidator)
-            }
-          }
-      }
-  }
+  def userValidatorMatches(database: SetupDatabase): IO[Boolean] =
+    validatorMatches(database, MongoCollections.Users, userValidator)
 
-  def createUserValidator(database: MongoDatabase[IO]): IO[Unit] =
-    database.createCollection(MongoCollections.Users).void.recoverWith {
-      case error: MongoCommandException if error.getErrorCode == 48 => IO.unit
-    } *> database
-      .runCommand(
-        new Document("collMod", MongoCollections.Users)
-          .append("validator", userValidator)
-          .append("validationLevel", "strict")
-          .append("validationAction", "error")
-      )
-      .void
+  def createUserValidator(database: SetupDatabase): IO[Unit] =
+    install(database, MongoCollections.Users, userValidator)
 
-  def createJobValidator(database: MongoDatabase[IO]): IO[Unit] = {
+  def jobValidator: Document = {
     val geoPoint = new Document("bsonType", "object")
-      .append("required", List("type", "coordinates").asJava)
+      .append("required", List("type", MongoFields.Coordinates).asJava)
       .append(
         "properties",
         new Document("type", new Document("bsonType", "string").append("enum", List("Point").asJava))
           .append(
-            "coordinates",
+            MongoFields.Coordinates,
             new Document("bsonType", "array")
               .append("minItems", 2)
               .append("maxItems", 2)
@@ -156,7 +200,7 @@ private[mongo] object MongoHiringValidators {
           )
       )
     val location = new Document("bsonType", "object")
-      .append("properties", new Document("point", geoPoint))
+      .append("properties", new Document(MongoFields.Point, geoPoint))
     val schema = new Document(
       "$jsonSchema",
       new Document("bsonType", "object")
@@ -194,15 +238,9 @@ private[mongo] object MongoHiringValidators {
       "$expr",
       new Document("$cond", List(pointIsAbsent, true, validCoordinates).asJava)
     )
-    database.createCollection(MongoCollections.Jobs).void.recoverWith {
-      case error: MongoCommandException if error.getErrorCode == 48 => IO.unit
-    } *> database
-      .runCommand(
-        new Document("collMod", MongoCollections.Jobs)
-          .append("validator", new Document("$and", List(schema, geoPredicate).asJava))
-          .append("validationLevel", "strict")
-          .append("validationAction", "error")
-      )
-      .void
+    new Document("$and", List(schema, geoPredicate).asJava)
   }
+
+  def createJobValidator(database: SetupDatabase): IO[Unit] =
+    install(database, MongoCollections.Jobs, jobValidator)
 }

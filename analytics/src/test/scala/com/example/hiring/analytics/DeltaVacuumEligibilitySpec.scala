@@ -38,7 +38,10 @@ final class DeltaVacuumEligibilitySpec extends CatsEffectSuite {
     val temporary = Resource.make(IO.blocking(Files.createTempDirectory("hiring-vacuum-eligibility-")))(root =>
       IO.blocking {
         val files = Files.walk(root)
-        try files.sorted(Comparator.reverseOrder()).forEach(path => Files.deleteIfExists(path))
+        try
+          files.sorted(Comparator.reverseOrder()).forEach { path =>
+            val _ = Files.deleteIfExists(path)
+          }
         finally files.close()
       }
     )
@@ -210,7 +213,7 @@ final class DeltaVacuumEligibilitySpec extends CatsEffectSuite {
         try assert(!DeltaVacuumEligibility.canSkip(spark, paths.bronze, safetyHours, maximumEntries))
         finally {
           Files.delete(log)
-          Files.move(savedLog, log)
+          val _ = Files.move(savedLog, log)
         }
       }
     }

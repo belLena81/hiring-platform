@@ -1,31 +1,23 @@
 package com.example.hiring.analytics.cli
 
-import cats.effect.{ExitCode, IO, IOApp}
-import cats.syntax.all.*
+import cats.effect.{ExitCode, IO}
 import com.example.hiring.analytics.app.AppModule
 import com.example.hiring.analytics.config.AnalyticsRuntimeConfig
-import com.example.hiring.analytics.errors.AnalyticsError
 import org.typelevel.log4cats.slf4j.Slf4jLogger
 
 /** Explicit operator replay configured through HOCON, with no command-line credential or payload arguments. */
-object HiringAnalyticsLateFactReplayMain extends IOApp {
+object HiringAnalyticsLateFactReplayMain
+    extends HoconConfiguredCommand("hiring-analytics-late-fact-replay", "Replay selected late hiring facts") {
   private val logger = Slf4jLogger.getLogger[IO]
 
-  override def run(args: List[String]): IO[ExitCode] = AnalyticsCliProgram.runProgram(
-    if (args.nonEmpty)
-      IO.raiseError[Unit](
-        AnalyticsError.InvalidConfiguration(
-          "late replay inputs are loaded from HOCON; command-line arguments are not accepted"
-        )
+  override protected def program: IO[ExitCode] =
+    AnalyticsRuntimeConfig
+      .loadLateFactReplay[IO]
+      .flatMap(settings =>
+        AppModule
+          .lateFactReplay[IO](settings)
+          .use(_.run)
+          .flatMap(outcome => logger.info(s"late replay outcome: $outcome"))
       )
-    else
-      AnalyticsRuntimeConfig
-        .loadLateFactReplay[IO]
-        .flatMap(settings =>
-          AppModule
-            .lateFactReplay[IO](settings)
-            .use(_.run)
-            .flatMap(outcome => logger.info(s"late replay outcome: $outcome"))
-        )
-  )
+      .as(ExitCode.Success)
 }

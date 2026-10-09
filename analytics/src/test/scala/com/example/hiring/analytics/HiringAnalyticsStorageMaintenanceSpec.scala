@@ -35,7 +35,10 @@ final class HiringAnalyticsStorageMaintenanceSpec extends CatsEffectSuite {
     val temporaryRoot = Resource.make(IO.blocking(Files.createTempDirectory("hiring-storage-maintenance-")))(root =>
       IO.blocking {
         val files = Files.walk(root)
-        try files.sorted(Comparator.reverseOrder()).forEach(path => Files.deleteIfExists(path))
+        try
+          files.sorted(Comparator.reverseOrder()).forEach { path =>
+            val _ = Files.deleteIfExists(path)
+          }
         finally files.close()
       }
     )

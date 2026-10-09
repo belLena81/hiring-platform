@@ -1,7 +1,6 @@
 package com.example.hiring.analytics.adapter.spark
 
 import cats.effect.{IO, Resource}
-import cats.syntax.all.*
 import com.example.hiring.analytics.{AnalyticsTestSubjectPseudonymizer, TestAnalyticsLakehousePaths}
 import munit.CatsEffectSuite
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
@@ -129,7 +128,7 @@ final class StreamingLateFactAdmissionSpec extends CatsEffectSuite {
             quality <- execution {
               val closed = input.filter(col("admissionState") === lit("CLOSED"))
               val empty = ids(spark, Vector.empty)
-              SparkStreamingBatchStages.measureQuality(empty, empty, empty, closed)
+              AdmissionQualityBaseline.measure(empty, empty, empty, closed)
             }
             _ <- IO(assertEquals(quality.closed, 0L))
             counted <- execution(

@@ -75,7 +75,7 @@ final class MongoCandidateResidenceIntegrityIntegrationSpec extends MongoIntegra
         database <- setup(fixture)
         users = database.getCollection(MongoCollections.Users)
         _ <- users.insertMany(rows)
-        _ <- MongoHiringValidators.createUserValidator(fixture.database)
+        _ <- MongoHiringValidators.createUserValidator(database)
         _ <- MongoCandidateResidenceIntegrityMigrations.initialize(database)
         stored <- users.find.sort(com.mongodb.client.model.Sorts.ascending("_id")).all
         proof <- database.getCollection(MongoCollections.HiringMigrationLedger).find(migration).first
@@ -103,8 +103,9 @@ final class MongoCandidateResidenceIntegrityIntegrationSpec extends MongoIntegra
       val _ = missing.remove("cityCanonical")
       val orphan = residence(city = false).append("cityCanonical", "nicosia")
       for {
+        database <- setup(fixture)
         users <- MongoRepositoryTestSupport.collection(fixture.database, MongoCollections.Users)
-        _ <- MongoHiringValidators.createUserValidator(fixture.database)
+        _ <- MongoHiringValidators.createUserValidator(database)
         _ <- users.insertMany(List(located(0, residence(city = false)), located(1, residence())))
         rejected <- List(located(2, missing), located(3, orphan)).traverse(row => users.insertOne(row).attempt)
         count <- users.count(Filters.empty())
@@ -128,7 +129,7 @@ final class MongoCandidateResidenceIntegrityIntegrationSpec extends MongoIntegra
         users = database.getCollection(MongoCollections.Users)
         ledger = database.getCollection(MongoCollections.HiringMigrationLedger)
         _ <- users.insertMany(rows)
-        _ <- MongoHiringValidators.createUserValidator(fixture.database)
+        _ <- MongoHiringValidators.createUserValidator(database)
         _ <- fixture.commands.clear
         failed <- MongoCandidateResidenceIntegrityMigrations.initialize(database).attempt
         running <- ledger.find(migration).first
@@ -168,7 +169,7 @@ final class MongoCandidateResidenceIntegrityIntegrationSpec extends MongoIntegra
         database <- setup(fixture)
         users = database.getCollection(MongoCollections.Users)
         _ <- users.insertMany(rows)
-        _ <- MongoHiringValidators.createUserValidator(fixture.database)
+        _ <- MongoHiringValidators.createUserValidator(database)
         _ <- (
           MongoCandidateResidenceIntegrityMigrations.initialize(database),
           MongoCandidateResidenceIntegrityMigrations.initialize(database)
@@ -198,7 +199,7 @@ final class MongoCandidateResidenceIntegrityIntegrationSpec extends MongoIntegra
         users = database.getCollection(MongoCollections.Users)
         ledger = database.getCollection(MongoCollections.HiringMigrationLedger)
         _ <- users.insertOne(row)
-        _ <- MongoHiringValidators.createUserValidator(fixture.database)
+        _ <- MongoHiringValidators.createUserValidator(database)
         _ <- invalid.traverse_ { entry =>
           ledger.deleteOne(migration) *> ledger.insertOne(
             entry.append("_id", MongoCandidateResidenceIntegrityMigrations.MigrationId)
@@ -216,13 +217,13 @@ final class MongoCandidateResidenceIntegrityIntegrationSpec extends MongoIntegra
     mongoResource.use { fixture =>
       for {
         database <- setup(fixture)
-        _ <- MongoHiringValidators.createUserValidator(fixture.database)
+        _ <- MongoHiringValidators.createUserValidator(database)
         _ <- MongoCandidateResidenceIntegrityMigrations.initialize(database)
         _ <- fixture.database.runCommand(
           new Document("collMod", MongoCollections.Users).append("validator", new Document())
         )
         failed <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop).attempt
-        stillDrifted <- MongoHiringValidators.userValidatorMatches(fixture.database)
+        stillDrifted <- MongoHiringValidators.userValidatorMatches(database)
         proof <- database.getCollection(MongoCollections.HiringMigrationLedger).find(migration).first
       } yield {
         assert(failed.isLeft)

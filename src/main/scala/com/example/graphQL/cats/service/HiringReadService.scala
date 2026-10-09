@@ -1,8 +1,8 @@
 package com.example.graphQL.cats.service
 
-import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
+import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, UserId}
 import com.example.graphQL.cats.domain.error.DomainError
-import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, Job, User, UserRole}
+import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, UserRole}
 import com.example.graphQL.cats.service.port.{ApplicationRepository, JobRepository, RepositoryIO, UserRepository}
 import com.example.graphQL.cats.service.protocol.{HiringReadModel, UseCaseIO, UseCaseIO as UseCase}
 import com.example.graphQL.cats.service.auth.ActorAuthorization
@@ -28,14 +28,8 @@ final class HiringReadService(
   override def relatedJobs(actor: ActorContext, keys: List[JobRelationKey]): UseCaseIO[List[RelatedJob]] =
     scope(actor).flatMap(current => read(jobs.relatedJobs(current, keys.distinct)))
 
-  override def user(id: UserId): UseCaseIO[Option[User]] =
-    read(users.find(id))
-
   override def viewer(actor: ActorContext): UseCaseIO[AuthenticatedActor] =
     authorization.resolve(actor).map(AuthenticatedActor(actor, _))
-
-  override def users(ids: List[UserId]): UseCaseIO[List[User]] =
-    read(users.findMany(ids))
 
   override def canViewUserEmail(actor: ActorContext, userId: UserId): UseCaseIO[Boolean] =
     authorization
@@ -47,12 +41,6 @@ final class HiringReadService(
       if (viewer.role == UserRole.Admin && viewer.adminSingleton) userIds.toSet
       else userIds.filter(_ == viewer.id).toSet
     }
-
-  override def job(id: JobId): UseCaseIO[Option[Job]] =
-    read(jobs.find(id))
-
-  override def jobs(ids: List[JobId]): UseCaseIO[List[Job]] =
-    read(jobs.findMany(ids))
 
   override def application(id: ApplicationId): UseCaseIO[Option[Application]] =
     read(applications.find(id))

@@ -4,31 +4,31 @@ import com.example.hiring.analytics.domain.AnalyticsLakehouseIdentity
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.batch.AnalyticsLakehouseLock
 
-import cats.effect.{Async, Resource, Temporal}
+import cats.Monad
+import cats.effect.{Async, Clock, Resource, Temporal}
 import cats.effect.kernel.Poll
+import cats.effect.std.{Random, UUIDGen}
 import cats.syntax.all.*
 import com.mongodb.MongoException
 import com.mongodb.{WriteConcern, ReadConcern, ReadPreference}
 import mongo4cats.database.MongoDatabase
 import org.bson.Document
+import retry.{PolicyDecision, RetryPolicies, RetryPolicy, RetryStatus}
+import retry.{HandlerDecision, retryingOnFailures}
 
-import java.util.UUID
-import java.util.concurrent.ThreadLocalRandom
 import java.util.concurrent.TimeUnit
 import scala.concurrent.duration.*
 import scala.util.control.NonFatal
 
 /** Mongo mutex with no expiry or automatic takeover. A stale row must be cleared manually after its owner stops. */
-private[analytics] final class MongoAnalyticsLakehouseLock[F[_]: Async](
+private[analytics] final class MongoAnalyticsLakehouseLock[F[_]: Async: UUIDGen](
     database: MongoDatabase[F],
     streams: MongoPublisherStream,
-    private[analytics] val nowOverride: Option[F[java.time.Instant]] = None,
-    private[analytics] val monotonicOverride: Option[F[FiniteDuration]] = None,
+    clock: Clock[F],
     private[analytics] val afterInsertOverride: Option[F[Unit]] = None
 ) extends AnalyticsLakehouseLock[F] {
   private val effect = Async[F]
-  private val now = nowOverride.getOrElse(effect.realTimeInstant)
-  private val monotonic = monotonicOverride.getOrElse(effect.monotonic)
+  private val random = Random.javaUtilConcurrentThreadLocalRandom[F]
   import MongoAnalyticsLakehouseLock.*
 
   private val collection = database
@@ -46,10 +46,11 @@ private[analytics] final class MongoAnalyticsLakehouseLock[F[_]: Async](
 
   private def acquire(root: String, poll: Poll[F]): F[String] =
     effect.fromEither(lockId(root)).flatMap { id =>
-      effect.delay(UUID.randomUUID().toString).flatMap { owner =>
-        monotonic.flatMap { startedAt =>
-          val deadline = startedAt + WaitTimeout
-          def attempt(retryDelay: FiniteDuration): F[String] = now
+      UUIDGen[F].randomUUID.map(_.toString).flatMap { owner =>
+        clock.monotonic.flatMap { startedAt =>
+          val policy = contentionPolicy(clock, startedAt + WaitTimeout, random)
+          // The sleep is the only cancellable step: an insert whose outcome is unknown must reach reconciliation.
+          def attempt(status: RetryStatus): F[String] = clock.realTimeInstant
             .flatMap(acquiredAt =>
               collection.flatMap(
                 _.insertOne(
@@ -62,30 +63,29 @@ private[analytics] final class MongoAnalyticsLakehouseLock[F[_]: Async](
             .as(owner)
             .handleErrorWith {
               case error: MongoException if error.getCode == 11000 =>
-                effect.monotonic.flatMap { reconciliationStarted =>
+                clock.monotonic.flatMap { reconciliationStarted =>
                   effect
                     .timeoutTo(
                       readOwner(id, ReconciliationTimeout),
                       ReconciliationTimeout,
-                      effect.raiseError(uncertainOwnership)
+                      effect.raiseError(AnalyticsError.LakehouseLockOwnershipUncertain)
                     )
                     .attempt
                     .flatMap {
                       case Right(Some(stored)) if stored == owner => effect.pure(owner)
                       case Left(_)                                => reconcile(id, owner, Some(reconciliationStarted))
                       case _                                      =>
-                        monotonic.flatMap { current =>
-                          if (current >= deadline) effect.raiseError(AnalyticsError.LakehouseLockTimeout)
-                          else
-                            poll(MongoAnalyticsLakehouseLock.jitter[F](retryDelay).flatMap(Temporal[F].sleep)) *>
-                              attempt((retryDelay * 2).min(MaximumRetryDelay))
+                        policy.decideNextRetry((), status).flatMap {
+                          case PolicyDecision.DelayAndRetry(delay) =>
+                            poll(Temporal[F].sleep(delay)) *> attempt(status.addRetry(delay))
+                          case PolicyDecision.GiveUp => effect.raiseError(AnalyticsError.LakehouseLockTimeout)
                         }
                     }
                 }
               case error: AnalyticsError => effect.raiseError(error)
               case NonFatal(_)           => reconcile(id, owner)
             }
-          attempt(InitialRetryDelay)
+          attempt(RetryStatus.NoRetriesYet)
         }
       }
     }
@@ -104,7 +104,10 @@ private[analytics] final class MongoAnalyticsLakehouseLock[F[_]: Async](
       .map(_.map(_.ownerToken))
 
   private def reconcile(id: String, owner: String, startedAt: Option[FiniteDuration] = None): F[String] =
-    MongoAnalyticsLakehouseLock.reconcileOwnership(owner, remaining => readOwner(id, remaining), startedAt)
+    MongoAnalyticsLakehouseLock.reconcileOwnership[F](owner, remaining => readOwner(id, remaining), startedAt)(using
+      effect,
+      clock
+    )
 
   private def release(root: String, owner: String): F[Unit] = effect.fromEither(lockId(root)).flatMap { id =>
     collection
@@ -116,9 +119,7 @@ private[analytics] final class MongoAnalyticsLakehouseLock[F[_]: Async](
       )
       .flatMap(result =>
         effect
-          .raiseWhen(result.getDeletedCount != 1L)(
-            AnalyticsError.LakehouseFailure(new IllegalStateException("lakehouse mutex owner changed before release"))
-          )
+          .raiseWhen(result.getDeletedCount != 1L)(AnalyticsError.LakehouseLockOwnershipLost)
           .void
       )
       .handleErrorWith {
@@ -137,41 +138,64 @@ private[analytics] object MongoAnalyticsLakehouseLock {
   private val WriteTimeout = 15.seconds
   private val ReconciliationTimeout = 30.seconds
 
-  private def uncertainOwnership: AnalyticsError = AnalyticsError.LakehouseFailure(
-    new IllegalStateException("lakehouse mutex acquisition is uncertain; manual ownership recovery required")
-  )
+  /** Un-jittered contention delays: 100ms doubled per retry and capped at 5s (100, 200, ..., 3200, 5000, 5000, ...). */
+  private[analytics] def contentionCeilings[F[_]: Monad]: RetryPolicy[F, Any] =
+    RetryPolicies.capDelay(MaximumRetryDelay, RetryPolicies.exponentialBackoff[F](InitialRetryDelay))
 
-  private[analytics] def reconcileOwnership[F[_]: Async](
+  /** Full jitter: each wait is uniform over [0, ceiling] milliseconds, with a minimum ceiling of one millisecond. */
+  private[analytics] def contentionBackoff[F[_]: Monad](random: Random[F]): RetryPolicy[F, Any] =
+    contentionCeilings[F].flatMapDelay(ceiling =>
+      random.betweenLong(0L, math.max(1L, ceiling.toMillis) + 1L).map(_.millis)
+    )
+
+  /** Contended acquisition waits with jittered backoff until the monotonic deadline passes. */
+  private[analytics] def contentionPolicy[F[_]: Monad](
+      clock: Clock[F],
+      deadline: FiniteDuration,
+      random: Random[F]
+  ): RetryPolicy[F, Any] =
+    RetryDeadline.until(clock, deadline).join(contentionBackoff(random))
+
+  private enum Reconciliation {
+    case Owned, Foreign, Unconfirmed, Expired
+  }
+
+  /** Waits for a majority read to confirm whether an uncertain insert belongs to `owner`. Delays are 100ms doubled and
+    * capped at 5s, each clamped to the time left in the reconciliation window.
+    */
+  private[analytics] def reconcileOwnership[F[_]](
       owner: String,
       readOwner: FiniteDuration => F[Option[String]],
       startedAt: Option[FiniteDuration] = None
-  ): F[String] = {
-    val F = Async[F]
-    val uncertain = uncertainOwnership
-    startedAt.fold(F.monotonic)(F.pure).flatMap { started =>
-      def loop(delay: FiniteDuration): F[String] = F.monotonic.flatMap { current =>
-        val remaining = ReconciliationTimeout - (current - started)
-        if (remaining <= Duration.Zero) F.raiseError(uncertain)
+  )(using F: Async[F], clock: Clock[F]): F[String] =
+    startedAt.fold(clock.monotonic)(F.pure).flatMap { started =>
+      def remaining: F[FiniteDuration] = clock.monotonic.map(current => ReconciliationTimeout - (current - started))
+
+      val step: F[Reconciliation] = remaining.flatMap { left =>
+        if (left <= Duration.Zero) F.pure(Reconciliation.Expired)
         else
-          F.timeoutTo(readOwner(remaining), remaining, F.raiseError(uncertain)).attempt.flatMap {
-            case Right(Some(stored)) if stored == owner => F.pure(owner)
-            case Right(Some(_))                         => F.raiseError(AnalyticsError.LakehouseLockTimeout)
-            case _                                      =>
-              F.monotonic.flatMap { observed =>
-                val left = ReconciliationTimeout - (observed - started)
-                if (left <= Duration.Zero) F.raiseError(uncertain)
-                else F.sleep(delay.min(left)) *> loop((delay * 2).min(MaximumRetryDelay))
-              }
+          F.timeoutTo(readOwner(left), left, F.raiseError(AnalyticsError.LakehouseLockOwnershipUncertain)).attempt.map {
+            case Right(Some(stored)) if stored == owner => Reconciliation.Owned
+            case Right(Some(_))                         => Reconciliation.Foreign
+            case _                                      => Reconciliation.Unconfirmed
           }
       }
-      loop(InitialRetryDelay)
+      val backoff = contentionCeilings[F]
+      val policy: RetryPolicy[F, Reconciliation] = RetryPolicy[F, Reconciliation] { (_, status) =>
+        (remaining, backoff.decideNextRetry((), status)).mapN {
+          case (left, PolicyDecision.DelayAndRetry(delay)) if left > Duration.Zero =>
+            PolicyDecision.DelayAndRetry(delay.min(left))
+          case _ => PolicyDecision.GiveUp
+        }
+      }
+      val handler: retry.ValueHandler[F, Reconciliation] = (outcome, _) =>
+        F.pure(if (outcome == Reconciliation.Unconfirmed) HandlerDecision.Continue else HandlerDecision.Stop)
+      retryingOnFailures(step)(policy, handler).flatMap {
+        case Right(Reconciliation.Owned)   => F.pure(owner)
+        case Right(Reconciliation.Foreign) => F.raiseError(AnalyticsError.LakehouseLockTimeout)
+        case _                             => F.raiseError(AnalyticsError.LakehouseLockOwnershipUncertain)
+      }
     }
-  }
-
-  private def jitter[F[_]: Async](maximum: FiniteDuration): F[FiniteDuration] = Async[F].delay {
-    val bound = math.max(1L, maximum.toMillis)
-    ThreadLocalRandom.current().nextLong(bound + 1L).millis
-  }
 
   /** The hash lets operators locate the mutex without storing a potentially sensitive URI in Mongo. */
   def lockId(root: String): Either[AnalyticsError, String] =

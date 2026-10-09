@@ -1,20 +1,13 @@
 package com.example.hiring.analytics
-import com.example.hiring.analytics.service.keyretirement.*
 import com.example.hiring.analytics.service.batch.*
-import com.example.hiring.analytics.errors.*
 import com.example.hiring.analytics.domain.*
 import com.example.hiring.analytics.config.*
-import com.example.hiring.analytics.adapter.spark.*
-import com.example.hiring.analytics.adapter.mongo.*
 import com.example.hiring.analytics.adapter.kafka.*
-import com.example.hiring.analytics.adapter.local.*
 import com.example.hiring.analytics.service.erasure.*
 
-import com.example.hiring.analytics.adapter.spark.*
 import com.example.hiring.analytics.adapter.mongo.*
 
 import cats.effect.IO
-import cats.effect.syntax.all.*
 import cats.effect.unsafe.implicits.global
 import cats.syntax.all.*
 import com.mongodb.client.{MongoClient, MongoClients}
@@ -445,6 +438,10 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
         1L
       )
       val publisher = new AnalyticsReportPublisher[IO] {
+        override def publicationReceipt(
+            reservation: AnalyticsReportReservation
+        ): IO[AnalyticsReportPublicationReceipt] = IO.pure(AnalyticsReportPublicationReceipt.Absent)
+
         override def reservePinned(
             runId: RunId,
             rangeFingerprint: RangeFingerprint,

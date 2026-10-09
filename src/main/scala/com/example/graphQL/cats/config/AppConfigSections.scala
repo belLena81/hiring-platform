@@ -11,7 +11,8 @@ private[config] final case class TransportSettings(
     trustedProxy: TrustedProxyConfig,
     mongoUri: String,
     mongoDatabase: String,
-    discovery: DiscoveryConfig
+    discovery: DiscoveryConfig,
+    resetOnStart: Boolean
 )
 
 private[config] final case class AuthSettings(

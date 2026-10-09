@@ -1,8 +1,6 @@
 package com.example.hiring.analytics
 
 import cats.effect.IO
-import cats.effect.unsafe.implicits.global
-import cats.syntax.all.*
 import com.example.hiring.analytics.adapter.spark.*
 import com.example.hiring.analytics.domain.*
 import com.example.hiring.analytics.errors.AnalyticsError
@@ -10,7 +8,6 @@ import com.example.hiring.analytics.service.batch.*
 import com.example.hiring.analytics.HiringAnalyticsRecoveryTestSupport.*
 import io.delta.tables.DeltaTable
 import org.apache.spark.sql.Row
-import org.apache.spark.sql.functions.col
 import org.bson.Document
 
 import java.sql.Timestamp

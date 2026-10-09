@@ -4,7 +4,7 @@ import com.example.hiring.analytics.adapter.spark.OperationalEventTransforms
 import io.circe.Json
 import io.circe.parser.parse
 import munit.FunSuite
-import org.apache.spark.sql.{Row, SparkSession}
+import org.apache.spark.sql.Row
 import org.apache.spark.sql.functions.{current_timestamp, encode, col}
 import org.apache.spark.sql.types.{IntegerType, LongType, StringType, StructField, StructType}
 import scala.jdk.CollectionConverters.*

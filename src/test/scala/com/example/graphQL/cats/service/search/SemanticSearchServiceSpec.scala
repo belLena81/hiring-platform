@@ -352,18 +352,22 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
     }
   }
 
-  test("invalid candidate filters reject before provider or retrieval and retain error precedence") {
+  test("invalid candidate filters reject before provider or retrieval and report every violated field") {
     val scenarios = List(
       (
         CandidateMatchFilters(Nil, None, None, Some("invalid")),
         "Scala",
         SearchError.InvalidFilter("availabilityStatus")
       ),
-      (CandidateMatchFilters(Nil, Some(" "), None, Some("invalid")), "Scala", SearchError.InvalidFilter("residence")),
+      (
+        CandidateMatchFilters(Nil, Some(" "), None, Some("invalid")),
+        "Scala",
+        SearchError.InvalidFilters(cats.data.NonEmptyList.of("residence", "availabilityStatus"))
+      ),
       (
         CandidateMatchFilters(List(" "), Some(" "), None, Some("invalid")),
         "Scala",
-        SearchError.InvalidFilter("requiredSkills")
+        SearchError.InvalidFilters(cats.data.NonEmptyList.of("requiredSkills", "residence", "availabilityStatus"))
       ),
       (
         CandidateMatchFilters(Nil, None, None, Some("invalid")),

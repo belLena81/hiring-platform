@@ -3,9 +3,7 @@ package com.example.graphQL.cats.repository.mongo
 import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.FieldLimits
-import com.mongodb.MongoWriteException
-import com.mongodb.client.model.{Filters, Projections, Sorts, UpdateOptions, Updates}
-import com.mongodb.client.result.UpdateResult
+import com.mongodb.client.model.{Filters, Projections, Sorts}
 import org.bson.Document
 import java.util.Locale
 
@@ -60,86 +58,35 @@ private[mongo] object CandidateResidenceIntegrity {
   * incompatible writers before cutover. This migration changes only its own ledger, never user revisions/data.
   */
 private[mongo] object MongoCandidateResidenceIntegrityMigrations {
-  val MigrationId = "016_candidate_residence_integrity"
+  private val Id: MigrationId = MigrationIds.CandidateResidenceIntegrity
+
+  /** Ledger literal kept as `String` for existing callers; the typed identity is
+    * `MigrationIds.CandidateResidenceIntegrity`.
+    */
+  val MigrationId: String = Id.value
   private val BatchSize = 500
 
-  private enum State {
-    case Running(after: Option[String])
-    case Complete
-  }
-
-  private def readState(row: Document): Either[String, State] = {
-    val version = Option(row.get("version"))
-    val checkpoint: Either[String, Option[String]] =
-      if (!row.containsKey("lastId")) Right(None)
-      else
-        Option(row.get("lastId"))
-          .collect { case value: String if value.nonEmpty => value }
-          .toRight("Invalid candidate residence integrity checkpoint")
-          .map(Some(_))
-    if (!version.contains(Long.box(1L)) || !version.exists(_.isInstanceOf[java.lang.Long]))
-      Left("Unsupported candidate residence integrity proof")
-    else
-      Option(row.get("state")) match {
-        case Some("Running")                                => checkpoint.map(State.Running.apply)
-        case Some("Complete") if !row.containsKey("lastId") => Right(State.Complete)
-        case _                                              => Left("Unsupported candidate residence integrity proof")
-      }
-  }
-
-  private def storedState(row: Document): IO[State] =
-    IO.fromEither(readState(row).leftMap(new IllegalStateException(_)))
-
-  private def validator(database: MongoHiringSetup.SetupDatabase): IO[Unit] =
-    MongoHiringValidators
-      .userValidatorMatches(database.underlying)
-      .flatMap(valid =>
-        IO.raiseUnless(valid)(
-          new IllegalStateException("Candidate residence validator changed; explicit maintenance repair required")
-        )
-      )
+  private def requireValidator(database: MongoHiringSetup.SetupDatabase): IO[Unit] =
+    MongoHiringValidators.assertStrictValidators(
+      database,
+      List(MongoCollections.Users -> MongoHiringValidators.userValidator)
+    )
 
   /** Run before installing the user validator so completed-proof drift cannot be silently overwritten. */
   def verifyCompleted(database: MongoHiringSetup.SetupDatabase): IO[Unit] =
-    database
-      .getCollection(MongoCollections.HiringMigrationLedger)
-      .find(Filters.eq("_id", MigrationId))
-      .first
-      .flatMap {
-        case None      => IO.unit
-        case Some(row) =>
-          storedState(row).flatMap {
-            case State.Complete   => validator(database)
-            case State.Running(_) => IO.unit
-          }
-      }
-
-  def initialize(database: MongoHiringSetup.SetupDatabase): IO[Unit] = {
-    val users = database.getCollection(MongoCollections.Users)
-    val ledger = database.getCollection(MongoCollections.HiringMigrationLedger)
-    val marker = Filters.eq("_id", MigrationId)
-    val running = Filters.and(marker, Filters.eq("version", Long.box(1L)), Filters.eq("state", "Running"))
-
-    def acknowledged(result: UpdateResult): IO[Unit] =
-      IO.raiseUnless(result.wasAcknowledged())(
-        new IllegalStateException("Candidate residence integrity proof write was not acknowledged")
-      )
-
-    def complete: IO[Unit] = ledger.find(marker).first.flatMap {
-      case Some(row) =>
-        storedState(row).flatMap {
-          case State.Complete => validator(database)
-          case _ => IO.raiseError(new IllegalStateException("Candidate residence integrity audit did not complete"))
-        }
-      case None => IO.raiseError(new IllegalStateException("Candidate residence integrity proof is absent"))
+    MongoMigrationLedger.read(database, Id).flatMap {
+      case MigrationLedgerState.Complete => requireValidator(database)
+      case _                             => IO.unit
     }
 
-    def audit(after: Option[String], checkpoint: Boolean): IO[Unit] = {
-      val selection = after.fold(Filters.empty())(value => Filters.gt("_id", value))
+  private def audit(run: MigrationRun): IO[Unit] = {
+    val users = run.database.getCollection(MongoCollections.Users)
+    def scan(after: Option[String], checkpoint: Boolean): IO[Unit] = {
+      val selection = after.fold(Filters.empty())(value => Filters.gt(MongoFields.Id, value))
       users
         .find(selection)
-        .projection(Projections.include("_id", "profile.currentResidence"))
-        .sort(Sorts.ascending("_id"))
+        .projection(Projections.include(MongoFields.Id, s"${MongoFields.Profile}.${MongoFields.CurrentResidence}"))
+        .sort(Sorts.ascending(MongoFields.Id))
         .hint("_id_")
         .limit(BatchSize)
         .boundedStream(32)
@@ -147,61 +94,30 @@ private[mongo] object MongoCandidateResidenceIntegrityMigrations {
         .compile
         .toList
         .flatMap { rows =>
-          IO.raiseWhen(rows.size > BatchSize)(
-            new IllegalStateException("Candidate residence audit exceeded batch limit")
-          ) *>
+          IO.raiseWhen(rows.size > BatchSize)(MigrationError.StepFailed(run.id, "audit exceeded batch limit")) *>
             rows.traverse_(row =>
               IO.fromEither(
                 CandidateResidenceIntegrity
                   .validate(row)
-                  .leftMap(_ => new IllegalStateException("Candidate residence audit rejected stored residence"))
+                  .leftMap(_ => MigrationError.StepFailed(run.id, "audit rejected a stored residence"))
               )
             ) *> rows.lastOption.traverse_ { last =>
-              val identity = Option(last.get("_id")).collect { case value: String if value.nonEmpty => value }
-              IO.fromEither(
-                identity.toRight(new IllegalStateException("Candidate residence audit identity is invalid"))
-              ).flatMap { id =>
-                val advance =
-                  if (!checkpoint) IO.unit
-                  else
-                    ledger.updateOne(running, Updates.max("lastId", id)).flatMap { result =>
-                      acknowledged(result) *> (if (result.getMatchedCount == 1L) IO.unit else complete)
-                    }
-                advance *> (if (rows.size == BatchSize) IO.defer(audit(Some(id), checkpoint)) else IO.unit)
-              }
+              val identity = Option(last.get(MongoFields.Id)).collect { case value: String if value.nonEmpty => value }
+              IO.fromEither(identity.toRight(MigrationError.StepFailed(run.id, "audit identity is invalid")))
+                .flatMap { id =>
+                  (if (checkpoint) run.advance(id) else IO.unit) *>
+                    (if (rows.size == BatchSize) IO.defer(scan(Some(id), checkpoint)) else IO.unit)
+                }
             }
         }
     }
-
-    def resume: IO[Unit] = ledger.find(marker).first.flatMap {
-      case Some(row) =>
-        storedState(row).flatMap {
-          case State.Complete       => validator(database)
-          case State.Running(after) =>
-            audit(after, checkpoint = true) *>
-              // The paired validator prevents unpaired new writes. Recheck the prefix before freezing its proof.
-              audit(None, checkpoint = false) *>
-              ledger
-                .updateOne(running, Updates.combine(Updates.set("state", "Complete"), Updates.unset("lastId")))
-                .flatMap(acknowledged) *> complete
-        }
-      case None => IO.raiseError(new IllegalStateException("Candidate residence integrity proof is absent"))
-    }
-
-    validator(database) *> ledger.find(marker).first.flatMap {
-      case Some(_) => resume
-      case None    =>
-        ledger
-          .updateOne(
-            marker,
-            Updates.combine(Updates.setOnInsert("version", Long.box(1L)), Updates.setOnInsert("state", "Running")),
-            new UpdateOptions().upsert(true)
-          )
-          .flatMap(acknowledged)
-          .handleErrorWith {
-            case error: MongoWriteException if error.getError.getCode == 11000 => IO.unit
-            case error                                                         => IO.raiseError(error)
-          } *> resume
-    }
+    requireValidator(run.database) *> run.textCheckpoint.flatMap(after => scan(after, checkpoint = true)) *>
+      // The paired validator prevents unpaired new writes. Recheck the prefix before freezing its proof.
+      scan(None, checkpoint = false) *> requireValidator(run.database)
   }
+
+  val step: MongoMigrationStep =
+    MongoMigrationStep(Id, audit, requireValidator(_).as(CompletedProof.Trusted))
+
+  def initialize(database: MongoHiringSetup.SetupDatabase): IO[Unit] = MongoMigrationRunner.run(database, step)
 }

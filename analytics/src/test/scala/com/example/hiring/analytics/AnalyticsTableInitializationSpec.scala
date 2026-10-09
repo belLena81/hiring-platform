@@ -156,7 +156,7 @@ final class AnalyticsTableInitializationSpec extends CatsEffectSuite {
           val mismatch = root.resolve("mismatch").toString
           AnalyticsTableSchemas.createOrValidate(spark, mismatch, AnalyticsTableSchemas.bronze, true)
           val prior = DeltaLogFactory.system(spark, mismatch).update().version
-          intercept[com.example.hiring.analytics.errors.AnalyticsError.LakehouseFailure] {
+          intercept[com.example.hiring.analytics.errors.AnalyticsError.DeltaSchemaMismatch] {
             AnalyticsTableSchemas.createOrValidate(spark, mismatch, shape)
           }
           assertEquals(DeltaLogFactory.system(spark, mismatch).update().version, prior)

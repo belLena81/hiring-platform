@@ -8,9 +8,19 @@ import com.example.graphQL.cats.domain.model.ApplicationStatus
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId}
 import java.time.Instant
 
-final case class ApplicationCursor(createdAt: Instant, id: ApplicationId)
-final case class JobCursor(createdAt: Instant, id: JobId)
-final case class ApplicationEventCursor(occurredAt: Instant, id: ApplicationEventId)
+/** Keyset position `(timestamp, id)` shared by every newest-first connection; `Id` selects the connection. */
+final case class TimestampIdCursor[+Id](createdAt: Instant, id: Id) {
+
+  /** Application events order by occurrence time; the keyset timestamp is the same value. */
+  def occurredAt: Instant = createdAt
+}
+
+type ApplicationCursor = TimestampIdCursor[ApplicationId]
+val ApplicationCursor: TimestampIdCursor.type = TimestampIdCursor
+type JobCursor = TimestampIdCursor[JobId]
+val JobCursor: TimestampIdCursor.type = TimestampIdCursor
+type ApplicationEventCursor = TimestampIdCursor[ApplicationEventId]
+val ApplicationEventCursor: TimestampIdCursor.type = TimestampIdCursor
 
 opaque type PageSize = Int
 object PageSize {

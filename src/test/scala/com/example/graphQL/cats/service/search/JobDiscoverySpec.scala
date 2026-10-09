@@ -40,26 +40,23 @@ class JobDiscoverySpec extends FunSuite {
     assert(!result.truncated)
   }
 
-  test("nearby cursors are bound to center, radius, filters and ordering") {
-    val query = NearbyJobsQuery(GeoPoint(35d, 33d), 20d, JobSearchFilter(Some("Nicosia"), Set("Scala"), None))
-    val cursor = NearbyJobsQuery.encodeCursor(3.4d, JobId(new UUID(0L, 1L)), query)
-    assert(NearbyJobsQuery.decodeCursor(cursor, query).isRight)
-    assert(NearbyJobsQuery.decodeCursor(cursor, query.copy(center = GeoPoint(36d, 33d))).isLeft)
-  }
-  test("cursors reject malformed identity, radius, normalized filter and ordering mismatches") {
+  test("nearby cursors are bound to center, radius, normalized filters and ordering") {
     val query = NearbyJobsQuery(GeoPoint(35d, 33d), 20d, JobSearchFilter(Some(" Nicosia "), Set("Scala"), Some(now)))
-    val cursor = NearbyJobsQuery.encodeCursor(1.234567890123456d, JobId(new UUID(0L, 1L)), query)
-    assert(NearbyJobsQuery.decodeCursor(cursor, query.copy(radiusKm = 21d)).isLeft)
-    assert(NearbyJobsQuery.decodeCursor(cursor, query.copy(filter = query.filter.copy(skills = Set("Cats")))).isLeft)
-    assert(NearbyJobsQuery.decodeCursor(cursor, query.copy(filter = query.filter.copy(createdAfter = None))).isLeft)
-    assert(NearbyJobsQuery.decodeCursor(cursor, query.copy(filter = query.filter.copy(city = Some("Nicosia")))).isRight)
-    val malformed = java.util.Base64.getUrlEncoder
-      .withoutPadding()
-      .encodeToString(
-        s"1.0|invalid|${query.fingerprint}".getBytes(java.nio.charset.StandardCharsets.UTF_8)
-      )
-    assertEquals(NearbyJobsQuery.decodeCursor(malformed, query), Left(NearbyCursorError.InvalidIdentity))
-    assertEquals(NearbyJobsQuery.decodeCursor(cursor, query).toOption.map(_.distanceKm), Some(1.234567890123456d))
+    val cursor = NearbyJobCursor(1.234567890123456d, JobId(new UUID(0L, 1L)), query.fingerprint)
+    assert(cursor.isBoundTo(query))
+    assert(!cursor.isBoundTo(query.copy(center = GeoPoint(36d, 33d))))
+    assert(!cursor.isBoundTo(query.copy(radiusKm = 21d)))
+    assert(!cursor.isBoundTo(query.copy(filter = query.filter.copy(skills = Set("Cats")))))
+    assert(!cursor.isBoundTo(query.copy(filter = query.filter.copy(createdAfter = None))))
+    assert(cursor.isBoundTo(query.copy(filter = query.filter.copy(city = Some("Nicosia")))))
+  }
+
+  test("nearby cursor distances must be finite and non-negative") {
+    val identity = JobId(new UUID(0L, 1L))
+    assert(NearbyJobCursor(0d, identity, "f").hasValidDistance)
+    List(-1d, Double.NaN, Double.PositiveInfinity).foreach(invalid =>
+      assert(!NearbyJobCursor(invalid, identity, "f").hasValidDistance)
+    )
   }
 
   test("non-finite coordinates and radii fail closed") {
@@ -93,43 +90,14 @@ class JobDiscoverySpec extends FunSuite {
     assertEquals(accumulated.swap.toOption.map(_.length), Some(2L))
   }
 
-  test("typed cursor identities preserve the existing full-precision wire format") {
-    val query = NearbyJobsQuery(GeoPoint(35d, 33d), 20d, JobSearchFilter(None, Set.empty, None))
-    val identity = JobId(new UUID(0L, 1L))
-    val distance = 1.234567890123456d
-    val expected = java.util.Base64.getUrlEncoder
-      .withoutPadding()
-      .encodeToString(
-        s"$distance|${identity.value}|${query.fingerprint}".getBytes(java.nio.charset.StandardCharsets.UTF_8)
-      )
-    assertEquals(NearbyJobsQuery.encodeCursor(distance, identity, query), expected)
-    assertEquals(
-      NearbyJobsQuery.decodeCursor(expected, query),
-      Right(NearbyJobCursor(distance, identity, query.fingerprint))
-    )
-    assertEquals(NearbyJobsQuery.decodeCursor("%", query), Left(NearbyCursorError.InvalidEncoding))
-    List(-1d, Double.NaN, Double.PositiveInfinity).foreach { invalid =>
-      assertEquals(
-        NearbyJobCursorCodec.validate(NearbyJobCursor(invalid, identity, query.fingerprint), query),
-        Left(NearbyCursorError.InvalidDistance)
-      )
-    }
-  }
-
-  test("nearby cursor canonical criteria and full-precision bytes match fixed golden values") {
+  test("nearby cursor criteria fingerprint matches fixed golden values") {
     val query = NearbyJobsQuery(
       GeoPoint(35.5d, 33.25d),
       20.5d,
       JobSearchFilter(Some(" Nicosia|Old \"Town\" "), Set(" Scala,Cats ", "Pipe|Skill", " "), Some(now))
     )
     val fingerprint = "a69011814621cddab045b832630cba7e5e326ecb4d8d21f71d557879cf62e844"
-    val encoded =
-      "MS4yMzQ1Njc4OTAxMjM0NTZ8MDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxfGE2OTAxMTgxNDYyMWNkZGFiMDQ1YjgzMjYzMGNiYTdlNWUzMjZlY2I0ZDhkMjFmNzFkNTU3ODc5Y2Y2MmU4NDQ"
-    val identity = JobId(new UUID(0L, 1L))
-    val distance = 1.234567890123456d
     assertEquals(query.fingerprint, fingerprint)
-    assertEquals(NearbyJobsQuery.encodeCursor(distance, identity, query), encoded)
-    assertEquals(NearbyJobsQuery.decodeCursor(encoded, query), Right(NearbyJobCursor(distance, identity, fingerprint)))
     assertEquals(
       query
         .copy(filter = JobSearchFilter(Some("Nicosia|Old \"Town\""), Set("Pipe|Skill", "Scala,Cats"), Some(now)))

@@ -11,8 +11,7 @@ import com.mongodb.MongoException
 import fs2.Stream
 import mongo4cats.client.ClientSession
 import org.reactivestreams.Publisher
-
-import scala.util.control.NonFatal
+import retry.{ResultHandler, retryingOnErrors}
 
 /** FS2 boundary for Mongo's cold Reactive Streams publishers. */
 private[analytics] final class MongoPublisherStream(settings: AnalyticsOperationalSettings) {
@@ -51,26 +50,29 @@ private[analytics] final class MongoPublisherStream(settings: AnalyticsOperation
       work: EitherT[F, AnalyticsError, A]
   )(clock: Clock[F]): EitherT[F, AnalyticsError, A] =
     EitherT(clock.monotonic.flatMap { startedAt =>
-      val deadline = startedAt + settings.mongoTransactionWindow
+      // Both retry levels share one monotonic deadline and retry immediately, as Mongo's withTransaction helper does.
+      val deadline = RetryDeadline.until(clock, startedAt + settings.mongoTransactionWindow)
 
-      def beforeDeadline: F[Boolean] = clock.monotonic.map(_ < deadline)
+      def hasLabel(label: String)(error: Throwable): Boolean = error match {
+        case mongo: MongoException => mongo.hasErrorLabel(label)
+        case _                     => false
+      }
+      def retryOn(isWorthRetrying: Throwable => Boolean) =
+        ResultHandler.retryOnSomeErrors[F, Either[AnalyticsError, A]](isWorthRetrying, (_, _) => Async[F].unit)
 
       def abortIfActive: F[Unit] = if (session.hasActiveTransaction) session.abortTransaction else Async[F].unit
 
-      def retryTransaction(error: MongoException): F[Boolean] =
-        if (error.hasErrorLabel(MongoException.TRANSIENT_TRANSACTION_ERROR_LABEL)) beforeDeadline
-        else Async[F].pure(false)
+      // An unknown commit result may be committed again; any other failure is left to the transaction-level retry.
+      val commit: F[Unit] = retryingOnErrors(Async[F].defer(session.commitTransaction))(
+        deadline,
+        ResultHandler.retryOnSomeErrors[F, Unit](
+          hasLabel(MongoException.UNKNOWN_TRANSACTION_COMMIT_RESULT_LABEL),
+          (_, _) => Async[F].unit
+        )
+      )
 
-      def commit: F[Unit] = session.commitTransaction.handleErrorWith {
-        case error: MongoException if error.hasErrorLabel(MongoException.UNKNOWN_TRANSACTION_COMMIT_RESULT_LABEL) =>
-          beforeDeadline.flatMap(if _ then commit else Async[F].raiseError(error))
-        case error: MongoException =>
-          retryTransaction(error).flatMap(if _ then Async[F].raiseError(RetryTransaction(error))
-          else Async[F].raiseError(error))
-        case error => Async[F].raiseError(error)
-      }
-
-      def runOnce: F[Either[AnalyticsError, A]] = {
+      // Session primitives are built per attempt: a retry must start a fresh transaction, not replay a built effect.
+      val runOnce: F[Either[AnalyticsError, A]] = Async[F].defer {
         val transaction = session.startTransaction *> work.value.flatMap {
           case success @ Right(_) => commit.as(success)
           case failure @ Left(_)  => abortIfActive.as(failure)
@@ -81,17 +83,6 @@ private[analytics] final class MongoPublisherStream(settings: AnalyticsOperation
         }
       }
 
-      def run: F[Either[AnalyticsError, A]] = runOnce.handleErrorWith {
-        case retry: RetryTransaction =>
-          beforeDeadline.flatMap(if _ then Async[F].defer(run) else Async[F].raiseError(retry.getCause))
-        case error: MongoException =>
-          retryTransaction(error).flatMap(if _ then Async[F].defer(run) else Async[F].raiseError(error))
-        case error: AnalyticsError => Async[F].raiseError(error)
-        case NonFatal(error)       => Async[F].raiseError(error)
-      }
-      run
+      retryingOnErrors(runOnce)(deadline, retryOn(hasLabel(MongoException.TRANSIENT_TRANSACTION_ERROR_LABEL)))
     })
-
-  private final case class RetryTransaction(cause: MongoException)
-      extends RuntimeException("retry Mongo transaction", cause)
 }

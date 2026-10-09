@@ -1,6 +1,6 @@
 package com.example.hiring.analytics
 
-import com.example.hiring.analytics.config.AnalyticsStreamingSettings
+import com.example.hiring.analytics.config.{AnalyticsConfigFixtures, AnalyticsStreamingSettings}
 import com.example.hiring.analytics.config.MaximumOffsetsPerTrigger.*
 import com.example.hiring.analytics.errors.AnalyticsError
 
@@ -23,7 +23,7 @@ class AnalyticsStreamingSettingsSpec extends FunSuite {
     |""".stripMargin
 
   test("stream settings accept explicit unique offsets for checkpoint initialization") {
-    val parsed = AnalyticsStreamingSettings.fromHocon(valid)
+    val parsed = AnalyticsConfigFixtures.streaming(valid)
     assert(parsed.isRight)
     assertEquals(parsed.toOption.map(_.initialOffsets.size), Some(2))
     assertEquals(parsed.toOption.map(_.maxOffsetsPerTrigger.value), Some(1000))
@@ -34,11 +34,11 @@ class AnalyticsStreamingSettingsSpec extends FunSuite {
 
   test("trigger interval is configurable up to the ten-second default bound") {
     val configured = valid.replace("trigger-interval = 10 seconds", "trigger-interval = 5 seconds")
-    assertEquals(AnalyticsStreamingSettings.fromHocon(configured).map(_.triggerInterval), Right(5.seconds))
+    assertEquals(AnalyticsConfigFixtures.streaming(configured).map(_.triggerInterval), Right(5.seconds))
   }
 
   test("activation identity is bound to Kafka cluster and topic IDs") {
-    val settings = AnalyticsStreamingSettings.fromHocon(valid).fold(error => fail(error.getMessage), identity)
+    val settings = AnalyticsConfigFixtures.streaming(valid).fold(error => fail(error.getMessage), identity)
     val original = settings.activationIdentity("cluster-a", "topic-a", "hiring.events", "file:///tmp/lakehouse")
     val changedCluster = settings.activationIdentity("cluster-b", "topic-a", "hiring.events", "file:///tmp/lakehouse")
     val changedTopic = settings.activationIdentity("cluster-a", "topic-b", "hiring.events", "file:///tmp/lakehouse")
@@ -49,9 +49,9 @@ class AnalyticsStreamingSettingsSpec extends FunSuite {
   }
 
   test("activation grant renewal does not change checkpoint identity") {
-    val original = AnalyticsStreamingSettings.fromHocon(valid).toOption.get
-    val renewed = AnalyticsStreamingSettings
-      .fromHocon(
+    val original = AnalyticsConfigFixtures.streaming(valid).toOption.get
+    val renewed = AnalyticsConfigFixtures
+      .streaming(
         valid.replace("grant-2026-09", "grant-2026-10")
       )
       .toOption
@@ -72,11 +72,11 @@ class AnalyticsStreamingSettingsSpec extends FunSuite {
       "{ partition = 0, offset = 30 }"
     )
 
-    assert(AnalyticsStreamingSettings.fromHocon(emptyOffsets).left.exists {
+    assert(AnalyticsConfigFixtures.streaming(emptyOffsets).left.exists {
       case AnalyticsError.InvalidConfiguration(message) => message.contains("explicitly name every source partition")
       case _                                            => false
     })
-    assert(AnalyticsStreamingSettings.fromHocon(duplicateOffsets).left.exists {
+    assert(AnalyticsConfigFixtures.streaming(duplicateOffsets).left.exists {
       case AnalyticsError.InvalidConfiguration(message) => message.contains("each partition once")
       case _                                            => false
     })
@@ -84,9 +84,10 @@ class AnalyticsStreamingSettingsSpec extends FunSuite {
 
   test("replay cap cannot exceed one thousand retained records") {
     val overLimit = valid.replace("maximum-replay-records = 1000", "maximum-replay-records = 1001")
-    assert(AnalyticsStreamingSettings.fromHocon(overLimit).left.exists {
-      case AnalyticsError.InvalidConfiguration(message) => message.contains("between 1 and 1000")
-      case _                                            => false
+    assert(AnalyticsConfigFixtures.streaming(overLimit).left.exists {
+      case AnalyticsError.InvalidConfiguration(message) =>
+        message.contains("analytics.streaming.maximum-replay-records") && message.contains("[1, 1000]")
+      case _ => false
     })
   }
 
@@ -95,17 +96,17 @@ class AnalyticsStreamingSettingsSpec extends FunSuite {
       "file:///var/lib/hiring-analytics/checkpoints/hiring-events",
       "file:///tmp/hiring-events"
     )
-    assert(AnalyticsStreamingSettings.fromHocon(unowned).isLeft)
+    assert(AnalyticsConfigFixtures.streaming(unowned).isLeft)
   }
 
   test("checkpoint identity rejects escaped aliases and accepts canonical escaped physical names") {
     val original = "file:///var/lib/hiring-analytics/checkpoints/hiring-events"
     val canonical = "file:///var/lib/hiring-analytics/checkpoints/hiring+events%20with%25percent"
-    assert(AnalyticsStreamingSettings.fromHocon(valid.replace(original, canonical)).isRight)
+    assert(AnalyticsConfigFixtures.streaming(valid.replace(original, canonical)).isRight)
     Vector(
       "file:///var/lib/hiring-analytics/checkpoints/hiring%2Bevents",
       "file:///var/lib/hiring-analytics/checkpoints/%68iring-events"
-    ).foreach(alias => assert(AnalyticsStreamingSettings.fromHocon(valid.replace(original, alias)).isLeft))
+    ).foreach(alias => assert(AnalyticsConfigFixtures.streaming(valid.replace(original, alias)).isLeft))
   }
 
   test("batch limits and trigger policy are bounded and invalid values are not echoed in diagnostics") {
@@ -113,25 +114,25 @@ class AnalyticsStreamingSettingsSpec extends FunSuite {
     val unsupportedTrigger = valid.replace("trigger-interval = 10 seconds", "trigger-interval = 11 seconds")
     val sensitiveInvalidValue = valid.replace("trigger-interval = 10 seconds", "trigger-interval = \"private-value\"")
 
-    assert(AnalyticsStreamingSettings.fromHocon(excessiveOffsets).isLeft)
-    assert(AnalyticsStreamingSettings.fromHocon(unsupportedTrigger).isLeft)
-    assert(AnalyticsStreamingSettings.fromHocon(sensitiveInvalidValue).left.exists {
+    assert(AnalyticsConfigFixtures.streaming(excessiveOffsets).isLeft)
+    assert(AnalyticsConfigFixtures.streaming(unsupportedTrigger).isLeft)
+    assert(AnalyticsConfigFixtures.streaming(sensitiveInvalidValue).left.exists {
       case AnalyticsError.InvalidConfiguration(message) => !message.contains("private-value")
       case _                                            => false
     })
   }
   test("maintenance and progress retention settings are positive and identity-bound") {
-    val settings = AnalyticsStreamingSettings.fromHocon(valid).toOption.get
+    val settings = AnalyticsConfigFixtures.streaming(valid).toOption.get
     assertEquals(settings.maintenanceInterval, 60.seconds)
     assertEquals(settings.progressRetention, 7.days)
     List(
       "maintenance-interval = 60 seconds" -> "maintenance-interval = 0 seconds",
       "progress-retention = 7 days" -> "progress-retention = 0 days"
     ).foreach { case (old, changed) =>
-      assert(AnalyticsStreamingSettings.fromHocon(valid.replace(old, changed)).isLeft)
+      assert(AnalyticsConfigFixtures.streaming(valid.replace(old, changed)).isLeft)
     }
-    val changed = AnalyticsStreamingSettings
-      .fromHocon(valid.replace("progress-retention = 7 days", "progress-retention = 8 days"))
+    val changed = AnalyticsConfigFixtures
+      .streaming(valid.replace("progress-retention = 7 days", "progress-retention = 8 days"))
       .toOption
       .get
     assertNotEquals(

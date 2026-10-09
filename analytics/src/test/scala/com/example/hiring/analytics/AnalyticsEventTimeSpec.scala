@@ -5,7 +5,6 @@ import com.example.hiring.analytics.domain.*
 import munit.FunSuite
 
 import java.time.Instant
-import scala.concurrent.duration.*
 
 class AnalyticsEventTimeSpec extends FunSuite {
   private val observedAt = Instant.parse("2026-09-30T12:00:00Z")

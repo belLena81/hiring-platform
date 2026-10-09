@@ -30,8 +30,10 @@ object JobDiscoveryValidation {
       filter(value.filter)
     ).mapN((_, normalizedFilter) => value.copy(filter = normalizedFilter)).andThen { normalized =>
       normalized.after
-        .traverse(cursor => NearbyJobCursorCodec.validate(cursor, normalized))
-        .leftMap(_ => SearchError.InvalidFilter("cursor"))
+        .traverse(cursor =>
+          Either
+            .cond(cursor.hasValidDistance && cursor.isBoundTo(normalized), cursor, SearchError.InvalidFilter("cursor"))
+        )
         .toValidatedNec
         .as(normalized)
     }

@@ -89,7 +89,6 @@ lazy val root = (project in file("."))
       "org.mongodb" % "mongodb-driver-reactivestreams" % mongoVersion,
       "org.mongodb.scala" %% "mongo-scala-bson" % mongoScalaBsonVersion,
       "io.github.kirill5k" %% "mongo4cats-core" % mongo4catsVersion,
-      "io.github.kirill5k" %% "mongo4cats-circe" % mongo4catsVersion,
       "com.github.pureconfig" %% "pureconfig-core" % pureConfigVersion,
       "io.github.iltotore" %% "iron" % ironVersion,
       "io.github.iltotore" %% "iron-pureconfig" % ironVersion,

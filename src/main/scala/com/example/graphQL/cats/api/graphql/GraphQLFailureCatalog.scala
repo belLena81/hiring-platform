@@ -53,6 +53,9 @@ private[graphql] object GraphQLFailureCatalog {
     case AnalyticsUnavailable extends FailureMetadata("ANALYTICS_UNAVAILABLE", exceptional = true)
     case AnalyticsInvalidPeriod extends FailureMetadata("INVALID_ANALYTICS_PERIOD", exceptional = false)
     case AnalyticsContextRequired extends FailureMetadata("ANALYTICS_CONTEXT_REQUIRED", exceptional = true)
+    case InvalidCursor extends FailureMetadata("INVALID_CURSOR", exceptional = false)
+    case WrongCursorKind extends FailureMetadata("WRONG_CURSOR_KIND", exceptional = false)
+    case InvalidFilter extends FailureMetadata("INVALID_FILTER", exceptional = false)
   }
 
   def classify(error: UseCaseError): GraphQLFailure =
@@ -66,6 +69,19 @@ private[graphql] object GraphQLFailureCatalog {
       case UseCaseError.Search(value)            => classifySearch(value)
       case UseCaseError.ValidationFailed(errors) => classifyValidation(errors)
     }
+
+  /** Cursor decoding and binding failures raised by connection and nearby-search arguments. */
+  def classifyCursor(error: CursorCodec.CursorError): GraphQLFailure =
+    error match {
+      case CursorCodec.CursorError.Malformed(_) => failure(FailureMetadata.InvalidCursor, "Invalid cursor")
+      case CursorCodec.CursorError.WrongKind(_) =>
+        failure(FailureMetadata.WrongCursorKind, "Cursor belongs to a different connection")
+      case CursorCodec.CursorError.CriteriaMismatch =>
+        failure(FailureMetadata.InvalidCursor, "Nearby cursor does not match criteria")
+    }
+
+  /** Request arguments that are individually valid but inconsistent together. */
+  def inconsistentArguments(message: String): GraphQLFailure = failure(FailureMetadata.InvalidFilter, message)
 
   private def classifyAuthentication(error: AuthenticationError): GraphQLFailure =
     error match {
@@ -159,6 +175,8 @@ private[graphql] object GraphQLFailureCatalog {
         failure(FailureMetadata.InputTooLarge, s"$field must be at most $maximum characters")
       case SearchError.InvalidFilter(field) =>
         failure(FailureMetadata.InvalidSearchFilter, s"Invalid $field filter")
+      case SearchError.InvalidFilters(fields) =>
+        failure(FailureMetadata.InvalidSearchFilter, s"Invalid ${fields.toList.mkString(", ")} filters")
       case SearchError.ProviderUnavailable =>
         failure(FailureMetadata.ProviderUnavailable, "Embedding provider unavailable")
       case SearchError.VectorSearchUnavailable =>

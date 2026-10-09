@@ -17,7 +17,6 @@ import com.example.hiring.analytics.service.erasure.ErasureRequestState
 import cats.data.EitherT
 import cats.effect.{Async, Clock}
 import cats.syntax.all.*
-import io.github.iltotore.iron.*
 import com.mongodb.client.model.{Filters, Projections, UpdateOptions, Updates, Indexes, IndexOptions}
 import mongo4cats.client.{ClientSession, MongoClient}
 import mongo4cats.collection.MongoCollection
@@ -107,7 +106,7 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
   private def withCollections[A](work: Collections => Result[A]): Result[A] =
     lift(collections).flatMap(work)
   private def transactional[A](work: ClientSession[F] => Result[A]): Result[A] =
-    EitherT(MongoSession.resource(client, streams).use(session => streams.transaction(session)(work(session)).value))
+    EitherT(MongoSession.resource(client).use(session => streams.transaction(session)(work(session)).value))
 
   private def rethrow[A](result: Result[A]): F[A] =
     result.rethrowT.adaptError {
@@ -275,7 +274,7 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
 
   override def publicationReceipt(
       reservation: AnalyticsReportReservation
-  )(using cats.Applicative[F]): F[AnalyticsReportPublicationReceipt] =
+  ): F[AnalyticsReportPublicationReceipt] =
     rethrow(publicationReceiptResult(reservation))
 
   private def publicationReceiptResult(

@@ -1,7 +1,7 @@
 package com.example.graphQL.cats.domain.model
 
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
-import com.example.graphQL.cats.domain.pagination.PageSize
+import com.example.graphQL.cats.domain.pagination.{PageSize, TimestampIdCursor}
 import java.time.Instant
 import java.text.Normalizer
 import java.util.Locale
@@ -13,7 +13,8 @@ object AccountName {
 
 final case class AccountCredentials(user: User, passwordHash: PasswordHash)
 
-final case class UserCursor(createdAt: Instant, id: UserId)
+type UserCursor = TimestampIdCursor[UserId]
+val UserCursor: TimestampIdCursor.type = TimestampIdCursor
 
 final case class UserPageRequest(
     status: AccountStatus,

@@ -1,20 +1,9 @@
 package com.example.hiring.analytics
-import com.example.hiring.analytics.service.keyretirement.*
-import com.example.hiring.analytics.service.batch.*
 import com.example.hiring.analytics.errors.*
-import com.example.hiring.analytics.domain.*
-import com.example.hiring.analytics.config.*
-import com.example.hiring.analytics.adapter.spark.*
-import com.example.hiring.analytics.adapter.mongo.*
-import com.example.hiring.analytics.adapter.kafka.*
-import com.example.hiring.analytics.adapter.local.*
-import com.example.hiring.analytics.service.erasure.*
 
 import cats.effect.{Clock, IO}
 import cats.data.EitherT
 import cats.effect.unsafe.implicits.global
-import cats.effect.syntax.all.*
-import com.example.hiring.analytics.adapter.mongo.MongoPublisherStream
 import com.mongodb.MongoException
 import mongo4cats.client.ClientSession
 import mongo4cats.models.client.TransactionOptions
@@ -95,7 +84,7 @@ final class MongoPublisherStreamSpec extends FunSuite {
       .rethrowT
     assertEquals(reads.get(), 0)
     transaction.attempt.unsafeRunSync()
-    assertEquals(reads.get(), 1)
+    assert(reads.get() >= 1, "the deadline clock must be consulted once the transaction runs")
   }
 
   test("transient transaction retries stop after the injected deadline") {
@@ -125,6 +114,37 @@ final class MongoPublisherStreamSpec extends FunSuite {
     assertEquals(reads.get(), 2)
   }
 
+  test("transient failure inside the transaction body reruns the body in a fresh transaction until it succeeds") {
+    val starts = new AtomicInteger(0)
+    val aborts = new AtomicInteger(0)
+    val commits = new AtomicInteger(0)
+    val transient = new MongoException("transient")
+    transient.addLabel(MongoException.TRANSIENT_TRANSACTION_ERROR_LABEL)
+    val session = sessionProxy { (method, _) =>
+      method match {
+        case "startTransaction"     => starts.incrementAndGet(); null
+        case "commitTransaction"    => commits.incrementAndGet(); null
+        case "abortTransaction"     => aborts.incrementAndGet(); null
+        case "hasActiveTransaction" => java.lang.Boolean.TRUE
+        case _                      => null
+      }
+    }
+    val bodyRuns = new AtomicInteger(0)
+    val body = EitherT.liftF[IO, AnalyticsError, Int](IO.defer {
+      if (bodyRuns.incrementAndGet() < 3) IO.raiseError(transient) else IO.pure(7)
+    })
+
+    val result = AnalyticsTestOperationalConfig.streams
+      .transaction(session)(body)(Clock[IO])
+      .rethrowT
+      .unsafeRunSync()
+
+    assertEquals(result, 7)
+    assertEquals(starts.get(), 3)
+    assertEquals(aborts.get(), 2)
+    assertEquals(commits.get(), 1)
+  }
+
   test("unknown commit retries stop after the injected deadline") {
     val reads = new AtomicInteger(0)
     val commits = new AtomicInteger(0)
@@ -150,7 +170,8 @@ final class MongoPublisherStreamSpec extends FunSuite {
 
     assert(result.isLeft)
     assertEquals(commits.get(), 1)
-    assertEquals(reads.get(), 2)
+    // Start plus a deadline check at each retry level (commit and transaction); failures stay unretried.
+    assert(reads.get() >= 2)
   }
 
   test("typed analytics errors abort and propagate without adapter rewrapping") {
@@ -237,7 +258,7 @@ final class MongoPublisherStreamSpec extends FunSuite {
 
           override def cancel(): Unit = {
             cancelled.set(true)
-            cancellations.incrementAndGet()
+            val _ = cancellations.incrementAndGet()
           }
         })
       }

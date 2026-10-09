@@ -1,8 +1,6 @@
 package com.example.hiring.analytics.adapter.spark
 
 import cats.effect.{Deferred, IO, Ref, Resource}
-import cats.effect.syntax.all.*
-import cats.syntax.all.*
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.AnalyticsTestSubjectPseudonymizer
 import com.example.hiring.analytics.domain.AnalyticsDigest

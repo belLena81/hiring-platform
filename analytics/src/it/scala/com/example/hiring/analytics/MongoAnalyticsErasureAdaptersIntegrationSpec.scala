@@ -4,18 +4,12 @@ import com.example.hiring.analytics.service.batch.*
 import com.example.hiring.analytics.errors.*
 import com.example.hiring.analytics.domain.*
 import com.example.hiring.analytics.config.*
-import com.example.hiring.analytics.adapter.spark.*
-import com.example.hiring.analytics.adapter.mongo.*
-import com.example.hiring.analytics.adapter.kafka.*
-import com.example.hiring.analytics.adapter.local.*
 import com.example.hiring.analytics.service.erasure.*
 
-import com.example.hiring.analytics.adapter.spark.*
 import com.example.hiring.analytics.adapter.mongo.*
 
 import cats.Applicative
 import cats.effect.{Clock, Deferred, IO}
-import cats.effect.unsafe.implicits.global
 import com.mongodb.{ConnectionString, MongoClientSettings}
 import com.mongodb.client.{MongoClient, MongoClients}
 import com.mongodb.event.{CommandFailedEvent, CommandListener, CommandStartedEvent, CommandSucceededEvent}
@@ -43,7 +37,7 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends AnalyticsMongoIntegra
     mongo4catsBySync.put(sync, AnalyticsMongo4catsTestSupport.client(uri))
     sync
   }
-  private def syncClient(settings: MongoClientSettings, uri: String): MongoClient = {
+  private def syncClient(settings: MongoClientSettings): MongoClient = {
     val sync = MongoClients.create(settings)
     mongo4catsBySync.put(sync, AnalyticsMongo4catsTestSupport.client(settings))
     sync
@@ -102,7 +96,7 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends AnalyticsMongoIntegra
     var client: MongoClient = null
     var restartedClient: MongoClient = null
     try {
-      client = syncClient(settings, connectionString)
+      client = syncClient(settings)
       val database = client.getDatabase(databaseName)
       val requestId = UUID.randomUUID().toString
       val requestedAt = Instant.parse("2026-01-01T00:00:00Z")
@@ -169,7 +163,7 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends AnalyticsMongoIntegra
           if (!evidenceWriteStarted.await(90, TimeUnit.SECONDS))
             throw new AssertionError("old worker did not reach the file evidence write")
         }
-        _ <- IO.blocking { restartedClient = syncClient(settings, connectionString) }
+        _ <- IO.blocking { restartedClient = syncClient(settings) }
         restartedDatabase = restartedClient.getDatabase(databaseName)
         restartedStore = AnalyticsErasureWorkerTestSupport.stores(
           mongo4catsClient(restartedClient),
@@ -628,6 +622,10 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends AnalyticsMongoIntegra
         IntegrationAnalyticsLakehousePaths.unsafe(Files.createTempDirectory("analytics-fence-failure").toUri.toString),
         AnalyticsTestSubjectPseudonymizer.fromSecret("analytics-integration-secret".padTo(32, 'x').getBytes("UTF-8")),
         new AnalyticsReportPublisher[IO] {
+          override def publicationReceipt(
+              reservation: AnalyticsReportReservation
+          ): IO[AnalyticsReportPublicationReceipt] = IO.pure(AnalyticsReportPublicationReceipt.Absent)
+
           override def reservePinned(
               runId: RunId,
               rangeFingerprint: RangeFingerprint,
@@ -766,7 +764,7 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends AnalyticsMongoIntegra
       .applyConnectionString(new ConnectionString(connectionString))
       .addCommandListener(listener)
       .build()
-    val staleClient = syncClient(settings, connectionString)
+    val staleClient = syncClient(settings)
     val currentClient = syncClient(connectionString)
     try {
       val database = currentClient.getDatabase(databaseName)
@@ -990,7 +988,7 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends AnalyticsMongoIntegra
     try {
       val authStore = new MongoHmacKeyRetirementAuthorizationStore[IO](database, AnalyticsTestOperationalConfig.streams)
       val preparationStore =
-        new MongoHmacKeyRetirementPreparationStore[IO](database, AnalyticsTestOperationalConfig.streams)
+        new MongoHmacKeyRetirementPreparationStore[IO](database)
       val listed = for {
         _ <- authStore.insert(root, authorization)
         _ <- preparationStore.insert(root, preparation)

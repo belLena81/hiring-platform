@@ -1,7 +1,6 @@
 package com.example.hiring.analytics.cli
 
 import cats.effect.{Deferred, IO, Ref, Resource}
-import cats.syntax.all.*
 import munit.CatsEffectSuite
 import java.util.concurrent.ConcurrentLinkedQueue
 import scala.concurrent.ExecutionContext

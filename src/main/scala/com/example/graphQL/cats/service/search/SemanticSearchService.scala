@@ -147,7 +147,10 @@ final class SemanticSearchService(
         }
       )
       validatedFilters <- UseCase.fromEither(
-        ValidatedCandidateMatchFilters.from(filters).toEither.leftMap(errors => UseCaseError.Search(errors.head))
+        ValidatedCandidateMatchFilters
+          .from(filters)
+          .toEither
+          .leftMap(errors => UseCaseError.Search(SearchError.accumulated(errors)))
       )
       results <- job.embedding match {
         case Some(embedding)

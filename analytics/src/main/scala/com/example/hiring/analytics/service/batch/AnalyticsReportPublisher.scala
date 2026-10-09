@@ -3,7 +3,6 @@ package com.example.hiring.analytics.service.batch
 import com.example.hiring.analytics.domain.{AnalyticsReportOutput, RangeFingerprint, RunId}
 import com.example.hiring.analytics.service.erasure.ErasureClaim
 
-import cats.Applicative
 import java.time.Instant
 
 /** Durable publication boundary shared with the operational report reader. */
@@ -13,9 +12,7 @@ trait AnalyticsReportPublisher[F[_]] {
   /** Allocates once per attempt; retries must return the exact reservation without generation refresh. */
   def reservePinned(runId: RunId, rangeFingerprint: RangeFingerprint, now: Instant): F[AnalyticsReportReservation]
   def publish(reservation: AnalyticsReportReservation, report: AnalyticsReportOutput, expiresAt: Instant): F[Unit]
-  def publicationReceipt(reservation: AnalyticsReportReservation)(using
-      applicative: Applicative[F]
-  ): F[AnalyticsReportPublicationReceipt] = applicative.pure(AnalyticsReportPublicationReceipt.Absent)
+  def publicationReceipt(reservation: AnalyticsReportReservation): F[AnalyticsReportPublicationReceipt]
   def publishErasure(
       reservation: AnalyticsReportReservation,
       report: AnalyticsReportOutput,

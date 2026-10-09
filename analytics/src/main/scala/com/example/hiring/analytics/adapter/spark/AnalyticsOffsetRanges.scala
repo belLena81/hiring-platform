@@ -98,11 +98,11 @@ private[analytics] object AnalyticsOffsetRanges {
   ): F[Map[(String, Int), Observed]] =
     sparkExecution {
       frame
-        .groupBy(col("topic"), col("partition"))
+        .groupBy(col(Columns.Topic), col(Columns.Partition))
         .agg(
-          countDistinct(col("offset")).as("observed"),
-          min(col("offset")).as("first"),
-          max(col("offset")).as("last")
+          countDistinct(col(Columns.Offset)).as("observed"),
+          min(col(Columns.Offset)).as("first"),
+          max(col(Columns.Offset)).as("last")
         )
         .collect()
         .iterator

@@ -1,19 +1,8 @@
 package com.example.hiring.analytics
-import com.example.hiring.analytics.service.keyretirement.*
-import com.example.hiring.analytics.service.batch.*
-import com.example.hiring.analytics.errors.*
-import com.example.hiring.analytics.domain.*
 import com.example.hiring.analytics.config.*
-import com.example.hiring.analytics.adapter.spark.*
-import com.example.hiring.analytics.adapter.mongo.*
 import com.example.hiring.analytics.adapter.kafka.*
-import com.example.hiring.analytics.adapter.local.*
 import com.example.hiring.analytics.service.erasure.*
 
-import com.example.hiring.analytics.adapter.spark.*
-import com.example.hiring.analytics.adapter.mongo.*
-
-import cats.effect.unsafe.implicits.global
 import com.mongodb.client.{MongoClient, MongoClients, MongoDatabase}
 import com.mongodb.client.model.Filters
 import org.bson.Document
@@ -157,7 +146,7 @@ final class AccountDeletionComposeIntegrationSpec extends FunSuite {
       .append("availableAt", now)
       .append("createdAt", now)
       .append("updatedAt", now)
-    if (state == "Published") event.append("publishedAt", now)
+    if (state == "Published") { val _ = event.append("publishedAt", now) }
     database
       .getCollection("event_outbox")
       .insertOne(event)
@@ -306,8 +295,8 @@ final class AccountDeletionComposeIntegrationSpec extends FunSuite {
     )
     try {
       Files.writeString(temporary, subjectId + "\n", StandardCharsets.UTF_8)
-      Files.move(temporary, path, java.nio.file.StandardCopyOption.ATOMIC_MOVE)
-    } finally Files.deleteIfExists(temporary)
+      val _ = Files.move(temporary, path, java.nio.file.StandardCopyOption.ATOMIC_MOVE)
+    } finally { val _ = Files.deleteIfExists(temporary) }
   }
 
   private def seedAttributedDeltaRows(subjectId: String): (String, String) = {

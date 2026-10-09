@@ -10,26 +10,17 @@ private[config] object VectorSearchConfigValidation {
     val voyage = vector.voyage
     val embedding = vector.embedding
     val indexes = vector.indexes
+    val durableRetryBaseMillis =
+      embedding.durableRetryBaseMillis.getOrElse(VectorSearchConfig.DefaultDurableRetryBaseMillis)
+    val durableRetryCapMillis =
+      embedding.durableRetryCapMillis.getOrElse(VectorSearchConfig.DefaultDurableRetryCapMillis)
     (
       validVoyageApiKey(vector.enabled, voyage.apiKey),
       validNumCandidates(vector.numCandidates),
       validBranchResultLimit(vector.branchResultLimit, vector.numCandidates),
-      validFusionStrategy(vector.fusionStrategy),
-      validRerankModel(vector.rerank.model),
-      Either
-        .cond(
-          embedding.durableRetryAttempts.getOrElse(8) >= 1 && embedding.durableRetryAttempts.getOrElse(8) <= 100 &&
-            embedding.durableRetryBaseMillis.getOrElse(1000) >= 100 && embedding.durableRetryCapMillis.getOrElse(
-              300000
-            ) >= embedding.durableRetryBaseMillis.getOrElse(1000) &&
-            embedding.durableRetryCapMillis.getOrElse(300000) <= 3600000 && embedding.workerRestartDelayMillis
-              .getOrElse(1000) >= 100 &&
-            embedding.workerRestartDelayMillis.getOrElse(1000) <= 60000,
-          (),
-          ConfigError.InvalidEmbeddingRecovery
-        )
-        .toValidatedNel
-    ).mapN { (apiKey, numCandidates, branchResultLimit, fusionStrategy, rerankModel, _) =>
+      validRerankFusion(vector.rerank.enabled, vector.fusionStrategy),
+      validDurableRetryWindow(durableRetryBaseMillis, durableRetryCapMillis)
+    ).mapN { (apiKey, numCandidates, branchResultLimit, fusionStrategy, _) =>
       VectorSearchConfig(
         vector.enabled,
         apiKey,
@@ -47,25 +38,17 @@ private[config] object VectorSearchConfigValidation {
         indexes.candidateLexical,
         fusionStrategy,
         vector.rerank.enabled,
-        rerankModel,
+        vector.rerank.model,
         indexes.readyTimeoutMs,
         indexes.pollIntervalMs,
         numCandidates,
         branchResultLimit,
-        embedding.durableRetryAttempts.getOrElse(8),
-        embedding.durableRetryBaseMillis.getOrElse(1000),
-        embedding.durableRetryCapMillis.getOrElse(300000),
-        embedding.workerRestartDelayMillis.getOrElse(1000)
+        embedding.durableRetryAttempts.getOrElse(VectorSearchConfig.DefaultDurableRetryAttempts),
+        durableRetryBaseMillis,
+        durableRetryCapMillis,
+        embedding.workerRestartDelayMillis.getOrElse(VectorSearchConfig.DefaultWorkerRestartDelayMillis)
       )
-    }.andThen(config =>
-      Either
-        .cond(
-          !config.rerankEnabled || config.fusionStrategy != SearchFusionStrategy.ApplicationRrf,
-          config,
-          ConfigError.InvalidVectorFusionStrategy
-        )
-        .toValidatedNel
-    )
+    }
   }
 
   def validVoyageApiKey(enabled: Boolean, value: Option[String]): ValidatedNel[ConfigError, Option[String]] =
@@ -82,20 +65,19 @@ private[config] object VectorSearchConfigValidation {
       .cond(resolved >= PageSize.Max && resolved <= numCandidates, resolved, ConfigError.InvalidVectorBranchResultLimit)
       .toValidatedNel
 
-  def validFusionStrategy(value: String): ValidatedNel[ConfigError, SearchFusionStrategy] =
-    value match {
-      case "applicationRrf"   => SearchFusionStrategy.ApplicationRrf.validNel
-      case "mongoRankFusion"  => SearchFusionStrategy.MongoRankFusion.validNel
-      case "mongoScoreFusion" => SearchFusionStrategy.MongoScoreFusion.validNel
-      case _                  => ConfigError.InvalidVectorFusionStrategy.invalidNel
-    }
-
-  def validRerankModel(value: String): ValidatedNel[ConfigError, String] =
+  /** Reranking needs a database-side fusion; application RRF cannot feed the reranker. */
+  def validRerankFusion(
+      rerankEnabled: Boolean,
+      strategy: SearchFusionStrategy
+  ): ValidatedNel[ConfigError, SearchFusionStrategy] =
     Either
       .cond(
-        Set("rerank-2.5", "rerank-2.5-lite", "rerank-2", "rerank-2-lite").contains(value),
-        value,
-        ConfigError.InvalidRerankModel
+        !rerankEnabled || strategy != SearchFusionStrategy.ApplicationRrf,
+        strategy,
+        ConfigError.InvalidVectorFusionStrategy
       )
       .toValidatedNel
+
+  def validDurableRetryWindow(baseMillis: Int, capMillis: Int): ValidatedNel[ConfigError, Unit] =
+    Either.cond(capMillis >= baseMillis, (), ConfigError.InvalidEmbeddingDurableRetryWindow).toValidatedNel
 }

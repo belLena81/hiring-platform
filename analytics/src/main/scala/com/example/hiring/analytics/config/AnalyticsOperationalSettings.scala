@@ -1,7 +1,5 @@
 package com.example.hiring.analytics.config
 
-import AnalyticsPositiveInt.*
-
 import scala.concurrent.duration.*
 import io.github.iltotore.iron.*
 import io.github.iltotore.iron.constraint.numeric.{Interval, Positive}
@@ -11,11 +9,11 @@ type MaximumErasureEvidenceFiles = Int :| Interval.Closed[1, 2147483646]
 type MongoPublisherBufferSize = Int :| Interval.Closed[1, 65536]
 
 object MaximumErasureEvidenceFiles {
-  def unwrap(value: MaximumErasureEvidenceFiles): Int = value.asInstanceOf[Int]
+  def unwrap(value: MaximumErasureEvidenceFiles): Int = value
 }
 
 object MongoPublisherBufferSize {
-  def unwrap(value: MongoPublisherBufferSize): Int = value.asInstanceOf[Int]
+  def unwrap(value: MongoPublisherBufferSize): Int = value
 }
 
 object AnalyticsPositiveInt {
@@ -58,7 +56,3 @@ final case class AnalyticsErasureWorkerPolicy(
     retention: AnalyticsRetentionSettings,
     timings: AnalyticsErasureWorkerTimings
 )
-
-object AnalyticsOperationalSettings {
-  val MaximumMongoPublisherBufferSize: Int = 65536
-}

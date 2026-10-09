@@ -2,11 +2,11 @@ package com.example.hiring.analytics.cli
 
 import com.example.hiring.analytics.app.AppModule
 import com.example.hiring.analytics.config.AnalyticsRuntimeConfig
-import com.example.hiring.analytics.service.batch.AnalyticsPublication
 import com.example.hiring.analytics.errors.AnalyticsError
 
-import cats.effect.{ExitCode, IO, IOApp}
-import cats.syntax.all.*
+import cats.effect.{ExitCode, IO}
+import com.monovore.decline.Opts
+import com.monovore.decline.effect.CommandIOApp
 import org.typelevel.log4cats.slf4j.Slf4jLogger
 
 private[cli] object AnalyticsCliProgram {
@@ -37,61 +37,53 @@ private[cli] object AnalyticsCliProgram {
     if (causes.isEmpty) label else s"$label; cause types: ${causes.mkString(" -> ")}"
   }
 
-  def runProgram[A](program: IO[A]): IO[ExitCode] =
+  /** Maps an expected process outcome to its exit code; failures are logged as a sanitized summary and exit with error.
+    */
+  def runCommand(program: IO[ExitCode]): IO[ExitCode] =
     program.attempt.flatMap {
-      case Right(_)    => IO.pure(ExitCode.Success)
+      case Right(code) => IO.pure(code)
       case Left(error) => logger.error(safeFailureSummary(error)).as(ExitCode.Error)
     }
+
+  def runProgram[A](program: IO[A]): IO[ExitCode] = runCommand(program.as(ExitCode.Success))
 }
 
-object HiringAnalyticsBatchMain extends IOApp {
+/** Commands configured only through HOCON. Decline rejects any command-line argument, option or help flag, so no
+  * credential or payload can arrive through the process arguments.
+  */
+private[cli] abstract class HoconConfiguredCommand(name: String, header: String)
+    extends CommandIOApp(name = name, header = header, helpFlag = false) {
+  protected def program: IO[ExitCode]
+
+  final override def main: Opts[IO[ExitCode]] = Opts.unit.map(_ => AnalyticsCliProgram.runCommand(program))
+}
+
+object HiringAnalyticsBatchMain
+    extends HoconConfiguredCommand("hiring-analytics-batch", "Run one bounded hiring analytics batch") {
   private val logger = Slf4jLogger.getLogger[IO]
 
-  private def program: IO[AnalyticsPublication] =
-    AnalyticsRuntimeConfig.loadBatch[IO].flatMap(settings => AppModule.batch[IO](settings).use(_.run))
-
-  override def run(args: List[String]): IO[ExitCode] =
-    AnalyticsCliProgram.runProgram(
-      (if (args.nonEmpty)
-         IO.raiseError[AnalyticsPublication](
-           AnalyticsError.InvalidConfiguration(
-             "batch inputs are loaded from HOCON; command-line arguments are not accepted"
-           )
-         )
-       else program).flatTap(publication => logger.info(publication.toString))
-    )
+  override protected def program: IO[ExitCode] =
+    AnalyticsRuntimeConfig
+      .loadBatch[IO]
+      .flatMap(settings => AppModule.batch[IO](settings).use(_.run))
+      .flatTap(publication => logger.info(publication.toString))
+      .as(ExitCode.Success)
 }
 
-object HiringAnalyticsStreamingMain extends IOApp {
-  private def program: IO[Unit] =
-    AnalyticsRuntimeConfig.loadStreaming[IO].flatMap(settings => AppModule.streaming[IO](settings).use(_.run))
-
-  override def run(args: List[String]): IO[ExitCode] =
-    AnalyticsCliProgram.runProgram(
-      if (args.nonEmpty)
-        IO.raiseError[Unit](
-          AnalyticsError.InvalidConfiguration(
-            "streaming settings are loaded from HOCON; command-line arguments are not accepted"
-          )
-        )
-      else StreamingProcessTermination.run(program)
-    )
+object HiringAnalyticsStreamingMain
+    extends HoconConfiguredCommand("hiring-analytics-streaming", "Run the hiring analytics streaming job") {
+  override protected def program: IO[ExitCode] =
+    StreamingProcessTermination
+      .run(
+        AnalyticsRuntimeConfig.loadStreaming[IO].flatMap(settings => AppModule.streaming[IO](settings).use(_.run))
+      )
+      .as(ExitCode.Success)
 }
 
-object AnalyticsErasureWorkerMain extends IOApp {
-  private val logger = Slf4jLogger.getLogger[IO]
-
-  private def program: IO[Unit] =
-    AnalyticsRuntimeConfig.loadWorker[IO].flatMap(settings => AppModule.worker[IO](settings).use(_.run))
-
-  override def run(args: List[String]): IO[ExitCode] =
-    AnalyticsCliProgram.runProgram(
-      if (args.nonEmpty)
-        IO.raiseError[Unit](
-          AnalyticsError.InvalidConfiguration(
-            "worker settings are loaded from HOCON; command-line arguments are not accepted"
-          )
-        )
-      else StreamingProcessTermination.run(program)
-    )
+object AnalyticsErasureWorkerMain
+    extends HoconConfiguredCommand("analytics-erasure-worker", "Run the analytics erasure worker") {
+  override protected def program: IO[ExitCode] =
+    StreamingProcessTermination
+      .run(AnalyticsRuntimeConfig.loadWorker[IO].flatMap(settings => AppModule.worker[IO](settings).use(_.run)))
+      .as(ExitCode.Success)
 }

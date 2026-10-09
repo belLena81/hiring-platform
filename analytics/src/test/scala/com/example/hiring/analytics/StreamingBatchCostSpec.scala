@@ -1,10 +1,7 @@
 package com.example.hiring.analytics
 
-import cats.Applicative
 import cats.effect.{Deferred, IO, Ref, Resource}
-import cats.effect.syntax.all.*
 import cats.effect.testkit.TestControl
-import cats.syntax.all.*
 import com.example.hiring.analytics.adapter.spark.StreamingBatchCost
 import com.example.hiring.analytics.domain.*
 import com.example.hiring.analytics.service.batch.{
@@ -35,8 +32,9 @@ final class StreamingBatchCostSpec extends CatsEffectSuite {
   private def stages(action: IO[Unit]): StreamingBatchStages[IO] = new StreamingBatchStages[IO] {
     override def reservePublication(p: StreamingInputPreparation, revision: Long): IO[AnalyticsReportReservation] =
       IO { assertEquals(p, preparation); assertEquals(revision, 7L) } *> action.as(reservation)
-    override def publicationReceipt(p: StreamingInputPreparation, d: StreamingDecisionRevision)(using
-        Applicative[IO]
+    override def publicationReceipt(
+        p: StreamingInputPreparation,
+        d: StreamingDecisionRevision
     ): IO[AnalyticsReportPublicationReceipt] =
       IO { assertEquals(p, preparation); assertEquals(d, decision) } *> action.as(
         AnalyticsReportPublicationReceipt.CurrentGeneration

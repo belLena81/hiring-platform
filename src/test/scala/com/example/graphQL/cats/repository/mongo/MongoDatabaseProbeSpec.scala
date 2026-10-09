@@ -142,7 +142,9 @@ class MongoDatabaseProbeSpec extends CatsEffectSuite {
         .allocated
         .timeout(1.second)
         .flatMap { case (probe, release) =>
-          probe.check.timed
+          probe
+            .check(None)
+            .timed
             .flatMap { case (elapsed, result) =>
               IO {
                 assertEquals(result, ProbeResult.Unavailable)

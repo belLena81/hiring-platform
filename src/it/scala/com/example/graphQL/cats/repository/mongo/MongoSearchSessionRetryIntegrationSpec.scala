@@ -118,6 +118,46 @@ class MongoSearchSessionRetryIntegrationSpec extends MongoIntegrationSuite {
     }
   }
 
+  test("a search-session lease is reclaimable at exactly its expiry instant and held one millisecond earlier") {
+    mongoResource.use { fixture =>
+      val now = Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MILLIS)
+      val leaseUntil = now.plusSeconds(1)
+      val session = SearchSession(
+        UUID.randomUUID(),
+        UserId(UUID.randomUUID()),
+        "jobs",
+        None,
+        Json.obj(),
+        None,
+        Nil,
+        now,
+        now.plusSeconds(3600)
+      )
+      val event =
+        OperationalEvents.searchPerformed(UUID.randomUUID(), session).fold(error => fail(error.toString), identity)
+      val repository =
+        MongoSearchSessionWorkRepository.transactional(fixture.database, fixture.client, Diagnostics.noop)
+      for {
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- repository.enqueue(PendingSearchSessionWork(session, event), now).value.flatMap(result)
+        first <- repository.claim("first", now, leaseUntil).value.flatMap(result)
+        held <- repository.claim("second", leaseUntil.minusMillis(1L), leaseUntil.plusSeconds(30)).value.flatMap(result)
+        reclaimed <- repository.claim("second", leaseUntil, leaseUntil.plusSeconds(30)).value.flatMap(result)
+        stored <- MongoRepositoryTestSupport.findOne(
+          fixture.database,
+          MongoCollections.SearchSessionWork,
+          new Document("_id", session.id.toString)
+        )
+      } yield {
+        assert(first.nonEmpty)
+        assertEquals(held, None)
+        assert(reclaimed.exists(claim => first.exists(_.leaseToken != claim.leaseToken)))
+        assertEquals(stored.map(_.getString("leaseOwner")), Some("second"))
+        assertEquals(stored.map(_.getDate("updatedAt")), Some(java.util.Date.from(leaseUntil)))
+      }
+    }
+  }
+
   private def result[A](value: Either[RepositoryError, A]): IO[A] =
     value.fold(error => IO.raiseError(new AssertionError(error.toString)), IO.pure)
 }

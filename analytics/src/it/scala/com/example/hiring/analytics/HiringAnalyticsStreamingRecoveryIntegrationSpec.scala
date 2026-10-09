@@ -1,14 +1,12 @@
 package com.example.hiring.analytics
 
 import cats.effect.IO
-import cats.effect.unsafe.implicits.global
 import cats.syntax.all.*
 import com.example.hiring.analytics.adapter.spark.*
 import com.example.hiring.analytics.domain.*
 import com.example.hiring.analytics.service.batch.*
 import com.example.hiring.analytics.service.streaming.*
 import com.example.hiring.analytics.HiringAnalyticsRecoveryTestSupport.*
-import io.delta.tables.DeltaTable
 import org.apache.spark.sql.{DataFrame, Row}
 import org.apache.spark.sql.functions.{col, encode, lit}
 import org.apache.spark.sql.types.*

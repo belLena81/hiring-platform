@@ -72,6 +72,7 @@ enum LogField(val key: String, val sensitive: Boolean = false) {
   case TraceId extends LogField("traceId", true)
   case SpanId extends LogField("spanId", true)
   case SpanName extends LogField("spanName")
+  case Worker extends LogField("worker")
   case EntityId extends LogField("entityId", true)
   case ActorId extends LogField("actorId", true)
   case Count extends LogField("count")
@@ -104,7 +105,13 @@ object LogFields {
     "com.mongodb.MongoCommandException",
     "com.mongodb.MongoWriteException",
     "com.mongodb.MongoBulkWriteException",
-    "com.mongodb.MongoException"
+    "com.mongodb.MongoException",
+    "com.example.graphQL.cats.repository.mongo.MigrationError$LedgerAbsent",
+    "com.example.graphQL.cats.repository.mongo.MigrationError$LedgerCorrupt",
+    "com.example.graphQL.cats.repository.mongo.MigrationError$UnacknowledgedWrite",
+    "com.example.graphQL.cats.repository.mongo.MigrationError$StepFailed",
+    "com.example.graphQL.cats.repository.mongo.MigrationError$ValidatorMismatch",
+    "com.example.graphQL.cats.repository.mongo.MigrationError$IndexMismatch"
   )
   private val Root = "com.example.graphQL.cats."
 
@@ -144,6 +151,7 @@ object LogFields {
       value.matches("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
     case LogField.Count     => value.toLongOption.exists(_ >= 0)
     case LogField.SpanName  => value.matches("[A-Za-z][A-Za-z0-9_.-]{0,127}")
+    case LogField.Worker    => value.matches("[A-Za-z][A-Za-z0-9_.-]{0,63}")
     case LogField.Remote    => Set("true", "false").contains(value)
     case LogField.JobStatus => Set("Draft", "Open", "Closed").contains(value)
     case _                  => false

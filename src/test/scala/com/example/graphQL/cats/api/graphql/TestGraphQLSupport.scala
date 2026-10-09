@@ -15,6 +15,7 @@ import com.example.graphQL.cats.service.protocol.{
   AccountUseCases,
   ApplicationUseCases,
   HiringReadModel,
+  InteractionUseCases,
   IdempotencyRequest,
   JobUseCases,
   LoginInput,
@@ -22,7 +23,8 @@ import com.example.graphQL.cats.service.protocol.{
   UseCaseIO
 }
 import com.example.graphQL.cats.domain.pagination.{ApplicationEventPageRequest, ApplicationPageRequest, JobPageRequest}
-import com.example.graphQL.cats.service.search.JobSearchFilter
+import com.example.graphQL.cats.service.events.{OperationalEventEnvelope, SearchSession, SearchSessionHandoff}
+import com.example.graphQL.cats.service.search.{JobSearchFilter, SearchSessionRecording}
 import io.circe.Json
 import org.http4s.Request
 
@@ -43,15 +45,36 @@ object TestGraphQLSupport {
     def listUsers(actor: ActorContext, page: UserPageRequest) = unsupported
   }
 
+  /** Test fixture: accepts interaction events without durable recording. */
+  val interactions: InteractionUseCases = new InteractionUseCases {
+    def recordJobView(
+        request: IdempotencyRequest,
+        actor: ActorContext,
+        eventId: java.util.UUID,
+        jobId: JobId,
+        searchId: Option[java.util.UUID]
+    ) = UseCaseIO.pure(())
+    def recordSearchResultClick(
+        request: IdempotencyRequest,
+        actor: ActorContext,
+        eventId: java.util.UUID,
+        searchId: java.util.UUID,
+        resultId: String
+    ) = UseCaseIO.pure(())
+  }
+
+  /** Test fixture: real recording service over a handoff that drops every session. */
+  val searchSessions: SearchSessionRecording = SearchSessionRecording(
+    new SearchSessionHandoff {
+      def enqueue(session: SearchSession, event: OperationalEventEnvelope): IO[Unit] = IO.unit
+    }
+  )
+
   val emptyServices: HiringGraphQLServices = HiringGraphQLServices(
     new HiringReadModel {
-      def user(id: UserId) = unsupported
       def viewer(actor: ActorContext) = unsupported
-      def users(ids: List[UserId]) = unsupported
       def canViewUserEmail(actor: ActorContext, userId: UserId) = unsupported
       def canViewUserEmails(actor: ActorContext, userIds: List[UserId]) = unsupported
-      def job(id: JobId) = unsupported
-      def jobs(ids: List[JobId]) = unsupported
       def application(id: ApplicationId) = unsupported
       def canViewApplication(actor: ActorContext, applicationId: ApplicationId) = unsupported
       def relatedUsers(actor: ActorContext, keys: List[com.example.graphQL.cats.service.read.UserRelationKey]) =
@@ -88,7 +111,9 @@ object TestGraphQLSupport {
       ) = unsupported
     },
     cursorKey,
-    accountService
+    accountService,
+    interactions,
+    searchSessions
   )
 
   def context(

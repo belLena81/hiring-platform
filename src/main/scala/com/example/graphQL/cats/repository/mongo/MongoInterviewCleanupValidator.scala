@@ -6,38 +6,43 @@ import scala.jdk.CollectionConverters.*
 
 /** Store-enforced equivalent of the current cleanup codec and pure retention proof validation. */
 private[mongo] object MongoInterviewCleanupValidator {
-  private val Uuid = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
-  private val Producer = s"^(hiring-interview-orchestrator-|hiring-interview-worker-)$Uuid$$"
+  import MongoValidatorSchemas.{enumSchema, objectSchema, AnchoredUuidPattern, UuidPattern}
+
+  private val Producer = s"^(hiring-interview-orchestrator-|hiring-interview-worker-)$UuidPattern$$"
 
   def definition(topics: InterviewTopicPair): Document = {
     def values(operator: String, operands: Any*): Document = new Document(operator, operands.toList.asJava)
-    def enumSchema(names: String*): Document = values("enum", names*)
-    def objectSchema(required: List[String], properties: Document): Document =
-      new Document("bsonType", "object").append("required", required.asJava).append("properties", properties)
     def stateShape(names: List[String], required: List[String]): Document = {
-      val shape = new Document("properties", new Document("state", enumSchema(names*)))
+      val shape = new Document("properties", new Document(MongoFields.State, enumSchema(names*)))
       if (required.isEmpty) shape else shape.append("required", required.asJava)
     }
     val barrier = objectSchema(
-      List("topic", "partition", "endOffset"),
-      new Document("topic", enumSchema(topics.commands, topics.results))
-        .append("partition", new Document("bsonType", "int").append("minimum", 0))
+      List(MongoFields.Topic, MongoFields.Partition, "endOffset"),
+      new Document(MongoFields.Topic, enumSchema(topics.commands, topics.results))
+        .append(MongoFields.Partition, new Document("bsonType", "int").append("minimum", 0))
         .append("endOffset", new Document("bsonType", "long").append("minimum", Long.box(0L)))
     )
     val schema = objectSchema(
-      List("_id", "revision", "requestedAt", "state", "interviewTransactionalIds", "producerRegistry"),
-      new Document("_id", new Document("bsonType", "string").append("pattern", s"^$Uuid$$"))
+      List(
+        MongoFields.Id,
+        MongoFields.Revision,
+        MongoFields.RequestedAt,
+        MongoFields.State,
+        MongoFields.InterviewTransactionalIds,
+        MongoFields.ProducerRegistry
+      ),
+      new Document(MongoFields.Id, new Document("bsonType", "string").append("pattern", AnchoredUuidPattern))
         .append(
-          "revision",
+          MongoFields.Revision,
           new Document("bsonType", "long")
             .append("minimum", Long.box(0L))
             .append("maximum", Long.box(Long.MaxValue - 1L))
         )
-        .append("requestedAt", new Document("bsonType", "date"))
-        .append("state", enumSchema((MongoInterviewCleanupSweepCodec.ActiveStates :+ "Complete")*))
-        .append("producerRegistry", new Document("enum", List(true).asJava))
+        .append(MongoFields.RequestedAt, new Document("bsonType", "date"))
+        .append(MongoFields.State, enumSchema((MongoInterviewCleanupSweepCodec.ActiveStates :+ "Complete")*))
+        .append(MongoFields.ProducerRegistry, new Document("enum", List(true).asJava))
         .append(
-          "interviewTransactionalIds",
+          MongoFields.InterviewTransactionalIds,
           new Document("bsonType", "array")
             .append("items", new Document("bsonType", "string").append("pattern", Producer))
         )
@@ -47,13 +52,14 @@ private[mongo] object MongoInterviewCleanupValidator {
         stateShape(List("AwaitingRetention"), List("barriers"))
           .append(
             "properties",
-            new Document("state", enumSchema("AwaitingRetention"))
+            new Document(MongoFields.State, enumSchema("AwaitingRetention"))
               .append("barriers", new Document("bsonType", "array").append("minItems", 1).append("items", barrier))
           ),
-        stateShape(List("Complete"), List("completedAt"))
+        stateShape(List("Complete"), List(MongoFields.CompletedAt))
           .append(
             "properties",
-            new Document("state", enumSchema("Complete")).append("completedAt", new Document("bsonType", "date"))
+            new Document(MongoFields.State, enumSchema("Complete"))
+              .append(MongoFields.CompletedAt, new Document("bsonType", "date"))
           ),
         stateShape(List("Pending", "ProducersFenced", "MongoPurged"), Nil)
       ).asJava
@@ -65,7 +71,7 @@ private[mongo] object MongoInterviewCleanupValidator {
       new Document("input", safeBarriers).append("as", "barrier").append("in", expression)
     )
     val pairs = mapBarriers(
-      new Document("topic", "$$barrier.topic").append("partition", "$$barrier.partition")
+      new Document(MongoFields.Topic, "$$barrier.topic").append(MongoFields.Partition, "$$barrier.partition")
     )
     val proof = values(
       "$and",

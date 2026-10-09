@@ -94,7 +94,7 @@ private[analytics] object HiringAnalyticsRecoveryTestSupport {
     val operational = AnalyticsTestOperationalConfig.operational
     val streams = AnalyticsTestOperationalConfig.streams
     val keys = AnalyticsTestSubjectPseudonymizer.fromSecret(Array.fill[Byte](32)(19))
-    val lock = new MongoAnalyticsLakehouseLock[IO](database, streams)
+    val lock = new MongoAnalyticsLakehouseLock[IO](database, streams, cats.effect.Clock[IO])
     val markers = new MongoActiveDeletionMarkerSource[IO](database, keys, streams)
     val retirements = new MongoHmacKeyRetirementAuthorizationStore[IO](database, streams)
     val publisher = new MongoAnalyticsReportPublisher[IO](runtime.client, database, operational)
@@ -108,7 +108,8 @@ private[analytics] object HiringAnalyticsRecoveryTestSupport {
       retirements,
       operational,
       execution,
-      org.typelevel.log4cats.slf4j.Slf4jLogger.getLogger[IO]
+      org.typelevel.log4cats.slf4j.Slf4jLogger.getLogger[IO],
+      cats.effect.Clock[IO]
     )
     val topic = "hiring.recovery." + UUID.randomUUID().toString
     val subjects: Vector[String] = Vector.fill(12)(UUID.randomUUID().toString)
@@ -174,7 +175,15 @@ private[analytics] object HiringAnalyticsRecoveryTestSupport {
     ): Resource[IO, StreamingBatchStages[IO]] = {
       val manifests = new DeltaManifestStore[IO](spark, paths, execution)
       val ingestion =
-        new AnalyticsBatchIngestionStage[IO](paths, keys, execution, manifests, sink, operational.retention)
+        new AnalyticsBatchIngestionStage[IO](
+          paths,
+          keys,
+          execution,
+          manifests,
+          sink,
+          operational.retention,
+          cats.effect.Clock[IO]
+        )
       val silver = new AnalyticsBatchSilverStage[IO](
         paths,
         keys,
@@ -233,7 +242,15 @@ private[analytics] object HiringAnalyticsRecoveryTestSupport {
     }
 
     def replayStages: AnalyticsLateFactReplayStages[IO] =
-      new SparkAnalyticsLateFactReplayStages[IO](spark, paths, execution, reader, writer, maintenance)
+      new SparkAnalyticsLateFactReplayStages[IO](
+        spark,
+        paths,
+        execution,
+        reader,
+        writer,
+        maintenance,
+        cats.effect.Clock[IO]
+      )
     def replayJournal = new MongoAnalyticsLateFactReplayJournal[IO](database, streams, paths.root)
     def replay(
         request: AnalyticsLateFactReplayRequest,
@@ -246,7 +263,8 @@ private[analytics] object HiringAnalyticsRecoveryTestSupport {
         replayStages,
         publication,
         lock,
-        operational.retention.publishedSnapshotDays
+        operational.retention.publishedSnapshotDays,
+        cats.effect.Clock[IO]
       ).run(request)
   }
 
@@ -255,7 +273,7 @@ private[analytics] object HiringAnalyticsRecoveryTestSupport {
       delegate.reserve(run, fingerprint, at)
     override def reservePinned(run: RunId, fingerprint: RangeFingerprint, at: Instant) =
       delegate.reservePinned(run, fingerprint, at)
-    override def publicationReceipt(reservation: AnalyticsReportReservation)(using cats.Applicative[IO]) =
+    override def publicationReceipt(reservation: AnalyticsReportReservation) =
       delegate.publicationReceipt(reservation)
     override def publish(reservation: AnalyticsReportReservation, report: AnalyticsReportOutput, expiry: Instant) =
       delegate.publish(reservation, report, expiry)

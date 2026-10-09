@@ -271,7 +271,7 @@ class MongoHiringRuntimeSpec extends CatsEffectSuite {
       setup = setupCalls.update(_ + 1) *> entered.complete(()).void *> release.get
       result <- SetupLifecycle.resource(setup, com.example.graphQL.cats.service.Diagnostics.noop).use { lifecycle =>
         val probe = new DatabaseProbe {
-          override def check: IO[ProbeResult] = lifecycle.ready.map {
+          override def check(requestId: Option[String]): IO[ProbeResult] = lifecycle.ready.map {
             if (_) ProbeResult.Ready else ProbeResult.Unavailable
           }
         }

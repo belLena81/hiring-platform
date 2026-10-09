@@ -3,7 +3,6 @@ package com.example.hiring.analytics.config
 import com.example.hiring.analytics.domain.{
   AnalyticsDigest,
   AnalyticsLakehouseIdentity,
-  AnalyticsEventTimePolicy,
   AnalyticsOffset,
   AnalyticsPartition,
   StreamingActivationIdentity
@@ -11,22 +10,12 @@ import com.example.hiring.analytics.domain.{
 import com.example.hiring.analytics.errors.AnalyticsError
 
 import cats.data.ValidatedNec
-import cats.effect.Async
 import cats.syntax.all.*
-import com.typesafe.config.{ConfigFactory, ConfigParseOptions, ConfigResolveOptions}
 import io.github.iltotore.iron.*
 import io.github.iltotore.iron.constraint.numeric.Interval
-import pureconfig.*
-import pureconfig.generic.derivation.{
-  ConfigReaderDerivation,
-  CoproductConfigReaderDerivation,
-  ProductConfigReaderDerivation
-}
+import _root_.pureconfig.*
 
-import scala.annotation.nowarn
 import scala.concurrent.duration.*
-import scala.deriving.Mirror
-import scala.jdk.CollectionConverters.*
 import java.net.URI
 import java.nio.file.Paths
 
@@ -34,7 +23,7 @@ type MaximumStreamingReplayRecords = Int :| Interval.Closed[1, 1000]
 type MaximumOffsetsPerTrigger = Int :| Interval.Closed[1, 100000]
 
 object MaximumOffsetsPerTrigger {
-  extension (value: MaximumOffsetsPerTrigger) def value: Int = value.asInstanceOf[Int]
+  extension (value: MaximumOffsetsPerTrigger) def value: Int = value
 }
 
 final case class KafkaStartingOffset private (partition: AnalyticsPartition, offset: AnalyticsOffset)
@@ -56,10 +45,6 @@ final case class AnalyticsStreamingSettings private (
     maintenanceInterval: FiniteDuration,
     progressRetention: FiniteDuration
 ) {
-  def allowedFutureSkew: FiniteDuration = AnalyticsEventTimePolicy.AllowedFutureSkew
-  def watermarkLag: FiniteDuration = AnalyticsEventTimePolicy.WatermarkLag
-  def lateFactRetentionDays: Int = AnalyticsEventTimePolicy.LateFactRetentionDays
-
   def activationIdentity(
       sourceClusterId: String,
       sourceTopicId: String,
@@ -74,7 +59,7 @@ final case class AnalyticsStreamingSettings private (
       streamId,
       checkpointLocation,
       triggerInterval.toString,
-      maxOffsetsPerTrigger.asInstanceOf[Int].toString,
+      maxOffsetsPerTrigger.toString,
       maximumReplayRecords.toString,
       AnalyticsStreamingSettings.ConsumerGroupId,
       offsets,
@@ -104,29 +89,24 @@ final case class AnalyticsStreamingSettings private (
   }
 }
 
-private final case class StreamingSettingsInput(
-    streamId: AnalyticsNonBlank,
-    activationGrantId: AnalyticsNonBlank,
-    checkpointLocation: AnalyticsNonBlank,
-    triggerInterval: FiniteDuration,
-    maxOffsetsPerTrigger: Int,
-    maximumReplayRecords: Int,
-    initialOffsets: Vector[KafkaStartingOffsetInput],
-    maintenanceInterval: FiniteDuration,
-    progressRetention: FiniteDuration
-)
-
-private final case class KafkaStartingOffsetInput(partition: Int, offset: Long)
-
 object AnalyticsStreamingSettings {
-  import AnalyticsConfigReaders.given
+  import AnalyticsConfigReaders.{decode, given}
+  import io.github.iltotore.iron.pureconfig.given
 
-  private val InvalidStreamingConfiguration =
-    AnalyticsError.InvalidConfiguration("analytics.streaming configuration is invalid")
-
-  val TriggerInterval: FiniteDuration = 10.seconds
   val ConsumerGroupId: String = "hiring-analytics-streaming-v1"
-  val MaximumOffsetsPerTrigger: Int = 100000
+
+  private final case class KafkaStartingOffsetInput(partition: Int, offset: Long) derives ConfigReader
+  private final case class StreamingSettingsInput(
+      streamId: AnalyticsNonBlank,
+      activationGrantId: AnalyticsNonBlank,
+      checkpointLocation: AnalyticsNonBlank,
+      triggerInterval: StreamingTriggerInterval,
+      maxOffsetsPerTrigger: MaximumOffsetsPerTrigger,
+      maximumReplayRecords: MaximumStreamingReplayRecords,
+      initialOffsets: Vector[KafkaStartingOffsetInput],
+      maintenanceInterval: AnalyticsPositiveDuration,
+      progressRetention: AnalyticsPositiveDuration
+  ) derives ConfigReader
 
   /** Check before checkpoint creation that the explicit offsets cover exactly the broker's current partition set. */
   def validatePartitionCoverage(
@@ -143,71 +123,11 @@ object AnalyticsStreamingSettings {
     )
   }
 
-  private def validateCheckpointLocation(value: AnalyticsNonBlank): ValidatedNec[String, AnalyticsNonBlank] = {
-    val location = Either
-      .catchNonFatal {
-        val uri = new URI(value)
-        val path = Paths.get(uri).normalize()
-        val segments = path.iterator().asScala.map(_.toString).toVector
-        val dockerRoot = Paths.get("/var/lib/hiring-analytics/checkpoints")
-        val localRootPresent = segments.sliding(4).zipWithIndex.exists { case (parts, index) =>
-          parts == Vector(".local", "data", "analytics", "checkpoints") && segments.size > index + 4
-        }
-        val permitted = (path.startsWith(dockerRoot) && path != dockerRoot) || localRootPresent
-        uri.getScheme == "file" && uri.getAuthority == null && uri.getQuery == null && uri.getFragment == null &&
-        path.isAbsolute && permitted && AnalyticsLakehouseIdentity.from(value).isRight &&
-        !Option(uri.getPath).toVector.flatMap(_.split("/")).contains("..")
-      }
-      .leftMap(_ => "checkpoint-location must be inside the owned analytics runtime checkpoint directory")
-      .flatMap(isAllowed =>
-        Either.cond(
-          isAllowed,
-          value,
-          "checkpoint-location must be inside the owned analytics runtime checkpoint directory"
-        )
-      )
-    location.toValidatedNec
-  }
+  /** Decodes `analytics.streaming` from `source`; field bounds come from the readers, offset rules are checked here. */
+  private[analytics] def read(source: ConfigSource): ValidatedNec[String, AnalyticsStreamingSettings] =
+    decode[StreamingSettingsInput](source, "analytics.streaming").andThen(validate)
 
-  @nowarn("cat=deprecation")
-  private object KebabCaseConfigReader
-      extends ConfigReaderDerivation
-      with CoproductConfigReaderDerivation(ConfigFieldMapping(PascalCase, KebabCase), "type")
-      with ProductConfigReaderDerivation(ConfigFieldMapping(CamelCase, KebabCase)) {
-    inline def derive[A](using Mirror.Of[A]): ConfigReader[A] = deriveConfigReader[A]
-  }
-
-  private given ConfigReader[KafkaStartingOffsetInput] = KebabCaseConfigReader.derive[KafkaStartingOffsetInput]
-  private given ConfigReader[StreamingSettingsInput] = KebabCaseConfigReader.derive[StreamingSettingsInput]
-  def load[F[_]: Async]: F[AnalyticsStreamingSettings] =
-    Async[F].blocking(ConfigSource.default.at("analytics.streaming").load[StreamingSettingsInput]).flatMap {
-      case Right(raw) => Async[F].fromEither(validate(raw))
-      case Left(_)    => Async[F].raiseError(InvalidStreamingConfiguration)
-    }
-
-  def fromHocon(
-      value: String,
-      environment: Map[String, String] = Map.empty
-  ): Either[AnalyticsError, AnalyticsStreamingSettings] =
-    for {
-      parsed <- Either
-        .catchNonFatal(ConfigFactory.parseString(value, ConfigParseOptions.defaults().setAllowMissing(false)))
-        .leftMap(_ => AnalyticsError.InvalidConfiguration("analytics streaming HOCON is malformed"))
-      resolved <- Either
-        .catchNonFatal(
-          parsed.withFallback(ConfigFactory.parseMap(environment.asJava)).resolve(ConfigResolveOptions.noSystem())
-        )
-        .leftMap(_ => AnalyticsError.InvalidConfiguration("analytics streaming substitutions are invalid"))
-      raw <- ConfigSource
-        .fromConfig(resolved)
-        .at("analytics.streaming")
-        .load[StreamingSettingsInput]
-        .left
-        .map(_ => InvalidStreamingConfiguration)
-      settings <- validate(raw)
-    } yield settings
-
-  private def validate(raw: StreamingSettingsInput): Either[AnalyticsError, AnalyticsStreamingSettings] = {
+  private def validate(raw: StreamingSettingsInput): ValidatedNec[String, AnalyticsStreamingSettings] = {
     val offsets = raw.initialOffsets.traverse(offset => KafkaStartingOffset.from(offset.partition, offset.offset))
     val uniquePartitions = Either
       .cond(
@@ -223,36 +143,43 @@ object AnalyticsStreamingSettings {
         "analytics.streaming.initial-offsets must explicitly name every source partition"
       )
       .toValidatedNec
-    val triggerInterval = Either
-      .cond(
-        raw.triggerInterval > Duration.Zero && raw.triggerInterval <= TriggerInterval,
-        raw.triggerInterval,
-        "analytics.streaming.trigger-interval must be positive and no greater than 10 seconds"
-      )
-      .toValidatedNec
-    val settings = (
-      raw.streamId.validNec[String],
-      raw.activationGrantId.validNec[String],
+    (
       validateCheckpointLocation(raw.checkpointLocation),
-      triggerInterval,
-      raw.maxOffsetsPerTrigger
-        .refineEither[Interval.Closed[1, 100000]]
-        .leftMap(_ => "max-offsets-per-trigger must be between 1 and 100000")
-        .toValidatedNec,
-      raw.maximumReplayRecords
-        .refineEither[Interval.Closed[1, 1000]]
-        .leftMap(_ => "maximum-replay-records must be between 1 and 1000")
-        .toValidatedNec,
-      (offsets, uniquePartitions, nonEmptyOffsets).mapN((validOffsets, _, _) => validOffsets),
-      Either
-        .cond(raw.maintenanceInterval > Duration.Zero, raw.maintenanceInterval, "maintenance-interval must be positive")
-        .toValidatedNec,
-      Either
-        .cond(raw.progressRetention > Duration.Zero, raw.progressRetention, "progress-retention must be positive")
-        .toValidatedNec
-    ).mapN(AnalyticsStreamingSettings.apply)
-    settings.toEither.leftMap(errors =>
-      AnalyticsError.InvalidConfiguration(errors.toNonEmptyList.toList.mkString("; "))
+      (offsets, uniquePartitions, nonEmptyOffsets).mapN((validOffsets, _, _) => validOffsets)
+    ).mapN((checkpointLocation, validOffsets) =>
+      AnalyticsStreamingSettings(
+        raw.streamId,
+        raw.activationGrantId,
+        checkpointLocation,
+        raw.triggerInterval,
+        raw.maxOffsetsPerTrigger,
+        raw.maximumReplayRecords,
+        validOffsets,
+        raw.maintenanceInterval,
+        raw.progressRetention
+      )
     )
+  }
+
+  private def validateCheckpointLocation(value: AnalyticsNonBlank): ValidatedNec[String, AnalyticsNonBlank] = {
+    val location = Either
+      .catchNonFatal {
+        val uri = new URI(value)
+        val path = Paths.get(uri).normalize()
+        val owned =
+          AnalyticsRuntimeDirectory.owns(path, AnalyticsRuntimeDirectory.Checkpoints, allowCategoryRoot = false)
+        uri.getScheme == "file" && uri.getAuthority == null && uri.getQuery == null && uri.getFragment == null &&
+        owned && AnalyticsLakehouseIdentity.from(value).isRight &&
+        !Option(uri.getPath).toVector.flatMap(_.split("/")).contains("..")
+      }
+      .leftMap(_ => "checkpoint-location must be inside the owned analytics runtime checkpoint directory")
+      .flatMap(isAllowed =>
+        Either.cond(
+          isAllowed,
+          value,
+          "checkpoint-location must be inside the owned analytics runtime checkpoint directory"
+        )
+      )
+    location.toValidatedNec
   }
 }

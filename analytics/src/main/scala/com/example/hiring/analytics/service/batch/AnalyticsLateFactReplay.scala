@@ -1,6 +1,6 @@
 package com.example.hiring.analytics.service.batch
 
-import cats.effect.Async
+import cats.effect.{Async, Clock}
 import cats.syntax.all.*
 import com.example.hiring.analytics.config.AnalyticsPositiveInt
 import com.example.hiring.analytics.domain.{
@@ -75,11 +75,11 @@ final class AnalyticsLateFactReplayService[F[_]: Async](
     reportPublisher: AnalyticsReportPublisher[F],
     lakehouseLock: AnalyticsLakehouseLock[F],
     publishedSnapshotDays: AnalyticsPositiveInt,
-    private[analytics] val nowOverride: Option[F[Instant]] = None
+    clock: Clock[F]
 ) {
   import AnalyticsLateFactReplayService.*
   private val F = Async[F]
-  private val now = nowOverride.getOrElse(F.realTimeInstant)
+  private val now = clock.realTimeInstant
 
   def run(request: AnalyticsLateFactReplayRequest): F[AnalyticsLateFactReplayOutcome] =
     lakehouseLock.resource(lakehouseRoot).use { _ =>

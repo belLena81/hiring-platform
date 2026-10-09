@@ -61,8 +61,6 @@ private[analytics] object MongoAnalyticsErasureStoreSupport {
 
   final case class PublisherFence(deleted: Boolean, leaseToken: Option[String], leaseUntil: Option[Instant])
 
-  private def malformed = AnalyticsError.MalformedMarker
-
   private def isCanonicalUuid(value: String): Boolean =
     scala.util.Try(UUID.fromString(value)).toOption.exists(_.toString == value)
 

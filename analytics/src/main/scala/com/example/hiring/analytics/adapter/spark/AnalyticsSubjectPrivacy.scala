@@ -16,8 +16,8 @@ import org.apache.spark.sql.types.{ArrayType, StringType, StructField}
   * new key needs a new token version and a rebuild.
   */
 object AnalyticsSubjectPrivacy {
-  private val SubjectTokenColumn = "subjectToken"
-  private val SubjectTokensColumn = "subjectTokens"
+  private val SubjectTokenColumn = Columns.SubjectToken
+  private val SubjectTokensColumn = Columns.SubjectTokens
 
   /** Candidate identity takes precedence for application events. Events without a candidate use the authenticated actor
     * identifier, ensuring every valid operational event has one token.

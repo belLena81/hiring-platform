@@ -14,17 +14,11 @@ import org.bson.*
 import org.bson.conversions.*
 import scala.jdk.CollectionConverters.*
 
+/** Ordered hiring migrations 001–009 plus the shared ledger-tracked plan; later cutovers live in their own objects. */
 private[mongo] object MongoHiringMigrations {
   import MongoHiringSetup.{SetupCollection, SetupDatabase}
 
-  private val RevisionMigrationId = "001_user_job_revisions"
-  private val RevisionMigrationBatchSize = 500
-  private val CandidateProfileMigrationId = "002_candidate_search_profile_verification"
-  private val OutboxSubjectReferencesMigrationId = "003_event_outbox_subject_references"
-  private val AnalyticsReportControlMigrationId = "004_analytics_report_control"
-  private val AnalyticsDeletionReceiptMigrationId = "005_analytics_deletion_receipts"
-  private val JobGeoPointsMigrationId = "006_job_geo_points"
-  private val InterviewWorkflowStorageMigrationId = "007_interview_workflow_storage"
+  private val BatchSize = 500
   private val InterviewWorkflowCollections = List(
     MongoCollections.InterviewWorkflows,
     MongoCollections.InterviewWorkflowCommands,
@@ -67,231 +61,134 @@ private[mongo] object MongoHiringMigrations {
     MongoCollections.FakeInterviewNotificationReceipts
   )
 
-  private final case class SetupCollectionLimitExceeded(maximum: Int)
-      extends RuntimeException(s"setup read exceeded its maximum of $maximum elements")
-
-  private def collectWithin[A](values: fs2.Stream[IO, A], maximum: Int): IO[List[A]] =
+  private def collectWithin[A](run: MigrationRun, values: fs2.Stream[IO, A], maximum: Int): IO[List[A]] =
     values.take(maximum.toLong + 1L).compile.toList.flatMap { found =>
-      if (found.size > maximum) IO.raiseError(SetupCollectionLimitExceeded(maximum))
+      if (found.size > maximum) run.fail(s"setup read exceeded its maximum of $maximum elements")
       else IO.pure(found)
     }
 
   private def countDocuments(collection: SetupCollection, filter: Bson): IO[Long] =
     collection.count(filter, new CountOptions())
 
-  private def index(collection: SetupCollection, keys: Bson, options: IndexOptions): IO[Unit] =
-    collection.createIndex(keys, options).void
+  private def boundedBatch(collection: SetupCollection, filter: Bson) =
+    collection.find(filter).sort(Indexes.ascending(MongoFields.Id)).limit(BatchSize).boundedStream(32)
 
+  /** The ledger plan in application order. Completed 013/015 proofs retire the 003/010 and 011 scans they cover. */
   def initialize(
       database: SetupDatabase,
       resetOnStart: Boolean,
       diagnostics: Diagnostics,
       topics: InterviewTopicPair = InterviewTopicPair.Default
   ): IO[Unit] =
-    Option.when(resetOnStart)(resetOwnedCollections(database)).getOrElse(IO.unit) *>
+    IO.whenA(resetOnStart)(resetOwnedCollections(database)) *>
       (
         MongoWorkflowIntegrityMigrations.trusted(database),
         MongoInterviewCleanupIntegrityMigrations.trusted(database, topics)
-      ).tupled.flatMap { (trusted, cleanupTrusted) =>
-        migrateAggregateVersions(database) *> verifyCandidateSearchProfiles(database) *>
-          (if (trusted) IO.unit else migrateOutboxSubjectReferences(database, diagnostics)) *>
-          migrateAnalyticsReportControl(database) *> migrateAnalyticsDeletionReceipts(database) *>
-          migrateInterviewWorkflowStorage(database) *> migrateInterviewSubjectCleanup(database) *>
-          migrateInterviewInboxIdentity(database) *>
-          (if (trusted) IO.unit else MongoInterviewWorkflowMigrations.initialize(database)) *>
-          (if (cleanupTrusted) IO.unit else MongoInterviewCleanupMigrations.initialize(database)) *>
-          MongoProducerRegistrationMigrations.initialize(database) *>
-          MongoWorkflowIntegrityMigrations.initialize(database) *>
-          MongoDeletedAccountEmbeddingMigrations.initialize(database) *>
-          MongoInterviewCleanupIntegrityMigrations.initialize(database, topics) *> createAccountRegistry(database)
+      ).tupled.flatMap { (workflowTrusted, cleanupTrusted) =>
+        def run(step: MongoMigrationStep): IO[Unit] = MongoMigrationRunner.run(database, step)
+        List(
+          run(userJobRevisions),
+          run(candidateSearchProfiles),
+          IO.unlessA(workflowTrusted)(run(outboxSubjectReferences(diagnostics))),
+          run(analyticsReportControl),
+          run(analyticsDeletionReceipts),
+          run(interviewWorkflowStorage),
+          run(interviewSubjectCleanup),
+          run(interviewInboxIdentity),
+          // TODO(RF-06): 010 keeps its own ledger handling until the interview workflow session releases the file.
+          IO.unlessA(workflowTrusted)(MongoInterviewWorkflowMigrations.initialize(database)),
+          IO.unlessA(cleanupTrusted)(run(MongoInterviewCleanupMigrations.step)),
+          run(MongoProducerRegistrationMigrations.step),
+          run(MongoWorkflowIntegrityMigrations.step),
+          run(MongoDeletedAccountEmbeddingMigrations.step),
+          run(MongoInterviewCleanupIntegrityMigrations.step(topics)),
+          createAccountRegistry(database)
+        ).sequence_
       }
 
   /** Retire only the known unfiltered inbox index; quarantine/hiring receipts must not share a null identity. */
-  private def migrateInterviewInboxIdentity(database: SetupDatabase): IO[Unit] = {
-    val collection = database.getCollection(MongoCollections.InterviewWorkflowInbox)
-    val indexName = MongoHiringSetup.InterviewWorkflowInboxIdentityIndex
-    val ledger = database.getCollection(MongoCollections.HiringMigrationLedger)
-    collection.listIndexes[Document].flatMap { indexes =>
-      indexes.find(_.getString("name") == indexName) match {
-        case Some(index) if !index.containsKey("partialFilterExpression") =>
-          val keys = index.get("key", classOf[Document])
-          val expected = new Document("workflowId", Int.box(1)).append("messageId", Int.box(1))
-          if (keys != expected || !index.getBoolean("unique", false))
-            IO.raiseError(new IllegalStateException("Interview inbox identity index has an unexpected definition"))
-          else
-            database
-              .runCommand(
-                new Document("dropIndexes", MongoCollections.InterviewWorkflowInbox)
-                  .append("index", indexName)
+  private val interviewInboxIdentity = MongoMigrationStep(
+    MigrationIds.InterviewInboxIdentity,
+    run => {
+      val collection = run.database.getCollection(MongoCollections.InterviewWorkflowInbox)
+      val indexName = MongoIndexNames.InterviewWorkflowInboxIdentity
+      collection.listIndexes[Document].flatMap { indexes =>
+        indexes.find(_.getString("name") == indexName) match {
+          case Some(index) if !index.containsKey("partialFilterExpression") =>
+            val keys = index.get("key", classOf[Document])
+            val expected = new Document(MongoFields.WorkflowId, Int.box(1)).append(MongoFields.MessageId, Int.box(1))
+            if (keys != expected || !index.getBoolean("unique", false))
+              IO.raiseError(
+                MigrationError.IndexMismatch(
+                  MongoCollections.InterviewWorkflowInbox,
+                  indexName,
+                  "unexpected legacy definition"
+                )
               )
-              .handleErrorWith {
-                case error: MongoCommandException if error.getErrorCode == 27 => IO.unit
-                case error                                                    => IO.raiseError(error)
-              }
-        case _ => IO.unit
+            else
+              run.database
+                .runCommand(
+                  new Document("dropIndexes", MongoCollections.InterviewWorkflowInbox)
+                    .append("index", indexName)
+                )
+                .void
+                .recoverWith { case error: MongoCommandException if error.getErrorCode == 27 => IO.unit }
+          case _ => IO.unit
+        }
       }
-    } *> ledger
-      .updateOne(
-        Filters.eq(MongoFields.Id, "009_interview_inbox_identity"),
-        Updates.combine(
-          Updates.setOnInsert(MongoFields.Id, "009_interview_inbox_identity"),
-          Updates.setOnInsert(MongoFields.Version, 1L),
-          Updates.set(MongoFields.State, "Complete")
-        ),
-        new UpdateOptions().upsert(true)
-      )
-      .void
-  }
+    }
+  )
 
-  private def migrateInterviewSubjectCleanup(database: SetupDatabase): IO[Unit] = {
-    val ledger = database.getCollection(MongoCollections.HiringMigrationLedger)
-    val migration = Filters.eq(MongoFields.Id, "008_interview_subject_cleanup")
-    database.createCollection(MongoCollections.InterviewSubjectCleanup).handleErrorWith {
-      case error: MongoCommandException if error.getErrorCode == 48 => IO.unit
-      case error                                                    => IO.raiseError(error)
-    } *> ledger
-      .updateOne(
-        migration,
-        Updates.combine(
-          Updates.setOnInsert(MongoFields.Id, "008_interview_subject_cleanup"),
-          Updates.setOnInsert(MongoFields.Version, 1L),
-          Updates.set(MongoFields.State, "Complete")
-        ),
-        new UpdateOptions().upsert(true)
-      )
-      .void
-  }
+  private val interviewSubjectCleanup = MongoMigrationStep(
+    MigrationIds.InterviewSubjectCleanup,
+    run => run.database.ensureCollection(MongoCollections.InterviewSubjectCleanup)
+  )
 
   /** Introduces empty durable-work and local fake-provider stores. There is no legacy payload to backfill; each
-    * collection creation is idempotent and the ledger is marked complete only after all namespaces exist. Index setup
-    * runs immediately after this migration and verifies each required definition on every startup.
+    * collection creation is idempotent. Index setup runs after the ledger plan and verifies each required definition on
+    * every startup.
     */
-  private def migrateInterviewWorkflowStorage(database: SetupDatabase): IO[Unit] = {
-    val ledger = database.getCollection(MongoCollections.HiringMigrationLedger)
-    val migration = Filters.eq(MongoFields.Id, InterviewWorkflowStorageMigrationId)
-    val options = new UpdateOptions().upsert(true)
-
-    def ensureCollection(name: String): IO[Unit] =
-      database.createCollection(name).handleErrorWith {
-        case error: MongoCommandException if error.getErrorCode == 48 => IO.unit
-        case error                                                    => IO.raiseError(error)
-      }
-
-    def verifyLedger: IO[Unit] =
-      ledger.find(migration).first.flatMap {
-        case Some(document)
-            if document.getLong(MongoFields.Version).longValue() == 1L &&
-              document.getString(MongoFields.State) == "Complete" =>
-          IO.unit
-        case _ => IO.raiseError(new IllegalStateException("Interview workflow storage migration did not complete"))
-      }
-
-    def markRunning: IO[Unit] =
-      ledger
-        .updateOne(
-          migration,
-          Updates.combine(
-            Updates.setOnInsert(MongoFields.Id, InterviewWorkflowStorageMigrationId),
-            Updates.set(MongoFields.Version, 1L),
-            Updates.set(MongoFields.State, "Running")
-          ),
-          options
-        )
-        .void
-        .handleErrorWith {
-          case error: MongoWriteException if error.getError.getCode == 11000 => IO.unit
-          case error                                                         => IO.raiseError(error)
-        }
-
-    def run: IO[Unit] =
-      markRunning *> InterviewWorkflowCollections.traverse_(ensureCollection) *>
-        ledger
-          .updateOne(
-            migration,
-            Updates.combine(Updates.set(MongoFields.Version, 1L), Updates.set(MongoFields.State, "Complete")),
-            options
-          )
-          .void *> verifyLedger
-
-    ledger.find(migration).first.flatMap {
-      case Some(document) if document.containsKey(MongoFields.Version) && document.getLong(MongoFields.Version) != 1L =>
-        IO.raiseError(new IllegalStateException("Unsupported interview workflow storage migration version"))
-      case _ => run
-    }
-  }
+  private val interviewWorkflowStorage = MongoMigrationStep(
+    MigrationIds.InterviewWorkflowStorage,
+    run => InterviewWorkflowCollections.traverse_(run.database.ensureCollection)
+  )
 
   /** Verifies existing optional GeoJSON points after the strict collection validator is installed. Missing points are
     * valid and are deliberately left untouched. The scan is bounded and resumes after the last verified job ID; new
     * writes are protected by the validator before this runs.
     */
-  private[mongo] def verifyJobGeoPoints(database: SetupDatabase): IO[Unit] = {
-    val ledger = database.getCollection(MongoCollections.HiringMigrationLedger)
-    val jobs = database.getCollection(MongoCollections.Jobs)
-    val migration = Filters.eq(MongoFields.Id, JobGeoPointsMigrationId)
-    val pointExists = Filters.exists("location.point", true)
+  private[mongo] def verifyJobGeoPoints(database: SetupDatabase): IO[Unit] =
+    MongoMigrationRunner.run(database, jobGeoPoints)
 
-    def markComplete: IO[Unit] =
-      ledger
-        .updateOne(
-          migration,
-          Updates.combine(
-            Updates.set(MongoFields.Version, 1L),
-            Updates.set(MongoFields.State, "Complete"),
-            Updates.unset(MongoFields.LastId)
-          )
-        )
-        .void
-
-    def scan(checkpoint: Option[String]): IO[Unit] = {
-      val afterCheckpoint = checkpoint.fold(pointExists)(id => Filters.and(pointExists, Filters.gt(MongoFields.Id, id)))
-      collectWithin(
-        jobs
-          .find(afterCheckpoint)
-          .sort(Indexes.ascending(MongoFields.Id))
-          .limit(RevisionMigrationBatchSize)
-          .boundedStream(32),
-        RevisionMigrationBatchSize
-      ).flatMap { batch =>
-        batch.traverse_ { job =>
-          val id = Option(job.getString(MongoFields.Id))
-          val point = Option(job.get(MongoFields.Location, classOf[Document]))
-            .flatMap(location => Option(location.get("point", classOf[Document])))
-          (id, point) match {
-            case (Some(_), Some(value)) if isValidJobGeoPoint(value) => IO.unit
-            case (Some(jobId), _)                                    =>
-              IO.raiseError(new IllegalStateException(s"Job geo-point migration found an invalid point at job $jobId"))
-            case _ => IO.raiseError(new IllegalStateException("Job geo-point migration found an invalid job key"))
-          }
-        } *> batch.lastOption.traverse_ { last =>
-          Option(last.getString(MongoFields.Id)).fold(
-            IO.raiseError[Unit](new IllegalStateException("Invalid job geo-point migration key"))
-          )(id => ledger.updateOne(migration, Updates.set(MongoFields.LastId, id)).void)
-        } *> (if (batch.size == RevisionMigrationBatchSize)
-                scan(batch.lastOption.map(_.getString(MongoFields.Id)))
-              else markComplete)
+  private val jobGeoPoints = MongoMigrationStep(
+    MigrationIds.JobGeoPoints,
+    run => {
+      val jobs = run.database.getCollection(MongoCollections.Jobs)
+      val pointExists = Filters.exists(MongoFields.LocationPoint, true)
+      def scan(checkpoint: Option[String]): IO[Unit] = {
+        val afterCheckpoint =
+          checkpoint.fold(pointExists)(id => Filters.and(pointExists, Filters.gt(MongoFields.Id, id)))
+        collectWithin(run, boundedBatch(jobs, afterCheckpoint), BatchSize).flatMap { batch =>
+          batch.traverse_ { job =>
+            val id = Option(job.getString(MongoFields.Id))
+            val point = Option(job.get(MongoFields.Location, classOf[Document]))
+              .flatMap(location => Option(location.get(MongoFields.Point, classOf[Document])))
+            (id, point) match {
+              case (Some(_), Some(value)) if isValidJobGeoPoint(value) => IO.unit
+              case (Some(jobId), _) => run.fail(s"found an invalid point at job $jobId")
+              case _                => run.fail("found an invalid job key")
+            }
+          } *> batch.lastOption.traverse_ { last =>
+            Option(last.getString(MongoFields.Id)).fold(run.fail[Unit]("invalid job key"))(run.advance)
+          } *> (if (batch.size == BatchSize) scan(batch.lastOption.map(_.getString(MongoFields.Id))) else IO.unit)
+        }
       }
+      run.textCheckpoint.flatMap(scan)
     }
-
-    ledger.find(migration).first.flatMap {
-      case Some(document) if document.getString(MongoFields.State) == "Complete" => IO.unit
-      case existing                                                              =>
-        val checkpoint = existing.flatMap(value => Option(value.getString(MongoFields.LastId)))
-        ledger
-          .updateOne(
-            migration,
-            Updates.combine(
-              Updates.setOnInsert(MongoFields.Id, JobGeoPointsMigrationId),
-              Updates.set(MongoFields.Version, 1L),
-              Updates.set(MongoFields.State, "Running")
-            ),
-            new UpdateOptions().upsert(true)
-          )
-          .void *> scan(checkpoint)
-    }
-  }
+  )
 
   private[mongo] def isValidJobGeoPoint(point: Document): Boolean = {
-    val coordinates = Option(point.get("coordinates")) collect { case values: java.util.List[?] =>
+    val coordinates = Option(point.get(MongoFields.Coordinates)) collect { case values: java.util.List[?] =>
       values.asScala.toList
     }
     val longitudeLatitude = coordinates.filter(_.size == 2).flatMap {
@@ -301,140 +198,63 @@ private[mongo] object MongoHiringMigrations {
         Option.when(lon.isFinite && lat.isFinite && lon >= -180d && lon <= 180d && lat >= -90d && lat <= 90d)(())
       case _ => None
     }
-    point.get("type") == "Point" && longitudeLatitude.isDefined
+    point.get(MongoFields.Type) == "Point" && longitudeLatitude.isDefined
   }
 
-  private def migrateAggregateVersions(database: SetupDatabase): IO[Unit] = {
-    val ledger = database.getCollection(MongoCollections.HiringMigrationLedger)
-    val migration = Filters.eq(MongoFields.Id, RevisionMigrationId)
-    val state = ledger.find(migration).first.map(_.map(_.getString(MongoFields.State)))
-    val started = Updates.combine(
-      Updates.setOnInsert(MongoFields.Id, RevisionMigrationId),
-      Updates.set(MongoFields.Version, 1L),
-      Updates.set(MongoFields.State, "Running")
-    )
-    state.flatMap {
-      case Some("Complete") => IO.unit
-      case _                =>
-        ledger.updateOne(migration, started, new UpdateOptions().upsert(true)).void *> List(
-          database.getCollection(MongoCollections.Users),
-          database.getCollection(MongoCollections.Jobs)
-        ).traverse_(backfillVersions) *>
-          verifyAggregateVersions(database) *>
-          ledger
-            .updateOne(
-              migration,
-              Updates.combine(Updates.set(MongoFields.Version, 1L), Updates.set(MongoFields.State, "Complete"))
-            )
-            .void
-    }
-  }
+  private val userJobRevisions = MongoMigrationStep(
+    MigrationIds.UserJobRevisions,
+    run =>
+      List(
+        run.database.getCollection(MongoCollections.Users),
+        run.database.getCollection(MongoCollections.Jobs)
+      ).traverse_(backfillVersions(run, _)) *> verifyAggregateVersions(run)
+  )
 
-  private def verifyCandidateSearchProfiles(database: SetupDatabase): IO[Unit] = {
-    val ledger = database.getCollection(MongoCollections.HiringMigrationLedger)
-    val users = database.getCollection(MongoCollections.Users)
-    val migration = Filters.eq(MongoFields.Id, CandidateProfileMigrationId)
-    ledger.find(migration).first.flatMap {
-      case Some(document) if document.getString(MongoFields.State) == "Complete" => IO.unit
-      case existing                                                              =>
-        val checkpoint = existing.flatMap(value => Option(value.getString(MongoFields.LastId)))
-        ledger
-          .updateOne(
-            migration,
-            Updates.combine(
-              Updates.setOnInsert(MongoFields.Id, CandidateProfileMigrationId),
-              Updates.set(MongoFields.Version, 1L),
-              Updates.set(MongoFields.State, "Running")
-            ),
-            new UpdateOptions().upsert(true)
-          )
-          .void *> verifyCandidateProfileBatches(users, ledger, migration, checkpoint)
-    }
-  }
+  private val candidateSearchProfiles = MongoMigrationStep(
+    MigrationIds.CandidateSearchProfileVerification,
+    run => run.textCheckpoint.flatMap(verifyCandidateProfileBatches(run, _))
+  )
 
-  /** Backfills the internal subject index needed to fence/purge events without changing the Kafka envelope. */
-  private def migrateOutboxSubjectReferences(database: SetupDatabase, diagnostics: Diagnostics): IO[Unit] = {
-    val ledger = database.getCollection(MongoCollections.HiringMigrationLedger)
-    val outbox = database.getCollection(MongoCollections.EventOutbox)
-    val migration = Filters.eq(MongoFields.Id, OutboxSubjectReferencesMigrationId)
+  /** Backfills the internal subject index needed to fence/purge events without changing the Kafka envelope. A completed
+    * proof is reopened when unverified events reappear.
+    */
+  private def outboxSubjectReferences(diagnostics: Diagnostics): MongoMigrationStep = {
     val unverifiedSubjects = Filters.ne(MongoFields.SubjectRefsVersion, 1)
-
-    def verifyAndComplete: IO[Unit] = countDocuments(outbox, unverifiedSubjects).flatMap {
-      case count if count.longValue() == 0L =>
-        ledger
-          .updateOne(
-            migration,
-            Updates.combine(
-              Updates.set(MongoFields.Version, 1L),
-              Updates.set(MongoFields.State, "Complete"),
-              Updates.unset(MongoFields.LastId)
-            )
-          )
-          .void
-      case _ => backfillNextBatch
-    }
-
-    def backfillNextBatch: IO[Unit] =
-      collectWithin(
-        outbox
-          .find(unverifiedSubjects)
-          .sort(Indexes.ascending(MongoFields.Id))
-          .limit(RevisionMigrationBatchSize)
-          .boundedStream(32),
-        RevisionMigrationBatchSize
-      )
-        .flatMap { batch =>
-          batch.traverse_(backfillOutboxSubjectReferences(database, outbox, ledger, migration, _, diagnostics)) *>
-            (if (batch.size == RevisionMigrationBatchSize) backfillNextBatch else verifyAndComplete)
+    def outbox(database: SetupDatabase) = database.getCollection(MongoCollections.EventOutbox)
+    def backfill(run: MigrationRun): IO[Unit] =
+      collectWithin(run, boundedBatch(outbox(run.database), unverifiedSubjects), BatchSize).flatMap { batch =>
+        batch.traverse_(backfillOutboxSubjectReferences(run, _, diagnostics)) *>
+          (if (batch.size == BatchSize) backfill(run)
+           else
+             countDocuments(outbox(run.database), unverifiedSubjects).flatMap {
+               case count if count.longValue() == 0L => IO.unit
+               case _                                => backfill(run)
+             })
+      }
+    MongoMigrationStep(
+      MigrationIds.EventOutboxSubjectReferences,
+      backfill,
+      database =>
+        countDocuments(outbox(database), unverifiedSubjects).map {
+          case count if count.longValue() == 0L => CompletedProof.Trusted
+          case _                                => CompletedProof.Reopen
         }
-
-    ledger.find(migration).first.flatMap {
-      case Some(document) if document.getString(MongoFields.State) == "Complete" =>
-        countDocuments(outbox, unverifiedSubjects).flatMap {
-          case count if count.longValue() == 0L => IO.unit
-          case _                                =>
-            ledger
-              .updateOne(
-                migration,
-                Updates.combine(Updates.set(MongoFields.State, "Running"), Updates.set(MongoFields.Version, 1L))
-              )
-              .void *> backfillNextBatch
-        }
-      case _ =>
-        ledger
-          .updateOne(
-            migration,
-            Updates.combine(
-              Updates.setOnInsert(MongoFields.Id, OutboxSubjectReferencesMigrationId),
-              Updates.set(MongoFields.Version, 1L),
-              Updates.set(MongoFields.State, "Running")
-            ),
-            new UpdateOptions().upsert(true)
-          )
-          .void *> backfillNextBatch
-    }
+    )
   }
 
   private def backfillOutboxSubjectReferences(
-      database: SetupDatabase,
-      outbox: SetupCollection,
-      ledger: SetupCollection,
-      migration: Bson,
+      run: MigrationRun,
       document: Document,
       diagnostics: Diagnostics
   ): IO[Unit] = {
+    val outbox = run.database.getCollection(MongoCollections.EventOutbox)
     val id = Option(document.getString(MongoFields.Id))
     val event = MongoHiringCodecs.readOperationalEvent(document).toEither.leftMap(_ => "undecodable event")
 
     (id, event) match {
       case (Some(eventId), Right(value)) =>
-        outboxCandidateIds(database, value, diagnostics).flatMap {
-          case Left(reason) =>
-            IO.raiseError(
-              new IllegalStateException(
-                s"Outbox subject-reference migration found $reason at event $eventId"
-              )
-            )
+        outboxCandidateIds(run.database, value, diagnostics).flatMap {
+          case Left(reason)      => run.fail(s"found $reason at event $eventId")
           case Right(candidates) =>
             val subjectIds = (value.actorId.value.toString :: candidates).distinct.sorted
             val values = subjectIds.asJava
@@ -447,87 +267,79 @@ private[mongo] object MongoHiringMigrations {
                 )
               )
               .flatMap {
-                case result if result.getMatchedCount == 1L =>
-                  ledger.updateOne(migration, Updates.set(MongoFields.LastId, eventId)).void
-                case _ =>
-                  IO.raiseError(
-                    new IllegalStateException(s"Outbox subject-reference migration could not update event $eventId")
-                  )
+                case result if result.getMatchedCount == 1L => run.advance(eventId)
+                case _                                      => run.fail(s"could not update event $eventId")
               }
         }
-      case (Some(eventId), Left(reason)) =>
-        IO.raiseError(new IllegalStateException(s"Outbox subject-reference migration found $reason at event $eventId"))
-      case _ =>
-        IO.raiseError(new IllegalStateException("Outbox subject-reference migration found an invalid event key"))
+      case (Some(eventId), Left(reason)) => run.fail(s"found $reason at event $eventId")
+      case _                             => run.fail("found an invalid event key")
     }
   }
 
   /** Seeds a durable report generation and visibility record independently of the expiring snapshot payload. */
-  private def migrateAnalyticsReportControl(database: SetupDatabase): IO[Unit] = {
-    val ledger = database.getCollection(MongoCollections.HiringMigrationLedger)
-    val snapshots = database.getCollection(MongoCollections.AnalyticsReportSnapshots)
-    val controls = database.getCollection(MongoCollections.AnalyticsReportControl)
-    val migration = Filters.eq(MongoFields.Id, AnalyticsReportControlMigrationId)
-
-    def verify: IO[Unit] =
-      controls.find(Filters.eq(MongoFields.Id, "analytics-report")).first.flatMap {
-        case Some(document)
-            if Option(document.get(MongoFields.Generation, classOf[java.lang.Long])).isDefined &&
-              Option(document.get(MongoFields.NextRevision, classOf[java.lang.Long])).isDefined &&
-              Option(document.get(MongoFields.LastPublishedRevision, classOf[java.lang.Long])).isDefined &&
-              Set("Unpublished", "Hidden", "Published").contains(document.getString(MongoFields.State)) =>
-          IO.unit
-        case _ => IO.raiseError(new IllegalStateException("Analytics report control migration verification failed"))
-      }
-
-    ledger.find(migration).first.flatMap {
-      case Some(document) if document.getString(MongoFields.State) == "Complete" => verify
-      case _                                                                     =>
-        ledger
-          .updateOne(
-            migration,
-            Updates.combine(
-              Updates.setOnInsert(MongoFields.Id, AnalyticsReportControlMigrationId),
-              Updates.set(MongoFields.Version, 1L),
-              Updates.set(MongoFields.State, "Running")
-            ),
-            new UpdateOptions().upsert(true)
-          )
-          .void *> snapshots.find(Filters.eq(MongoFields.Id, "current")).first.flatMap { legacy =>
-          val visible = legacy.exists(snapshot =>
-            snapshot.getString(MongoFields.State) == "Published" &&
-              Option(snapshot.getDate(MongoFields.ExpiresAt)).exists(_.after(new java.util.Date()))
-          )
-          val addLegacyMetadata =
-            snapshots
-              .updateOne(
-                Filters.and(Filters.eq(MongoFields.Id, "current"), Filters.exists(MongoFields.Generation, false)),
-                Updates.combine(
-                  Updates.set(MongoFields.Generation, 0L),
-                  Updates.set(MongoFields.Revision, 0L),
-                  Updates.set(MongoFields.RunId, "legacy")
-                )
-              )
-              .void
-          val initialControl = Updates.combine(
-            Updates.setOnInsert(MongoFields.Id, "analytics-report"),
-            Updates.setOnInsert(MongoFields.Generation, 0L),
-            Updates.setOnInsert(MongoFields.State, if (visible) "Published" else "Unpublished"),
-            Updates.setOnInsert(MongoFields.NextRevision, 0L),
-            Updates.setOnInsert(MongoFields.LastPublishedRevision, 0L),
-            Updates.setOnInsert(MongoFields.LastRunId, if (visible) "legacy" else "")
-          )
-          addLegacyMetadata *> controls
-            .updateOne(Filters.eq(MongoFields.Id, "analytics-report"), initialControl, new UpdateOptions().upsert(true))
-            .void *> verify *> ledger
+  private val analyticsReportControl: MongoMigrationStep = {
+    def verify(run: MigrationRun): IO[Unit] =
+      run.database
+        .getCollection(MongoCollections.AnalyticsReportControl)
+        .find(Filters.eq(MongoFields.Id, "analytics-report"))
+        .first
+        .flatMap {
+          case Some(document)
+              if Option(document.get(MongoFields.Generation, classOf[java.lang.Long])).isDefined &&
+                Option(document.get(MongoFields.NextRevision, classOf[java.lang.Long])).isDefined &&
+                Option(document.get(MongoFields.LastPublishedRevision, classOf[java.lang.Long])).isDefined &&
+                Set("Unpublished", "Hidden", "Published").contains(document.getString(MongoFields.State)) =>
+            IO.unit
+          case _ => run.fail("verification failed")
+        }
+    def seed(run: MigrationRun): IO[Unit] = {
+      val snapshots = run.database.getCollection(MongoCollections.AnalyticsReportSnapshots)
+      val controls = run.database.getCollection(MongoCollections.AnalyticsReportControl)
+      snapshots.find(Filters.eq(MongoFields.Id, "current")).first.flatMap { legacy =>
+        val visible = legacy.exists(snapshot =>
+          snapshot.getString(MongoFields.State) == "Published" &&
+            Option(snapshot.getDate(MongoFields.ExpiresAt)).exists(_.after(new java.util.Date()))
+        )
+        val addLegacyMetadata =
+          snapshots
             .updateOne(
-              migration,
-              Updates.combine(Updates.set(MongoFields.Version, 1L), Updates.set(MongoFields.State, "Complete"))
+              Filters.and(Filters.eq(MongoFields.Id, "current"), Filters.exists(MongoFields.Generation, false)),
+              Updates.combine(
+                Updates.set(MongoFields.Generation, 0L),
+                Updates.set(MongoFields.Revision, 0L),
+                Updates.set(MongoFields.RunId, "legacy")
+              )
             )
             .void
-        }
+        val initialControl = Updates.combine(
+          Updates.setOnInsert(MongoFields.Id, "analytics-report"),
+          Updates.setOnInsert(MongoFields.Generation, 0L),
+          Updates.setOnInsert(MongoFields.State, if (visible) "Published" else "Unpublished"),
+          Updates.setOnInsert(MongoFields.NextRevision, 0L),
+          Updates.setOnInsert(MongoFields.LastPublishedRevision, 0L),
+          Updates.setOnInsert(MongoFields.LastRunId, if (visible) "legacy" else "")
+        )
+        addLegacyMetadata *> controls
+          .updateOne(Filters.eq(MongoFields.Id, "analytics-report"), initialControl, new UpdateOptions().upsert(true))
+          .void *> verify(run)
+      }
     }
+    MongoMigrationStep(
+      MigrationIds.AnalyticsReportControl,
+      seed,
+      database => verify(MigrationRun(database, MigrationIds.AnalyticsReportControl, None)).as(CompletedProof.Trusted)
+    )
   }
+
+  /** The receipt uniqueness indexes are declared once in `MongoHiringIndexSetup`; this step only introduces them. */
+  private val analyticsDeletionReceipts = MongoMigrationStep(
+    MigrationIds.AnalyticsDeletionReceipts,
+    // One spec at a time: `ensure` groups by collection (unordered), and the applied command order is kept as at HEAD.
+    run =>
+      MongoHiringIndexSetup.analyticsErasureReceiptIndexes.traverse_(spec =>
+        MongoHiringIndexSetup.ensure(run.database.underlying, List(spec))
+      )
+  )
 
   private def outboxCandidateIds(
       database: SetupDatabase,
@@ -654,47 +466,25 @@ private[mongo] object MongoHiringMigrations {
     }
   }
 
-  private def verifyCandidateProfileBatches(
-      users: SetupCollection,
-      ledger: SetupCollection,
-      migration: Bson,
-      checkpoint: Option[String]
-  ): IO[Unit] = {
+  private def verifyCandidateProfileBatches(run: MigrationRun, checkpoint: Option[String]): IO[Unit] = {
+    val users = run.database.getCollection(MongoCollections.Users)
     val cursor = checkpoint.fold(Filters.empty())(id => Filters.gt(MongoFields.Id, id))
-    collectWithin(
-      users.find(cursor).sort(Indexes.ascending(MongoFields.Id)).limit(RevisionMigrationBatchSize).boundedStream(32),
-      RevisionMigrationBatchSize
-    )
-      .flatMap { batch =>
-        batch.traverse_(user => validateCandidateSearchProfile(user) *> ensureCanonicalCandidateSkills(users, user)) *>
-          batch.lastOption.traverse_ { last =>
-            Option(last.getString(MongoFields.Id)).fold(
-              IO.raiseError[Unit](new IllegalStateException("Invalid user migration key"))
-            )(id => ledger.updateOne(migration, Updates.set(MongoFields.LastId, id)).void)
-          } *> (if (batch.size == RevisionMigrationBatchSize)
-                  verifyCandidateProfileBatches(
-                    users,
-                    ledger,
-                    migration,
-                    batch.lastOption.map(_.getString(MongoFields.Id))
-                  )
-                else
-                  ledger
-                    .updateOne(
-                      migration,
-                      Updates.combine(Updates.set(MongoFields.State, "Complete"), Updates.unset(MongoFields.LastId))
-                    )
-                    .void)
-      }
+    collectWithin(run, boundedBatch(users, cursor), BatchSize).flatMap { batch =>
+      batch.traverse_(user => validateCandidateSearchProfile(run, user) *> ensureCanonicalCandidateSkills(run, user)) *>
+        batch.lastOption.traverse_ { last =>
+          Option(last.getString(MongoFields.Id)).fold(run.fail[Unit]("invalid user key"))(run.advance)
+        } *> (if (batch.size == BatchSize)
+                verifyCandidateProfileBatches(run, batch.lastOption.map(_.getString(MongoFields.Id)))
+              else IO.unit)
+    }
   }
 
-  private def validateCandidateSearchProfile(user: Document): IO[Unit] = {
+  private def validateCandidateSearchProfile(run: MigrationRun, user: Document): IO[Unit] = {
     val profile = user.get(MongoFields.Profile) match {
       case value: Document => Some(value)
       case _               => None
     }
-    def invalid(field: String): IO[Unit] =
-      IO.raiseError(new IllegalStateException(s"Candidate profile migration found malformed $field"))
+    def invalid(field: String): IO[Unit] = run.fail(s"found malformed $field")
     def optionalFieldValid(document: Document, field: String)(valid: Any => Boolean): Boolean =
       !document.containsKey(field) || valid(document.get(field))
     def canonical(value: String): String = value.trim.toLowerCase(java.util.Locale.ROOT)
@@ -732,7 +522,7 @@ private[mongo] object MongoHiringMigrations {
     else IO.unit
   }
 
-  private def ensureCanonicalCandidateSkills(users: SetupCollection, user: Document): IO[Unit] = {
+  private def ensureCanonicalCandidateSkills(run: MigrationRun, user: Document): IO[Unit] = {
     val isCandidate = user.getString(MongoFields.Role) == "Candidate"
     val profile = user.get(MongoFields.Profile) match {
       case value: Document => Some(value)
@@ -743,15 +533,16 @@ private[mongo] object MongoHiringMigrations {
       case _                               => Nil
     }
     if (!isCandidate) IO.unit
-    else updateCanonicalSkills(users, user, skills, retries = 3)
+    else updateCanonicalSkills(run, user, skills, retries = 3)
   }
 
   private def updateCanonicalSkills(
-      users: SetupCollection,
+      run: MigrationRun,
       user: Document,
       skills: List[String],
       retries: Int
   ): IO[Unit] = {
+    val users = run.database.getCollection(MongoCollections.Users)
     val canonical = skills.map(_.trim.toLowerCase(java.util.Locale.ROOT)).sorted.asJava
     val id = user.getString(MongoFields.Id)
     val version = user.getLong(MongoFields.Version)
@@ -777,31 +568,22 @@ private[mongo] object MongoHiringMigrations {
             }
             val sidecar = latestProfile.flatMap(value => Option(value.get(MongoFields.SkillsCanonical)))
             if (sidecar.contains(canonical)) IO.unit
-            else updateCanonicalSkills(users, latest, latestSkills, retries - 1)
+            else updateCanonicalSkills(run, latest, latestSkills, retries - 1)
           case None => IO.unit
         }
-      case _ => IO.raiseError(new IllegalStateException("Candidate skill migration raced with profile updates"))
+      case _ => run.fail("candidate skill migration raced with profile updates")
     }
   }
 
-  private def backfillVersions(collection: SetupCollection): IO[Unit] = {
+  private def backfillVersions(run: MigrationRun, collection: SetupCollection): IO[Unit] = {
     val missingVersion = Filters.exists(MongoFields.Version, false)
     def nextBatch: IO[Unit] =
-      collectWithin(
-        collection
-          .find(missingVersion)
-          .sort(Indexes.ascending(MongoFields.Id))
-          .limit(RevisionMigrationBatchSize)
-          .boundedStream(32),
-        RevisionMigrationBatchSize
-      )
-        .flatMap { documents =>
-          val ids = documents.flatMap(document => Option(document.getString(MongoFields.Id)))
-          if (documents.isEmpty) IO.unit
-          else if (ids.size != documents.size)
-            IO.raiseError(new IllegalStateException("Mongo revision backfill found a document without a string _id"))
-          else backfillVersionBatch(collection, ids) *> nextBatch
-        }
+      collectWithin(run, boundedBatch(collection, missingVersion), BatchSize).flatMap { documents =>
+        val ids = documents.flatMap(document => Option(document.getString(MongoFields.Id)))
+        if (documents.isEmpty) IO.unit
+        else if (ids.size != documents.size) run.fail("revision backfill found a document without a string _id")
+        else backfillVersionBatch(collection, ids) *> nextBatch
+      }
     nextBatch
   }
 
@@ -816,21 +598,26 @@ private[mongo] object MongoHiringMigrations {
         // predicate keeps a concurrent aggregate write from being reset to revision zero.
         case result if result.getMatchedCount <= ids.size.toLong => IO.unit
         case _                                                   =>
-          IO.raiseError(new IllegalStateException("Mongo revision backfill updated an unexpected row count"))
+          IO.raiseError(
+            MigrationError
+              .StepFailed(MigrationIds.UserJobRevisions, "revision backfill updated an unexpected row count")
+          )
       }
 
-  private def verifyAggregateVersions(database: SetupDatabase): IO[Unit] =
-    List(database.getCollection(MongoCollections.Users), database.getCollection(MongoCollections.Jobs)).traverse_ {
-      collection =>
-        val invalidVersion = Filters.or(
-          Filters.exists(MongoFields.Version, false),
-          Filters.lt(MongoFields.Version, 0L),
-          Filters.not(Filters.`type`(MongoFields.Version, BsonType.INT64))
-        )
-        countDocuments(collection, invalidVersion).flatMap {
-          case count if count.longValue() == 0L => IO.unit
-          case _ => IO.raiseError(new IllegalStateException("Mongo contains an invalid aggregate revision"))
-        }
+  private def verifyAggregateVersions(run: MigrationRun): IO[Unit] =
+    List(
+      run.database.getCollection(MongoCollections.Users),
+      run.database.getCollection(MongoCollections.Jobs)
+    ).traverse_ { collection =>
+      val invalidVersion = Filters.or(
+        Filters.exists(MongoFields.Version, false),
+        Filters.lt(MongoFields.Version, 0L),
+        Filters.not(Filters.`type`(MongoFields.Version, BsonType.INT64))
+      )
+      countDocuments(collection, invalidVersion).flatMap {
+        case count if count.longValue() == 0L => IO.unit
+        case _                                => run.fail("an invalid aggregate revision remains")
+      }
     }
 
   private def resetOwnedCollections(database: SetupDatabase): IO[Unit] =
@@ -848,39 +635,4 @@ private[mongo] object MongoHiringMigrations {
         new UpdateOptions().upsert(true)
       )
       .void
-
-  private def migrateAnalyticsDeletionReceipts(database: SetupDatabase): IO[Unit] = {
-    val ledger = database.getCollection(MongoCollections.HiringMigrationLedger)
-    val migration = Filters.eq(MongoFields.Id, AnalyticsDeletionReceiptMigrationId)
-    ledger.find(migration).first.flatMap {
-      case Some(document) if document.getString(MongoFields.State) == "Complete" => IO.unit
-      case _                                                                     =>
-        val started = Updates.combine(
-          Updates.setOnInsert(MongoFields.Id, AnalyticsDeletionReceiptMigrationId),
-          Updates.set(MongoFields.Version, 1L),
-          Updates.set(MongoFields.State, "Running")
-        )
-        ledger.updateOne(migration, started, new UpdateOptions().upsert(true)).void *>
-          List(
-            index(
-              database.getCollection(MongoCollections.AnalyticsErasureRequests),
-              Indexes.ascending(MongoFields.ReceiptId),
-              new IndexOptions()
-                .name("analytics_erasure_request_receipt_unique")
-                .unique(true)
-                .partialFilterExpression(Filters.exists(MongoFields.ReceiptId, true))
-            ),
-            index(
-              database.getCollection(MongoCollections.AnalyticsErasureCompletions),
-              Indexes.ascending(MongoFields.ReceiptId),
-              new IndexOptions()
-                .name("analytics_erasure_completion_receipt_unique")
-                .unique(true)
-                .partialFilterExpression(Filters.exists(MongoFields.ReceiptId, true))
-            )
-          ).sequence_.void *>
-          ledger.updateOne(migration, Updates.set(MongoFields.State, "Complete")).void
-    }
-  }
-
 }

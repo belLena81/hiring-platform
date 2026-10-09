@@ -1,23 +1,9 @@
 package com.example.hiring.analytics
 import com.example.hiring.analytics.app.AppModule
-import com.example.hiring.analytics.service.keyretirement.*
-import com.example.hiring.analytics.service.batch.*
 import com.example.hiring.analytics.errors.*
-import com.example.hiring.analytics.domain.*
-import com.example.hiring.analytics.config.*
-import com.example.hiring.analytics.adapter.spark.*
-import com.example.hiring.analytics.adapter.mongo.*
-import com.example.hiring.analytics.adapter.kafka.*
-import com.example.hiring.analytics.adapter.local.*
-import com.example.hiring.analytics.service.erasure.*
-
-import com.example.hiring.analytics.adapter.spark.*
-import com.example.hiring.analytics.adapter.mongo.*
 
 import cats.effect.{Deferred, IO, Resource}
-import cats.syntax.all.*
 import cats.effect.unsafe.implicits.global
-import cats.syntax.all.*
 import mongo4cats.client.MongoClient
 import munit.FunSuite
 import org.apache.spark.sql.SparkSession
@@ -123,7 +109,7 @@ class AnalyticsBatchResourceSpec extends FunSuite {
 
   test("process-local test lock serializes same-process access") {
     val root = java.nio.file.Files.createTempDirectory("analytics-lock").toUri.toString
-    val result = AnalyticsLakehouseLock
+    val result = AnalyticsTestLakehouseLocks
       .processLocal[IO]
       .use { lock =>
         for {
@@ -147,7 +133,7 @@ class AnalyticsBatchResourceSpec extends FunSuite {
 
   test("waiting for the process-local test lock is cancellable") {
     val root = java.nio.file.Files.createTempDirectory("analytics-lock-cancel").toUri.toString
-    val cancelledWaiterDidNotEnter = AnalyticsLakehouseLock
+    val cancelledWaiterDidNotEnter = AnalyticsTestLakehouseLocks
       .processLocal[IO]
       .use { lock =>
         for {

@@ -82,7 +82,7 @@ private[analytics] final class SparkBlockingExecution[F[_]] private (
               Thread.interrupted()
               workerLock.synchronized {
                 worker = null
-                completed.complete(())
+                val _ = completed.complete(())
               }
             }
           }

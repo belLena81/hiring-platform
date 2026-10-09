@@ -1,16 +1,10 @@
 package com.example.hiring.analytics
-import com.example.hiring.analytics.service.keyretirement.*
 import com.example.hiring.analytics.service.batch.*
-import com.example.hiring.analytics.errors.*
 import com.example.hiring.analytics.domain.*
 import com.example.hiring.analytics.config.*
-import com.example.hiring.analytics.adapter.spark.*
-import com.example.hiring.analytics.adapter.mongo.*
 import com.example.hiring.analytics.adapter.kafka.*
-import com.example.hiring.analytics.adapter.local.*
 import com.example.hiring.analytics.service.erasure.*
 
-import com.example.hiring.analytics.adapter.spark.*
 import com.example.hiring.analytics.adapter.mongo.*
 
 import cats.Applicative
@@ -34,7 +28,7 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path}
 import com.example.hiring.testing.{KafkaTestNamespace, LocalTestServices, RecoveryApiProcess}
 import java.time.Duration
-import java.util.{Date, UUID}
+import java.util.UUID
 import java.util.Properties
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
@@ -110,7 +104,7 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
             process.destroy()
             if (!process.waitFor(10, java.util.concurrent.TimeUnit.SECONDS)) {
               process.destroyForcibly()
-              process.waitFor()
+              val _ = process.waitFor()
             }
           }.void
         }
@@ -212,7 +206,7 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
             .append("state", "Active")
             .append("registeredAt", java.util.Date.from(java.time.Instant.now()))
         )
-      database
+      val _ = database
         .getCollection("event_outbox")
         .insertOne(
           new Document("_id", UUID.randomUUID().toString)

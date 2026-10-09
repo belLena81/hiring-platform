@@ -1,13 +1,11 @@
 package com.example.hiring.analytics.adapter.spark
 
-import com.example.hiring.analytics.config.AnalyticsPositiveInt.*
-
 import com.example.hiring.analytics.config.{AnalyticsOperationalSettings, MaximumErasureEvidenceFiles}
 import com.example.hiring.analytics.service.batch.{AnalyticsLakehousePaths, AnalyticsStoragePrivacy}
 
 import cats.effect.Async
+import cats.effect.std.UUIDGen
 import cats.syntax.all.*
-import io.github.iltotore.iron.*
 import io.delta.tables.DeltaTable
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.functions.{col, lit}
@@ -15,10 +13,9 @@ import org.typelevel.log4cats.Logger
 
 import java.sql.Timestamp
 import java.time.Instant
-import java.util.UUID
 
 /** Applies Delta retention/privacy properties and reclaims expired table files. */
-private[analytics] final class AnalyticsDeltaRetention[F[_]: Async](
+private[analytics] final class AnalyticsDeltaRetention[F[_]: Async: UUIDGen](
     paths: AnalyticsLakehousePaths,
     operational: AnalyticsOperationalSettings,
     execution: SparkExecution[F],
@@ -74,7 +71,7 @@ private[analytics] final class AnalyticsDeltaRetention[F[_]: Async](
         val changes = desired.filter { case (key, value) => properties.get(key).forall(_ != value) }
         if (changes.nonEmpty) {
           val rendered = changes.map { case (key, value) => s"'$key' = '$value'" }.mkString(", ")
-          spark.sql(s"ALTER TABLE delta.`$escaped` SET TBLPROPERTIES ($rendered)")
+          val _ = spark.sql(s"ALTER TABLE delta.`$escaped` SET TBLPROPERTIES ($rendered)")
         }
       }
     }
@@ -82,7 +79,9 @@ private[analytics] final class AnalyticsDeltaRetention[F[_]: Async](
 
   def expire(spark: SparkSession, path: String, at: Instant): F[Unit] = execution {
     if (DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(path)))
-      DeltaTable.forPath(spark, SparkPhysicalLocation.resolve(path)).delete(col("expiresAt") <= lit(Timestamp.from(at)))
+      DeltaTable
+        .forPath(spark, SparkPhysicalLocation.resolve(path))
+        .delete(col(Columns.ExpiresAt) <= lit(Timestamp.from(at)))
   }
 
   def vacuumExpiredFiles(spark: SparkSession): F[Long] =
@@ -94,27 +93,32 @@ private[analytics] final class AnalyticsDeltaRetention[F[_]: Async](
           execution(DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(path))).flatMap {
             case false => Async[F].pure(count)
             case true  =>
-              val temporaryPath = s"${paths.root.stripSuffix("/")}/control/purge-rewrite-${UUID.randomUUID()}"
-              DeltaPurgeRewrite.temporaryPath[F](spark, temporaryPath, execution).use { _ =>
-                execution {
-                  spark.read
-                    .format("delta")
-                    .load(SparkPhysicalLocation.resolve(path))
-                    .write
-                    .format("delta")
-                    .mode("overwrite")
-                    .save(SparkPhysicalLocation.resolve(temporaryPath))
-                  spark.read
-                    .format("delta")
-                    .load(SparkPhysicalLocation.resolve(temporaryPath))
-                    .write
-                    .format("delta")
-                    .mode("overwrite")
-                    .option("overwriteSchema", "true")
-                    .save(SparkPhysicalLocation.resolve(path))
-                  // Respect Delta's retention safety horizon. Erasure completes only after this reclaim horizon passes.
-                  val retentionHours = retention.deltaVacuumSafety.toMillis.toDouble / 3600000d
-                  count + DeltaTable.forPath(spark, SparkPhysicalLocation.resolve(path)).vacuum(retentionHours).count()
+              UUIDGen[F].randomUUID.flatMap { id =>
+                val temporaryPath = s"${paths.root.stripSuffix("/")}/control/purge-rewrite-$id"
+                DeltaPurgeRewrite.temporaryPath[F](spark, temporaryPath, execution).use { _ =>
+                  execution {
+                    spark.read
+                      .format("delta")
+                      .load(SparkPhysicalLocation.resolve(path))
+                      .write
+                      .format("delta")
+                      .mode("overwrite")
+                      .save(SparkPhysicalLocation.resolve(temporaryPath))
+                    spark.read
+                      .format("delta")
+                      .load(SparkPhysicalLocation.resolve(temporaryPath))
+                      .write
+                      .format("delta")
+                      .mode("overwrite")
+                      .option("overwriteSchema", "true")
+                      .save(SparkPhysicalLocation.resolve(path))
+                    // Respect Delta's retention safety horizon. Erasure completes only after this reclaim horizon passes.
+                    val retentionHours = retention.deltaVacuumSafety.toMillis.toDouble / 3600000d
+                    count + DeltaTable
+                      .forPath(spark, SparkPhysicalLocation.resolve(path))
+                      .vacuum(retentionHours)
+                      .count()
+                  }
                 }
               }
           }

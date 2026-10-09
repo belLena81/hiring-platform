@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.service.read
 
-import com.example.graphQL.cats.domain.model.{User, UserRole}
+import com.example.graphQL.cats.domain.model.{CandidateProfile, User, UserRole}
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
 import com.example.graphQL.cats.service.auth.ActorAuthorization
@@ -23,3 +23,10 @@ enum UserRelationKey {
 final case class JobRelationKey(applicationId: ApplicationId, jobId: JobId)
 final case class RelatedUser(key: UserRelationKey, value: User)
 final case class RelatedJob(key: JobRelationKey, value: com.example.graphQL.cats.domain.model.Job)
+
+/** Owner-only matching attributes are visible to the candidate themself and to nobody else, including Admin. */
+object CandidateProfileProjection {
+  def forViewer(viewer: ActorContext, ownerId: UserId, profile: CandidateProfile): CandidateProfile =
+    if (viewer.userId == ownerId) profile
+    else profile.copy(currentResidence = None, availabilityStatus = None, recruiterSearchOptIn = false)
+}

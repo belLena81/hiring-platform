@@ -4,6 +4,7 @@ import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
 
 import cats.effect.Async
+import cats.effect.std.UUIDGen
 import cats.syntax.all.*
 import io.delta.tables.DeltaTable
 import org.apache.spark.sql.{DataFrame, SparkSession}
@@ -12,7 +13,7 @@ import org.apache.spark.sql.functions.*
 import scala.util.Try
 
 /** Owns erasure matching, Delta evidence capture, checkpointing, and physical-presence verification. */
-private[spark] final class AnalyticsBatchErasureStage[F[_]: Async](
+private[spark] final class AnalyticsBatchErasureStage[F[_]: Async: UUIDGen](
     paths: AnalyticsLakehousePaths,
     execution: SparkExecution[F],
     configureRawTablePrivacy: SparkSession => F[Unit],
@@ -36,9 +37,7 @@ private[spark] final class AnalyticsBatchErasureStage[F[_]: Async](
             Either.cond(
               matched.limit(1).count() == 0L,
               (),
-              AnalyticsError.LakehouseFailure(
-                new IllegalStateException(s"marked subject remains in Delta dataset $path")
-              )
+              AnalyticsError.MarkedSubjectRetained(path)
             )
           } else Right(())
         }
@@ -69,9 +68,10 @@ private[spark] final class AnalyticsBatchErasureStage[F[_]: Async](
             val columns = frame.columns.toSet
             val attributed = BatchSubjectMatching.matchedBySubject(frame, marker)
             val affected =
-              if (subjectBearingPaths.contains(path) && !columns.contains("subjectTokens")) frame
-              else if (subjectBearingPaths.contains(path) && columns.contains("subjectTokens")) {
-                val unattributed = frame.filter(col("subjectTokens").isNull || size(col("subjectTokens")) === 0)
+              if (subjectBearingPaths.contains(path) && !columns.contains(Columns.SubjectTokens)) frame
+              else if (subjectBearingPaths.contains(path) && columns.contains(Columns.SubjectTokens)) {
+                val unattributed =
+                  frame.filter(col(Columns.SubjectTokens).isNull || size(col(Columns.SubjectTokens)) === 0)
                 attributed.unionByName(unattributed, allowMissingColumns = true)
               } else attributed
             val dataFiles = affected
@@ -93,30 +93,32 @@ private[spark] final class AnalyticsBatchErasureStage[F[_]: Async](
       )
     }
 
-  def checkpointPurgedRawLogs(spark: SparkSession): F[Vector[String]] = blocking.either {
-    val retiredLogs = paths.inventory.subjectDelta
-      .map(_.location)
-      .flatMap { path =>
-        if (!DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(path))) Vector.empty
-        else {
-          val log = deltaLogFactory(spark, path)
-          val tableIdentifier = SparkPhysicalLocation.resolve(path).replace("`", "``")
-          spark.sql(
-            s"ALTER TABLE delta.`$tableIdentifier` SET TBLPROPERTIES ('analytics.erasureCheckpointNonce' = '${java.util.UUID.randomUUID()}')"
+  def checkpointPurgedRawLogs(spark: SparkSession): F[Vector[String]] =
+    // One fresh nonce per table forces a log commit, so each nonce is drawn through UUIDGen before the Spark block.
+    paths.inventory.subjectDelta.map(_.location).traverse(path => UUIDGen[F].randomUUID.map(path -> _)).flatMap {
+      nonces =>
+        blocking.either {
+          val retiredLogs = nonces.flatMap { case (path, nonce) =>
+            if (!DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(path))) Vector.empty
+            else {
+              val log = deltaLogFactory(spark, path)
+              val tableIdentifier = SparkPhysicalLocation.resolve(path).replace("`", "``")
+              spark.sql(
+                s"ALTER TABLE delta.`$tableIdentifier` SET TBLPROPERTIES ('analytics.erasureCheckpointNonce' = '$nonce')"
+              )
+              val snapshot = log.update()
+              val oldLogs = rawLogFiles(spark, path, Some(snapshot.version))
+              log.checkpointAndCleanUpDeltaLog(snapshot, None)
+              oldLogs
+            }
+          }.distinct
+          Either.cond(
+            retiredLogs.size <= MaximumErasureEvidenceFiles,
+            retiredLogs,
+            AnalyticsError.InvalidConfiguration("analytics erasure exceeds the bounded physical evidence file limit")
           )
-          val snapshot = log.update()
-          val oldLogs = rawLogFiles(spark, path, Some(snapshot.version))
-          log.checkpointAndCleanUpDeltaLog(snapshot, None)
-          oldLogs
         }
-      }
-      .distinct
-    Either.cond(
-      retiredLogs.size <= MaximumErasureEvidenceFiles,
-      retiredLogs,
-      AnalyticsError.InvalidConfiguration("analytics erasure exceeds the bounded physical evidence file limit")
-    )
-  }
+    }
 
   def verifyFilesAbsent(spark: SparkSession, files: Vector[String]): F[Unit] = blocking.either {
     val configuration = spark.sparkContext.hadoopConfiguration
@@ -142,32 +144,37 @@ private[spark] final class AnalyticsBatchErasureStage[F[_]: Async](
 
   def purgeMarkedSubjectRows(spark: SparkSession, path: String, markerTokens: DataFrame): F[Unit] = blocking {
     if (DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(path))) {
-      val markedSubjects = markerTokens.select(col("subjectToken")).filter(col("subjectToken").isNotNull).distinct()
+      val markedSubjects =
+        markerTokens.select(col(Columns.SubjectToken)).filter(col(Columns.SubjectToken).isNotNull).distinct()
       val columns = spark.read.format("delta").load(SparkPhysicalLocation.resolve(path)).columns.toSet
       val rawScope = path == paths.bronze || path == paths.quarantine || path == paths.lateFacts
       if (rawScope) {
         val table = DeltaTable.forPath(spark, SparkPhysicalLocation.resolve(path))
-        if (columns.contains("subjectTokens"))
-          table.delete(col("subjectTokens").isNull || size(col("subjectTokens")) === 0)
+        if (columns.contains(Columns.SubjectTokens))
+          table.delete(col(Columns.SubjectTokens).isNull || size(col(Columns.SubjectTokens)) === 0)
         else table.delete()
       }
       val condition =
-        if (columns.contains("subjectTokens"))
+        if (columns.contains(Columns.SubjectTokens))
           "array_contains(target.subjectTokens, source.subjectToken)" +
-            (if (columns.contains("subjectToken")) " OR target.subjectToken = source.subjectToken" else "")
-        else if (columns.contains("subjectToken")) "target.subjectToken = source.subjectToken"
+            (if (columns.contains(Columns.SubjectToken))
+               s" OR target.${Columns.SubjectToken} = source.${Columns.SubjectToken}"
+             else "")
+        else if (columns.contains(Columns.SubjectToken))
+          s"target.${Columns.SubjectToken} = source.${Columns.SubjectToken}"
         else {
           DeltaTable.forPath(spark, SparkPhysicalLocation.resolve(path)).delete()
           ""
         }
-      if (condition.nonEmpty)
-        DeltaTable
+      if (condition.nonEmpty) {
+        val _ = DeltaTable
           .forPath(spark, SparkPhysicalLocation.resolve(path))
           .as("target")
           .merge(markedSubjects.as("source"), condition)
           .whenMatched()
           .delete()
           .execute()
+      }
     }
   }
 

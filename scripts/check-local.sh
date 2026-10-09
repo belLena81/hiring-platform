@@ -14,5 +14,14 @@ if [[ ! "$java_major" =~ ^[0-9]+$ ]] || (( java_major < 17 )); then
   exit 1
 fi
 
-sbt test
-printf '%s\n' 'Unit checks passed. Run any additional integration, migration, compatibility, or performance checks required by this task; see docs/engineering-quality.md.'
+# The sbt launcher uses the PATH java unless told otherwise; both builds target Java 17.
+sbt_args=()
+if [[ -n "${JAVA_HOME:-}" ]]; then
+  sbt_args=(-java-home "$JAVA_HOME")
+fi
+
+# Both builds: formatting gates first, then the Docker-independent unit suites.
+sbt "${sbt_args[@]}" scalafmtCheckAll scalafmtSbtCheck test
+(cd analytics && sbt "${sbt_args[@]}" scalafmtCheckAll scalafmtSbtCheck test)
+
+printf '%s\n' 'Formatting and unit checks passed for the application and analytics builds. Run any additional integration, migration, compatibility, or performance checks required by this task; see docs/engineering-quality.md.'
