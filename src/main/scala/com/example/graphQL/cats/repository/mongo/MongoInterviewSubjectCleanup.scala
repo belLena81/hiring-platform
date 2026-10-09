@@ -25,9 +25,10 @@ import com.example.graphQL.cats.service.{RepositoryError, Diagnostics}
 import mongo4cats.client.ClientSession
 import mongo4cats.database.MongoDatabase
 import org.bson.Document
+import com.example.graphQL.cats.repository.mongo.MongoDocumentFields.Repository.{instant, int64, string, stringVector}
 import com.mongodb.client.model.{Sorts, UpdateOptions}
 import java.time.Instant
-import java.util.{Date, UUID}
+import java.util.UUID
 import scala.jdk.CollectionConverters.*
 
 /** Durable deletion evidence. Broker fencing precedes barrier capture in the application worker. Purging removes every
@@ -70,16 +71,13 @@ final class MongoInterviewSubjectCleanup(
                   MongoUpdate.setOnInsert("state", "Pending"),
                   MongoUpdate.setOnInsert("producerRegistry", true),
                   MongoUpdate.setOnInsert("revision", Long.box(0L)),
-                  MongoUpdate.setOnInsert("requestedAt", Date.from(now)),
+                  MongoUpdate.setOnInsert("requestedAt", now.toDate),
                   MongoUpdate.setOnInsert(ProducerIdsField, Vector.empty[String].asJava)
                 ),
                 new UpdateOptions().upsert(true)
               )
             )
-            .subflatMap {
-              case Some(value) if value.wasAcknowledged() => Right(())
-              case _                                      => Left(RepositoryError.MissingWriteResult)
-            }
+            .void
     } yield ()
 
   override def producerBatch(subject: UserId): RepositoryIO[Vector[String]] = guard("interviewCleanup.producerBatch") {
@@ -120,7 +118,7 @@ final class MongoInterviewSubjectCleanup(
 
   override def find(subject: UserId): RepositoryIO[Option[InterviewSubjectCleanup]] = guard("interviewCleanup.find") {
     RepositoryIO
-      .lift(MongoSessionOperations.findOne(queue, None, MongoFilter.eq(MongoFields.Id, subject.value.toString)))
+      .lift(MongoSessionOperations.findById(queue, None, subject.value.toString))
       .flatMap(_.traverse(row => RepositoryIO.fromEither(MongoInterviewCleanupCodec.decodeCurrent(row, topics))))
   }
 
@@ -217,12 +215,9 @@ final class MongoInterviewSubjectCleanup(
               stateUpdate(next)
             )
           )
-          .subflatMap {
-            case Some(value) if !value.wasAcknowledged()    => Left(RepositoryError.MissingWriteResult)
-            case Some(value) if value.getMatchedCount == 1L => Right(InterviewCleanupUpdate.Applied)
-            case Some(_)                                    => Right(InterviewCleanupUpdate.StaleRevision)
-            case None                                       => Left(RepositoryError.MissingWriteResult)
-          }
+          .map(value =>
+            if (value.getMatchedCount == 1L) InterviewCleanupUpdate.Applied else InterviewCleanupUpdate.StaleRevision
+          )
       } yield result
     }
 
@@ -244,7 +239,7 @@ final class MongoInterviewSubjectCleanup(
           )
         )
       case InterviewCleanupState.Complete(at) =>
-        List(MongoUpdate.unset("barriers"), MongoUpdate.set("completedAt", Date.from(at)))
+        List(MongoUpdate.unset("barriers"), MongoUpdate.set("completedAt", at.toDate))
       case _ => List.empty
     }
     MongoUpdate.combine((common ++ detail)*)
@@ -259,7 +254,7 @@ final class MongoInterviewSubjectCleanup(
   }
 
   private def guard[A](operation: String)(effect: RepositoryIO[A]): RepositoryIO[A] =
-    MongoRepositorySupport.repositoryGuard(diagnostics, operation)(effect)(_ => Left(RepositoryError.Unavailable))
+    MongoRepositorySupport.repositoryGuard(diagnostics, operation)(effect)
 
   override def absent(subject: UserId): RepositoryIO[Boolean] = guard("interviewCleanup.absent") {
     hasAttributableData(subject, None).map(value => !value)
@@ -422,13 +417,10 @@ final class MongoInterviewSubjectCleanup(
                   MongoFilter.eq(ReserveKeyField, hold.reserveKey),
                   MongoFilter.exists(ReleasedAtField, false)
                 ),
-                MongoUpdate.set(ReleasedAtField, Date.from(at))
+                MongoUpdate.set(ReleasedAtField, at.toDate)
               )
             )
-            .subflatMap {
-              case Some(result) if result.wasAcknowledged() => Right(())
-              case _                                        => Left(RepositoryError.MissingWriteResult)
-            }
+            .void
         )
     }
 
@@ -455,7 +447,7 @@ private[mongo] object MongoInterviewCleanupCodec {
         .leftMap(_ => RepositoryError.InvalidStoredData)
         .flatMap(id => Either.cond(id.toString == value, id, RepositoryError.InvalidStoredData))
     )
-    revision <- long(row, "revision")
+    revision <- int64(row, "revision")
     requested <- instant(row, "requestedAt")
     ids <- stringVector(row, ProducerIdsField)
     name <- string(row, "state")
@@ -483,29 +475,9 @@ private[mongo] object MongoInterviewCleanupCodec {
             partition <- Option(document.get("partition"))
               .collect { case number: java.lang.Integer => number.intValue() }
               .toRight(RepositoryError.InvalidStoredData)
-            offset <- long(document, "endOffset")
+            offset <- int64(document, "endOffset")
           } yield InterviewRetentionBarrier(topic, partition, offset)
         case _ => Left(RepositoryError.InvalidStoredData)
-      })
-
-  private def string(row: Document, field: String): Either[RepositoryError, String] =
-    Option(row.get(field)).collect { case value: String => value }.toRight(RepositoryError.InvalidStoredData)
-
-  private def long(row: Document, field: String): Either[RepositoryError, Long] =
-    Option(row.get(field))
-      .collect { case value: java.lang.Long => value.longValue() }
-      .toRight(RepositoryError.InvalidStoredData)
-
-  private def instant(row: Document, field: String): Either[RepositoryError, Instant] =
-    Option(row.get(field)).collect { case value: Date => value.toInstant }.toRight(RepositoryError.InvalidStoredData)
-
-  def stringVector(row: Document, field: String): Either[RepositoryError, Vector[String]] =
-    Option(row.get(field))
-      .collect { case values: java.util.List[?] => values.asScala.toVector }
-      .toRight(RepositoryError.InvalidStoredData)
-      .flatMap(_.traverse {
-        case value: String => Right(value)
-        case _             => Left(RepositoryError.InvalidStoredData)
       })
 
 }

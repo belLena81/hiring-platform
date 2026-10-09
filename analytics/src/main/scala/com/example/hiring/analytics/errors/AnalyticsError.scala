@@ -6,13 +6,23 @@ sealed abstract class AnalyticsError(message: String, cause: Option[Throwable] =
     extends RuntimeException(message, cause.orNull)
 
 object AnalyticsError {
-  final case class InvalidInput(problems: NonEmptyChain[String])
-      extends AnalyticsError(problems.toNonEmptyList.toList.mkString("; "))
+  private def render(problems: NonEmptyChain[String]): String = problems.toNonEmptyList.toList.mkString("; ")
+
+  final case class InvalidInput(problems: NonEmptyChain[String]) extends AnalyticsError(render(problems))
   object InvalidInput {
     def one(problem: String): InvalidInput = InvalidInput(NonEmptyChain.one(problem))
   }
-  final case class InvalidConfiguration(detail: String, underlying: Option[Throwable] = None)
-      extends AnalyticsError(detail, underlying)
+
+  /** Configuration and startup failures; accumulated problems render joined by `; `. */
+  final case class InvalidConfiguration(problems: NonEmptyChain[String], underlying: Option[Throwable])
+      extends AnalyticsError(render(problems), underlying)
+  object InvalidConfiguration {
+    def apply(detail: String, underlying: Option[Throwable] = None): InvalidConfiguration =
+      InvalidConfiguration(NonEmptyChain.one(detail), underlying)
+  }
+
+  def fromProblems(problems: NonEmptyChain[String]): InvalidConfiguration = InvalidConfiguration(problems, None)
+
   final case class InvalidSourceSchema(missing: Vector[String])
       extends AnalyticsError(s"Kafka batch records are missing required columns: ${missing.mkString(", ")}")
   final case class InvalidLateFactSchema(detail: String)

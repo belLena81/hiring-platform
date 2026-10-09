@@ -140,10 +140,10 @@ class KafkaProducerFencerIntegrationSpec extends FunSuite {
         .get(30, java.util.concurrent.TimeUnit.SECONDS)
 
       val connection = localKafkaConnection(kafka.getBootstrapServers, readerUsername, readerPassword)
-      val openTransactionManifest = AnalyticsRunManifest
-        .validated(
+      val openTransactionManifest = TestPartitionOffsetRange
+        .manifestOf(
           "open-transaction-it-" + UUID.randomUUID().toString,
-          Vector(IntegrationPartitionOffsetRange.unsafe(topic, 0, 0L, 1L))
+          Vector(TestPartitionOffsetRange.unsafe(topic, 0, 0L, 1L))
         )
         .toEither
         .fold(errors => throw new AssertionError(errors.toString), identity)
@@ -201,10 +201,10 @@ class KafkaProducerFencerIntegrationSpec extends FunSuite {
         .capture[IO](connection, AnalyticsTopic.from(topic).toOption.get, AnalyticsBatchTestSupport.driverExecution)
         .unsafeRunSync()
       val endOffset = barrier.partitions.head.endOffsetExclusive.asInstanceOf[Long]
-      val manifest = AnalyticsRunManifest
-        .validated(
+      val manifest = TestPartitionOffsetRange
+        .manifestOf(
           "fencer-it-" + UUID.randomUUID().toString,
-          Vector(IntegrationPartitionOffsetRange.unsafe(topic, 0, 0L, endOffset))
+          Vector(TestPartitionOffsetRange.unsafe(topic, 0, 0L, endOffset))
         )
         .toEither
         .fold(errors => throw new AssertionError(errors.toString), identity)

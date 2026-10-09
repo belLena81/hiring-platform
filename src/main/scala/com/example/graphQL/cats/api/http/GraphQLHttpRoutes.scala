@@ -47,15 +47,11 @@ private[http] final class GraphQLHttpRoutes(
   private object dsl extends Http4sDsl[IO]
   import dsl.*
 
-  private def json(status: Status, body: Json): Response[IO] =
-    Response[IO](status).withEntity(body)(using jsonEncoderOf[IO, Json])
-
   private def error(status: Status, message: String, mediaType: MediaType): Response[IO] =
-    json(status, Json.obj("errors" -> Json.arr(Json.obj("message" -> Json.fromString(message)))))
-      .putHeaders(`Content-Type`(mediaType))
+    HttpMiddleware.errorResponse(status, message).putHeaders(`Content-Type`(mediaType))
 
   private def graphqlJson(status: Status, body: Json, mediaType: MediaType): Response[IO] =
-    json(status, body).putHeaders(`Content-Type`(mediaType))
+    Response[IO](status).withEntity(body)(using jsonEncoderOf[IO, Json]).putHeaders(`Content-Type`(mediaType))
 
   private def rejected(
       rejection: HttpRejection,

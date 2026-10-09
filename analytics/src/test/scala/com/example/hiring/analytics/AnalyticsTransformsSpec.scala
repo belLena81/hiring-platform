@@ -3,7 +3,6 @@ import com.example.hiring.analytics.service.batch.*
 import com.example.hiring.analytics.errors.*
 import com.example.hiring.analytics.domain.*
 import com.example.hiring.analytics.config.*
-import com.example.hiring.analytics.config.AnalyticsPositiveInt.*
 import com.example.hiring.analytics.adapter.kafka.*
 import com.example.hiring.analytics.service.erasure.*
 import AnalyticsBatchTestSupport.{newBatch, newKeyContinuityStage}
@@ -78,7 +77,7 @@ class AnalyticsTransformsSpec extends FunSuite {
   }
 
   private def validatedManifest(runId: String, ranges: Vector[PartitionOffsetRange]): AnalyticsRunManifest =
-    AnalyticsRunManifest.validated(runId, ranges).toEither.fold(errors => fail(errors.toString), identity)
+    TestPartitionOffsetRange.manifestOf(runId, ranges).toEither.fold(errors => fail(errors.toString), identity)
 
   private def fixedClock(instant: Instant): Clock[IO] = new Clock[IO] {
     override val applicative: cats.Applicative[IO] = summon[cats.Applicative[IO]]
@@ -479,23 +478,12 @@ class AnalyticsTransformsSpec extends FunSuite {
   }
 
   test("offset manifests reject impossible or duplicated partition ranges") {
-    assertEquals(AnalyticsTestOperationalConfig.operational.retention.bronzeDays.value, 7)
-    assertEquals(AnalyticsTestOperationalConfig.operational.retention.silverDays.value, 30)
-    assert(PartitionOffsetRange.from("topic", 0, 5L, 4L).isInvalid)
-    assert(
-      AnalyticsRunManifest
-        .validated(
-          "run-1",
-          Vector(
-            TestPartitionOffsetRange.unsafe("topic", 0, 0L, 1L),
-            TestPartitionOffsetRange.unsafe("topic", 0, 1L, 2L)
-          )
-        )
-        .isInvalid
-    )
-    val errors = AnalyticsRunManifest
-      .validated(
-        "",
+    assertEquals(AnalyticsTestOperationalConfig.operational.retention.bronzeDays, 7)
+    assertEquals(AnalyticsTestOperationalConfig.operational.retention.silverDays, 30)
+    assert(TestPartitionOffsetRange.from("topic", 0, 5L, 4L).isInvalid)
+    val errors = TestPartitionOffsetRange
+      .manifestOf(
+        "run-1",
         Vector(TestPartitionOffsetRange.unsafe("topic", 0, 0L, 1L), TestPartitionOffsetRange.unsafe("topic", 0, 1L, 2L))
       )
       .toEither
@@ -504,14 +492,14 @@ class AnalyticsTransformsSpec extends FunSuite {
       .get
       .toNonEmptyList
       .toList
-    assert(errors.contains("run id must be non-empty"))
-    val topicErrors = PartitionOffsetRange.from("", 0, 0L, 1L).toEither.swap.toOption.get
+    assert(errors.contains("each topic partition may occur only once"))
+    assertEquals(RunId.from(""), Left("run id must be non-empty"))
+    val topicErrors = TestPartitionOffsetRange.from("", 0, 0L, 1L).toEither.swap.toOption.get
     assert(topicErrors.toNonEmptyList.toList.contains("topic must be non-empty"))
-    val numericErrors = PartitionOffsetRange.from("topic", -1, -1L, -2L).toEither.swap.toOption.get
+    val numericErrors = TestPartitionOffsetRange.from("topic", -1, -1L, -2L).toEither.swap.toOption.get
     assert(numericErrors.toNonEmptyList.toList.contains("partition must be non-negative"))
     assert(numericErrors.toNonEmptyList.toList.contains("start offset must be non-negative"))
     assert(numericErrors.toNonEmptyList.toList.contains("end offset must be non-negative"))
-    assert(errors.contains("each topic partition may occur only once"))
   }
 
   test("Kafka offset JSON escapes topic strings and preserves the configured shape") {
@@ -1378,7 +1366,7 @@ class AnalyticsTransformsSpec extends FunSuite {
       .mkString(" ")
     assert(errors.contains("32 bytes"))
     val encoded = java.util.Base64.getEncoder.encodeToString("short-secret".getBytes("UTF-8"))
-    assert(SubjectPseudonymizer.validateFromBase64(Some(encoded), "hmac-v1", None, None).isInvalid)
+    assert(SubjectPseudonymizer.validateFromBase64(encoded, "hmac-v1", None, None).isInvalid)
   }
 
   test("lakehouse operation boundary preserves typed errors and adapts thrown failures") {

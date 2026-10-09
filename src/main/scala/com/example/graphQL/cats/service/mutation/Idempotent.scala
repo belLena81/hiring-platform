@@ -1,18 +1,27 @@
 package com.example.graphQL.cats.service.mutation
 
+import cats.data.EitherT
 import cats.effect.{Clock, IO}
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
 import com.example.graphQL.cats.service.protocol.{IdempotencyRequest, UseCaseIO}
 
-import java.util.Locale
+import com.example.graphQL.cats.domain.model.Identifiers
+import java.util.{Locale, UUID}
 import scala.concurrent.duration.*
 
-final class Idempotent private (
-    receipts: MutationReceiptRepository,
-    clock: Clock[IO],
-    receiptTtl: FiniteDuration
-) {
+final class Idempotent private (receipts: MutationReceiptRepository, clock: Clock[IO]) {
+
+  /** [[execute]] scoped to the authenticated actor. */
+  def executeFor[A](
+      actor: ActorContext,
+      operation: String,
+      request: IdempotencyRequest,
+      entity: A => MutationEntityReference,
+      replay: MutationEntityReference => UseCaseIO[A]
+  )(write: MutationWriteContext => UseCaseIO[A]): UseCaseIO[A] =
+    execute(operation, Idempotent.actorScope(actor), request, entity, replay)(write)
+
   def execute[A](
       operation: String,
       actorScope: String,
@@ -20,11 +29,11 @@ final class Idempotent private (
       entity: A => MutationEntityReference,
       replay: MutationEntityReference => UseCaseIO[A]
   )(write: MutationWriteContext => UseCaseIO[A]): UseCaseIO[A] =
-    UseCaseIO.liftIO(clock.realTimeInstant).flatMap { now =>
+    EitherT.liftF(clock.realTimeInstant).flatMap { now =>
       val key = MutationReceiptKey(operation, actorScope, request.idempotencyKey)
       UseCaseIO
         .repository(
-          receipts.execute(key, request.fingerprint, now, now.plusSeconds(receiptTtl.toSeconds)) { context =>
+          receipts.execute(key, request.fingerprint, now, now.plusSeconds(Idempotent.ReceiptTtl.toSeconds)) { context =>
             write(context).biflatMap(
               {
                 case UseCaseError.Repository(error) => RepositoryIO.fromEither(Left(error))
@@ -36,28 +45,34 @@ final class Idempotent private (
           }
         )
         .flatMap {
-          case MutationReceiptExecution.Applied(value, _)   => UseCaseIO.pure(value)
+          case MutationReceiptExecution.Applied(value, _)   => EitherT.rightT(value)
           case MutationReceiptExecution.Replay(reference)   => replay(reference)
-          case MutationReceiptExecution.Rejected(error)     => UseCaseIO.left(error)
+          case MutationReceiptExecution.Rejected(error)     => EitherT.leftT(error)
           case MutationReceiptExecution.FingerprintMismatch =>
-            UseCaseIO.left(UseCaseError.Repository(RepositoryError.Conflict))
+            EitherT.leftT(UseCaseError.Repository(RepositoryError.Conflict))
           case MutationReceiptExecution.InProgress =>
-            UseCaseIO.left(UseCaseError.Repository(RepositoryError.Unavailable))
+            EitherT.leftT(UseCaseError.Repository(RepositoryError.Unavailable))
         }
     }
 }
 
 object Idempotent {
-  private val ReceiptTtl = 7.days
+  private[mutation] val ReceiptTtl = 7.days
 
-  def apply(receipts: MutationReceiptRepository): Idempotent =
-    new Idempotent(receipts, Clock[IO], ReceiptTtl)
+  def apply(receipts: MutationReceiptRepository, clock: Clock[IO] = Clock[IO]): Idempotent =
+    new Idempotent(receipts, clock)
 
-  private[service] def withClock(
-      receipts: MutationReceiptRepository,
-      clock: Clock[IO]
-  ): Idempotent =
-    new Idempotent(receipts, clock, ReceiptTtl)
+  /** A stored reference that no replay can resolve is a repository fault, never a client error. */
+  def corruptReference[A]: UseCaseIO[A] = EitherT.leftT(UseCaseError.Repository(RepositoryError.Unavailable))
+
+  /** Replays a receipt that references an entity of `kind` by identifier. */
+  def replayById[Id, A](kind: String, wrap: UUID => Id)(load: Id => UseCaseIO[A])(
+      reference: MutationEntityReference
+  ): UseCaseIO[A] =
+    Option
+      .when(reference.entityType == kind)(reference.entityId)
+      .flatMap(Identifiers.parse(_)(wrap))
+      .fold(corruptReference)(load)
 
   def actorScope(actor: ActorContext): String = actor.userId.value.toString
 

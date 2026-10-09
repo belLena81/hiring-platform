@@ -1,5 +1,7 @@
 package com.example.graphQL.cats.service.application
 
+import com.example.graphQL.cats.domain.policy.RetryBackoff
+
 import cats.effect.{Clock, IO, Resource}
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.workflow.*
@@ -162,7 +164,7 @@ final class InterviewWorkflowWorker(
                       case Left(_) if claim.record.publicationAttempts + 1 >= settings.maxAttempts => finish
                       case Left(_)                                                                 =>
                         currentTime.flatMap { at =>
-                          val delay = InterviewWorkflowPolicy.backoffMillis(
+                          val delay = RetryBackoff.exponentialMillis(
                             claim.record.publicationAttempts + 1,
                             settings.initialBackoff.toMillis,
                             settings.maxBackoff.toMillis
@@ -505,8 +507,8 @@ final class InterviewWorkflowWorker(
               else
                 InterviewNotificationSettlement.Retry(
                   now.plusMillis(
-                    InterviewWorkflowPolicy
-                      .backoffMillis(attempts, settings.initialBackoff.toMillis, settings.maxBackoff.toMillis)
+                    RetryBackoff
+                      .exponentialMillis(attempts, settings.initialBackoff.toMillis, settings.maxBackoff.toMillis)
                   )
                 )
             repository.settleNotificationResult(record, settlement, now).value.flatMap {

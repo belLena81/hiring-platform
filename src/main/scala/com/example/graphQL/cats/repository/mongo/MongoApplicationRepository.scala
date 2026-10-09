@@ -13,7 +13,6 @@ import com.mongodb.client.model.Filters
 import mongo4cats.client.{ClientSession, MongoClient}
 import mongo4cats.database.MongoDatabase
 
-import java.util.Date
 import org.bson.Document
 import com.example.graphQL.cats.service.read.HiringReadScope
 
@@ -21,8 +20,7 @@ final class MongoApplicationRepository private (
     database: MongoDatabase[IO],
     transactionRunner: MongoTransactionRunner,
     diagnostics: Diagnostics
-) extends ApplicationRepository
-    with MongoOperationalEventInsertion {
+) extends ApplicationRepository {
   private def collection = Mongo4catsCollections.documents(database, MongoCollections.Applications)
   private def events = Mongo4catsCollections.documents(database, MongoCollections.ApplicationEvents)
   private def jobs = Mongo4catsCollections.documents(database, MongoCollections.Jobs)
@@ -177,9 +175,9 @@ final class MongoApplicationRepository private (
       _ <- MongoRepositorySupport.repositoryGuard(diagnostics, "applications.insertStatusEvent") {
         RepositoryIO
           .lift(MongoApplicationEventInsertion.insert(events, session, event))
-          .subflatMap(MongoRepositorySupport.writeResult(_).void)
+          .void
       }(MongoErrors.duplicateAs(RepositoryError.Conflict))
-      _ <- insertOperationalEvents(outbox, session, operationalEvents, application.updatedAt, diagnostics)
+      _ <- MongoOperationalEventInsertion.insert(outbox, session, operationalEvents, application.updatedAt, diagnostics)
     } yield ()
 
   private def baseFilter(field: String, id: String, page: ApplicationPageRequest): MongoFilter = {
@@ -262,15 +260,13 @@ final class MongoApplicationRepository private (
       MongoFilter.eq(MongoFields.Status, JobStatus.Open.toString)
     )
     val update = MongoUpdate.combine(
-      MongoUpdate.set(MongoFields.UpdatedAt, Date.from(application.createdAt)),
+      MongoUpdate.set(MongoFields.UpdatedAt, application.createdAt.toDate),
       MongoUpdate.inc(MongoFields.Version, 1L)
     )
     val guard = MongoSessionOperations.updateOne(jobs, session, guardFilter, update)
-    RepositoryIO.lift(guard).flatMap {
-      case Some(result) if result.getMatchedCount == 1L =>
+    RepositoryIO.lift(guard).flatMap { result =>
+      RepositoryIO.fromEither(MongoRepositorySupport.matchedOne(result)) *>
         insertApplicationAndEvent(session, application, initialEvent, operationalEvents)
-      case Some(_) => RepositoryIO.fromEither(Left(RepositoryError.Conflict))
-      case None    => RepositoryIO.fromEither(Left(RepositoryError.MissingWriteResult))
     }
 
   private def insertApplicationAndEvent(
@@ -283,14 +279,14 @@ final class MongoApplicationRepository private (
       _ <- MongoRepositorySupport.repositoryGuard(diagnostics, "applications.insert") {
         RepositoryIO
           .lift(MongoSessionOperations.insertOne(collection, session, MongoHiringCodecs.application(application)))
-          .subflatMap(MongoRepositorySupport.writeResult(_).void)
+          .void
       }(MongoErrors.duplicateAs(RepositoryError.DuplicateApplication))
       _ <- MongoRepositorySupport.repositoryGuard(diagnostics, "applications.insertInitialEvent") {
         RepositoryIO
           .lift(MongoApplicationEventInsertion.insert(events, session, initialEvent))
-          .subflatMap(MongoRepositorySupport.writeResult(_).void)
+          .void
       }(MongoErrors.duplicateAs(RepositoryError.Conflict))
-      _ <- insertOperationalEvents(outbox, session, operationalEvents, application.createdAt, diagnostics)
+      _ <- MongoOperationalEventInsertion.insert(outbox, session, operationalEvents, application.createdAt, diagnostics)
     } yield ()
 
   private def currentOpenJob(id: JobId): RepositoryIO[Option[JobSubmissionSnapshot]] =

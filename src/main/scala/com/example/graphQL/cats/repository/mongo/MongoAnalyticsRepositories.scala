@@ -44,7 +44,6 @@ final class MongoAnalyticsErasureRequestRepository(
       com.example.graphQL.cats.domain.workflow.InterviewTopicPair.Default
 ) extends AnalyticsErasureRequestRepository {
   private val collection = Mongo4catsCollections.documents(database, MongoCollections.AnalyticsErasureRequests)
-  private val subjectFences = Mongo4catsCollections.documents(database, MongoCollections.OutboxSubjectFences)
   private val outbox = Mongo4catsCollections.documents(database, MongoCollections.EventOutbox)
   private val users = Mongo4catsCollections.documents(database, MongoCollections.Users)
   private val completions = Mongo4catsCollections.documents(database, MongoCollections.AnalyticsErasureCompletions)
@@ -61,7 +60,7 @@ final class MongoAnalyticsErasureRequestRepository(
               MongoFilter.and(
                 MongoFilter.eq(MongoFields.Id, "analytics-erasure"),
                 MongoFilter.eq(MongoFields.State, "Ready"),
-                MongoFilter.gt(MongoFields.LeaseUntil, Date.from(now))
+                MongoFilter.gt(MongoFields.LeaseUntil, now.toDate)
               )
             )
           )
@@ -83,7 +82,7 @@ final class MongoAnalyticsErasureRequestRepository(
             MongoSessionOperations
               .updateOne(documents, session, byId, MongoUpdate.set(MongoFields.ReceiptId, freshReceiptId))
           )
-          .subflatMap(_.toRight(RepositoryError.MissingWriteResult).as(freshReceiptId))
+          .as(freshReceiptId)
       )(receipt => RepositoryIO.fromEither(Right(receipt)))
     }
   }
@@ -100,12 +99,7 @@ final class MongoAnalyticsErasureRequestRepository(
             val requestId = userId.value.toString
             receiptOrAssign(completions, session, requestId, freshReceiptId)
               .orElse(receiptOrAssign(collection, session, requestId, freshReceiptId))
-              .getOrElseF(
-                // The fence read is retained as-is (open decision O3).
-                RepositoryIO.lift(
-                  MongoSessionOperations.findOne(subjectFences, session, MongoFilter.eq(MongoFields.Id, requestId))
-                ) *> createRequest(requestId, freshReceiptId, now, session)
-              )
+              .getOrElseF(createRequest(requestId, freshReceiptId, now, session))
           }
         }
       )
@@ -117,7 +111,7 @@ final class MongoAnalyticsErasureRequestRepository(
       session: Option[ClientSession[IO]]
   ): RepositoryIO[String] = {
     val request = new Document(MongoFields.Id, requestId)
-      .append(MongoFields.RequestedAt, Date.from(now))
+      .append(MongoFields.RequestedAt, now.toDate)
       .append(MongoFields.ReceiptId, freshReceiptId)
       .append(MongoFields.State, "Pending")
       .append(MongoFields.FencingVersion, 1)
@@ -126,11 +120,10 @@ final class MongoAnalyticsErasureRequestRepository(
     val hide = MongoUpdate.combine(
       MongoUpdate.inc(MongoFields.Generation, 1L),
       MongoUpdate.set(MongoFields.State, AnalyticsReportSnapshotDocument.Hidden),
-      MongoUpdate.set(MongoFields.HiddenAt, Date.from(now))
+      MongoUpdate.set(MongoFields.HiddenAt, now.toDate)
     )
     for {
-      inserted <- RepositoryIO.lift(MongoSessionOperations.insertOne(collection, session, request))
-      _ <- RepositoryIO.fromEither(inserted.toRight(RepositoryError.MissingWriteResult))
+      _ <- RepositoryIO.lift(MongoSessionOperations.insertOne(collection, session, request))
       hidden <- RepositoryIO.lift(
         MongoSessionOperations.updateOne(
           reportControl,
@@ -140,12 +133,8 @@ final class MongoAnalyticsErasureRequestRepository(
           new UpdateOptions
         )
       )
-      result <- RepositoryIO.fromEither(hidden match {
-        case Some(result) if result.getMatchedCount == 1L => Right(freshReceiptId)
-        case Some(_)                                      => Left(RepositoryError.Conflict)
-        case None                                         => Left(RepositoryError.MissingWriteResult)
-      })
-    } yield result
+      _ <- RepositoryIO.fromEither(MongoRepositorySupport.matchedOne(hidden))
+    } yield freshReceiptId
   }
 
   override def statusForSubject(
@@ -216,16 +205,16 @@ final class MongoAnalyticsErasureRequestRepository(
               )
               val update = MongoUpdate.combine(
                 MongoUpdate.set(MongoFields.State, "Complete"),
-                MongoUpdate.set(MongoFields.CompletedAt, Date.from(now)),
+                MongoUpdate.set(MongoFields.CompletedAt, now.toDate),
                 MongoUpdate.set(MongoFields.ExpiresAt, Date.from(now.plusSeconds(31L * 24L * 60L * 60L)))
               )
               val requests =
                 RepositoryIO.lift(
                   MongoSessionOperations.updateOne(collection, session, filter, update, new UpdateOptions)
                 )
-              requests.flatMap {
-                case Some(result) if result.getMatchedCount == 1L => persistCompletion(session, requestId, now)
-                case Some(_)                                      =>
+              requests.flatMap { result =>
+                if (result.getMatchedCount == 1L) persistCompletion(session, requestId, now)
+                else {
                   val completed = RepositoryIO.lift(
                     MongoSessionOperations.findOne(
                       collection,
@@ -239,7 +228,7 @@ final class MongoAnalyticsErasureRequestRepository(
                       persistCompletion(session, requestId, now)
                     )
                   )
-                case None => RepositoryIO.fromEither(Left(RepositoryError.MissingWriteResult))
+                }
               }
             case _ => RepositoryIO.fromEither(Left(RepositoryError.Conflict))
           }
@@ -258,7 +247,7 @@ final class MongoAnalyticsErasureRequestRepository(
           .flatMap { stored =>
             val updates = List(
               Some(MongoUpdate.setOnInsert(MongoFields.Id, userId)),
-              Some(MongoUpdate.setOnInsert(MongoFields.CompletedAt, Date.from(now))),
+              Some(MongoUpdate.setOnInsert(MongoFields.CompletedAt, now.toDate)),
               stored
                 .flatMap(value => Option(value.getString(MongoFields.ReceiptId)))
                 .map(MongoUpdate.setOnInsert(MongoFields.ReceiptId, _))
@@ -268,11 +257,7 @@ final class MongoAnalyticsErasureRequestRepository(
             val result = RepositoryIO.lift(
               MongoSessionOperations.updateOne(completions, session, filter, update, new UpdateOptions().upsert(true))
             )
-            result
-              .subflatMap {
-                case Some(_) => Right(())
-                case _       => Left(RepositoryError.MissingWriteResult)
-              }
+            result.void
           }
       )
   }
@@ -388,7 +373,7 @@ final class MongoAnalyticsReportRepository(
                             )
                           )
                           .flatMap {
-                            case Some(incremented) if incremented.getMatchedCount == 1L =>
+                            case incremented if incremented.getMatchedCount == 1L =>
                               RepositoryIO
                                 .lift(
                                   MongoSessionOperations.findOne(
@@ -421,20 +406,15 @@ final class MongoAnalyticsReportRepository(
                                             MongoUpdate.combine(
                                               MongoUpdate.set(MongoFields.Generation, generation),
                                               MongoUpdate.set(MongoFields.Revision, revision),
-                                              MongoUpdate.set(MongoFields.CreatedAt, Date.from(now)),
-                                              MongoUpdate.set(MongoFields.ExpiresAt, Date.from(reservationExpiresAt))
+                                              MongoUpdate.set(MongoFields.CreatedAt, now.toDate),
+                                              MongoUpdate.set(MongoFields.ExpiresAt, reservationExpiresAt.toDate)
                                             )
                                           )
                                         )
-                                        .subflatMap {
-                                          case Some(result) if result.getMatchedCount == 1L => Right(refreshed)
-                                          case Some(_) => Left(RepositoryError.Conflict)
-                                          case None    => Left(RepositoryError.MissingWriteResult)
-                                        }
+                                        .subflatMap(MongoRepositorySupport.matchedOne(_).as(refreshed))
                                   case None => RepositoryIO.fromEither(Left(RepositoryError.InvalidStoredData))
                                 }
-                            case Some(_) => RepositoryIO.fromEither(Left(RepositoryError.Conflict))
-                            case None    => RepositoryIO.fromEither(Left(RepositoryError.MissingWriteResult))
+                            case _ => RepositoryIO.fromEither(Left(RepositoryError.Conflict))
                           }
                       case Some(_) => RepositoryIO.fromEither(Right(reservation))
                       case None    => RepositoryIO.fromEither(Left(RepositoryError.InvalidStoredData))
@@ -457,7 +437,7 @@ final class MongoAnalyticsReportRepository(
                   )
                 )
                 .flatMap {
-                  case Some(result) if result.getMatchedCount == 1L =>
+                  case result if result.getMatchedCount == 1L =>
                     RepositoryIO
                       .lift(
                         MongoSessionOperations.findOne(
@@ -484,16 +464,15 @@ final class MongoAnalyticsReportRepository(
                                 generation,
                                 revision,
                                 Some("Reserved"),
-                                Some(Date.from(now)),
-                                Some(Date.from(reservationExpiresAt))
+                                Some(now.toDate),
+                                Some(reservationExpiresAt.toDate)
                               )
                             )
                             insertOne(reservations, session, document).as(reservation)
                           }
                         case None => RepositoryIO.fromEither(Left(RepositoryError.InvalidStoredData))
                       }
-                  case Some(_) => RepositoryIO.fromEither(Left(RepositoryError.Conflict))
-                  case None    => RepositoryIO.fromEither(Left(RepositoryError.MissingWriteResult))
+                  case _ => RepositoryIO.fromEither(Left(RepositoryError.Conflict))
                 }
           }
       }
@@ -591,11 +570,7 @@ final class MongoAnalyticsReportRepository(
                                 new ReplaceOptions().upsert(true)
                               )
                             )
-                            .subflatMap(
-                              _.fold[Either[RepositoryError, Unit]](Left(RepositoryError.MissingWriteResult))(_ =>
-                                Right(())
-                              )
-                            )
+                            .void
                       }
                 } else {
                   val updateControl = MongoUpdate.combine(
@@ -616,7 +591,7 @@ final class MongoAnalyticsReportRepository(
                   RepositoryIO
                     .lift(MongoSessionOperations.updateOne(control, session, controlFilter, updateControl))
                     .flatMap {
-                      case Some(updateResult) if updateResult.getMatchedCount == 1L =>
+                      case updateResult if updateResult.getMatchedCount == 1L =>
                         val snapshotDocument = AnalyticsReportSnapshotDocument
                           .write(snapshot, expiresAt)
                           .append(MongoFields.Generation, reservation.generation)
@@ -632,29 +607,23 @@ final class MongoAnalyticsReportRepository(
                               new ReplaceOptions().upsert(true)
                             )
                           )
-                          .flatMap {
-                            case Some(_) =>
-                              RepositoryIO
-                                .lift(
-                                  MongoSessionOperations.updateOne(
-                                    reservations,
-                                    session,
-                                    MongoFilter.and(
-                                      MongoFilter.eq(MongoFields.Id, reservation.runId.value),
-                                      MongoFilter.eq(MongoFields.Generation, reservation.generation),
-                                      MongoFilter.eq(MongoFields.Revision, reservation.revision)
-                                    ),
-                                    MongoUpdate.set(MongoFields.State, "Published")
-                                  )
+                          .flatMap { _ =>
+                            RepositoryIO
+                              .lift(
+                                MongoSessionOperations.updateOne(
+                                  reservations,
+                                  session,
+                                  MongoFilter.and(
+                                    MongoFilter.eq(MongoFields.Id, reservation.runId.value),
+                                    MongoFilter.eq(MongoFields.Generation, reservation.generation),
+                                    MongoFilter.eq(MongoFields.Revision, reservation.revision)
+                                  ),
+                                  MongoUpdate.set(MongoFields.State, "Published")
                                 )
-                                .subflatMap {
-                                  case Some(_) => Right(())
-                                  case None    => Left(RepositoryError.MissingWriteResult)
-                                }
-                            case None => RepositoryIO.fromEither(Left(RepositoryError.MissingWriteResult))
+                              )
+                              .void
                           }
-                      case Some(_) => RepositoryIO.fromEither(Left(RepositoryError.Conflict))
-                      case None    => RepositoryIO.fromEither(Left(RepositoryError.MissingWriteResult))
+                      case _ => RepositoryIO.fromEither(Left(RepositoryError.Conflict))
                     }
                 }
               case (Some(_), Some(_))              => RepositoryIO.fromEither(Left(RepositoryError.Conflict))
@@ -672,7 +641,7 @@ final class MongoAnalyticsReportRepository(
   ): RepositoryIO[Unit] =
     RepositoryIO
       .lift(MongoSessionOperations.insertOne(collection, session, document))
-      .subflatMap(_.fold[Either[RepositoryError, Unit]](Left(RepositoryError.MissingWriteResult))(_ => Right(())))
+      .void
 
   private def readReservation(document: Document): Option[AnalyticsReportRunReservation] =
     for {
@@ -706,8 +675,8 @@ private[mongo] object AnalyticsReportSnapshotDocument {
   def write(snapshot: AnalyticsReportSnapshot, expiresAt: Instant): Document = {
     val document = new Document(MongoFields.Id, CurrentId)
       .append(MongoFields.State, "Published")
-      .append(MongoFields.AsOf, Date.from(snapshot.asOf))
-      .append(MongoFields.ExpiresAt, Date.from(expiresAt))
+      .append(MongoFields.AsOf, snapshot.asOf.toDate)
+      .append(MongoFields.ExpiresAt, expiresAt.toDate)
       .append(MongoFields.Funnel, snapshot.funnel.map(writeFunnel).asJava)
       .append(MongoFields.SkillPostingActivity, snapshot.skillPostingActivity.map(writeSkill).asJava)
     snapshot.timeToHire.fold(document)(value => document.append(MongoFields.TimeToHire, writeTimeToHire(value)))
@@ -726,7 +695,7 @@ private[mongo] object AnalyticsReportSnapshotDocument {
     )
 
   private def writeFunnel(value: AnalyticsFunnelDay): Document =
-    new Document(MongoFields.Day, Date.from(value.day))
+    new Document(MongoFields.Day, value.day.toDate)
       .append(MongoFields.Created, value.created)
       .append(MongoFields.Accepted, value.accepted)
       .append(MongoFields.Declined, value.declined)
@@ -743,7 +712,7 @@ private[mongo] object AnalyticsReportSnapshotDocument {
       .append(MongoFields.ExcludedCount, value.excludedCount)
 
   private def writeSkill(value: AnalyticsSkillPostingDay): Document =
-    new Document(MongoFields.Day, Date.from(value.day))
+    new Document(MongoFields.Day, value.day.toDate)
       .append(MongoFields.Skill, value.skill)
       .append(MongoFields.Postings, value.postings)
 

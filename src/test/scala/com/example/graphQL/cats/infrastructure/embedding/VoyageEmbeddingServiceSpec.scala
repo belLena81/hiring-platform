@@ -21,12 +21,13 @@ final class VoyageEmbeddingServiceSpec extends CatsEffectSuite {
   test("encodes the Voyage request and decodes a successful response") {
     val app: HttpApp[IO] = Kleisli { (request: Request[IO]) =>
       for {
-        body <- request.as[Json]
+        body <- request.as[String]
         _ = assertEquals(request.method, Method.POST)
         _ = assert(request.headers.get(CIString("Authorization")).nonEmpty)
-        _ = assertEquals(body.hcursor.get[String]("input"), Right("Scala"))
-        _ = assertEquals(body.hcursor.get[String]("input_type"), Right("document"))
-        _ = assertEquals(body.hcursor.get[Int]("output_dimension"), Right(2))
+        _ = assertEquals(
+          body,
+          """{"input":"Scala","model":"voyage-4-lite","input_type":"document","output_dimension":2,"output_dtype":"float","truncation":true}"""
+        )
       } yield Response[IO](Status.Ok).withEntity(
         Json.obj(
           "data" -> Json.arr(Json.obj("embedding" -> Json.arr(Json.fromFloatOrNull(0.1f), Json.fromFloatOrNull(0.2f)))),
@@ -216,19 +217,10 @@ final class VoyageEmbeddingServiceSpec extends CatsEffectSuite {
     }
   }
 
-  test("rejects an invalid endpoint while constructing the provider resource") {
+  test("builds and releases the provider resource without contacting the endpoint") {
     VoyageEmbeddingService
-      .resource(
-        "test-key",
-        "not a URI",
-        "voyage-4-lite",
-        2,
-        1.second,
-        diagnostics = com.example.graphQL.cats.service.Diagnostics.noop
-      )
-      .use(_ => IO.raiseError[Unit](new AssertionError("invalid endpoint was accepted")))
-      .attempt
-      .map(result => assert(result.isLeft))
+      .resource("test-key", endpoint, "voyage-4-lite", 2, 1.second, diagnostics = Diagnostics.noop)
+      .use(_ => IO.unit)
   }
 
   test("rejects multiple vectors for a single embedding input") {

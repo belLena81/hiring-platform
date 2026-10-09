@@ -4,6 +4,7 @@ import cats.effect.IO
 import cats.effect.std.Dispatcher
 import cats.syntax.all.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.GraphQLFailure
+import com.example.graphQL.cats.shared.CauseChain
 import scala.concurrent.{ExecutionContext, Future}
 import scala.jdk.CollectionConverters.*
 import scala.util.control.NoStackTrace
@@ -81,11 +82,8 @@ private[graphql] final class HiringGraphQLSangriaAdapter(dispatcher: Dispatcher[
   private def isInvalidQuery(error: Throwable): Boolean =
     error match {
       case _: QueryAnalysisError => true
-      case other                 => causes(other).exists(_.isInstanceOf[ComplexityRejected])
+      case other                 => CauseChain(other).exists(_.isInstanceOf[ComplexityRejected])
     }
-
-  private def causes(error: Throwable): Iterator[Throwable] =
-    Iterator.iterate(Option(error))(_.flatMap(current => Option(current.getCause))).takeWhile(_.nonEmpty).flatten
 }
 
 private final case class ResolverFailureSignal(failure: HiringGraphQLFailure) extends RuntimeException with NoStackTrace

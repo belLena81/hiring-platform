@@ -2,13 +2,12 @@ package com.example.hiring.analytics.config
 
 import cats.effect.Async
 import com.example.hiring.analytics.errors.AnalyticsError
-import cats.data.ValidatedNec
+import cats.data.{NonEmptyChain, ValidatedNec}
 import cats.syntax.all.*
 import pureconfig.ConfigReader
 import pureconfig.error.UserValidationFailed
 
 import java.net.InetAddress
-import scala.util.Try
 
 enum KafkaSecurityProtocol(val kafkaValue: String) {
   case SaslSsl extends KafkaSecurityProtocol("SASL_SSL")
@@ -62,45 +61,44 @@ object KafkaConnection {
       .forall(endpoint => BootstrapEndpoint.parse(endpoint).exists(_.allowedHost))
 
   def preflight[F[_]: Async](connection: KafkaConnection): F[Unit] =
-    preflightUsing(connection, host => Try(InetAddress.getAllByName(host).toVector).toOption)
+    preflightUsing(connection, host => Either.catchNonFatal(InetAddress.getAllByName(host).toVector))
 
   private[analytics] def preflightUsing[F[_]: Async](
       connection: KafkaConnection,
-      resolveAddresses: String => Option[Vector[InetAddress]]
+      resolveAddresses: String => Either[Throwable, Vector[InetAddress]]
   ): F[Unit] =
     Async[F].fromEither(validate(connection).toEither.leftMap(AnalyticsError.InvalidInput.apply)) *>
-      (if (connection.securityProtocol == KafkaSecurityProtocol.SaslPlaintext)
-         Async[F]
-           .blocking(localPlaintextBootstrapUsing(connection.bootstrapServers, resolveAddresses))
-           .flatMap(valid =>
-             Async[F].raiseUnless(valid)(
-               AnalyticsError
-                 .InvalidConfiguration("Kafka plaintext endpoint did not resolve exclusively to loopback addresses")
-             )
-           )
-       else Async[F].unit)
+      Async[F].whenA(connection.securityProtocol == KafkaSecurityProtocol.SaslPlaintext)(
+        Async[F]
+          .blocking(connection.bootstrapServers.split(",", -1).toList.forallM(resolvesLocally(_, resolveAddresses)))
+          .flatMap {
+            case Right(true)  => Async[F].unit
+            case Right(false) => Async[F].raiseError(plaintextRejected(None))
+            case Left(cause)  => Async[F].raiseError(plaintextRejected(Some(cause)))
+          }
+      )
 
-  private[analytics] def localPlaintextBootstrap(bootstrapServers: String): Boolean =
-    structurallyLocal(bootstrapServers)
+  private def plaintextRejected(cause: Option[Throwable]): AnalyticsError =
+    AnalyticsError.InvalidConfiguration(
+      NonEmptyChain.one("Kafka plaintext endpoint did not resolve exclusively to loopback addresses"),
+      cause
+    )
 
-  private[analytics] def localPlaintextBootstrapUsing(
-      bootstrapServers: String,
-      resolveAddresses: String => Option[Vector[InetAddress]]
-  ): Boolean =
-    bootstrapServers.trim.nonEmpty && bootstrapServers.split(",", -1).forall { endpoint =>
-      BootstrapEndpoint.parse(endpoint).exists(_.isLocal(resolveAddresses))
+  private def resolvesLocally(
+      endpoint: String,
+      resolveAddresses: String => Either[Throwable, Vector[InetAddress]]
+  ): Either[Throwable, Boolean] =
+    BootstrapEndpoint.parse(endpoint).fold(false.asRight[Throwable]) { parsed =>
+      if (parsed.composeKafka) true.asRight
+      else resolveAddresses(parsed.host).map(addresses => addresses.nonEmpty && addresses.forall(_.isLoopbackAddress))
     }
 
   private final case class BootstrapEndpoint(host: String, port: Int) {
-    def allowedHost: Boolean =
-      (host.equalsIgnoreCase("kafka") && port == 9092) || host.equalsIgnoreCase("localhost") ||
-        (host.nonEmpty && host.forall(char => char.isDigit || char == '.' || char == ':'))
+    def composeKafka: Boolean = host.equalsIgnoreCase("kafka") && port == 9092
 
-    def isLocal(resolveAddresses: String => Option[Vector[InetAddress]]): Boolean =
-      (host.equalsIgnoreCase("kafka") && port == 9092) ||
-        ((host.equalsIgnoreCase("localhost") || (host.nonEmpty && host.forall(char =>
-          char.isDigit || char == '.' || char == ':'
-        ))) && resolveAddresses(host).exists(addresses => addresses.nonEmpty && addresses.forall(_.isLoopbackAddress)))
+    def allowedHost: Boolean =
+      composeKafka || host.equalsIgnoreCase("localhost") ||
+        (host.nonEmpty && host.forall(char => char.isDigit || char == '.' || char == ':'))
   }
 
   private object BootstrapEndpoint {

@@ -282,10 +282,12 @@ private[mongo] object MongoHiringMigrations {
   /** Seeds a durable report generation and visibility record independently of the expiring snapshot payload. */
   private val analyticsReportControl: MongoMigrationStep = {
     def verify(run: MigrationRun): IO[Unit] =
-      run.database
-        .getCollection(MongoCollections.AnalyticsReportControl)
-        .find(Filters.eq(MongoFields.Id, "analytics-report"))
-        .first
+      MongoSessionOperations
+        .findById(
+          IO.pure(run.database.getCollection(MongoCollections.AnalyticsReportControl)),
+          None,
+          "analytics-report"
+        )
         .flatMap {
           case Some(document)
               if Option(document.get(MongoFields.Generation, classOf[java.lang.Long])).isDefined &&
@@ -298,7 +300,7 @@ private[mongo] object MongoHiringMigrations {
     def seed(run: MigrationRun): IO[Unit] = {
       val snapshots = run.database.getCollection(MongoCollections.AnalyticsReportSnapshots)
       val controls = run.database.getCollection(MongoCollections.AnalyticsReportControl)
-      snapshots.find(Filters.eq(MongoFields.Id, "current")).first.flatMap { legacy =>
+      MongoSessionOperations.findById(IO.pure(snapshots), None, "current").flatMap { legacy =>
         val visible = legacy.exists(snapshot =>
           snapshot.getString(MongoFields.State) == "Published" &&
             Option(snapshot.getDate(MongoFields.ExpiresAt)).exists(_.after(new java.util.Date()))
@@ -415,10 +417,11 @@ private[mongo] object MongoHiringMigrations {
     verifyRetainedSearchSessionForClick(
       event,
       id =>
-        database
-          .getCollection(MongoCollections.SearchSessions)
-          .find(Filters.eq(MongoFields.Id, id.toString))
-          .first,
+        MongoSessionOperations.findById(
+          IO.pure(database.getCollection(MongoCollections.SearchSessions)),
+          None,
+          id.toString
+        ),
       diagnostics
     )
 
@@ -559,7 +562,7 @@ private[mongo] object MongoHiringMigrations {
     users.updateOne(unchanged, Updates.set(MongoFields.ProfileSkillsCanonical, canonical)).flatMap {
       case result if result.getMatchedCount == 1L => IO.unit
       case _ if retries > 0                       =>
-        users.find(Filters.eq(MongoFields.Id, id)).first.flatMap {
+        MongoSessionOperations.findById(IO.pure(users), None, id).flatMap {
           case Some(latest) =>
             val latestProfile = latest.get(MongoFields.Profile) match {
               case profile: Document => Some(profile)

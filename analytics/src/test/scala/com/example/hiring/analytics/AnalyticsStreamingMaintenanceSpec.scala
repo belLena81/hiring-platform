@@ -49,8 +49,8 @@ final class AnalyticsStreamingMaintenanceSpec extends CatsEffectSuite {
       _ <- AnalyticsTestLakehouseLocks.processLocal[IO].use { lock =>
         val maintenance = new AnalyticsStreamingMaintenance[IO]("hiring", lock, 60.seconds, _ => calls.update(_ + 1))
         lock.resource("hiring").use { _ =>
-          maintenance.runOnce.start.flatMap(fiber => IO.cede *> fiber.cancel)
-        } *> maintenance.runOnce
+          maintenance.tick.void.start.flatMap(fiber => IO.cede *> fiber.cancel)
+        } *> maintenance.tick.void
       }
       count <- calls.get
       _ <- IO(assertEquals(count, 1))
@@ -65,7 +65,7 @@ final class AnalyticsStreamingMaintenanceSpec extends CatsEffectSuite {
           Resource.eval(IO.raiseError[Unit](AnalyticsError.LakehouseLockTimeout))
       }
       maintenance = new AnalyticsStreamingMaintenance[IO]("hiring", lock, 60.seconds, _ => calls.update(_ + 1))
-      _ <- maintenance.runOnce
+      _ <- maintenance.tick.void
       count <- calls.get
       _ <- IO(assertEquals(count, 0))
     } yield ()
@@ -134,7 +134,7 @@ final class AnalyticsStreamingMaintenanceSpec extends CatsEffectSuite {
         lock,
         60.seconds,
         _ => calls.update(_ + 1)
-      ).runOnce.attempt
+      ).tick.void.attempt
       count <- calls.get
       _ <- IO { assertEquals(result, Left(failure)); assertEquals(count, 0) }
     } yield ()
@@ -159,7 +159,7 @@ final class AnalyticsStreamingMaintenanceSpec extends CatsEffectSuite {
             60.seconds,
             _ => (entered.complete(()).void *> finish.get *> completed.set(true)).onCancel(interrupted.set(true))
           )
-          tick <- maintenance.runOnce.start
+          tick <- maintenance.tick.void.start
           _ <- entered.get
           cancelling <- tick.cancel.start
           _ <- IO.sleep(1.second)
@@ -182,8 +182,9 @@ final class AnalyticsStreamingMaintenanceSpec extends CatsEffectSuite {
       override def resource(root: String): Resource[IO, Unit] =
         Resource.make(IO.unit)(_ => IO.raiseError[Unit](AnalyticsError.LakehouseLockTimeout))
     }
-    new AnalyticsStreamingMaintenance[IO]("hiring", lock, 60.seconds, _ => IO.unit).runOnce.attempt.flatMap { result =>
-      IO(assertEquals(result, Left(AnalyticsError.LakehouseLockTimeout)))
+    new AnalyticsStreamingMaintenance[IO]("hiring", lock, 60.seconds, _ => IO.unit).tick.void.attempt.flatMap {
+      result =>
+        IO(assertEquals(result, Left(AnalyticsError.LakehouseLockTimeout)))
     }
   }
 

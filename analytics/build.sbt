@@ -36,6 +36,8 @@ lazy val analytics = (project in file("."))
     Compile / run / fork := true,
     Test / fork := true,
     Test / jacocoReportSettings := JacocoReportSettings()
+      .withFormats(JacocoReportFormats.ScalaHTML, JacocoReportFormats.XML),
+    IntegrationTest / jacocoMergedReportSettings := JacocoReportSettings()
       .withThresholds(JacocoThresholds(line = 60))
       .withFormats(JacocoReportFormats.ScalaHTML, JacocoReportFormats.XML),
     Test / unmanagedSourceDirectories += baseDirectory.value.getParentFile / "test-support" / "src" / "main" / "scala",
@@ -71,7 +73,7 @@ lazy val analytics = (project in file("."))
       "io.github.iltotore" %% "iron" % ironVersion,
       "io.github.iltotore" %% "iron-pureconfig" % ironVersion,
       "co.fs2" %% "fs2-core" % fs2Version,
-      "co.fs2" %% "fs2-io" % fs2Version % Test,
+      "co.fs2" %% "fs2-io" % fs2Version,
       "org.typelevel" %% "log4cats-slf4j" % log4catsVersion,
       "io.github.kirill5k" %% "mongo4cats-core" % mongo4catsVersion,
       "io.github.kirill5k" %% "mongo4cats-circe" % mongo4catsVersion,

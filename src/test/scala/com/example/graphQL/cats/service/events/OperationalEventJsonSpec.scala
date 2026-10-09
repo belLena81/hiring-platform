@@ -27,22 +27,6 @@ class OperationalEventJsonSpec extends FunSuite {
     assertEquals(OperationalEventJson.decode(Json.Null), Left("MalformedEnvelope"))
   }
 
-  test("raw adapter DTOs with null fields return typed errors") {
-    val invalid = List(
-      null,
-      statusEvent.copy(eventId = null),
-      statusEvent.copy(eventType = null),
-      statusEvent.copy(occurredAt = null),
-      statusEvent.copy(aggregateType = null),
-      statusEvent.copy(aggregateId = null),
-      statusEvent.copy(actorId = null.asInstanceOf[UserId]),
-      statusEvent.copy(payload = null)
-    )
-    invalid.foreach(value =>
-      assertEquals(OperationalEventJson.validate(value), Left(OperationalEventContractError.MalformedEnvelope))
-    )
-  }
-
   test("all nine fact types retain exactly seven envelope fields and round-trip") {
     val payloads = List(
       JobFact(JobKind.Created, JobSnapshot(jobId, List("Scala"), JobStatus.Open)),

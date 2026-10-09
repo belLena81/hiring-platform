@@ -8,7 +8,6 @@ import com.example.graphQL.cats.api.graphql.{GraphQLDocumentCache, HiringGraphQL
 import com.example.graphQL.cats.shared.HiringHttpPaths
 import com.example.graphQL.cats.service.{ActorContext, Diagnostics, HealthService, LogFields, ProbeResult}
 import org.http4s.*
-import org.http4s.circe.*
 import org.http4s.dsl.Http4sDsl
 import org.typelevel.otel4s.trace.Tracer
 import scala.concurrent.duration.*
@@ -25,13 +24,12 @@ final class HiringApiRoutes(
   private val probePaths = Set(HiringHttpPaths.HealthPath, HiringHttpPaths.ReadyPath)
 
   private val healthRoutes: HttpRoutes[IO] = HttpRoutes.of[IO] {
-    case GET -> Root / "health" =>
-      Ok(io.circe.Json.obj("status" -> io.circe.Json.fromString("UP")))
+    case GET -> Root / "health"          => IO.pure(HttpMiddleware.statusResponse(Status.Ok, "UP"))
     case request @ GET -> Root / "ready" =>
       HttpMiddleware.requestId(request).flatMap { correlationId =>
-        service.readiness(Some(correlationId)).flatMap {
-          case ProbeResult.Ready => Ok(io.circe.Json.obj("status" -> io.circe.Json.fromString("READY")))
-          case _ => ServiceUnavailable(io.circe.Json.obj("status" -> io.circe.Json.fromString("NOT_READY")))
+        service.readiness(Some(correlationId)).map {
+          case ProbeResult.Ready => HttpMiddleware.statusResponse(Status.Ok, "READY")
+          case _                 => HttpMiddleware.statusResponse(Status.ServiceUnavailable, "NOT_READY")
         }
       }
   }
@@ -42,30 +40,11 @@ final class HiringApiRoutes(
       graphQL.rejection(HttpRejection.Internal, request, LogFields.failure(failure))
     val onEntityTooLarge = (request: Request[IO]) => graphQL.rejection(HttpRejection.PayloadTooLarge, request)
 
-    for {
-      protectedRoutes <- HttpMiddleware(
-        config,
-        graphQL.routes.orNotFound,
-        diagnostics,
-        tracer,
-        onError,
-        onEntityTooLarge
-      )
-      probeRoutes <- HttpMiddleware(
-        config,
-        healthRoutes.orNotFound,
-        diagnostics,
-        tracer,
-        onError,
-        onEntityTooLarge,
-        applyAdmissionControl = false
-      )
-    } yield Kleisli { request =>
-      val app =
-        if (probePaths.contains(request.uri.path)) probeRoutes
-        else protectedRoutes
-      OptionT.liftF(app(request))
-    }
+    val isProbe = (request: Request[IO]) => probePaths.contains(request.uri.path)
+    val (probes, guarded) = (healthRoutes.orNotFound, graphQL.routes.orNotFound)
+    val routes: HttpApp[IO] = Kleisli(request => (if (isProbe(request)) probes else guarded).run(request))
+    HttpMiddleware(config, routes, isProbe, diagnostics, tracer, onError, onEntityTooLarge)
+      .map(app => Kleisli(request => OptionT.liftF(app(request))))
   }
 
   def httpApp(config: HiringApiRoutes.HttpConfig): IO[HttpApp[IO]] =

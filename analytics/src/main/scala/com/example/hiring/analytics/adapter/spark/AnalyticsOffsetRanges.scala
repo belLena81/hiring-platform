@@ -15,6 +15,15 @@ import org.apache.spark.sql.functions.{col, countDistinct, max, min}
 private[analytics] object AnalyticsOffsetRanges {
   final case class Observed(count: Long, first: Long, last: Long)
 
+  /** The range has fewer records than requested. */
+  def missing(range: PartitionOffsetRange, observed: Long): AnalyticsError =
+    AnalyticsError.MissingOffsetRange(
+      AnalyticsTopic.unwrap(range.topic),
+      range.partition,
+      range.endOffsetExclusive - range.startOffset,
+      observed
+    )
+
   def requireNonEmpty[F[_]: Async](manifest: AnalyticsRunManifest): F[Unit] =
     manifest.offsetRanges.find(range => range.startOffset == range.endOffsetExclusive) match {
       case Some(range) =>
@@ -39,14 +48,7 @@ private[analytics] object AnalyticsOffsetRanges {
         )
       )
     else if (range.endOffsetExclusive > latestExclusive)
-      Left(
-        AnalyticsError.MissingOffsetRange(
-          AnalyticsTopic.unwrap(range.topic),
-          range.partition,
-          range.endOffsetExclusive - range.startOffset,
-          (latestExclusive - range.startOffset).max(0L)
-        )
-      )
+      Left(missing(range, (latestExclusive - range.startOffset).max(0L)))
     else Right(())
 
   def complete(range: PartitionOffsetRange, observed: Option[Observed]): Either[AnalyticsError, Unit] = {
@@ -56,15 +58,7 @@ private[analytics] object AnalyticsOffsetRanges {
           if actual.count == requested && actual.first == range.startOffset &&
             actual.last == range.endOffsetExclusive - 1L =>
         Right(())
-      case other =>
-        Left(
-          AnalyticsError.MissingOffsetRange(
-            AnalyticsTopic.unwrap(range.topic),
-            range.partition,
-            requested,
-            other.fold(0L)(_.count)
-          )
-        )
+      case other => Left(missing(range, other.fold(0L)(_.count)))
     }
   }
 
@@ -140,15 +134,7 @@ private[analytics] object AnalyticsOffsetRanges {
       case Some(actual)
           if actual.count <= requested && actual.first >= range.startOffset && actual.last < range.endOffsetExclusive =>
         Right(())
-      case other =>
-        Left(
-          AnalyticsError.MissingOffsetRange(
-            AnalyticsTopic.unwrap(range.topic),
-            range.partition,
-            requested,
-            other.fold(0L)(_.count)
-          )
-        )
+      case other => Left(missing(range, other.fold(0L)(_.count)))
     }
   }
 }

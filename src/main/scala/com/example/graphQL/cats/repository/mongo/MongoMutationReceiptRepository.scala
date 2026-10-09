@@ -10,7 +10,6 @@ import mongo4cats.database.MongoDatabase
 import org.bson.Document
 
 import java.time.Instant
-import java.util.Date
 
 /** The Mongo-only transaction context used by receipt-aware repository writes. */
 private[mongo] final case class MongoMutationWriteContext(session: Option[ClientSession[IO]])
@@ -107,7 +106,7 @@ final class MongoMutationReceiptRepository(
       .repositoryGuard(diagnostics, "mutationReceipt.insert")(
         RepositoryIO
           .lift(MongoSessionOperations.insertOne(collection, session, receipt))
-          .subflatMap(MongoRepositorySupport.writeResult(_).void)
+          .void
       )(MongoErrors.duplicateAsConflict)
 
   private def complete(
@@ -126,8 +125,8 @@ final class MongoMutationReceiptRepository(
     val update = MongoUpdate.combine(
       MongoUpdate.set(MongoFields.State, MutationReceiptState.Completed.toString),
       MongoUpdate.set(MongoFields.Entity, entityDocument(entity)),
-      MongoUpdate.set(MongoFields.CompletedAt, Date.from(now)),
-      MongoUpdate.set(MongoFields.ExpiresAt, Date.from(expiresAt))
+      MongoUpdate.set(MongoFields.CompletedAt, now.toDate),
+      MongoUpdate.set(MongoFields.ExpiresAt, expiresAt.toDate)
     )
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "mutationReceipt.complete")(
@@ -161,8 +160,8 @@ final class MongoMutationReceiptRepository(
         .append(MongoFields.IdempotencyKey, key.idempotencyKey.toString)
         .append(MongoFields.Fingerprint, fingerprint.value)
         .append(MongoFields.State, MutationReceiptState.InProgress.toString)
-        .append(MongoFields.CreatedAt, Date.from(now))
-        .append(MongoFields.ExpiresAt, Date.from(expiresAt))
+        .append(MongoFields.CreatedAt, now.toDate)
+        .append(MongoFields.ExpiresAt, expiresAt.toDate)
     }
 
   private def entityDocument(entity: MutationEntityReference): Document =

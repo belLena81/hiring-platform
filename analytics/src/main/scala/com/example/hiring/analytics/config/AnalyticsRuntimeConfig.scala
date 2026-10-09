@@ -2,15 +2,22 @@ package com.example.hiring.analytics.config
 
 import com.example.hiring.analytics.domain.{
   AnalyticsLateFactReplayRequest,
+  AnalyticsReplayRequestId,
   AnalyticsRunManifest,
   AnalyticsTopic,
+  KafkaRetentionEvidence,
   PartitionOffsetRange,
+  RetentionEvidence,
+  RetentionHorizon,
   RunId,
-  SubjectPseudonymizer
+  SubjectPseudonymizer,
+  WriterDisposition,
+  WriterInventory,
+  WriterRecord
 }
 import com.example.hiring.analytics.errors.AnalyticsError
 
-import cats.data.ValidatedNec
+import cats.data.{Validated, ValidatedNec}
 import cats.effect.Async
 import cats.syntax.all.*
 import com.mongodb.ConnectionString
@@ -18,9 +25,8 @@ import io.github.iltotore.iron.*
 import io.github.iltotore.iron.constraint.any.Not
 import io.github.iltotore.iron.constraint.string.Blank
 import _root_.pureconfig.*
-import _root_.pureconfig.error.UserValidationFailed
-import java.time.Instant
 import java.nio.file.Paths
+import java.time.Instant
 
 type AnalyticsNonBlank = String :| Not[Blank]
 
@@ -31,13 +37,14 @@ final case class AnalyticsCommonSettings(
     sparkLocalDirectory: AnalyticsNonBlank,
     kafka: KafkaConnection,
     lakehouseRoot: AnalyticsNonBlank,
-    hmac: AnalyticsHmacSettings,
+    pseudonymizer: SubjectPseudonymizer,
     operational: AnalyticsOperationalSettings
 ) {
   override def toString: String = "AnalyticsCommonSettings([REDACTED])"
 }
 
-final case class AnalyticsHmacSettings(
+/** HMAC key-ring inputs; validated once into [[SubjectPseudonymizer]] and never kept in settings. */
+private[config] final case class AnalyticsHmacSettings(
     secretBase64: AnalyticsNonBlank,
     keyId: AnalyticsNonBlank,
     previousKeyId: Option[AnalyticsNonBlank],
@@ -73,38 +80,6 @@ final case class AnalyticsWorkerSettings(
   override def toString: String = "AnalyticsWorkerSettings([REDACTED])"
 }
 
-private[analytics] enum AnalyticsAuditWriterDisposition {
-  case Stopped, AccessRevoked, Active, Unknown
-}
-
-private[analytics] object AnalyticsAuditWriterDisposition {
-  given ConfigReader[AnalyticsAuditWriterDisposition] = ConfigReader[String].emap {
-    case "stopped"        => Right(Stopped)
-    case "access-revoked" => Right(AccessRevoked)
-    case "active"         => Right(Active)
-    case "unknown"        => Right(Unknown)
-    case _                => Left(UserValidationFailed("must be stopped, access-revoked, active, or unknown"))
-  }
-}
-
-private[analytics] final case class AnalyticsAuditWriter(
-    identity: Option[AnalyticsNonBlank],
-    disposition: Option[AnalyticsAuditWriterDisposition],
-    evidenceReference: Option[AnalyticsNonBlank]
-)
-
-private[analytics] final case class AnalyticsAuditHorizon(
-    retainedUntil: Option[Instant],
-    evidenceReference: Option[AnalyticsNonBlank]
-)
-
-private[analytics] final case class AnalyticsAuditWriterInventory(
-    observedAt: Option[Instant],
-    coverageReference: Option[AnalyticsNonBlank],
-    managed: Vector[AnalyticsAuditWriter],
-    unmanaged: Vector[AnalyticsAuditWriter]
-)
-
 private[analytics] final case class AnalyticsKeyRetirementAuditSettings(
     mongoUri: AnalyticsNonBlank,
     mongoDatabase: AnalyticsNonBlank,
@@ -112,13 +87,8 @@ private[analytics] final case class AnalyticsKeyRetirementAuditSettings(
     lakehouseRoot: AnalyticsNonBlank,
     operational: AnalyticsOperationalSettings,
     retiringKeyId: AnalyticsNonBlank,
-    kafkaBarrierOffset: Option[Long],
-    kafkaEarliestAvailableOffset: Option[Long],
-    kafkaEvidenceReference: Option[AnalyticsNonBlank],
-    deltaData: AnalyticsAuditHorizon,
-    deltaLogs: AnalyticsAuditHorizon,
-    reports: AnalyticsAuditHorizon,
-    writers: AnalyticsAuditWriterInventory
+    retention: RetentionEvidence,
+    writers: WriterInventory
 ) {
   override def toString: String = "AnalyticsKeyRetirementAuditSettings([REDACTED])"
 }
@@ -127,59 +97,68 @@ private[analytics] final case class AnalyticsKeyRetirementAuditSettings(
 object AnalyticsRuntimeConfig {
   import AnalyticsConfigReaders.{complete, decode, given}
 
-  private given ConfigReader[AnalyticsAuditHorizon] = ConfigReader.derived
-  private given ConfigReader[AnalyticsAuditWriter] = ConfigReader.derived
-  private given ConfigReader[AnalyticsAuditWriterInventory] = ConfigReader.derived
+  // Optional evidence text defaults to the empty "not provided" value the audit treats as missing.
+  private given ConfigReader[RetentionHorizon] =
+    ConfigReader.forProduct2("retained-until", "evidence-reference")(
+      (until: Option[Instant], reference: Option[String]) => RetentionHorizon(until, reference.getOrElse(""))
+    )
+  private given ConfigReader[WriterRecord] =
+    ConfigReader.forProduct3("identity", "disposition", "evidence-reference")(
+      (identity: Option[String], disposition: Option[WriterDisposition], reference: Option[String]) =>
+        WriterRecord(identity.getOrElse(""), disposition.getOrElse(WriterDisposition.Unknown), reference.getOrElse(""))
+    )
+  private given ConfigReader[WriterInventory] =
+    ConfigReader.forProduct4("observed-at", "coverage-reference", "managed", "unmanaged")(
+      (
+          observedAt: Option[Instant],
+          coverage: Option[String],
+          managed: Vector[WriterRecord],
+          unmanaged: Vector[WriterRecord]
+      ) => WriterInventory(observedAt, coverage.getOrElse(""), managed, unmanaged)
+    )
+  private given ConfigReader[KafkaRetentionEvidence] =
+    ConfigReader.forProduct3("barrier-offset", "earliest-available-offset", "evidence-reference")(
+      (barrier: Option[Long], earliest: Option[Long], reference: Option[String]) =>
+        KafkaRetentionEvidence(barrier, earliest, reference.getOrElse(""))
+    )
 
   private final case class MongoInput(uri: AnalyticsNonBlank, database: AnalyticsNonBlank) derives ConfigReader
   private final case class SparkInput(master: AnalyticsNonBlank, localDirectory: AnalyticsNonBlank) derives ConfigReader
   private final case class LakehouseInput(root: AnalyticsNonBlank) derives ConfigReader
-  private final case class KafkaFencerInput(username: Option[AnalyticsNonBlank], password: Option[AnalyticsNonBlank])
-      derives ConfigReader
   private final case class KafkaInput(
       bootstrapServers: AnalyticsNonBlank,
       username: AnalyticsNonBlank,
       password: AnalyticsNonBlank,
       topic: AnalyticsTopic,
-      fencer: KafkaFencerInput,
       securityProtocol: Option[KafkaSecurityProtocol],
       allowPlaintext: Option[Boolean]
   ) derives ConfigReader
-  private final case class BatchInput(
-      runId: Option[AnalyticsNonBlank],
-      partition: Option[Int],
-      startOffset: Option[Long],
-      endOffsetExclusive: Option[Long]
-  ) derives ConfigReader
-  private final case class ReplayCoordinateInput(topic: String, partition: Int, offset: Long) derives ConfigReader
-  private final case class ReplayInput(
-      requestId: Option[String],
-      maximumRecords: Option[Int],
-      coordinates: Option[List[ReplayCoordinateInput]]
-  ) derives ConfigReader
-  private final case class KafkaRetentionEvidence(
-      barrierOffset: Option[Long],
-      earliestAvailableOffset: Option[Long],
-      evidenceReference: Option[AnalyticsNonBlank]
-  ) derives ConfigReader
-  private final case class KeyRetirementAuditInput(
-      retiringKeyId: Option[AnalyticsNonBlank],
-      kafka: KafkaRetentionEvidence,
-      deltaData: AnalyticsAuditHorizon,
-      deltaLogs: AnalyticsAuditHorizon,
-      reports: AnalyticsAuditHorizon,
-      writers: AnalyticsAuditWriterInventory
-  ) derives ConfigReader
-  private final case class AnalyticsConfigValues(
+  private final case class CommonInput(
       mongo: MongoInput,
       spark: SparkInput,
       kafka: KafkaInput,
       lakehouse: LakehouseInput,
       hmac: AnalyticsHmacSettings,
-      batch: Option[BatchInput],
-      operational: AnalyticsOperationalSettings,
-      keyRetirementAudit: Option[KeyRetirementAuditInput],
-      replay: Option[ReplayInput]
+      operational: AnalyticsOperationalSettings
+  ) derives ConfigReader
+
+  // Command sections are decoded only by their own command, so each field is required where the section is read.
+  private final case class FencerInput(username: AnalyticsNonBlank, password: AnalyticsNonBlank) derives ConfigReader
+  private final case class BatchInput(runId: RunId, partition: Int, startOffset: Long, endOffsetExclusive: Long)
+      derives ConfigReader
+  private final case class ReplayCoordinateInput(topic: String, partition: Int, offset: Long) derives ConfigReader
+  private final case class ReplayInput(
+      requestId: AnalyticsReplayRequestId,
+      maximumRecords: Option[Int],
+      coordinates: List[ReplayCoordinateInput]
+  ) derives ConfigReader
+  private final case class KeyRetirementAuditInput(
+      retiringKeyId: AnalyticsNonBlank,
+      kafka: KafkaRetentionEvidence,
+      deltaData: RetentionHorizon,
+      deltaLogs: RetentionHorizon,
+      reports: RetentionHorizon,
+      writers: WriterInventory
   ) derives ConfigReader
 
   def loadBatch[F[_]: Async]: F[AnalyticsBatchSettings] =
@@ -204,126 +183,89 @@ object AnalyticsRuntimeConfig {
     Async[F].blocking(read(ConfigSource.default)).flatMap(Async[F].fromEither)
 
   private[analytics] def readBatch(source: ConfigSource): Either[AnalyticsError, AnalyticsBatchSettings] =
-    complete(values(source).andThen(batch))
+    complete(
+      (decodeCommon(source), decode[BatchInput](source, "analytics.batch")).tupled.andThen { case (raw, input) =>
+        val ranges = PartitionOffsetRange
+          .fromTopic(raw.kafka.topic, input.partition, input.startOffset, input.endOffsetExclusive)
+          .map(Vector(_))
+        (common(raw), AnalyticsRunManifest.from(input.runId, ranges))
+          .mapN(AnalyticsBatchSettings.apply)
+      }
+    )
 
   private[analytics] def readWorker(source: ConfigSource): Either[AnalyticsError, AnalyticsWorkerSettings] =
-    complete(values(source).andThen(worker))
+    complete(
+      (
+        decodeCommon(source).andThen(raw => common(raw).tupleRight(raw.kafka.topic)),
+        decode[FencerInput](source, "analytics.kafka.fencer")
+      ).tupled.andThen { case ((settings, topic), fencer) =>
+        KafkaConnection
+          .validate(settings.kafka.copy(saslUsername = Some(fencer.username), saslPassword = Some(fencer.password)))
+          .map(AnalyticsWorkerSettings(settings, topic, _))
+      }
+    )
 
   private[analytics] def readStreaming(
       source: ConfigSource
   ): Either[AnalyticsError, AnalyticsStreamingRuntimeSettings] =
     complete(
-      (values(source).andThen(raw => common(raw).tupleRight(raw.kafka.topic)), AnalyticsStreamingSettings.read(source))
+      (
+        decodeCommon(source).andThen(raw => common(raw).tupleRight(raw.kafka.topic)),
+        AnalyticsStreamingSettings.read(source)
+      )
         .mapN { case ((settings, topic), streaming) => AnalyticsStreamingRuntimeSettings(settings, streaming, topic) }
     )
 
   private[analytics] def readLateFactReplay(
       source: ConfigSource
   ): Either[AnalyticsError, AnalyticsLateFactReplaySettings] =
-    complete(values(source).andThen(lateFactReplay))
+    complete(
+      (decodeCommon(source), decode[ReplayInput](source, "analytics.replay")).tupled.andThen { case (raw, input) =>
+        val request = AnalyticsLateFactReplayRequest
+          .from(
+            input.requestId,
+            input.coordinates.map(row => (row.topic, row.partition, row.offset)).toVector,
+            input.maximumRecords.getOrElse(AnalyticsLateFactReplayRequest.MaximumCoordinates)
+          )
+        val topicBound = Validated.condNec(
+          input.coordinates.forall(_.topic == AnalyticsTopic.unwrap(raw.kafka.topic)),
+          (),
+          "analytics.replay coordinates must use analytics.kafka.topic"
+        )
+        (common(raw), request, topicBound).mapN((settings, validRequest, _) =>
+          AnalyticsLateFactReplaySettings(settings, validRequest)
+        )
+      }
+    )
 
   private[analytics] def readKeyRetirementAudit(
       source: ConfigSource
   ): Either[AnalyticsError, AnalyticsKeyRetirementAuditSettings] =
-    complete(values(source).andThen(keyRetirementAudit))
-
-  private def values(source: ConfigSource): ValidatedNec[String, AnalyticsConfigValues] =
-    decode[AnalyticsConfigValues](source, "analytics")
-
-  private def batch(raw: AnalyticsConfigValues): ValidatedNec[String, AnalyticsBatchSettings] = {
-    val manifest = raw.batch.toValidNec("analytics.batch configuration is required").andThen { input =>
-      val inputs = (
-        required(input.runId, "analytics.batch.run-id"),
-        input.partition.toValidNec("analytics.batch.partition is required"),
-        input.startOffset.toValidNec("analytics.batch.start-offset is required"),
-        input.endOffsetExclusive.toValidNec("analytics.batch.end-offset-exclusive is required")
-      ).tupled
-      inputs.andThen { case (runIdValue, partition, startOffset, endOffsetExclusive) =>
-        val runId = RunId.from(runIdValue).leftMap(_ => "analytics.batch.run-id must be non-empty").toValidatedNec
-        val ranges = PartitionOffsetRange
-          .fromTopic(raw.kafka.topic, partition, startOffset, endOffsetExclusive)
-          .map(Vector(_))
-        AnalyticsRunManifest.fromValidated(runId, ranges)
-      }
-    }
-    (common(raw), manifest).mapN(AnalyticsBatchSettings.apply)
-  }
-
-  private def worker(raw: AnalyticsConfigValues): ValidatedNec[String, AnalyticsWorkerSettings] =
-    (
-      common(raw),
-      required(raw.kafka.fencer.username, "analytics.kafka.fencer.username"),
-      required(raw.kafka.fencer.password, "analytics.kafka.fencer.password")
-    ).tupled.andThen { case (settings, username, password) =>
-      KafkaConnection
-        .validate(
-          KafkaConnection(
-            settings.kafka.bootstrapServers,
-            Some(username),
-            Some(password),
-            settings.kafka.securityProtocol,
-            settings.kafka.allowPlaintext
-          )
-        )
-        .map(AnalyticsWorkerSettings(settings, raw.kafka.topic, _))
-    }
-
-  private def lateFactReplay(raw: AnalyticsConfigValues): ValidatedNec[String, AnalyticsLateFactReplaySettings] = {
-    val validatedRequest = raw.replay.toValidNec("analytics.replay configuration is required").andThen { value =>
-      val requestId = value.requestId.toValidNec("analytics.replay.request-id is required")
-      val coordinates = value.coordinates.toValidNec("analytics.replay.coordinates is required")
-      val builtRequest = (requestId, coordinates).tupled.andThen { case (id, selected) =>
-        val maximum = value.maximumRecords.getOrElse(AnalyticsLateFactReplayRequest.MaximumCoordinates)
-        AnalyticsLateFactReplayRequest
-          .from(id, selected.map(row => (row.topic, row.partition, row.offset)).toVector, maximum)
-          .leftMap(_.toNonEmptyList.toList.mkString("; "))
-          .toValidatedNec
-      }
-      val configuredTopic = AnalyticsTopic.unwrap(raw.kafka.topic)
-      val topicBound = coordinates.andThen { selected =>
-        Either
-          .cond(
-            selected.forall(_.topic == configuredTopic),
-            (),
-            "analytics.replay coordinates must use analytics.kafka.topic"
-          )
-          .toValidatedNec
-      }
-      (builtRequest, topicBound).mapN((request, _) => request)
-    }
-    (common(raw), validatedRequest).mapN(AnalyticsLateFactReplaySettings.apply)
-  }
-
-  private def keyRetirementAudit(
-      raw: AnalyticsConfigValues
-  ): ValidatedNec[String, AnalyticsKeyRetirementAuditSettings] =
-    raw.keyRetirementAudit.toValidNec("analytics.key-retirement-audit configuration is required").andThen { audit =>
+    complete(
       (
-        mongoUri(raw.mongo.uri),
-        required(audit.retiringKeyId, "analytics.key-retirement-audit.retiring-key-id")
-      ).mapN { (uri, retiringKeyId) =>
+        decodeCommon(source).andThen(raw => mongoUri(raw.mongo.uri).as(raw)),
+        decode[KeyRetirementAuditInput](source, "analytics.key-retirement-audit")
+      ).mapN { (raw, audit) =>
         AnalyticsKeyRetirementAuditSettings(
-          uri,
+          raw.mongo.uri,
           raw.mongo.database,
           raw.spark.master,
           raw.lakehouse.root,
           raw.operational,
-          retiringKeyId,
-          audit.kafka.barrierOffset,
-          audit.kafka.earliestAvailableOffset,
-          audit.kafka.evidenceReference,
-          audit.deltaData,
-          audit.deltaLogs,
-          audit.reports,
+          audit.retiringKeyId,
+          RetentionEvidence(audit.kafka, audit.deltaData, audit.deltaLogs, audit.reports),
           audit.writers
         )
       }
-    }
+    )
+
+  private def decodeCommon(source: ConfigSource): ValidatedNec[String, CommonInput] =
+    decode[CommonInput](source, "analytics")
 
   /** Cross-field rules that no single reader can express: Mongo URI syntax, Kafka transport, directory ownership and
     * the HMAC key ring. Every bound on an individual field is already enforced by its reader.
     */
-  private def common(raw: AnalyticsConfigValues): ValidatedNec[String, AnalyticsCommonSettings] = {
+  private def common(raw: CommonInput): ValidatedNec[String, AnalyticsCommonSettings] = {
     val kafka = KafkaConnection.validate(
       KafkaConnection(
         raw.kafka.bootstrapServers,
@@ -337,8 +279,13 @@ object AnalyticsRuntimeConfig {
       mongoUri(raw.mongo.uri),
       validateSparkLocalDirectory(raw.spark.localDirectory),
       kafka,
-      validateHmac(raw.hmac)
-    ).mapN((uri, localDirectory, connection, hmac) =>
+      SubjectPseudonymizer.validateFromBase64(
+        raw.hmac.secretBase64,
+        raw.hmac.keyId,
+        raw.hmac.previousKeyId,
+        raw.hmac.previousSecretBase64
+      )
+    ).mapN((uri, localDirectory, connection, pseudonymizer) =>
       AnalyticsCommonSettings(
         uri,
         raw.mongo.database,
@@ -346,7 +293,7 @@ object AnalyticsRuntimeConfig {
         localDirectory,
         connection,
         raw.lakehouse.root,
-        hmac,
+        pseudonymizer,
         raw.operational
       )
     )
@@ -372,12 +319,4 @@ object AnalyticsRuntimeConfig {
         )
       }
       .toValidatedNec
-
-  private def required(value: Option[AnalyticsNonBlank], field: String): ValidatedNec[String, AnalyticsNonBlank] =
-    value.toValidNec(s"$field is required")
-
-  private def validateHmac(raw: AnalyticsHmacSettings): ValidatedNec[String, AnalyticsHmacSettings] =
-    SubjectPseudonymizer
-      .validateFromBase64(Some(raw.secretBase64), raw.keyId, raw.previousKeyId, raw.previousSecretBase64)
-      .as(raw)
 }

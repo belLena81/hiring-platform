@@ -13,10 +13,11 @@ import com.example.graphQL.cats.service.port.{
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogFields}
 import com.example.graphQL.cats.service.Diagnostics.*
 import io.circe.{Decoder, Encoder}
-import io.circe.generic.semiauto.deriveDecoder
+import io.circe.derivation.{Configuration, ConfiguredEncoder}
 import org.http4s.{AuthScheme, Credentials, Headers, Method, Request, Uri}
 import org.http4s.client.Client
 import org.http4s.circe.*
+import org.http4s.circe.CirceEntityEncoder.circeEntityEncoder
 import org.http4s.ember.client.EmberClientBuilder
 import org.http4s.headers.Authorization
 import org.typelevel.otel4s.context.propagation.TextMapUpdater
@@ -46,12 +47,12 @@ final class VoyageEmbeddingService(
         VoyageEmbeddingRequest(
           input = input.text,
           model = model,
-          inputType = inputType(input.inputType),
+          inputType = input.inputType,
           outputDimension = dimension,
           outputDtype = "float",
           truncation = true
         )
-      )(using jsonEncoderOf[IO, VoyageEmbeddingRequest])
+      )(using circeEntityEncoder[IO, VoyageEmbeddingRequest])
 
     tracer.span("voyage.embeddings").surround {
       tracer.propagate(request.headers).flatMap { propagatedHeaders =>
@@ -97,82 +98,45 @@ final class VoyageEmbeddingService(
         )
       case _ => Left(EmbeddingError.InvalidResponse)
     }
-
-  private def inputType(inputType: EmbeddingInputType): String =
-    inputType match {
-      case EmbeddingInputType.Query    => "query"
-      case EmbeddingInputType.Document => "document"
-    }
 }
 
+/** Field names are the provider's snake_case wire names; `outputDtype` and `truncation` are fixed by the contract. */
 private final case class VoyageEmbeddingRequest(
     input: String,
     model: String,
-    inputType: String,
+    inputType: EmbeddingInputType,
     outputDimension: Int,
     outputDtype: String,
     truncation: Boolean
-)
+) derives ConfiguredEncoder
 
 private object VoyageEmbeddingRequest {
-  given Encoder[VoyageEmbeddingRequest] = Encoder.forProduct6(
-    "input",
-    "model",
-    "input_type",
-    "output_dimension",
-    "output_dtype",
-    "truncation"
-  )(request =>
-    (
-      request.input,
-      request.model,
-      request.inputType,
-      request.outputDimension,
-      request.outputDtype,
-      request.truncation
-    )
-  )
+  private given Configuration = Configuration.default.withSnakeCaseMemberNames
+  given Encoder[EmbeddingInputType] = Encoder[String].contramap(_.toString.toLowerCase)
 }
 
-private final case class VoyageEmbeddingItem(embedding: List[Float])
-
-private object VoyageEmbeddingItem {
-  given Decoder[VoyageEmbeddingItem] = deriveDecoder
-}
+private final case class VoyageEmbeddingItem(embedding: List[Float]) derives Decoder
 
 private final case class VoyageEmbeddingResponse(
     data: List[VoyageEmbeddingItem],
     model: Option[String]
-)
-
-private object VoyageEmbeddingResponse {
-  given Decoder[VoyageEmbeddingResponse] = deriveDecoder
-}
+) derives Decoder
 
 object VoyageEmbeddingService {
   def resource(
       apiKey: String,
-      endpoint: String,
+      endpoint: Uri,
       model: String,
       dimension: Int,
       timeout: FiniteDuration,
       tracer: Tracer[IO] = Tracer.noop[IO],
       diagnostics: Diagnostics
   ): Resource[IO, EmbeddingService] =
-    Resource
-      .eval(
-        IO.fromEither(
-          Uri.fromString(endpoint).leftMap(_ => new IllegalArgumentException("Invalid Voyage embedding endpoint"))
-        )
+    EmberClientBuilder
+      .default[IO]
+      .withTimeout(timeout)
+      .build
+      .map(client =>
+        new VoyageEmbeddingService(client, apiKey, endpoint, model, dimension, timeout, tracer, diagnostics)
       )
-      .flatMap { uri =>
-        EmberClientBuilder
-          .default[IO]
-          .withTimeout(timeout)
-          .build
-          .map(client =>
-            new VoyageEmbeddingService(client, apiKey, uri, model, dimension, timeout, tracer, diagnostics)
-          )
-      }
-
 }

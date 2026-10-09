@@ -1,5 +1,8 @@
 package com.example.graphQL.cats.repository.mongo
 
+/** The BSON date for an instant. */
+extension (instant: java.time.Instant) private[mongo] def toDate: java.util.Date = java.util.Date.from(instant)
+
 /** Persisted Mongo collection names used by the hiring platform. */
 private[mongo] object MongoCollections {
   val InterviewSubjectCleanup = "interview_subject_cleanup"

@@ -19,6 +19,7 @@ import io.circe.{Json, Printer}
 import io.circe.syntax.*
 import sangria.schema.Context
 
+import java.time.Instant
 import java.util.{Locale, UUID}
 
 private[graphql] object HiringGraphQLResolverSupport {
@@ -97,7 +98,8 @@ private[graphql] object HiringGraphQLResolverSupport {
       action: (ActorContext, HiringGraphQLServices) => HiringGraphQLResult[A]
   ): HiringGraphQLResult[A] = authenticated(context).flatMap(action.tupled)
 
-  def publicMutation[A](context: Context[RequestContext, Unit])(
+  /** Runs `action` only while the hiring services are available. */
+  def withHiring[A](context: Context[RequestContext, Unit])(
       action: HiringGraphQLServices => HiringGraphQLResult[A]
   ): HiringGraphQLResult[A] =
     EitherT.liftF[IO, HiringGraphQLFailure, ProbeResult](context.ctx.hiringAvailable).flatMap {
@@ -124,36 +126,19 @@ private[graphql] object HiringGraphQLResolverSupport {
       }
     }
 
-  def page(
-      first: Int,
-      after: Option[String],
-      decode: String => Either[CursorCodec.CursorError, JobCursor]
-  ): Either[GraphQLFailure, (JobPageRequest, Int)] =
-    cursorPage(first, after, decode)((cursor, size) => JobPageRequest(None, cursor, size))
-
-  def pageEvent(
-      first: Int,
-      after: Option[String],
-      decode: String => Either[CursorCodec.CursorError, ApplicationEventCursor]
-  ): Either[GraphQLFailure, (ApplicationEventPageRequest, Int)] =
-    cursorPage(first, after, decode)((cursor, size) => ApplicationEventPageRequest(cursor, size))
-
-  def applicationPage(
-      first: Int,
-      after: Option[String],
-      status: Option[ApplicationStatus],
-      decode: String => Either[CursorCodec.CursorError, ApplicationCursor]
-  ): Either[GraphQLFailure, (ApplicationPageRequest, Int)] =
-    cursorPage(first, after, decode)((cursor, size) => ApplicationPageRequest(status, cursor, size))
-
-  def userPage(
-      first: Int,
-      after: Option[String],
-      status: AccountStatus,
-      role: Option[UserRole],
-      decode: String => Either[CursorCodec.CursorError, UserCursor]
-  ): Either[GraphQLFailure, (UserPageRequest, Int)] =
-    cursorPage(first, after, decode)((cursor, size) => UserPageRequest(status, role, cursor, size))
+  /** One bounded cursor page: decodes `after`, fetches with the request built from it, and signs the cursors. */
+  def paged[C, R, A](hiring: HiringGraphQLServices, first: Int, after: Option[String])(
+      build: (Option[C], PageSize) => R
+  )(fetch: R => HiringGraphQLResult[List[A]])(cursorOf: A => C)(using
+      CursorCodec.Keyed[C]
+  ): HiringGraphQLResult[Connection[A]] = {
+    given CursorCodec.CursorKey = hiring.cursorKey
+    for {
+      now <- EitherT.liftF[IO, HiringGraphQLFailure, Instant](IO.realTimeInstant)
+      (request, size) <- inputResult(cursorPage(first, after, CursorCodec.decode[C](_, now))(build))
+      values <- fetch(request)
+    } yield connection(values, size)(value => CursorCodec.encode(cursorOf(value), now))
+  }
 
   def connection[A](values: List[A], requested: Int)(cursor: A => String): Connection[A] = {
     val nodes = values.take(requested)
@@ -172,10 +157,7 @@ private[graphql] object HiringGraphQLResolverSupport {
   private def authenticated(
       context: Context[RequestContext, Unit]
   ): HiringGraphQLResult[(ActorContext, HiringGraphQLServices)] =
-    EitherT.liftF[IO, HiringGraphQLFailure, ProbeResult](context.ctx.hiringAvailable).flatMap {
-      case ProbeResult.Ready => context.ctx.authenticatedActor.map(_ -> context.ctx.hiring)
-      case _                 => EitherT.leftT(availabilityFailure)
-    }
+    withHiring(context)(hiring => context.ctx.authenticatedActor.map(_ -> hiring))
 
   private def availabilityFailure: HiringGraphQLFailure =
     HiringGraphQLFailure.UseCase(UseCaseError.Availability(AvailabilityError.ServiceNotReady))

@@ -32,8 +32,7 @@ final class MongoSearchSessionRepository(
     database: MongoDatabase[IO],
     transactionRunner: MongoTransactionRunner,
     diagnostics: Diagnostics
-) extends SearchSessionRepository
-    with MongoOperationalEventInsertion {
+) extends SearchSessionRepository {
   private val sessions = Mongo4catsCollections.documents(database, MongoCollections.SearchSessions)
   private val outbox = Mongo4catsCollections.documents(database, MongoCollections.EventOutbox)
 
@@ -52,12 +51,11 @@ final class MongoSearchSessionRepository(
             )
             val options = new UpdateOptions().upsert(true)
             val result = RepositoryIO.lift(MongoSessionOperations.updateOne(sessions, active, filter, update, options))
-            result.flatMap {
-              case Some(value) if Option(value.getUpsertedId).nonEmpty =>
-                insertOperationalEvents(outbox, active, List(event), session.occurredAt, diagnostics)
-              case Some(_) => RepositoryIO.fromEither(Right(()))
-              case None    => RepositoryIO.fromEither(Left(RepositoryError.MissingWriteResult))
-            }
+            result.flatMap(value =>
+              if (Option(value.getUpsertedId).nonEmpty)
+                MongoOperationalEventInsertion.insert(outbox, active, List(event), session.occurredAt, diagnostics)
+              else RepositoryIO.fromEither(Right(()))
+            )
           }
       )(MongoErrors.duplicateAsConflict)
 
@@ -89,8 +87,7 @@ final class MongoSearchSessionRepository(
   ): RepositoryIO[Boolean] =
     val insert = RepositoryIO
       .fromEither(MongoHiringCodecs.outboxRecord(event, event.occurredAt).leftMap(_ => RepositoryError.InvalidEvent))
-      .flatMap(document => RepositoryIO.lift(MongoSessionOperations.insertOne(outbox, session, document)))
-      .subflatMap(_.fold[Either[RepositoryError, Boolean]](Left(RepositoryError.MissingWriteResult))(_ => Right(true)))
+      .flatMap(document => RepositoryIO.lift(MongoSessionOperations.insertOne(outbox, session, document).as(true)))
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "searchSession.recordInteraction")(insert)(MongoErrors.duplicateAsConflict)
       .leftFlatMap {
@@ -215,10 +212,7 @@ final class MongoOperationalEventOutboxRepository(
           new UpdateOptions().upsert(true)
         )
       )
-      .subflatMap {
-        case Some(result) if result.wasAcknowledged() => Right(())
-        case _                                        => Left(RepositoryError.MissingWriteResult)
-      }
+      .void
     def scan(
         rows: List[Document],
         values: List[ClaimedOperationalEvent],
@@ -248,7 +242,7 @@ final class MongoOperationalEventOutboxRepository(
   private def due(now: Instant): MongoFilter = MongoLeaseQueue.claimable(
     MongoFilter.and(
       MongoFilter.eq(MongoFields.State, OutboxState.Retryable.toString),
-      MongoFilter.lte(MongoFields.AvailableAt, Date.from(now))
+      MongoFilter.lte(MongoFields.AvailableAt, now.toDate)
     ),
     inFlight,
     now
@@ -265,10 +259,10 @@ final class MongoOperationalEventOutboxRepository(
       leaseToken,
       MongoUpdate.combine(
         MongoUpdate.set(MongoFields.State, OutboxState.Published.toString),
-        MongoUpdate.set(MongoFields.PublishedAt, Date.from(now)),
-        MongoUpdate.set(MongoFields.RetentionExpiresAt, Date.from(retentionExpiresAt)),
+        MongoUpdate.set(MongoFields.PublishedAt, now.toDate),
+        MongoUpdate.set(MongoFields.RetentionExpiresAt, retentionExpiresAt.toDate),
         MongoLeaseQueue.releaseLease,
-        MongoUpdate.set(MongoFields.UpdatedAt, Date.from(now))
+        MongoUpdate.set(MongoFields.UpdatedAt, now.toDate)
       )
     ).flatMap(_ => releaseSubjectLeases(leaseToken))
 
@@ -283,9 +277,9 @@ final class MongoOperationalEventOutboxRepository(
       leaseToken,
       MongoUpdate.combine(
         MongoUpdate.set(MongoFields.State, OutboxState.Retryable.toString),
-        MongoUpdate.set(MongoFields.AvailableAt, Date.from(availableAt)),
+        MongoUpdate.set(MongoFields.AvailableAt, availableAt.toDate),
         MongoLeaseQueue.releaseLease,
-        MongoUpdate.set(MongoFields.UpdatedAt, Date.from(now))
+        MongoUpdate.set(MongoFields.UpdatedAt, now.toDate)
       )
     ).flatMap(_ => releaseSubjectLeases(leaseToken))
 
@@ -302,7 +296,7 @@ final class MongoOperationalEventOutboxRepository(
         MongoUpdate.set(MongoFields.State, OutboxState.Failed.toString),
         MongoUpdate.set(MongoFields.LastError, reason.take(512)),
         MongoLeaseQueue.releaseLease,
-        MongoUpdate.set(MongoFields.UpdatedAt, Date.from(now))
+        MongoUpdate.set(MongoFields.UpdatedAt, now.toDate)
       )
     ).flatMap(_ => releaseSubjectLeases(leaseToken))
 
@@ -333,14 +327,12 @@ final class MongoOperationalEventOutboxRepository(
                         MongoFilter.eq(MongoFields.LeaseToken, leaseToken),
                         MongoFilter.ne(MongoFields.Deleted, true)
                       ),
-                      MongoUpdate.set(MongoFields.LeaseUntil, Date.from(leaseUntil))
+                      MongoUpdate.set(MongoFields.LeaseUntil, leaseUntil.toDate)
                     )
                   )
-                  .subflatMap {
-                    case Some(result) if result.getMatchedCount == subjectIds.size.toLong => Right(())
-                    case Some(_) => Left(RepositoryError.Conflict)
-                    case None    => Left(RepositoryError.MissingWriteResult)
-                  }
+                  .subflatMap(result =>
+                    Either.cond(result.getMatchedCount == subjectIds.size.toLong, (), RepositoryError.Conflict)
+                  )
               case false => RepositoryIO.fromEither(Left(RepositoryError.Conflict))
             }
           }
@@ -428,16 +420,12 @@ final class MongoOperationalEventOutboxRepository(
           MongoUpdate.combine(
             MongoUpdate.set(MongoFields.State, OutboxState.Failed.toString),
             MongoUpdate.set(MongoFields.LastError, "INVALID_EVENT_CONTRACT"),
-            MongoUpdate.set(MongoFields.UpdatedAt, Date.from(now)),
+            MongoUpdate.set(MongoFields.UpdatedAt, now.toDate),
             MongoLeaseQueue.releaseLease
           )
         )
       )
-      .subflatMap {
-        case Some(result) if result.wasAcknowledged() && result.getMatchedCount == 1L => Right(())
-        case Some(_)                                                                  => Left(RepositoryError.Conflict)
-        case None => Left(RepositoryError.MissingWriteResult)
-      }
+      .subflatMap(MongoRepositorySupport.matchedOne(_))
 
   private def acquireSubjectLeases(
       session: Option[ClientSession[IO]],
@@ -448,7 +436,7 @@ final class MongoOperationalEventOutboxRepository(
   ): RepositoryIO[Unit] = {
     val leaseAvailable = MongoFilter.or(
       MongoFilter.exists(MongoFields.LeaseUntil, false),
-      MongoFilter.lte(MongoFields.LeaseUntil, Date.from(now))
+      MongoFilter.lte(MongoFields.LeaseUntil, now.toDate)
     )
     val options = new FindOneAndUpdateOptions().upsert(true).returnDocument(ReturnDocument.AFTER)
     def acquireOne(subjectId: String): RepositoryIO[Unit] = {
@@ -461,7 +449,7 @@ final class MongoOperationalEventOutboxRepository(
         MongoUpdate.setOnInsert(MongoFields.Id, subjectId),
         MongoUpdate.set(MongoFields.LeaseEventId, claim.event.eventId.toString),
         MongoUpdate.set(MongoFields.LeaseToken, claim.leaseToken),
-        MongoUpdate.set(MongoFields.LeaseUntil, Date.from(leaseUntil))
+        MongoUpdate.set(MongoFields.LeaseUntil, leaseUntil.toDate)
       )
       MongoRepositorySupport
         .transactionGuard(diagnostics, "outbox.acquireSubjectLease", session)(
@@ -517,14 +505,13 @@ final class MongoOperationalEventOutboxRepository(
     val update = MongoUpdate.combine(
       MongoUpdate.set(MongoFields.State, OutboxState.Failed.toString),
       MongoUpdate.set(MongoFields.LastError, "SUBJECT_DELETED"),
-      MongoUpdate.set(MongoFields.UpdatedAt, Date.from(now)),
+      MongoUpdate.set(MongoFields.UpdatedAt, now.toDate),
       MongoLeaseQueue.releaseLease
     )
     MongoRepositorySupport.transactionGuard(diagnostics, "outbox.suppressDeletedClaim", session)(
-      RepositoryIO.lift(MongoSessionOperations.updateOne(outbox, session, filter, update)).subflatMap {
-        case Some(result) if result.getMatchedCount == 1L => Right(())
-        case _                                            => Left(RepositoryError.Conflict)
-      }
+      RepositoryIO
+        .lift(MongoSessionOperations.updateOne(outbox, session, filter, update))
+        .subflatMap(MongoRepositorySupport.matchedOne(_))
     )
   }
 
@@ -544,11 +531,7 @@ final class MongoOperationalEventOutboxRepository(
               )
             )
           )
-          .subflatMap {
-            case Some(result) if result.getMatchedCount > 0L => Right(())
-            case Some(_)                                     => Left(RepositoryError.Conflict)
-            case None                                        => Left(RepositoryError.MissingWriteResult)
-          }
+          .subflatMap(result => Either.cond(result.getMatchedCount > 0L, (), RepositoryError.Conflict))
       )
 
   private def updateClaimed(
@@ -677,13 +660,11 @@ final class MongoConsumerReceiptRepository(database: MongoDatabase[IO], diagnost
                   .append(MongoFields.EventId, event.eventId.toString)
                   .append(MongoFields.AggregateType, event.aggregateType.toString)
                   .append(MongoFields.AggregateId, event.aggregateId)
-                  .append(MongoFields.CreatedAt, Date.from(now))
-                  .append(MongoFields.ExpiresAt, Date.from(expiresAt))
+                  .append(MongoFields.CreatedAt, now.toDate)
+                  .append(MongoFields.ExpiresAt, expiresAt.toDate)
               )
           )
-          .subflatMap(
-            _.fold[Either[RepositoryError, Boolean]](Left(RepositoryError.MissingWriteResult))(_ => Right(true))
-          )
+          .as(true)
       ) {
         case MongoDuplicateKey(_) => Right(false)
         case _                    => Left(RepositoryError.Unavailable)
@@ -711,11 +692,11 @@ final class MongoEventQuarantineRepository(database: MongoDatabase[IO], diagnost
                   .append(MongoFields.Category, record.category.toString)
                   .append(MongoFields.Reason, record.reason.take(512))
                   .append(MongoFields.RawBytes, record.rawBytes)
-                  .append(MongoFields.OccurredAt, Date.from(record.occurredAt))
-                  .append(MongoFields.ExpiresAt, Date.from(record.expiresAt))
+                  .append(MongoFields.OccurredAt, record.occurredAt.toDate)
+                  .append(MongoFields.ExpiresAt, record.expiresAt.toDate)
               )
           )
-          .subflatMap(_.fold[Either[RepositoryError, Unit]](Left(RepositoryError.MissingWriteResult))(_ => Right(())))
+          .void
       ) {
         case MongoDuplicateKey(_) => Right(())
         case _                    => Left(RepositoryError.Unavailable)

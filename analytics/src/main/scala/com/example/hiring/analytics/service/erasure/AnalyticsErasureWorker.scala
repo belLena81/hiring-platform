@@ -1,7 +1,5 @@
 package com.example.hiring.analytics.service.erasure
 
-import com.example.hiring.analytics.config.AnalyticsPositiveInt.value
-
 import com.example.hiring.analytics.config.AnalyticsErasureWorkerPolicy
 import com.example.hiring.analytics.domain.RangeFingerprint
 import com.example.hiring.analytics.domain.RunId
@@ -215,34 +213,7 @@ final class AnalyticsErasureWorker[F[_]: Async](
       case ErasurePhase.DeltaPurged =>
         for {
           next <- nextPhase(claim, ErasurePhase.GoldRebuilt)
-          barrierOption <- lift(barriers.readBarrier(claim.requestId))
-          barrier <- lift(
-            barrierOption.fold[F[KafkaRetentionBarrier]](
-              Async[F].raiseError(AnalyticsError.MalformedMarker)
-            )(Async[F].pure)
-          )
-          purgedAtOption <- lift(progress.readDeltaPurgedAt(claim.requestId))
-          purgedAt <- lift(
-            purgedAtOption.fold[F[Instant]](
-              Async[F].raiseError(AnalyticsError.MalformedMarker)
-            )(Async[F].pure)
-          )
-          ready <- lift(replayHorizonsPassed(barrier, purgedAt))
-          _ <- if (ready) EitherT.rightT(()) else defer(claim, 5.minutes)
-          markerTokens <- lift(markers.activeSubjectTokens)
-          _ <- lift(lakehouseLock.resource(paths.root).use { _ =>
-            for {
-              _ <- lakehouse.reclaimRetainedFiles
-              _ <- lakehouse.verifyMarkedSubjectsAbsent(markerTokens)
-            } yield ()
-          })
-          affectedRows <- lift(progress.readAffectedRows(claim.requestId))
-          affectedFiles <- lift(progress.readDeltaFiles(claim.requestId))
-          _ <-
-            if (affectedRows > 0L && affectedFiles.isEmpty)
-              lift(Async[F].raiseError[Unit](AnalyticsError.PhysicalReclamationUnverified))
-            else EitherT.rightT(())
-          _ <- lift(lakehouse.verifyFilesAbsent(affectedFiles))
+          _ <- awaitReclamation(claim)
           _ <- advance(claim, ErasurePhase.GoldRebuilt)
         } yield Left(next)
 
@@ -267,7 +238,7 @@ final class AnalyticsErasureWorker[F[_]: Async](
             } yield result
           })
           completedAt <- lift(now)
-          expiry = completedAt.plusSeconds(retention.publishedSnapshotDays.value.toLong * 86400L)
+          expiry = retention.publishedSnapshotExpiry(completedAt)
           _ <- lift(publisher.publishErasure(refreshed, report, expiry, claim, completedAt))
           _ <- lift(logger.info("analytics erasure completed and the snapshot was safely revealed"))
         } yield Right(())
@@ -317,31 +288,31 @@ final class AnalyticsErasureWorker[F[_]: Async](
   private def refreshErasureProjection(claim: ErasureClaim, generation: Long): ClaimFlow[Unit] =
     for {
       _ <- purgeAndRecordDelta(claim, generation)
-      barrierOption <- lift(barriers.readBarrier(claim.requestId))
+      _ <- awaitReclamation(claim)
+    } yield ()
+
+  /** Waits for the Kafka and Delta replay horizons, then reclaims and verifies physical removal under the lock. */
+  private def awaitReclamation(claim: ErasureClaim): ClaimFlow[Unit] =
+    for {
       barrier <- lift(
-        barrierOption.fold[F[KafkaRetentionBarrier]](
-          Async[F].raiseError(AnalyticsError.MalformedMarker)
-        )(Async[F].pure)
+        barriers.readBarrier(claim.requestId).flatMap(Async[F].fromOption(_, AnalyticsError.MalformedMarker))
       )
-      purgedAtOption <- lift(progress.readDeltaPurgedAt(claim.requestId))
       purgedAt <- lift(
-        purgedAtOption.fold[F[Instant]](
-          Async[F].raiseError(AnalyticsError.MalformedMarker)
-        )(Async[F].pure)
+        progress.readDeltaPurgedAt(claim.requestId).flatMap(Async[F].fromOption(_, AnalyticsError.MalformedMarker))
       )
       ready <- lift(replayHorizonsPassed(barrier, purgedAt))
       _ <- if (ready) EitherT.rightT(()) else defer(claim, 5.minutes)
-      currentMarkers <- lift(markers.activeSubjectTokens)
+      markerTokens <- lift(markers.activeSubjectTokens)
       _ <- lift(lakehouseLock.resource(paths.root).use { _ =>
-        lakehouse.reclaimRetainedFiles *> lakehouse.verifyMarkedSubjectsAbsent(currentMarkers)
+        lakehouse.reclaimRetainedFiles *> lakehouse.verifyMarkedSubjectsAbsent(markerTokens)
       })
-      allAffectedRows <- lift(progress.readAffectedRows(claim.requestId))
-      allAffectedFiles <- lift(progress.readDeltaFiles(claim.requestId))
+      affectedRows <- lift(progress.readAffectedRows(claim.requestId))
+      affectedFiles <- lift(progress.readDeltaFiles(claim.requestId))
       _ <-
-        if (allAffectedRows > 0L && allAffectedFiles.isEmpty)
+        if (affectedRows > 0L && affectedFiles.isEmpty)
           lift(Async[F].raiseError[Unit](AnalyticsError.PhysicalReclamationUnverified))
         else EitherT.rightT(())
-      _ <- lift(lakehouse.verifyFilesAbsent(allAffectedFiles))
+      _ <- lift(lakehouse.verifyFilesAbsent(affectedFiles))
     } yield ()
 
   private[analytics] def replayHorizonsPassed(barrier: KafkaRetentionBarrier, deltaPurgedAt: Instant): F[Boolean] =

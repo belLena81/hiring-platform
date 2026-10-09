@@ -11,7 +11,6 @@ import mongo4cats.client.ClientSession
 import mongo4cats.database.MongoDatabase
 import org.bson.{Document, BsonDocument, BsonString, BsonInt32, BsonInt64, BsonDateTime, BsonArray, BsonValue}
 import java.time.Instant
-import java.util.Date
 import scala.jdk.CollectionConverters.*
 
 trait MongoEmbeddingWorkEnqueuer {
@@ -120,8 +119,8 @@ final class MongoEmbeddingWorkRepository(
               ),
               MongoUpdate.combine(
                 MongoUpdate.set(MongoFields.State, EmbeddingWorkState.Ready.toString),
-                MongoUpdate.set(MongoFields.AvailableAt, Date.from(now)),
-                MongoUpdate.set(MongoFields.UpdatedAt, Date.from(now)),
+                MongoUpdate.set(MongoFields.AvailableAt, now.toDate),
+                MongoUpdate.set(MongoFields.UpdatedAt, now.toDate),
                 MongoUpdate.set(MongoFields.Attempts, 0),
                 MongoUpdate.inc(MongoFields.Generation, 1L),
                 MongoUpdate.unset(MongoFields.Failure),
@@ -130,11 +129,7 @@ final class MongoEmbeddingWorkRepository(
               )
             )
           )
-          result <- RepositoryIO.fromEither(repaired match {
-            case Some(result) => Right(result.getMatchedCount == 1L)
-            case None         => Left(RepositoryError.MissingWriteResult)
-          })
-        } yield result
+        } yield repaired.getMatchedCount == 1L
       }
   private val collection = Mongo4catsCollections.documents(database, MongoCollections.EmbeddingWork)
 
@@ -167,12 +162,13 @@ final class MongoEmbeddingWorkRepository(
               new UpdateOptions().upsert(true)
             )
           )
-          .subflatMap {
-            case Some(result) if result.wasAcknowledged() && result.getMatchedCount + result.getUpserts.size == 1 =>
-              Right(())
-            case Some(_) => Left(RepositoryError.Conflict)
-            case None    => Left(RepositoryError.MissingWriteResult)
-          }
+          .subflatMap(result =>
+            Either.cond(
+              result.wasAcknowledged() && result.getMatchedCount + result.getUpserts.size == 1,
+              (),
+              RepositoryError.Conflict
+            )
+          )
       }
   }
 
@@ -230,7 +226,7 @@ final class MongoEmbeddingWorkRepository(
     RepositoryIO.lift(uuidGen.randomUUID.map(_.toString)).flatMap { token =>
       val available = MongoFilter.and(
         MongoFilter.in(MongoFields.State, List(EmbeddingWorkState.Ready, EmbeddingWorkState.Retry).map(_.toString)),
-        MongoFilter.lte(MongoFields.AvailableAt, Date.from(now))
+        MongoFilter.lte(MongoFields.AvailableAt, now.toDate)
       )
       MongoRepositorySupport
         .repositoryGuard(diagnostics, "embeddingWork.claim") {
@@ -257,11 +253,7 @@ final class MongoEmbeddingWorkRepository(
       .repositoryGuard(diagnostics, "embeddingWork.complete") {
         RepositoryIO
           .lift(MongoSessionOperations.deleteOne(collection, None, leaseFilter(claim)))
-          .subflatMap {
-            case Some(result) if result.getDeletedCount == 1L => Right(())
-            case Some(_)                                      => Left(RepositoryError.Conflict)
-            case None                                         => Left(RepositoryError.MissingWriteResult)
-          }
+          .subflatMap(MongoRepositorySupport.deletedOne(_))
       }
 
   override def retry(
@@ -271,7 +263,7 @@ final class MongoEmbeddingWorkRepository(
   ): RepositoryIO[Unit] = {
     val updates = List(
       MongoUpdate.set(MongoFields.State, EmbeddingWorkState.Retry.toString),
-      MongoUpdate.set(MongoFields.AvailableAt, Date.from(availableAt)),
+      MongoUpdate.set(MongoFields.AvailableAt, availableAt.toDate),
       MongoLeaseQueue.releaseLease
     ) ++ Option.when(chargeAttempt)(MongoUpdate.inc(MongoFields.Attempts, java.lang.Integer.valueOf(1))).toList
     transition(claim, MongoUpdate.combine(updates*))
@@ -287,7 +279,7 @@ final class MongoEmbeddingWorkRepository(
       MongoUpdate.combine(
         MongoUpdate.set(MongoFields.State, EmbeddingWorkState.Failed.toString),
         MongoUpdate.set(MongoFields.Failure, failure.toString),
-        MongoUpdate.set(MongoFields.FinishedAt, Date.from(now)),
+        MongoUpdate.set(MongoFields.FinishedAt, now.toDate),
         MongoLeaseQueue.releaseLease
       )
     )

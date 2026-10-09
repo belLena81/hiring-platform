@@ -36,15 +36,9 @@ final class InterviewSchedulingService(
   ): UseCaseIO[InterviewWorkflow] =
     for {
       user <- authorization.resolve(actor)
-      application <- UseCase
-        .repository(applications.find(applicationId))
-        .subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("application"))))
-      job <- UseCase
-        .repository(jobs.find(application.jobId))
-        .subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("job"))))
-      _ <- UseCase.fromEither(
-        Either.cond(authorization.canManage(user, job), (), UseCaseError.Domain(DomainError.Forbidden))
-      )
+      application <- UseCase.found(applications.find(applicationId), "application")
+      job <- UseCase.found(jobs.find(application.jobId), "job")
+      _ <- UseCase.ensure(authorization.canManage(user, job), UseCaseError.Domain(DomainError.Forbidden))
       canonicalStart = startsAt.truncatedTo(java.time.temporal.ChronoUnit.MILLIS)
       canonicalEnd = endsAt.truncatedTo(java.time.temporal.ChronoUnit.MILLIS)
       fingerprint = MutationReceiptFingerprint.fromCanonicalInput(
@@ -52,19 +46,19 @@ final class InterviewSchedulingService(
       )
       replay <- UseCase.repository(workflows.findRequest(user.id, idempotencyKey, fingerprint))
       saved <- replay match {
-        case Some(existing) => UseCase.pure(existing)
+        case Some(existing) => EitherT.rightT[IO, UseCaseError](existing)
         case None           =>
           for {
-            now <- UseCase.liftIO(currentTime)
-            interval <- UseCase.fromEither(
+            now <- EitherT.liftF(currentTime)
+            interval <- EitherT.fromEither[IO](
               InterviewInterval
                 .validate(startsAt, endsAt, now)
                 .leftMap(_ => UseCaseError.Search(SearchError.InvalidFilter("interviewInterval")))
             )
-            id <- UseCase.liftIO(nextWorkflowId)
+            id <- EitherT.liftF(nextWorkflowId)
             acceptedDeadline = now.plusMillis(preCommitWindow.toMillis)
             deadline = if (acceptedDeadline.isBefore(interval.startsAt)) acceptedDeadline else interval.startsAt
-            workflow <- UseCase.fromEither(
+            workflow <- EitherT.fromEither[IO](
               InterviewWorkflow
                 .create(
                   id,
@@ -87,10 +81,10 @@ final class InterviewSchedulingService(
               workflows.create(workflow, InterviewWorkflow.initialCommand(workflow), idempotencyKey, fingerprint, now)
             )
             saved <- result match {
-              case InterviewWorkflowAdvanceResult.Applied             => UseCase.pure(workflow)
-              case InterviewWorkflowAdvanceResult.Duplicate(existing) => UseCase.pure(existing)
+              case InterviewWorkflowAdvanceResult.Applied             => EitherT.rightT[IO, UseCaseError](workflow)
+              case InterviewWorkflowAdvanceResult.Duplicate(existing) => EitherT.rightT[IO, UseCaseError](existing)
               case InterviewWorkflowAdvanceResult.StaleRevision       =>
-                UseCase.left(UseCaseError.Repository(RepositoryError.Conflict))
+                EitherT.leftT[IO, InterviewWorkflow](UseCaseError.Repository(RepositoryError.Conflict))
             }
           } yield saved
       }
@@ -103,7 +97,7 @@ final class InterviewSchedulingService(
         if (user.role == UserRole.Admin) workflows.findForAdmin(id)
         else workflows.findForActor(id, InterviewWorkflowAccess(user.id, user.role))
       )
-      workflow <- UseCase.fromEither(value.toRight(UseCaseError.Domain(DomainError.NotFound("interviewWorkflow"))))
+      workflow <- EitherT.fromEither[IO](value.toRight(UseCaseError.Domain(DomainError.NotFound("interviewWorkflow"))))
     } yield workflow
 
   def repair(
@@ -114,9 +108,11 @@ final class InterviewSchedulingService(
   ): UseCaseIO[InterviewWorkflow] =
     for {
       user <- authorization.resolve(actor)
-      _ <- UseCase.fromEither(Either.cond(user.role == UserRole.Admin, (), UseCaseError.Domain(DomainError.Forbidden)))
+      _ <- EitherT.fromEither[IO](
+        Either.cond(user.role == UserRole.Admin, (), UseCaseError.Domain(DomainError.Forbidden))
+      )
       workflow <- inspect(actor, id)
-      now <- UseCase.liftIO(currentTime)
+      now <- EitherT.liftF(currentTime)
       repaired <- UseCase.repository(workflows.repair(workflow, expectedRevision, idempotencyKey, now, user.id))
     } yield repaired
 
@@ -219,7 +215,7 @@ final class InterviewSchedulingService(
   ): UseCaseIO[Int] =
     for {
       admin <- requireAdmin(actor)
-      now <- UseCase.liftIO(currentTime)
+      now <- EitherT.liftF(currentTime)
       repaired <- UseCase.repository(workflows.repairNotifications(id, idempotencyKey, now, admin.id))
     } yield repaired
 

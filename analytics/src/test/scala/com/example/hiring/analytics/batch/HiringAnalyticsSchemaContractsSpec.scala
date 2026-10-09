@@ -33,6 +33,20 @@ class HiringAnalyticsSchemaContractsSpec extends FunSuite {
   override def afterAll(): Unit =
     if (!spark.sparkContext.isStopped) spark.stop()
 
+  test("merge targets resolve their stored shape and raw-record scope from the lakehouse paths") {
+    val paths = TestAnalyticsLakehousePaths.unsafe("file:///tmp/hiring-targets")
+    val raw = Vector(
+      paths.bronze -> AnalyticsTableSchemas.bronze,
+      paths.quarantine -> AnalyticsTableSchemas.quarantine,
+      paths.lateFacts -> AnalyticsTableSchemas.lateFacts
+    )
+    raw.foreach { case (path, shape) => assertEquals(AnalyticsTableSchemas.targetOf(paths, path), (shape, true)) }
+    assertEquals(
+      AnalyticsTableSchemas.targetOf(paths, paths.silver),
+      (AnalyticsTableSchemas.silver ++ AnalyticsTableSchemas.expiry, false)
+    )
+  }
+
   private val SilverSchema = StructType(
     Seq(
       StructField("eventId", StringType, nullable = true),

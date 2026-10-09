@@ -9,14 +9,8 @@ private[config] object AuthConfigValidation {
     (
       validJwtSecret(auth.jwt.hs256Secret),
       validReceiptSecret(auth.jwt.receiptFingerprintSecret),
-      validAdminSeed(auth.adminSeed)
+      validAdminSeed(auth.adminSeed.getOrElse(AdminSeedConfig()))
     ).mapN { (secret, receiptSecret, seed) =>
-      val passwordHash = auth.passwordHash.getOrElse(defaultPasswordHash)
-      val interviewActions = InterviewActionRateLimitConfig(
-        auth.interviewActionRateLimit.windowSeconds,
-        auth.interviewActionRateLimit.attempts,
-        auth.interviewActionRateLimit.maxBuckets
-      )
       AuthSettings(
         JwtAuthConfig(
           secret,
@@ -25,15 +19,14 @@ private[config] object AuthConfigValidation {
           cursorTtlSeconds = auth.jwt.cursorTtlSeconds.toLong,
           receiptFingerprintSecret = receiptSecret
         ),
-        PasswordHashConfig(passwordHash.iterations, passwordHash.memoryKib, passwordHash.parallelism),
-        AuthRateLimitConfig(auth.rateLimit.windowSeconds, auth.rateLimit.attempts, auth.rateLimit.maxBuckets),
-        interviewActions,
+        auth.passwordHash.getOrElse(PasswordHashConfig()),
+        auth.rateLimit,
+        auth.interviewActionRateLimit,
         seed
       )
     }
 
-  private def validAdminSeed(raw: Option[RawAdminSeedConfig]): ValidatedNel[ConfigError, AdminSeedConfig] = {
-    val seed = raw.fold(AdminSeedConfig())(value => AdminSeedConfig(value.enabled, value.name, value.password))
+  private def validAdminSeed(seed: AdminSeedConfig): ValidatedNel[ConfigError, AdminSeedConfig] = {
     val validName = seed.name.exists { value =>
       val normalized = java.text.Normalizer.normalize(value.trim, java.text.Normalizer.Form.NFKC)
       normalized.nonEmpty && normalized.length <= com.example.graphQL.cats.domain.model.FieldLimits.ShortTextMaxChars

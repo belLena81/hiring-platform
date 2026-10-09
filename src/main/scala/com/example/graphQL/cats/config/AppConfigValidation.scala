@@ -20,8 +20,11 @@ private[config] object AppConfigValidation {
   /** Each section is validated as soon as it decodes, so a decode failure in one section never hides another's. */
   def read(source: ConfigSource): Either[NonEmptyList[ConfigError], AppConfig] =
     (
-      (loadSection[RawHttpConfig](source, "http"), loadSection[RawMongoConfig](source, "mongo")).tupled
-        .andThen(HttpMongoConfigValidation.read.tupled),
+      (
+        loadSection[RawHttpConfig](source, "http"),
+        loadSection[RawMongoConfig](source, "mongo")
+          .andThen(mongo => HttpMongoConfigValidation.validMongoDatabase(mongo.database).as(mongo))
+      ).tupled.andThen(HttpMongoConfigValidation.read.tupled),
       loadSection[RawLoggingConfig](source, "logging"),
       loadSection[RawAuthConfig](source, "auth").andThen(AuthConfigValidation.read),
       loadSection[RawKafkaConfig](source, "kafka").andThen(KafkaConfigValidation.read),

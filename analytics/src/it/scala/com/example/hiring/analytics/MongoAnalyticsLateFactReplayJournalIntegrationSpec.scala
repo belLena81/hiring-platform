@@ -33,7 +33,7 @@ final class MongoAnalyticsLateFactReplayJournalIntegrationSpec extends Analytics
           attempt: Int,
           generation: Long = 0L
       ): AnalyticsReportReservation = {
-        val identity = AnalyticsLateFactReplayService.reservationIdentityFor(value, attempt).toOption.get
+        val identity = AnalyticsLateFactReplayService.reservationIdentityFor(value, attempt)
         AnalyticsReportReservation(identity._1, identity._2, generation, attempt.toLong + 1L)
       }
       def checked[A](step: String)(effect: IO[A]): IO[A] =
@@ -108,7 +108,7 @@ final class MongoAnalyticsLateFactReplayJournalIntegrationSpec extends Analytics
         published <- checked("published load")(journal.load(request.requestId))
         pending <- checked("unfinished load")(journal.load(unfinished.requestId))
         _ = assertEquals(published.map(_.progress), Some(AnalyticsLateFactReplayProgress.Published))
-        _ = assertEquals(published.map(_.selectionDigest), Some(request.selectionDigest))
+        _ = assertEquals(published.map(_.selectionDigest), Some(request.selectionDigest.value))
         _ = assertEquals(pending.map(_.progress), Some(AnalyticsLateFactReplayProgress.Prepared))
         reuse <- journal.prepare(changedSelection, reservation(changedSelection, 0), now).attempt
         _ = assertEquals(reuse.left.toOption, Some(AnalyticsError.LateFactReplayRequestConflict))

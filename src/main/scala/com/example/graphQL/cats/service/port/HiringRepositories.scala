@@ -49,6 +49,10 @@ object MutationReceiptFingerprint {
 /** A non-sensitive reference from a completed receipt to its authoritative result. */
 final case class MutationEntityReference(entityType: String, entityId: String)
 
+object MutationEntityReference {
+  def of(kind: String, id: java.util.UUID): MutationEntityReference = MutationEntityReference(kind, id.toString)
+}
+
 /** A repository snapshot paired with the revision required for compare-and-set writes. */
 final case class Versioned[+A](value: A, version: Long)
 

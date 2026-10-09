@@ -278,6 +278,18 @@ final class DeltaStreamingBatchJournalSpec extends CatsEffectSuite {
 
       val result = incompatible.prepare(prepared).attempt.unsafeRunSync()
       assert(result.left.exists(_.isInstanceOf[AnalyticsError]))
+      assert(incompatible.load(identity).attempt.unsafeRunSync().left.exists(_.isInstanceOf[AnalyticsError]))
+      // A path that exists but is not a Delta table is equally malformed.
+      Files.createDirectories(java.nio.file.Path.of(java.net.URI.create(incompatiblePaths.streamingDecisions)))
+      assert(incompatible.latestWatermark(lineage).attempt.unsafeRunSync().left.exists(_.isInstanceOf[AnalyticsError]))
+      assert(
+        incompatible
+          .referencedPublicationRunIds(Set(right(RunId.from("stream-test-1"))))
+          .attempt
+          .unsafeRunSync()
+          .left
+          .exists(_.isInstanceOf[AnalyticsError])
+      )
     } finally removeTree(incompatibleRoot)
   }
 

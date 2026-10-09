@@ -2,59 +2,31 @@ package com.example.graphQL.cats.config
 
 import cats.data.ValidatedNel
 import cats.syntax.all.*
-import com.comcast.ip4s.{Cidr, Host, IpAddress, Port as Ip4sPort}
-import com.mongodb.ConnectionString
 import java.nio.charset.StandardCharsets
 import scala.concurrent.duration.*
 
 private[config] object HttpMongoConfigValidation {
   def read(http: RawHttpConfig, mongo: RawMongoConfig): ValidatedNel[ConfigError, TransportSettings] =
-    (
-      validHost(http.host),
-      validPort(http.port),
-      http.admissionPermits.validNel[ConfigError],
-      validTrustedProxyCidrs(http.trustedProxyCidrs),
-      validMongoUri(mongo.uri),
-      validMongoDatabase(mongo.database),
-      validDiscovery(mongo.discovery.getOrElse(RawDiscoveryConfig()), http.requestTimeoutMs)
-    ).mapN { (host, port, admissionPermits, trustedProxy, mongoUri, mongoDatabase, discovery) =>
+    validDiscovery(mongo.discovery.getOrElse(DiscoveryConfig()), http.requestTimeoutMs).map { discovery =>
       TransportSettings(
-        host,
-        port,
-        admissionPermits,
+        http.host,
+        http.port,
+        http.admissionPermits,
         http.requestTimeoutMs.millis,
-        trustedProxy,
-        mongoUri,
-        mongoDatabase,
+        http.trustedProxyCidrs,
+        mongo.uri.getConnectionString,
+        mongo.database,
         discovery,
-        mongo.resetOnStart.getOrElse(false)
+        mongo.resetOnStart.contains(true)
       )
     }
 
   /** Per-field bounds are decoded by their refined types; only the HTTP-deadline relation is checked here. */
-  def validDiscovery(raw: RawDiscoveryConfig, requestTimeoutMs: Int): ValidatedNel[ConfigError, DiscoveryConfig] = {
-    val defaults = DiscoveryConfig()
-    val discovery = DiscoveryConfig(
-      raw.maxTimeMillis.getOrElse(defaults.maxTimeMillis),
-      raw.permits.getOrElse(defaults.permits),
-      raw.maxRoots.getOrElse(defaults.maxRoots)
-    )
+  def validDiscovery(discovery: DiscoveryConfig, requestTimeoutMs: Int): ValidatedNel[ConfigError, DiscoveryConfig] =
     Either
       .cond(discovery.maxTimeMillis < requestTimeoutMs, discovery, ConfigError.InvalidDiscoveryDeadline)
       .toValidatedNel
-  }
 
-  // HTTP_HOST is a bind address, so hostnames such as localhost are intentionally rejected.
-  def validHost(value: String): ValidatedNel[ConfigError, Host] =
-    IpAddress.fromString(value).map(ip => ip: Host).toValidNel(ConfigError.InvalidHost)
-  def validPort(value: Port): ValidatedNel[ConfigError, Ip4sPort] =
-    Ip4sPort.fromInt(value).toValidNel(ConfigError.InvalidPort)
-  def validMongoUri(value: String): ValidatedNel[ConfigError, String] =
-    Either
-      .catchNonFatal(new ConnectionString(value))
-      .leftMap(_ => ConfigError.InvalidMongoUri)
-      .toValidatedNel
-      .map(_ => value)
   def validMongoDatabase(value: String): ValidatedNel[ConfigError, String] =
     Either
       .cond(
@@ -64,14 +36,4 @@ private[config] object HttpMongoConfigValidation {
         ConfigError.InvalidMongoDatabase
       )
       .toValidatedNel
-  def validTrustedProxyCidrs(values: List[String]): ValidatedNel[ConfigError, TrustedProxyConfig] =
-    values
-      .traverse { value =>
-        Cidr
-          .fromString(value)
-          .filter(_.prefixBits > 0)
-          .toRight(ConfigError.InvalidTrustedProxyCidrs)
-          .toValidatedNel
-      }
-      .map(TrustedProxyConfig.apply)
 }

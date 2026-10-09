@@ -1,9 +1,10 @@
 package com.example.graphQL.cats.service
 
+import cats.data.EitherT
 import cats.data.NonEmptyList
 import cats.effect.{Clock, IO}
 import com.example.graphQL.cats.domain.error.DomainValidationError
-import com.example.graphQL.cats.domain.model.{AccountStatus, UserRole}
+import com.example.graphQL.cats.service.auth.ActorAuthorization
 import com.example.graphQL.cats.service.port.{EmbeddingCoverageRepository, UserRepository}
 import com.example.graphQL.cats.service.protocol.UseCaseIO
 import com.example.graphQL.cats.service.search.{
@@ -23,7 +24,7 @@ object EmbeddingCoverageUseCases {
   /** Deny by default: an unwired capability answers every caller as unauthorized, never with availability facts. */
   val denyAll: EmbeddingCoverageUseCases = new EmbeddingCoverageUseCases {
     override def report(actor: ActorContext, expectedModel: Option[String]): UseCaseIO[EmbeddingCoverageReport] =
-      UseCaseIO.left(UseCaseError.Authentication(AuthenticationError.Unauthorized))
+      EitherT.leftT(UseCaseError.Authentication(AuthenticationError.Unauthorized))
   }
 }
 
@@ -34,16 +35,14 @@ final class EmbeddingCoverageService private (
     clock: Clock[IO]
 ) extends EmbeddingCoverageUseCases {
   import EmbeddingCoverageService.*
+  private val authorization = ActorAuthorization(users)
 
   override def report(actor: ActorContext, expectedModel: Option[String]): UseCaseIO[EmbeddingCoverageReport] =
     for {
-      _ <- UseCaseIO.repository(users.find(actor.userId)).subflatMap {
-        case Some(user) if user.role == UserRole.Admin && user.accountStatus == AccountStatus.Active => Right(user)
-        case _ => Left(UseCaseError.Authentication(AuthenticationError.Unauthorized))
-      }
-      model <- UseCaseIO.fromEither(validate(expectedModel))
-      live <- UseCaseIO.fromEither(source.toRight(UseCaseError.Search(SearchError.VectorSearchUnavailable)))
-      now <- UseCaseIO.liftIO(clock.realTimeInstant)
+      _ <- authorization.requireAdmin(actor)
+      model <- EitherT.fromEither[IO](validate(expectedModel))
+      live <- EitherT.fromEither[IO](source.toRight(UseCaseError.Search(SearchError.VectorSearchUnavailable)))
+      now <- EitherT.liftF(clock.realTimeInstant)
       request = EmbeddingCoverageScanRequest(
         model,
         now,

@@ -79,7 +79,7 @@ final class MongoProducerGenerationMaintenance(
           for {
             ids <- RepositoryIO.fromEither(batch.toList.traverse(text(_, "_id")))
             now <- RepositoryIO.lift(currentTime)
-            updated <- boundary(
+            _ <- boundary(
               MongoSessionOperations.updateMany(
                 rows,
                 None,
@@ -90,13 +90,10 @@ final class MongoProducerGenerationMaintenance(
                 ),
                 MongoUpdate.combine(
                   MongoUpdate.set("state", "Fenced"),
-                  MongoUpdate.set("fencedAt", Date.from(now)),
+                  MongoUpdate.set("fencedAt", now.toDate),
                   MongoUpdate.set("expiresAt", Date.from(now.plusSeconds(MongoProducerRegistrations.RetentionSeconds)))
                 )
               )
-            )
-            _ <- RepositoryIO.fromEither(
-              Either.cond(updated.exists(_.wasAcknowledged()), (), RepositoryError.MissingWriteResult)
             )
             _ <- checkpoint
           } yield ()

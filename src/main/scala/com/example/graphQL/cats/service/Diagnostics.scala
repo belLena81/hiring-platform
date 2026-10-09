@@ -1,7 +1,8 @@
 package com.example.graphQL.cats.service
 
 import cats.effect.IO
-import com.example.graphQL.cats.shared.HiringHttpPaths
+import com.example.graphQL.cats.shared.{HiringHttpPaths, Parsing}
+import java.util.Locale
 
 enum LogLevel {
   case Trace, Debug, Info, Warn, Error
@@ -115,6 +116,10 @@ object LogFields {
     "com.example.graphQL.cats.repository.mongo.MongoSetupError"
   )
   private val Root = "com.example.graphQL.cats."
+  private def canonicalUuid(value: String): Boolean = Parsing.parseUuid(value).exists(_.toString == value)
+
+  private val transactionalIdPrefixes =
+    List("hiring-publisher-", "hiring-interview-orchestrator-", "hiring-interview-worker-")
 
   def failure(error: Throwable): Map[LogField, String] = {
     val errorType = error.getClass.getName
@@ -131,9 +136,7 @@ object LogFields {
 
   def validPublic(field: LogField, value: String): Boolean = field match {
     case LogField.TransactionalId =>
-      value.matches(
-        "hiring-(publisher|interview-orchestrator|interview-worker)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
-      )
+      transactionalIdPrefixes.exists(prefix => value.startsWith(prefix) && canonicalUuid(value.drop(prefix.length)))
     case LogField.Method => Set("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "OTHER").contains(value)
     case LogField.Route  => HiringHttpPaths.public.contains(value) || value == "_unmatched"
     case LogField.Status => value.toIntOption.exists(status => status >= 100 && status <= 599)
@@ -148,14 +151,13 @@ object LogFields {
     case LogField.Environment   => Set("local", "production").contains(value)
     case LogField.TraceId       => value.matches("[0-9a-fA-F]{32}")
     case LogField.SpanId        => value.matches("[0-9a-fA-F]{16}")
-    case LogField.EntityId | LogField.ActorId =>
-      value.matches("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
-    case LogField.Count     => value.toLongOption.exists(_ >= 0)
-    case LogField.SpanName  => value.matches("[A-Za-z][A-Za-z0-9_.-]{0,127}")
-    case LogField.Worker    => value.matches("[A-Za-z][A-Za-z0-9_.-]{0,63}")
-    case LogField.Remote    => Set("true", "false").contains(value)
-    case LogField.JobStatus => Set("Draft", "Open", "Closed").contains(value)
-    case _                  => false
+    case LogField.EntityId | LogField.ActorId => canonicalUuid(value.toLowerCase(Locale.ROOT))
+    case LogField.Count                       => value.toLongOption.exists(_ >= 0)
+    case LogField.SpanName                    => value.matches("[A-Za-z][A-Za-z0-9_.-]{0,127}")
+    case LogField.Worker                      => value.matches("[A-Za-z][A-Za-z0-9_.-]{0,63}")
+    case LogField.Remote                      => Set("true", "false").contains(value)
+    case LogField.JobStatus                   => Set("Draft", "Open", "Closed").contains(value)
+    case _                                    => false
   }
 }
 

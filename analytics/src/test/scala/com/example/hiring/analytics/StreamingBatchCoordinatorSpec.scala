@@ -287,13 +287,13 @@ final class StreamingBatchCoordinatorSpec extends CatsEffectSuite {
   test("grant expiry after publication prevents watermark commit and checkpoint acknowledgement") {
     for {
       state <- Ref.of[IO, FakeState](FakeState(expireWhenPublished = true))
-      harness = new Harness(state)
       authorization = state.get.flatMap(value =>
         IO.raiseUnless(value.authorizationValid)(
           com.example.hiring.analytics.errors.AnalyticsError.InvalidConfiguration("activation expired")
         )
       )
-      result <- harness.coordinator.process(prep, authorization).attempt
+      harness = new Harness(state, authorization)
+      result <- harness.coordinator.process(prep).attempt
       observed <- state.get
     } yield {
       assert(result.isLeft)
@@ -319,13 +319,13 @@ final class StreamingBatchCoordinatorSpec extends CatsEffectSuite {
           expireWhenMarkersRead = true
         )
       )
-      harness = new Harness(state)
       authorization = state.get.flatMap(value =>
         IO.raiseUnless(value.authorizationValid)(
           com.example.hiring.analytics.errors.AnalyticsError.InvalidConfiguration("activation expired")
         )
       )
-      result <- harness.coordinator.process(prep, authorization).attempt
+      harness = new Harness(state, authorization)
+      result <- harness.coordinator.process(prep).attempt
       observed <- state.get
     } yield {
       assert(result.isLeft)
@@ -362,7 +362,7 @@ final class StreamingBatchCoordinatorSpec extends CatsEffectSuite {
       expireWhenPublished: Boolean = false
   )
 
-  private final class Harness(state: Ref[IO, FakeState]) {
+  private final class Harness(state: Ref[IO, FakeState], authorize: IO[Unit] = IO.unit) {
     private val journal = new StreamingBatchJournal[IO] {
       override def load(id: StreamingBatchIdentity): IO[Option[StreamingJournalState]] =
         state.get.map(_.journal.get(id).map(_.asState))
@@ -523,6 +523,6 @@ final class StreamingBatchCoordinatorSpec extends CatsEffectSuite {
       ): IO[Unit] = IO.unit
     }
 
-    val coordinator = new StreamingBatchCoordinator[IO](journal, markers, stages, checkpoint)
+    val coordinator = new StreamingBatchCoordinator[IO](journal, markers, stages, checkpoint, authorize)
   }
 }

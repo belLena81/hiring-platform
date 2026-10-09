@@ -130,23 +130,15 @@ final case class PartitionOffsetRange private (
 object PartitionOffsetRange {
   private[analytics] def partitionNumber(value: AnalyticsPartition): Int = value
 
-  def from(
-      topic: String,
-      partition: Int,
-      startOffset: Long,
-      endOffsetExclusive: Long
-  ): ValidatedNec[String, PartitionOffsetRange] =
-    from(AnalyticsTopic.from(topic).toValidatedNec, partition, startOffset, endOffsetExclusive)
-
   def fromTopic(
       topic: AnalyticsTopic,
       partition: Int,
       startOffset: Long,
       endOffsetExclusive: Long
   ): ValidatedNec[String, PartitionOffsetRange] =
-    from(topic.validNec[String], partition, startOffset, endOffsetExclusive)
+    fromValidatedTopic(topic.validNec[String], partition, startOffset, endOffsetExclusive)
 
-  private def from(
+  private[analytics] def fromValidatedTopic(
       topicValue: ValidatedNec[String, AnalyticsTopic],
       partition: Int,
       startOffset: Long,
@@ -188,15 +180,9 @@ object AnalyticsRunManifest {
     (ranges.validNec[String], nonEmpty, unique, oneTopic).mapN((validRanges, _, _, _) => validRanges)
   }
 
-  def from(runId: RunId, ranges: Vector[PartitionOffsetRange]): ValidatedNec[String, AnalyticsRunManifest] =
-    fromValidated(runId.validNec, ranges.validNec)
-
-  def fromValidated(
-      runId: ValidatedNec[String, RunId],
+  def from(
+      runId: RunId,
       ranges: ValidatedNec[String, Vector[PartitionOffsetRange]]
   ): ValidatedNec[String, AnalyticsRunManifest] =
-    (runId, ranges.andThen(validateRanges)).mapN((id, validRanges) => new AnalyticsRunManifest(id, validRanges))
-
-  def validated(rawRunId: String, ranges: Vector[PartitionOffsetRange]): ValidatedNec[String, AnalyticsRunManifest] =
-    fromValidated(RunId.from(rawRunId).toValidatedNec, ranges.validNec)
+    ranges.andThen(validateRanges).map(new AnalyticsRunManifest(runId, _))
 }

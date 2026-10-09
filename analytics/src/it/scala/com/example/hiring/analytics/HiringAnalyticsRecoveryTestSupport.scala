@@ -237,7 +237,7 @@ private[analytics] object HiringAnalyticsRecoveryTestSupport {
         store: StreamingBatchJournal[IO] = journal
     ): IO[StreamingCoordinatorResult] = lock.resource(paths.root).use { _ =>
       maintenance.validateHmacConfigurationLocked *> streamingStages(frame, sink, publication).use { stages =>
-        new StreamingBatchCoordinator[IO](store, markers, stages, checkpoint(store)).process(preparation())
+        new StreamingBatchCoordinator[IO](store, markers, stages, checkpoint(store), IO.unit).process(preparation())
       }
     }
 
@@ -263,7 +263,7 @@ private[analytics] object HiringAnalyticsRecoveryTestSupport {
         replayStages,
         publication,
         lock,
-        operational.retention.publishedSnapshotDays,
+        operational.retention,
         cats.effect.Clock[IO]
       ).run(request)
   }

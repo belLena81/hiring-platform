@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.api.graphql
 
+import cats.data.EitherT
 import cats.data.Kleisli
 import cats.effect.{IO, Resource}
 import com.example.graphQL.cats.api.admission.{AuthRateLimiter, FixedWindowRateLimiter, InterviewActionRateLimiter}
@@ -30,7 +31,7 @@ import org.http4s.Request
 
 object TestGraphQLSupport {
   private def unsupported[A]: UseCaseIO[A] =
-    UseCaseIO.liftIO(IO.raiseError(new IllegalStateException("Request context services are not configured")))
+    EitherT.liftF(IO.raiseError(new IllegalStateException("Request context services are not configured")))
 
   val cursorKey: CursorCodec.CursorKey =
     CursorCodec.keyFromSecret("test-cursor-secret-01234567890123456789")
@@ -41,7 +42,7 @@ object TestGraphQLSupport {
     def me(actor: ActorContext) = unsupported
     def updateMyProfile(request: IdempotencyRequest, actor: ActorContext, input: AccountProfileInput) = unsupported
     def deleteMyAccount(request: IdempotencyRequest, actor: ActorContext) = unsupported
-    def accountDeletionStatus(actor: ActorContext, receiptId: String) = UseCaseIO.pure(AccountDeletionStatus.NotFound)
+    def accountDeletionStatus(actor: ActorContext, receiptId: String) = EitherT.rightT(AccountDeletionStatus.NotFound)
     def listUsers(actor: ActorContext, page: UserPageRequest) = unsupported
   }
 
@@ -53,14 +54,14 @@ object TestGraphQLSupport {
         eventId: java.util.UUID,
         jobId: JobId,
         searchId: Option[java.util.UUID]
-    ) = UseCaseIO.pure(())
+    ) = EitherT.rightT(())
     def recordSearchResultClick(
         request: IdempotencyRequest,
         actor: ActorContext,
         eventId: java.util.UUID,
         searchId: java.util.UUID,
         resultId: String
-    ) = UseCaseIO.pure(())
+    ) = EitherT.rightT(())
   }
 
   /** Test fixture: real recording service over a handoff that drops every session. */

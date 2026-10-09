@@ -5,8 +5,9 @@ import com.example.graphQL.cats.domain.model.ApplicationStatus
 import com.example.graphQL.cats.domain.workflow.*
 import com.example.graphQL.cats.service.port.*
 import org.bson.Document
+import com.example.graphQL.cats.repository.mongo.MongoDocumentFields.Repository.{instant, int32, int64}
 import java.time.Instant
-import java.util.{Date, UUID}
+import java.util.UUID
 
 /** Canonical current stored command contract shared by transactional reads and startup verification. */
 private[mongo] object MongoInterviewWorkflowCommandCodec {
@@ -87,7 +88,7 @@ private[mongo] object MongoInterviewWorkflowCommandCodec {
     for {
       workflowId <- string(document, WorkflowIdField).flatMap(uuid).map(InterviewWorkflowId.apply)
       step <- string(document, StepIdField)
-      revision <- long(document, RevisionField)
+      revision <- int64(document, RevisionField)
       id <- string(document, MongoFields.Id)
       _ <- Either.cond(id == s"${workflowId.value}:$step", (), RepositoryError.InvalidStoredData)
       commandDoc <- Option(document.get(CommandField))
@@ -97,8 +98,8 @@ private[mongo] object MongoInterviewWorkflowCommandCodec {
       state <- InterviewWorkflowCommandState.values
         .find(_.toString == stateName)
         .toRight(RepositoryError.InvalidStoredData)
-      attempts <- integer(document, MongoFields.Attempts)
-      executionAttempts <- integer(document, "executionAttempts")
+      attempts <- int32(document, MongoFields.Attempts)
+      executionAttempts <- int32(document, "executionAttempts")
       _ <- Either.cond(revision >= 0L && attempts >= 0 && executionAttempts >= 0, (), RepositoryError.InvalidStoredData)
       availableAt <- instant(document, MongoFields.AvailableAt)
       occurredAt <- instant(document, MongoFields.OccurredAt)
@@ -139,7 +140,7 @@ private[mongo] object MongoInterviewWorkflowCommandCodec {
     import InterviewLifecycleCommand as C
     import LifecycleKinds as K
     def interval(value: InterviewInterval): Document =
-      new Document(StartField, Date.from(value.startsAt)).append(EndField, Date.from(value.endsAt))
+      new Document(StartField, value.startsAt.toDate).append(EndField, value.endsAt.toDate)
     command match {
       case C.CancelCalendarSlot(key)       => new Document("kind", K.CancelCalendar).append(IdempotencyKeyField, key)
       case C.LookupCalendarCancellation(k) => new Document("kind", K.LookupCancellation).append(IdempotencyKeyField, k)
@@ -153,7 +154,7 @@ private[mongo] object MongoInterviewWorkflowCommandCodec {
         new Document("kind", K.LookupRescheduleCommit)
           .append(WorkflowIdField, id.value.toString)
           .append("generation", generation)
-      case C.ExpireProposal(at) => new Document("kind", K.ExpireProposal).append(MongoFields.AvailableAt, Date.from(at))
+      case C.ExpireProposal(at) => new Document("kind", K.ExpireProposal).append(MongoFields.AvailableAt, at.toDate)
       case C.Notify(kind, participant, key) =>
         new Document("kind", K.NotifyKind)
           .append("notificationKind", kind.toString)
@@ -211,7 +212,7 @@ private[mongo] object MongoInterviewWorkflowCommandCodec {
       case K.HoldReplacement       => (keyed(holdKey), interval("interval")).mapN(C.HoldReplacementSlot.apply)
       case K.LookupReplacementHold => keyed(holdKey).map(C.LookupReplacementHold.apply)
       case K.CommitReschedule      =>
-        (interval("interval"), integer(document, "generation").filterOrElse(_ > 0, RepositoryError.InvalidStoredData))
+        (interval("interval"), int32(document, "generation").filterOrElse(_ > 0, RepositoryError.InvalidStoredData))
           .mapN(C.CommitRescheduledInterval.apply)
       case K.LookupRescheduleCommit =>
         (
@@ -219,7 +220,7 @@ private[mongo] object MongoInterviewWorkflowCommandCodec {
             .flatMap(uuid)
             .map(InterviewWorkflowId.apply)
             .filterOrElse(_ == workflowId, RepositoryError.InvalidStoredData),
-          integer(document, "generation").filterOrElse(_ > 0, RepositoryError.InvalidStoredData)
+          int32(document, "generation").filterOrElse(_ > 0, RepositoryError.InvalidStoredData)
         ).mapN(C.LookupRescheduleCommitReceipt.apply)
       case K.ExpireProposal =>
         instant(document, MongoFields.AvailableAt)
@@ -298,18 +299,6 @@ private[mongo] object MongoInterviewWorkflowCommandCodec {
       .toRight(RepositoryError.InvalidStoredData)
   private def uuid(value: String): Either[RepositoryError, UUID] =
     Either.catchNonFatal(UUID.fromString(value)).leftMap(_ => RepositoryError.InvalidStoredData)
-  private def long(document: Document, field: String): Either[RepositoryError, Long] =
-    Option(document.get(field))
-      .collect { case value: java.lang.Long => value.longValue }
-      .toRight(RepositoryError.InvalidStoredData)
-  private def integer(document: Document, field: String): Either[RepositoryError, Int] =
-    Option(document.get(field))
-      .collect { case value: java.lang.Integer => value.intValue }
-      .toRight(RepositoryError.InvalidStoredData)
-  private def instant(document: Document, field: String): Either[RepositoryError, Instant] =
-    Option(document.get(field))
-      .collect { case value: Date => value.toInstant }
-      .toRight(RepositoryError.InvalidStoredData)
   private def enumStatus(value: String): Either[RepositoryError, ApplicationStatus] =
     ApplicationStatus.values.find(_.toString == value).toRight(RepositoryError.InvalidStoredData)
 }

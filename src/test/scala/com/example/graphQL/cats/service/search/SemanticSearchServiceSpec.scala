@@ -1126,6 +1126,43 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
     } yield assertEquals(result, Right(Nil))
   }
 
+  test(
+    "search store failures keep revoked authority forbidden and conflicts conflicting; other faults are unavailable"
+  ) {
+    List(
+      RepositoryError.AuthorityRevoked -> UseCaseError.Domain(DomainError.Forbidden),
+      RepositoryError.Conflict -> UseCaseError.Repository(RepositoryError.Conflict),
+      RepositoryError.Unavailable -> UseCaseError.Search(SearchError.VectorSearchUnavailable)
+    ).traverse_ { case (failure, expected) =>
+      for {
+        usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map(candidateId -> candidateWithProfile))
+        jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> openJob))
+        service = semanticService(
+          new InMemoryUsers(usersRef),
+          new InMemoryJobs(jobsRef),
+          FakeEmbeddingService(Right(EmbeddingVector(List(0.1f, 0.2f), configuredModel, 2))),
+          new RetrievalSearchRepository {
+            def searchJobs(query: VectorSearchQuery): RepositoryIO[List[JobRetrievalHit]] =
+              RepositoryIO.fromEither(Left(failure))
+            def recommendedJobs(query: VectorSearchQuery): RepositoryIO[List[JobRetrievalHit]] =
+              RepositoryIO.fromEither(Left(failure))
+            def candidateMatches(query: VectorSearchQuery): RepositoryIO[List[CandidateRetrievalHit]] =
+              RepositoryIO.fromEither(Left(failure))
+          }
+        )
+        result <- service
+          .semanticJobSearch(
+            ActorContext(candidateId, UserRole.Candidate),
+            "scala",
+            JobSearchFilter(None, Set.empty, None),
+            pageSize,
+            searchId
+          )
+          .value
+      } yield assertEquals(result, Left(expected))
+    }
+  }
+
   private def semanticService(
       users: UserRepository,
       jobs: JobRepository,

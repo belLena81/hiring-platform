@@ -186,4 +186,22 @@ private[mongo] object MongoDocumentFields {
 
   private def toInt(value: Long, field: String): Read[Int] =
     Either.cond(value >= Int.MinValue && value <= Int.MaxValue, value.toInt, StoredDocumentError.InvalidField(field))
+
+  /** The same readers collapsed to `InvalidStoredData` for repository-boundary decoding. */
+  object Repository {
+    def string(document: Document, field: String): Either[RepositoryError, String] =
+      toRepository(requiredString(document, field))
+    def instant(document: Document, field: String): Either[RepositoryError, Instant] =
+      toRepository(requiredInstant(document, field))
+    def optionalInstant(document: Document, field: String): Either[RepositoryError, Option[Instant]] =
+      toRepository(MongoDocumentFields.optionalInstant(document, field))
+    def stringList(document: Document, field: String): Either[RepositoryError, List[String]] =
+      toRepository(requiredStringList(document, field))
+    def stringVector(document: Document, field: String): Either[RepositoryError, Vector[String]] =
+      toRepository(requiredStringVector(document, field))
+    def int32(document: Document, field: String): Either[RepositoryError, Int] =
+      toRepository(requiredInt32(document, field))
+    def int64(document: Document, field: String): Either[RepositoryError, Long] =
+      toRepository(requiredInt64(document, field))
+  }
 }

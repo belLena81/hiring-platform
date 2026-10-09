@@ -460,8 +460,8 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
   test("Argon2 unknown-user verification accepts arbitrary credentials without retaining their hash") {
     Semaphore[IO](1).flatMap { permits =>
       com.example.graphQL.cats.infrastructure.auth.Argon2PasswordHasher
-        .resource(iterations = 1, memoryKilobytes = 8192, parallelism = 1, permits)
-        .use { hasher =>
+        .create(com.example.graphQL.cats.config.PasswordHashConfig(iterations = 1, memoryKilobytes = 8192), permits)
+        .flatMap { hasher =>
           hasher
             .verifyUnknown("first-password")
             .flatMap(_ => hasher.verifyUnknown("second-password"))

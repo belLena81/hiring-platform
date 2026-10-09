@@ -1,12 +1,13 @@
 package com.example.graphQL.cats.service.mutation
 
+import cats.data.EitherT
 import cats.effect.{IO, Ref}
 import com.example.graphQL.cats.FixedTestClock
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.UseCaseError
-import com.example.graphQL.cats.service.protocol.{IdempotencyRequest, UseCaseIO}
+import com.example.graphQL.cats.service.protocol.IdempotencyRequest
 import munit.CatsEffectSuite
 
 import java.time.Instant
@@ -24,14 +25,14 @@ final class IdempotentSpec extends CatsEffectSuite {
     for {
       state <- Ref.of[IO, Option[MutationEntityReference]](None)
       writes <- Ref.of[IO, Int](0)
-      idempotent = Idempotent.withClock(new RecordingReceiptRepository(state), FixedTestClock.at(now))
+      idempotent = Idempotent(new RecordingReceiptRepository(state), FixedTestClock.at(now))
       run = idempotent.execute[String](
         "createJob",
         "actor-1",
         request,
         value => MutationEntityReference("job", value),
-        reference => UseCaseIO.pure(s"replayed:${reference.entityId}")
-      )(_ => UseCaseIO.liftIO(writes.updateAndGet(_ + 1).map(index => s"job-$index")))
+        reference => EitherT.rightT(s"replayed:${reference.entityId}")
+      )(_ => EitherT.liftF(writes.updateAndGet(_ + 1).map(index => s"job-$index")))
       first <- run.value
       second <- run.value
       count <- writes.get
@@ -39,6 +40,21 @@ final class IdempotentSpec extends CatsEffectSuite {
       assertEquals(first, Right("job-1"))
       assertEquals(second, Right("replayed:job-1"))
       assertEquals(count, 1)
+    }
+  }
+
+  test("replay by id loads only a well-formed reference of the expected kind") {
+    val id = UUID.fromString("00000000-0000-0000-0000-000000000002")
+    val replay = Idempotent.replayById("job", identity[UUID])(found => EitherT.rightT[IO, UseCaseError](found))
+    val corrupt = Left(UseCaseError.Repository(RepositoryError.Unavailable))
+    for {
+      loaded <- replay(MutationEntityReference.of("job", id)).value
+      wrongKind <- replay(MutationEntityReference.of("user", id)).value
+      malformed <- replay(MutationEntityReference("job", "not-a-uuid")).value
+    } yield {
+      assertEquals(loaded, Right(id))
+      assertEquals(wrongKind, corrupt)
+      assertEquals(malformed, corrupt)
     }
   }
 
@@ -61,15 +77,14 @@ final class IdempotentSpec extends CatsEffectSuite {
         }
       }
     }
-    Idempotent
-      .withClock(receipts, FixedTestClock.at(now))
+    Idempotent(receipts, FixedTestClock.at(now))
       .execute[String](
         "createJob",
         "actor-1",
         request,
         value => MutationEntityReference("job", value),
-        reference => UseCaseIO.pure(reference.entityId)
-      )(context => UseCaseIO.pure(if (context eq expected) "same-context" else "different-context"))
+        reference => EitherT.rightT(reference.entityId)
+      )(context => EitherT.rightT(if (context eq expected) "same-context" else "different-context"))
       .value
       .map { result =>
         assertEquals(result, Right("same-context"))
@@ -78,15 +93,14 @@ final class IdempotentSpec extends CatsEffectSuite {
 
   test("maps fingerprint conflicts and in-progress receipts to stable use-case errors") {
     def result(execution: MutationReceiptExecution[Nothing, Nothing]) =
-      Idempotent
-        .withClock(new FixedReceiptRepository(execution), FixedTestClock.at(now))
+      Idempotent(new FixedReceiptRepository(execution), FixedTestClock.at(now))
         .execute[String](
           "createJob",
           "actor-1",
           request,
           value => MutationEntityReference("job", value),
-          reference => UseCaseIO.pure(reference.entityId)
-        )(_ => UseCaseIO.pure("unused"))
+          reference => EitherT.rightT(reference.entityId)
+        )(_ => EitherT.rightT("unused"))
         .value
 
     (result(MutationReceiptExecution.FingerprintMismatch), result(MutationReceiptExecution.InProgress)).mapN {
@@ -115,15 +129,14 @@ final class IdempotentSpec extends CatsEffectSuite {
         }
       )
     }
-    Idempotent
-      .withClock(receipts, FixedTestClock.at(now))
+    Idempotent(receipts, FixedTestClock.at(now))
       .execute[String](
         "createJob",
         "actor-1",
         request,
         value => MutationEntityReference("job", value),
-        reference => UseCaseIO.pure(reference.entityId)
-      )(_ => UseCaseIO.left(UseCaseError.Repository(RepositoryError.Conflict)))
+        reference => EitherT.rightT(reference.entityId)
+      )(_ => EitherT.leftT(UseCaseError.Repository(RepositoryError.Conflict)))
       .value
       .map { result =>
         assertEquals(result, Left(UseCaseError.Repository(RepositoryError.Conflict)))
@@ -132,18 +145,17 @@ final class IdempotentSpec extends CatsEffectSuite {
 
   test("keeps business rejection distinct from repository failure") {
     val rejection = UseCaseError.Domain(DomainError.Forbidden)
-    Idempotent
-      .withClock(
-        com.example.graphQL.cats.service.mutation.TestIdempotency.noopReceipts,
-        FixedTestClock.at(now)
-      )
+    Idempotent(
+      com.example.graphQL.cats.service.mutation.TestIdempotency.noopReceipts,
+      FixedTestClock.at(now)
+    )
       .execute[String](
         "createJob",
         "actor-1",
         request,
         value => MutationEntityReference("job", value),
-        reference => UseCaseIO.pure(reference.entityId)
-      )(_ => UseCaseIO.left(rejection))
+        reference => EitherT.rightT(reference.entityId)
+      )(_ => EitherT.leftT(rejection))
       .value
       .map(result => assertEquals(result, Left(rejection)))
   }
@@ -177,15 +189,14 @@ final class IdempotentSpec extends CatsEffectSuite {
             }
           )
       }
-      result <- Idempotent
-        .withClock(receipts, FixedTestClock.at(now))
+      result <- Idempotent(receipts, FixedTestClock.at(now))
         .execute[String](
           "createJob",
           "actor-1",
           request,
           value => MutationEntityReference("job", value),
-          reference => UseCaseIO.pure(reference.entityId)
-        )(_ => UseCaseIO.pure("job-1"))
+          reference => EitherT.rightT(reference.entityId)
+        )(_ => EitherT.rightT("job-1"))
         .value
       captured <- observed.get
     } yield {

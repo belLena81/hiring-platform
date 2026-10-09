@@ -6,50 +6,26 @@ import com.example.graphQL.cats.domain.pagination.PageSize
 import com.example.graphQL.cats.domain.search.SearchFusionStrategy
 
 private[config] object VectorSearchConfigValidation {
-  def read(vector: RawVectorSearchConfig): ValidatedNel[ConfigError, VectorSearchConfig] = {
-    val voyage = vector.voyage
-    val embedding = vector.embedding
-    val indexes = vector.indexes
-    val durableRetryBaseMillis =
-      embedding.durableRetryBaseMillis.getOrElse(VectorSearchConfig.DefaultDurableRetryBaseMillis)
-    val durableRetryCapMillis =
-      embedding.durableRetryCapMillis.getOrElse(VectorSearchConfig.DefaultDurableRetryCapMillis)
+  def read(vector: RawVectorSearchConfig): ValidatedNel[ConfigError, VectorSearchConfig] =
     (
-      validVoyageApiKey(vector.enabled, voyage.apiKey),
+      validVoyageApiKey(vector.enabled, vector.voyage.apiKey),
       validNumCandidates(vector.numCandidates),
       validBranchResultLimit(vector.branchResultLimit, vector.numCandidates),
       validRerankFusion(vector.rerank.enabled, vector.fusionStrategy),
-      validDurableRetryWindow(durableRetryBaseMillis, durableRetryCapMillis)
+      validDurableRetryWindow(vector.embedding.durableRetryBaseMillis, vector.embedding.durableRetryCapMillis)
     ).mapN { (apiKey, numCandidates, branchResultLimit, fusionStrategy, _) =>
-      VectorSearchConfig(
-        vector.enabled,
-        apiKey,
-        voyage.endpoint,
-        voyage.model,
-        voyage.dimension,
-        embedding.queueSize,
-        embedding.parallelism,
-        embedding.timeoutMs,
-        embedding.retryAttempts,
-        embedding.retryDelayMs,
-        indexes.jobs,
-        indexes.candidates,
-        indexes.lexical,
-        indexes.candidateLexical,
-        fusionStrategy,
-        vector.rerank.enabled,
-        vector.rerank.model,
-        indexes.readyTimeoutMs,
-        indexes.pollIntervalMs,
-        numCandidates,
-        branchResultLimit,
-        embedding.durableRetryAttempts.getOrElse(VectorSearchConfig.DefaultDurableRetryAttempts),
-        durableRetryBaseMillis,
-        durableRetryCapMillis,
-        embedding.workerRestartDelayMillis.getOrElse(VectorSearchConfig.DefaultWorkerRestartDelayMillis)
-      )
+      apiKey.filter(_ => vector.enabled).fold(VectorSearchConfig.Disabled: VectorSearchConfig) { key =>
+        VectorSearchConfig.Enabled(
+          VoyageConfig(key, vector.voyage.endpoint, vector.voyage.model, vector.voyage.dimension),
+          vector.embedding,
+          vector.indexes,
+          numCandidates,
+          branchResultLimit,
+          fusionStrategy,
+          vector.rerank
+        )
+      }
     }
-  }
 
   def validVoyageApiKey(enabled: Boolean, value: Option[String]): ValidatedNel[ConfigError, Option[String]] =
     val normalized = value.filter(_ != "disabled")

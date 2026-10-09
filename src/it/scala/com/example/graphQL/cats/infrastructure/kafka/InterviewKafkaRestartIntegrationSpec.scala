@@ -93,12 +93,11 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
       Instant.now()
     )
     val principal = config(worker = false)
-    val settings = OperationalEventKafkaRuntime
-      .saslProperties(Some(principal.username), Some(principal.password), principal.protocol)
-      .foldLeft(
-        ProducerSettings(Serializer[IO, String], Serializer[IO, Array[Byte]])
-          .withBootstrapServers(principal.bootstrapServers)
-      ) { case (current, (key, value)) => current.withProperty(key, value) }
+    val settings = ProducerSettings(Serializer[IO, String], Serializer[IO, Array[Byte]])
+      .withBootstrapServers(principal.bootstrapServers)
+      .withProperties(
+        KafkaClientSettings.security(Some(principal.username), Some(principal.password), principal.protocol)
+      )
     for {
       observed <- Ref.of[IO, Vector[String]](Vector.empty)
       _ <- InterviewKafkaRuntime
@@ -155,14 +154,11 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
           now
         )
         val principal = broker.config(worker = false)
-        val settings = OperationalEventKafkaRuntime
-          .saslProperties(Some(principal.username), Some(principal.password), principal.protocol)
-          .foldLeft(
-            ProducerSettings(Serializer[IO, String], Serializer[IO, Array[Byte]])
-              .withBootstrapServers(principal.bootstrapServers)
-          ) { case (current, (key, value)) =>
-            current.withProperty(key, value)
-          }
+        val settings = ProducerSettings(Serializer[IO, String], Serializer[IO, Array[Byte]])
+          .withBootstrapServers(principal.bootstrapServers)
+          .withProperties(
+            KafkaClientSettings.security(Some(principal.username), Some(principal.password), principal.protocol)
+          )
         for {
           _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop, topics)
           metadata <- KafkaProducer.resource(settings).use { producer =>
@@ -231,19 +227,17 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
           order <- saved.get
           _ = assertEquals(order.take(2), Vector("quarantined", "valid"))
           failedCommit <- OperationalEventKafkaRuntime
-            .processRecordBeforeCommit(topics.commands, first.partition(), first.offset())(
-              repository.quarantine(identity, now).value.map(_.isRight)
+            .processRecord(topics.commands, first.partition(), first.offset())(
+              repository.quarantine(identity, now)
             )(IO.raiseError(new IllegalStateException("synthetic acknowledgment failure")))
             .attempt
           _ = assert(failedCommit.isLeft)
           acknowledged <- Ref.of[IO, Boolean](false)
-          _ <- OperationalEventKafkaRuntime.processRecordBeforeCommit(
+          _ <- OperationalEventKafkaRuntime.processRecord(
             topics.commands,
             first.partition(),
             first.offset()
-          )(
-            repository.quarantine(identity, now).value.map(_.isRight)
-          )(acknowledged.set(true))
+          )(repository.quarantine(identity, now))(acknowledged.set(true))
           replayRows <- count(fixture.database, "interview_workflow_inbox", target)
           replayAck <- acknowledged.get
         } yield {
@@ -280,16 +274,15 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
         )
       )
     )
-    val settings = OperationalEventKafkaRuntime
-      .saslProperties(
-        Some("hiring_publisher_v2"),
-        Some(kafkaNamespace.manifest.publisherPassword),
-        KafkaSaslSecurityProtocol.Plaintext
+    val settings = ProducerSettings(Serializer[IO, String], Serializer[IO, Array[Byte]])
+      .withBootstrapServers(kafka.bootstrapServers)
+      .withProperties(
+        KafkaClientSettings.security(
+          Some("hiring_publisher_v2"),
+          Some(kafkaNamespace.manifest.publisherPassword),
+          KafkaSaslSecurityProtocol.Plaintext
+        )
       )
-      .foldLeft(
-        ProducerSettings(Serializer[IO, String], Serializer[IO, Array[Byte]])
-          .withBootstrapServers(kafka.bootstrapServers)
-      ) { case (current, (key, property)) => current.withProperty(key, property) }
     operationalDatabase.use { database =>
       val storedReceipts = new MongoConsumerReceiptRepository(database, Diagnostics.noop)
       val storedQuarantine = new MongoEventQuarantineRepository(database, Diagnostics.noop)
@@ -365,8 +358,8 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
         _ = assertEquals(document.map(_.get("rawBytes", classOf[Binary]).getData.toList), Some(List.empty[Byte]))
         // A durable quarantine survives a failed acknowledgment; replay must remain idempotent.
         failedCommit <- OperationalEventKafkaRuntime
-          .processRecordBeforeCommit(kafka.topic, first.partition(), first.offset())(
-            OperationalEventKafkaRuntime.handleRecord(
+          .processRecord(kafka.topic, first.partition(), first.offset())(
+            OperationalEventKafkaRuntime.recordDurably(
               kafka,
               storedReceipts,
               storedQuarantine,
@@ -379,8 +372,8 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
           .attempt
         _ = assert(failedCommit.isLeft)
         acknowledged <- Ref.of[IO, Boolean](false)
-        _ <- OperationalEventKafkaRuntime.processRecordBeforeCommit(kafka.topic, first.partition(), first.offset())(
-          OperationalEventKafkaRuntime.handleRecord(
+        _ <- OperationalEventKafkaRuntime.processRecord(kafka.topic, first.partition(), first.offset())(
+          OperationalEventKafkaRuntime.recordDurably(
             kafka,
             storedReceipts,
             storedQuarantine,
@@ -410,8 +403,8 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
     properties.put("group.id", config.consumerGroup)
     properties.put("key.deserializer", classOf[StringDeserializer].getName)
     properties.put("value.deserializer", classOf[ByteArrayDeserializer].getName)
-    OperationalEventKafkaRuntime
-      .saslProperties(config.consumer.saslUsername, config.consumer.saslPassword, config.saslSecurityProtocol)
+    KafkaClientSettings
+      .security(config.consumer.saslUsername, config.consumer.saslPassword, config.saslSecurityProtocol)
       .foreach { case (key, value) => properties.put(key, value); () }
     val consumer = new org.apache.kafka.clients.consumer.KafkaConsumer[String, Array[Byte]](properties)
     try Option(consumer.committed(Collections.singleton(partition)).get(partition)).map(_.offset())

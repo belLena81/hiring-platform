@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.api.graphql
 
+import cats.data.EitherT
 import cats.effect.{Deferred, IO, Ref, Resource}
 import cats.effect.std.Dispatcher
 import cats.syntax.all.*
@@ -27,6 +28,7 @@ import com.example.graphQL.cats.service.protocol.{
   UseCaseIO
 }
 import com.example.graphQL.cats.service.UseCaseError
+import com.example.graphQL.cats.api.graphql.HiringGraphQLResolverSupport.raiseOnUseCaseError
 import com.example.graphQL.cats.service.search.SearchSessionRecording
 import org.typelevel.otel4s.trace.{SpanContext, Tracer}
 
@@ -87,7 +89,7 @@ final class RequestContext private (
       case (Some(_), Some(resolveViewer)) =>
         viewerInvalidated.get.flatMap {
           case true  => IO.pure(Left(unauthorizedFailure))
-          case false => read(resolveViewer).value
+          case false => raiseOnUseCaseError(resolveViewer).value
         }
       case _ => IO.pure(Left(unauthorizedFailure))
     })
@@ -131,10 +133,14 @@ final class RequestContext private (
     parameters.diagnostics.emit(LogEvent.RuntimeFailed, parameters.requestId, fields = LogFields.failure(error))
 
   def relatedUsers(keys: List[UserRelationKey]): HiringGraphQLResult[List[RelatedUser]] =
-    authenticatedActor.flatMap(actor => read(parameters.hiring.readModel.relatedUsers(actor, keys.distinct)))
+    authenticatedActor.flatMap(actor =>
+      raiseOnUseCaseError(parameters.hiring.readModel.relatedUsers(actor, keys.distinct))
+    )
 
   def relatedJobs(keys: List[JobRelationKey]): HiringGraphQLResult[List[RelatedJob]] =
-    authenticatedActor.flatMap(actor => read(parameters.hiring.readModel.relatedJobs(actor, keys.distinct)))
+    authenticatedActor.flatMap(actor =>
+      raiseOnUseCaseError(parameters.hiring.readModel.relatedJobs(actor, keys.distinct))
+    )
 
   /** Owner-only profile attributes are masked by the service rule for the authenticated viewer. */
   private[graphql] def candidateProfileFor(
@@ -148,13 +154,10 @@ final class RequestContext private (
       case None    => cats.data.EitherT.pure[IO, HiringGraphQLFailure](Nil)
       case Some(_) =>
         authenticatedActor.flatMap(current =>
-          read(parameters.hiring.readModel.canViewUserEmails(current, ids.distinct))
+          raiseOnUseCaseError(parameters.hiring.readModel.canViewUserEmails(current, ids.distinct))
             .map(_.toList.map(EmailVisibility(_)))
         )
     }
-
-  private def read[A](result: UseCaseIO[A]): HiringGraphQLResult[A] =
-    cats.data.EitherT(result.value.map(_.leftMap(HiringGraphQLFailure.UseCase(_))))
 
   private def unauthorizedFailure: HiringGraphQLFailure =
     HiringGraphQLFailure.UseCase(
@@ -163,16 +166,18 @@ final class RequestContext private (
 
 }
 
-final class RequestContextFactory private (dispatcher: Dispatcher[IO]) {
+final class RequestContextFactory private (adapter: HiringGraphQLSangriaAdapter) {
   def resource(parameters: RequestContextParameters): Resource[IO, RequestContext] =
     Resource.eval(parameters.tracer.currentSpanContext).flatMap { spanContext =>
-      RequestContext.withAdapter(new HiringGraphQLSangriaAdapter(dispatcher), parameters, spanContext)
+      RequestContext.withAdapter(adapter, parameters, spanContext)
     }
 }
 
 object RequestContextFactory {
   def resource: Resource[IO, RequestContextFactory] =
-    Dispatcher.parallel[IO](await = false).map(new RequestContextFactory(_))
+    Dispatcher
+      .parallel[IO](await = false)
+      .map(dispatcher => new RequestContextFactory(new HiringGraphQLSangriaAdapter(dispatcher)))
 }
 
 object RequestContext {
@@ -188,7 +193,7 @@ object RequestContext {
       memoizedViewer <- Resource.eval(
         parameters.actor
           .traverse(actor => parameters.hiring.readModel.viewer(actor).value.memoize)
-          .map(_.map(UseCaseIO.fromIO))
+          .map(_.map(EitherT(_)))
       )
       viewerInvalidated <- Resource.eval(Ref.of[IO, Boolean](false))
       context = new RequestContext(

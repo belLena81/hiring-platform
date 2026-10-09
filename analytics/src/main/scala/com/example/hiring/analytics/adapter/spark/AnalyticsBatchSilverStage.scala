@@ -1,6 +1,5 @@
 package com.example.hiring.analytics.adapter.spark
 
-import com.example.hiring.analytics.config.AnalyticsPositiveInt.*
 import com.example.hiring.analytics.config.AnalyticsRetentionSettings
 import com.example.hiring.analytics.domain.SubjectPseudonymizer
 import com.example.hiring.analytics.errors.AnalyticsError
@@ -79,7 +78,7 @@ private[analytics] final class AnalyticsBatchSilverStage[F[_]: Async](
             .withColumn("quarantineId", quarantineId())
             .withColumn("quarantineReason", lit("INVALID_OPERATIONAL_EVENT_ENVELOPE")),
           bronze.startedAt,
-          retention.quarantineDays.value
+          retention.quarantineDays
         )
       )
       malformedToPersist <- if (activeMarkersPresent) blocking(malformed.limit(0)) else Async[F].pure(malformed)
@@ -150,7 +149,7 @@ private[analytics] final class AnalyticsBatchSilverStage[F[_]: Async](
             .withColumn("quarantineId", quarantineId())
             .withColumn("quarantineReason", lit("CONFLICTING_EVENT_ID")),
           bronze.startedAt,
-          retention.quarantineDays.value
+          retention.quarantineDays
         )
       )
       quarantine <- blocking(
@@ -191,7 +190,7 @@ private[analytics] final class AnalyticsBatchSilverStage[F[_]: Async](
         deltaWriter.withExpiry(
           prepared.incomingSilver.join(prepared.conflicts, Seq(Columns.EventId), "left_anti"),
           startedAt,
-          retention.silverDays.value
+          retention.silverDays
         )
       )
       _ <- deltaWriter.merge(silver, paths.silver, "target.eventId = source.eventId")

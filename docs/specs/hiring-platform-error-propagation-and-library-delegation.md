@@ -3,11 +3,11 @@
 ## Identity and scope
 
 - Task: maintainability cleanup from the 2026-10-09 design review (five read-only reviews: Mongo repositories, services/domain, API/config/runtime/infrastructure, analytics adapters, analytics services/config/CLI). Follows [quality consolidation](hiring-platform-quality-consolidation.md).
-- Status: in progress (slices 1 and 2 authorized by the user on 2026-10-09; slices 3–7 listed under "Later slices" are not authorized yet).
+- Status: in progress. Slices 1–2 implemented and committed (`9188668`, `b69fb9f`, gate `4a04d7c`); reviews pending. Decisions of 2026-10-09 (below) authorize all remaining items, O1–O4 and slices 3–7.
 - Coordinator: Product Manager. Implementation owners: Scala Developer (root build), Big Data Engineer (analytics build). Reviews: Code Reviewer, Security Engineer (slice 2), QA.
 - Outcome: code that is cheaper to maintain. Capabilities the configured libraries already provide (cats, cats-effect, fs2, mongo4cats, Delta, Kafka clients) are used directly instead of being re-implemented at each call site. Errors are typed values propagated through Cats Effect and translated once at their owning boundary; no cause is silently dropped.
 - Non-goals: any change to GraphQL schema, error codes or messages seen by clients; stored MongoDB document shapes; Kafka topic/event shapes; Delta table shapes; authorization behaviour; new dependencies. The four behaviour decisions listed under "Open decisions" are explicitly out of scope.
-- Concurrent work: a second session is editing interview scheduling in this checkout (uncommitted, 2026-10-09). The following paths are locked and must not be edited: every path shown by `git status` at task start, in particular `repository/mongo/MongoInterview*`, `MongoNames.scala`, `MongoMigrationLedger.scala`, `MongoWorkflowIntegrity*.scala`, `MongoHiringIndexSetup.scala`, `MongoHiringMigrations.scala`, `runtime/InterviewSchedulingRuntime.scala`, `service/application/InterviewWorkflowWorker.scala`, `service/port/Interview*.scala`, their tests, and `docs/specs/durable-hiring-workflows.md`. Shared helpers those files call keep their signatures. Root builds use `-Dhiring.test.buildRoot=<scratch>`; a compile failure that originates in a locked file is reported as BLOCKED, never fixed here.
+- Concurrent work: the interview session finished and committed `e06ef77` (2026-10-09); no paths are locked any more. Tracks below work in detached git worktrees (no branches, no commits) and are integrated into the main tree by the coordinator as diffs.
 
 ## Source context and decisions
 
@@ -54,28 +54,52 @@ No external contract changes: GraphQL SDL, operation fixtures, error codes/messa
 | EL-16 | **Net reduction (user requirement, 2026-10-09).** Per owner, `git diff --numstat` shows: production code (`src/main`, `analytics/src/main`) net negative for slice 1 and for slices 1+2 combined; test code is judged by coverage, not by size: JaCoCo unit line and branch coverage of every touched production file must not fall below the clean-HEAD baseline (`sbt jacoco` on an exported HEAD copy, reports under the scratch build root). A test that adds no covered line or branch beyond the rest of the suite is redundant and is merged or removed; when a helper replaces copies, the tests of those copies collapse into tests of the helper. A new test is added only when it raises coverage or pins a contract (wire bytes, digests, property maps), and it is kept to the minimal case. No parallel old/new variants beyond decision L2. Typed errors reuse existing ADTs/cases before adding new types. Any item that would grow code is skipped and reported. | all | `git diff --numstat` per area, reported by each owner and re-measured by the coordinator | Not run |
 | EL-17 | **Coverage gate (user requirement, 2026-10-09).** Both builds fail `sbt jacoco` when unit line coverage is below 60%; `scripts/check-local.sh` runs `jacoco` instead of `test`; reports include `jacoco.xml` for per-file comparison. | `build.sbt`, `analytics/build.sbt`, `scripts/check-local.sh`, `README.md` | Baseline on exported HEAD: application 64.47% lines (846/846 tests), analytics 60.86% lines (446/446 tests); `Test/jacocoReport` with threshold 70 fails with "Required coverage is not met", with 60 passes, in both builds; `scalafmtSbtCheck` passes | PASS (coordinator, 2026-10-09); independent review pending |
 
-## Open decisions (not in this task)
+## User decisions (2026-10-09)
 
-- O1 `EmbeddingCoverageService`/`AnalyticsReportingService` accept an Active Admin without checking `adminSingleton` (unlike `ActorAuthorization.canManage`). Needs Security Engineer review before a shared `requireAdmin` tightens it.
-- O2 `SemanticSearchService` (around line 352) maps every repository error, including `AuthorityRevoked`, to `VectorSearchUnavailable`.
-- O3 `MongoAnalyticsErasureRequestRepository.enqueue` reads the subject fence and discards it (pre-existing). Likely dead because the request carries `producerRegistry=true`; owner to confirm.
-- O4 A short password fails with `BlankField("password")`.
+| # | Point | Decision |
+|---|---|---|
+| 1 | Integration tests | Run them (other session closed) |
+| 2 | Coverage of integration-only code | Gate on merged unit + integration line coverage (≥ 60%); the local check therefore needs Docker |
+| 3 | Reviews | Code Reviewer, Security Engineer and QA after integration tests on the final state |
+| 4 | Commits | Done by the user; tree clean |
+| 5 | Locked interview items (L1 `Option` write results, compatibility wrappers, interview copies) | Do now |
+| 6 | `MongoPublisherStream.one` empty result | Raise an `AnalyticsError` directly (accepted per-path case change, documented) |
+| 7 | Skipped slice 1–2 items | Do all now |
+| 8 | O1 Admin checks | Shared `requireAdmin` including `adminSingleton`; Security Engineer sign-off |
+| 9 | O2 `AuthorityRevoked` in vector search | Propagate as `Forbidden`; only infrastructure failures become `VectorSearchUnavailable` |
+| 10 | O3 discarded fence read | Big Data Engineer traces HAL-05 first, then delete or enforce |
+| 11 | O4 short password | New `PasswordTooShort` error; pre-MVP direct API change (SDL, fixtures, docs) |
+| 12 | Slices 3–7 | Authorized now as one batch |
+| 13 | O4 wire code (follow-up) | A password-only failure returns `INVALID_PASSWORD`; unused `PasswordPolicyViolation` removed or reused |
+| 14 | `listUsers` collapsing lookup failures to `Unauthorized` | Deliberate anti-enumeration: keep, document in code and `docs/api.md` |
+| 15 | Transaction runner edge cases | An error with both labels at commit also retries the whole transaction; `startSession`/`startTransaction` failures become typed `RepositoryError.Unavailable` |
+| 16 | pureconfig default arguments | Not adopted: needs `pureconfig-generic-scala3`; keep one `Option` + `getOrElse` per optional key (recommendation, not challenged) |
+| 10a | O3 outcome | Fence read is dead code (producer ids moved to the registration collection); delete it; lakehouse spec wording updated |
 
-## Later slices (not authorized yet)
-
-3. Config delegation to pureconfig defaults/`emap` readers in both builds (config error text changes). 4. Runtime simplification (`SetupLifecycle`, `EmbeddingCapability`, `RuntimeConfig`, single Argon2 hasher, single config load). 5. Resolver/service shared helpers (`paged`, `withHiring`, `readScope`, semantic-search authorization). 6. `MongoTransactionRunner` on cats-retry's error channel; Spark cancellation bridge and checkpoint write-once helper with RF-08 8b. 7. Decisions O1–O4. Deferred by L1: Mongo write-result `Option` removal.
+Behaviour changes accepted by these decisions (each needs a test and review): 6, 8, 9, 11, and 10 if enforcement is chosen. Every other change stays behaviour-preserving (L3). EL-16 (production net negative per track; no coverage loss per touched file, now measured on merged unit + integration coverage) applies to every track.
 
 ## Implementation handoff
 
-- Owners and write paths (exclusive):
-  - Big Data Engineer: `analytics/src/**` only (EL-01–EL-05, EL-14). Analytics build is independent of the locked files.
-  - Scala Developer: root `src/main/**`, `src/test/**`, `src/it/**` excluding locked paths (EL-06–EL-13).
-- Order: slice 1 then slice 2 within each owner; the two owners run in parallel (separate builds). Each owner commits nothing.
-- Verification: root `sbt -Dhiring.test.buildRoot=<scratch> scalafmtCheckAll test` (Java 17) plus the Mongo/Kafka it specs touched, when Docker is available; analytics `sbt scalafmtCheckAll test` (own target). Missing infrastructure is reported as unverified.
+Tracks run in parallel in detached worktrees; write scopes are exclusive; the coordinator integrates in the order M, R, S, A1, A2 and resolves cross-track signature changes.
+
+| Track | Owner | Write scope | Items |
+|---|---|---|---|
+| M — persistence and Kafka | Data Engineer | `src/main/.../repository/mongo/**`, `infrastructure/kafka/**`, their tests and it specs | L1 (`Option` removal in write helpers and all callers), interview copies onto shared helpers (lease claim/renew, `MongoDocumentFields` readers, guard mappers, `findById`, raw id lookups in migrations/audit), remove `MongoOperationalEventInsertion` delegate, `saslProperties`, Boolean `handleRecord`/`processRecordBeforeCommit`; interview Kafka runtime/fencer/retention onto `KafkaClientSettings`; typed outbox invariants (EL-11); `MongoTransactionRunner` on cats-retry error channel (slice 6); `MongoProducerGenerationMaintenance` diagnostics in its CLI (EL-12); one `backoffMillis`; `Date`/`Instant` conversion helper; O3 outcome |
+| R — configuration and runtime | Scala Developer | `config/**`, `runtime/**`, `Main.scala`, `api/http/**`, `infrastructure/{auth,embedding,logging,telemetry}/**`, `shared/**` | Slice 3 root (pureconfig defaults, `emap` readers for host/CIDR/connection string/protocol, drop Raw→config copies), slice 4 (`SetupLifecycle`, vector-search config ADT replacing `EmbeddingCapability`, `RuntimeConfig`→`AppConfig`, one Argon2 hasher with `memoize`, config loaded once, middleware stack built once, derived error/health bodies, Voyage codecs), shared HMAC/JWT helper, cause-chain helper, `fs2-io` dependency check |
+| S — services and GraphQL | Scala Developer | `service/**`, `domain/**`, `api/graphql/**`, `api/auth/**`, GraphQL SDL/fixtures, `docs/api.md` | O1, O2, O4; slice 5 (`paged`, `withHiring`, `readScope`, semantic-search authorization helper, mutation replay/reference helpers, `Idempotent` call shape); remove `UseCaseIO` renamings; `DuplicateApplication` unification, `Widen` removal, `FailureReason` split |
+| A1 — analytics config/app/services | Big Data Engineer | `analytics/src/main/.../{config,app,cli,service,domain,errors}/**` and their tests | Slice 3 analytics (per-section decode, `ConfigReader` instances, drop custom `Instant` reader, pseudonymizer built once, `InvalidConfiguration` problem list), EL-04 `reservationIdentityFor`, EL-05 leftovers (`KeyRetirementAuditInputs` types, `AnalyticsPositiveInt.value`), services out of `AppModule`, coordinator `authorize` field, `fs2` temp directory, retention `FiniteDuration`s, test-only production APIs moved |
+| A2 — analytics adapters and Spark bridge | Big Data Engineer | `analytics/src/main/.../adapter/**` and their tests | Decision 6; slice 6 / RF-08 8b (`SparkBlockingExecution` via `interruptible`, checkpoint write-once helper, `foreachBatch` boundary, shutdown drain, `NonFatal`→`invalidCheckpoint` sites) with the recorded TERM/INT, grant-expiry and abrupt-loss proofs re-run; marker frame, journal preamble, paths resolved once, `DeltaSurface`, `Column` merge conditions, SQL escaping helper, key-retirement erasure records via circe, vacuum-probe measurement |
+
+Coordinator: integration tests on the committed state first; O3 trace; merged-coverage gate (decision 2) after integration; final `scripts/check-local.sh`, integration suites, then reviews and QA.
 
 ## Checkpoint and review
 
-- Completed criteria and changed files: none yet.
-- Latest commands/results: none yet.
-- Blockers: locked interview paths (see scope).
-- Code Reviewer: pending. Security Engineer (slice 2: auth issuer, Kafka outbox, Admin seed): pending. QA: pending.
+Checkpoint 2026-10-09 (all tracks integrated in the main working tree, uncommitted):
+
+- Integration baseline at `b69fb9f`: root unit 1033/1033; root it 286/298 (10 skipped; failures: known Admin-seed rename conflict, timing-sensitive `InterviewSchedulingWorkerIntegrationSpec`). Analytics it baseline did not complete (a unit spec timed out under machine load).
+- Track results (author-reported, isolated builds): M production −382 (+ merge fix-ups −22), R ≈ −275, S −263, A1+A2 analytics ≈ −400; root combined unit 1021/1021, lines 64.76%; analytics combined unit 448/448, lines 62.56%; A2 analytics it suites 37 passed / 1 ignored (abrupt-loss recovery and callback-cancellation proofs included); M full root it 287/298 (only the known Admin-seed failure).
+- Coordinator integration: shared backoff moved to `domain/policy/RetryBackoff`; merged unit + integration coverage gate (decision 2) in both builds, the runner's full runs and `scripts/check-local.sh`; lakehouse spec wording for O3.
+- Skipped with reasons (candidates for a later task, none authorized): `SparkBlockingExecution.submit` on `interruptible` (breaks driver-thread affinity and queued-cancellation specs; reverted); custom signal handling vs `IOApp` and the `foreachBatch`/boundary-observer restructure (TERM/INT and grant-expiry process harnesses referenced by `continuous-hiring-analytics.md` are not in the repository, so D5 cannot be re-proved); resolve-once lakehouse paths and `Either`-returning `createOrValidate`/`resolve` (net growth, throws already translated once); full `DeltaSurface`; typed codec in `AnalyticsKeyRetirement` (scan needs raw documents); `F` shadowing in adapters; pureconfig default arguments (decision 16); `FailureReason` split (adds code); positional `Job.validate`; streaming services kept in `app/` (moving to `service/` needs new ports); remaining raw reads in interview migration/validator files.
+- Behaviour changes to review: O1, O2, O4 (`INVALID_PASSWORD` when the short password is the only problem), decision 6 (only erasure-store empty-publisher path; `ErasureFailurePolicy` treats both cases identically), decision 15, `readScope` reloads the persisted user for nearby/facet reads, `replayById` checks the entity kind, stricter Kafka `SASL_PLAINTEXT` bootstrap parsing (port required), analytics config messages from pureconfig (empty strings now `must be non-empty`), `logback-classic` compile scope.
+- Next: final `scripts/check-local.sh`-equivalent runs on the integrated state, then Code Reviewer, Security Engineer and QA.
+- Code Reviewer: pending. Security Engineer: pending. QA: pending.

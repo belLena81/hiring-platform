@@ -1,5 +1,7 @@
 package com.example.graphQL.cats.service
 
+import cats.data.EitherT
+import cats.effect.IO
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, UserId}
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, UserRole}
@@ -17,17 +19,13 @@ final class HiringReadService(
 ) extends HiringReadModel {
   private val authorization = ActorAuthorization(users)
 
-  private def scope(actor: ActorContext): UseCaseIO[HiringReadScope] =
-    UseCase
-      .repository(users.find(actor.userId))
-      .subflatMap(_.toRight(UseCaseError.Authentication(AuthenticationError.Unauthorized)))
-      .subflatMap(HiringReadScope.validated(actor, _, authorization))
-
   override def relatedUsers(actor: ActorContext, keys: List[UserRelationKey]): UseCaseIO[List[RelatedUser]] =
-    scope(actor).flatMap(current => UseCase.repository(users.relatedUsers(current, keys.distinct)))
+    authorization
+      .readScope(actor)
+      .flatMap((_, current) => UseCase.repository(users.relatedUsers(current, keys.distinct)))
 
   override def relatedJobs(actor: ActorContext, keys: List[JobRelationKey]): UseCaseIO[List[RelatedJob]] =
-    scope(actor).flatMap(current => UseCase.repository(jobs.relatedJobs(current, keys.distinct)))
+    authorization.readScope(actor).flatMap((_, current) => UseCase.repository(jobs.relatedJobs(current, keys.distinct)))
 
   override def viewer(actor: ActorContext): UseCaseIO[AuthenticatedActor] =
     authorization.resolve(actor).map(AuthenticatedActor(actor, _))
@@ -35,11 +33,11 @@ final class HiringReadService(
   override def canViewUserEmail(actor: ActorContext, userId: UserId): UseCaseIO[Boolean] =
     authorization
       .resolve(actor)
-      .map(viewer => viewer.id == userId || (viewer.role == UserRole.Admin && viewer.adminSingleton))
+      .map(viewer => viewer.id == userId || authorization.isAdmin(viewer))
 
   override def canViewUserEmails(actor: ActorContext, userIds: List[UserId]): UseCaseIO[Set[UserId]] =
     authorization.resolve(actor).map { viewer =>
-      if (viewer.role == UserRole.Admin && viewer.adminSingleton) userIds.toSet
+      if (authorization.isAdmin(viewer)) userIds.toSet
       else userIds.filter(_ == viewer.id).toSet
     }
 
@@ -51,13 +49,13 @@ final class HiringReadService(
       user <- authorization.resolve(actor)
       application <- UseCase.found(applications.find(applicationId), "application")
       _ <-
-        if (application.candidateId == user.id && user.role == UserRole.Candidate) UseCase.pure(())
-        else if (user.role == UserRole.Admin && user.adminSingleton) UseCase.pure(())
+        if (application.candidateId == user.id && user.role == UserRole.Candidate) EitherT.rightT[IO, UseCaseError](())
+        else if (authorization.isAdmin(user)) EitherT.rightT[IO, UseCaseError](())
         else if (user.role == UserRole.Recruiter)
           UseCase
             .found(jobs.find(application.jobId), "job")
             .flatMap(job => UseCase.ensure(job.recruiterId == user.id, UseCaseError.Domain(DomainError.Forbidden)))
-        else UseCase.left(UseCaseError.Domain(DomainError.Forbidden))
+        else EitherT.leftT[IO, Unit](UseCaseError.Domain(DomainError.Forbidden))
     } yield ()
 
   override def applicationHistory(
@@ -67,7 +65,7 @@ final class HiringReadService(
   ): UseCaseIO[List[ApplicationEvent]] =
     for {
       _ <- canViewApplication(actor, applicationId)
-      current <- scope(actor)
+      (_, current) <- authorization.readScope(actor)
       values <- UseCase.repository(applications.history(current, applicationId, page))
     } yield values
 }

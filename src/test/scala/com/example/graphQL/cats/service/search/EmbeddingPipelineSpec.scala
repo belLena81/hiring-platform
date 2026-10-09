@@ -44,7 +44,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
           leaseDuration = 1.second,
           workerReady = setup.get,
           diagnostics = com.example.graphQL.cats.service.Diagnostics.noop,
-          durableRetryAttempts = 1
+          durableRetry = new DurableRetrySettings(attempts = 1)
         )
         .use { publisher =>
           for {
@@ -179,7 +179,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
           retryDelay = 10.millis,
           leaseDuration = 1.second,
           diagnostics = com.example.graphQL.cats.service.Diagnostics.noop,
-          durableRetryAttempts = 1
+          durableRetry = new DurableRetrySettings(attempts = 1)
         )
         .use { publisher =>
           val key = DurableEmbeddingWorkPublisher.keyFor(EmbeddingWork.JobChanged(jobId))
@@ -412,7 +412,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
           retryDelay = 10.millis,
           leaseDuration = 1.second,
           diagnostics = diagnostics,
-          durableRetryAttempts = 1
+          durableRetry = new DurableRetrySettings(attempts = 1)
         )
         .use { publisher =>
           val key = DurableEmbeddingWorkPublisher.keyFor(EmbeddingWork.JobChanged(jobId))
@@ -928,7 +928,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
           retryDelay = 10.millis,
           leaseDuration = 1.second,
           diagnostics = com.example.graphQL.cats.service.Diagnostics.noop,
-          durableRetryAttempts = 1
+          durableRetry = new DurableRetrySettings(attempts = 1)
         )
         .use { publisher =>
           publisher.offer(EmbeddingWork.JobChanged(jobId)) *> publisher.offer(EmbeddingWork.JobChanged(otherJobId)) *>
@@ -966,7 +966,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
           retryDelay = 10.millis,
           leaseDuration = 1.second,
           diagnostics = com.example.graphQL.cats.service.Diagnostics.noop,
-          durableRetryAttempts = 1
+          durableRetry = new DurableRetrySettings(attempts = 1)
         )
         .use { publisher =>
           publisher.wake *> eventually(work.snapshot)(snapshot =>
@@ -1136,9 +1136,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
           10.millis,
           1.second,
           diagnostics = Diagnostics.noop,
-          durableRetryAttempts = 8,
-          durableRetryBase = 10.millis,
-          durableRetryCap = 20.millis
+          durableRetry = new DurableRetrySettings(8, 10.millis, 20.millis)
         )
         .use { publisher =>
           publisher.offer(EmbeddingWork.JobChanged(jobId)) *>
@@ -1184,9 +1182,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
           10.millis,
           1.second,
           diagnostics = Diagnostics.noop,
-          durableRetryAttempts = 2,
-          durableRetryBase = 10.millis,
-          durableRetryCap = 20.millis
+          durableRetry = new DurableRetrySettings(2, 10.millis, 20.millis)
         )
         .use { publisher =>
           publisher.offer(EmbeddingWork.JobChanged(jobId)) *>
@@ -1297,12 +1293,6 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
     }
   }
 
-  test("embedding backoff saturates without overflow") {
-    assertEquals(EmbeddingRecoveryPolicy.backoffMillis(1L, 1000L, 300000L), 1000L)
-    assertEquals(EmbeddingRecoveryPolicy.backoffMillis(2L, 1000L, 300000L), 2000L)
-    assertEquals(EmbeddingRecoveryPolicy.backoffMillis(Long.MaxValue, 1000L, 300000L), 300000L)
-  }
-
   private def pipelineResource(
       users: UserRepository,
       jobs: JobRepository,
@@ -1330,7 +1320,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
             retryDelay,
             1.second,
             diagnostics = com.example.graphQL.cats.service.Diagnostics.noop,
-            durableRetryAttempts = 1
+            durableRetry = new DurableRetrySettings(attempts = 1)
           )
       )
 

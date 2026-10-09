@@ -7,7 +7,6 @@ enum RepositoryError {
   case Conflict
   case InvalidEvent
   case InvalidStoredData
-  case MissingWriteResult
   case MissingStoredResult
   case Unavailable
 }

@@ -101,8 +101,8 @@ private[mongo] object MongoHiringCodecs {
         application.candidateId.value.toString,
         application.jobId.value.toString,
         application.status.toString,
-        Date.from(application.createdAt),
-        Date.from(application.updatedAt)
+        application.createdAt.toDate,
+        application.updatedAt.toDate
       )
     )
 
@@ -126,7 +126,7 @@ private[mongo] object MongoHiringCodecs {
         event.previousStatus.map(_.toString),
         event.newStatus.toString,
         event.actorId.value.toString,
-        Date.from(event.occurredAt),
+        event.occurredAt.toDate,
         event.feedback,
         event.reason
       )
@@ -221,11 +221,11 @@ private[mongo] object MongoHiringCodecs {
         event.partitionKey,
         "Retryable",
         0,
-        Date.from(now),
+        now.toDate,
         None,
         None,
-        Date.from(now),
-        Date.from(now)
+        now.toDate,
+        now.toDate
       )
     )
   }
@@ -247,8 +247,8 @@ private[mongo] object MongoHiringCodecs {
         value.filter.noSpaces,
         value.model,
         value.results.map(result => StoredSearchSessionResult(result.resultId, result.rank, result.score)),
-        Date.from(value.occurredAt),
-        Date.from(value.expiresAt)
+        value.occurredAt.toDate,
+        value.expiresAt.toDate
       )
     )
 
@@ -466,7 +466,7 @@ private[mongo] object MongoHiringCodecs {
     MongoHiringPersistenceCodecs.embedding(
       StoredEmbeddingFields(
         embedding.values.map(_.toDouble),
-        StoredEmbeddingMeta(embedding.meta.model, embedding.meta.sourceHash, Date.from(embedding.meta.updatedAt))
+        StoredEmbeddingMeta(embedding.meta.model, embedding.meta.sourceHash, embedding.meta.updatedAt.toDate)
       )
     )
 
@@ -504,7 +504,7 @@ private[mongo] object MongoHiringCodecs {
       StoredEmbeddingMeta(
         embedding.meta.model,
         embedding.meta.sourceHash,
-        Date.from(embedding.meta.updatedAt)
+        embedding.meta.updatedAt.toDate
       )
     )
     StoredUser(
@@ -549,7 +549,7 @@ private[mongo] object MongoHiringCodecs {
             None
           )
       },
-      Date.from(value.createdAt),
+      value.createdAt.toDate,
       value.accountStatus.toString,
       value.deletedAt.map(Date.from),
       Option.when(value.role == UserRole.Admin && value.adminSingleton)("singleton-admin"),
@@ -565,7 +565,7 @@ private[mongo] object MongoHiringCodecs {
       StoredEmbeddingMeta(
         embedding.meta.model,
         embedding.meta.sourceHash,
-        Date.from(embedding.meta.updatedAt)
+        embedding.meta.updatedAt.toDate
       )
     )
     StoredJob(
@@ -583,8 +583,8 @@ private[mongo] object MongoHiringCodecs {
         value.location.coordinates.map(point => StoredGeoPoint("Point", List(point.longitude, point.latitude)))
       ),
       value.status.toString,
-      Date.from(value.createdAt),
-      Date.from(value.updatedAt),
+      value.createdAt.toDate,
+      value.updatedAt.toDate,
       value.closedAt.map(Date.from),
       embedding,
       embeddingMeta
@@ -596,7 +596,7 @@ private[mongo] object MongoHiringCodecs {
       value.eventId.toString,
       OperationalEventEnvelope.Topic,
       value.eventType.toString,
-      Date.from(value.occurredAt),
+      value.occurredAt.toDate,
       value.aggregateType.toString,
       value.aggregateId,
       value.actorId.value.toString,

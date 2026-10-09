@@ -162,8 +162,6 @@ private[graphql] object GraphQLFailureCatalog {
         failure(FailureMetadata.ProfileRoleMismatch, "Profile does not match the selected role")
       case AccountError.ProfileUnsupportedForRole =>
         failure(FailureMetadata.ProfileUnsupportedForRole, "This role does not support a profile")
-      case AccountError.PasswordPolicyViolation =>
-        failure(FailureMetadata.InvalidPassword, "Password does not meet policy")
       case AccountError.AccountAlreadyDeleted =>
         failure(FailureMetadata.AccountAlreadyDeleted, "Account is already deleted")
       case AccountError.AdminSignupForbidden =>
@@ -191,8 +189,6 @@ private[graphql] object GraphQLFailureCatalog {
     error match {
       case DomainError.Forbidden            => failure(FailureMetadata.Forbidden, "Forbidden")
       case DomainError.NotFound(entity)     => failure(FailureMetadata.NotFound, s"$entity not found")
-      case DomainError.DuplicateApplication =>
-        failure(FailureMetadata.DuplicateApplication, "Application already exists")
       case DomainError.SearchSessionPending =>
         failure(FailureMetadata.SearchSessionPending, "Search session is being prepared; retry shortly")
       case DomainError.SearchSessionUnavailable =>
@@ -218,8 +214,7 @@ private[graphql] object GraphQLFailureCatalog {
         failure(FailureMetadata.DuplicateApplication, "Application already exists")
       case RepositoryError.AuthorityRevoked => failure(FailureMetadata.Forbidden, "Forbidden")
       case RepositoryError.Conflict         => failure(FailureMetadata.Conflict, "Conflict")
-      case RepositoryError.InvalidEvent | RepositoryError.InvalidStoredData | RepositoryError.MissingWriteResult |
-          RepositoryError.MissingStoredResult =>
+      case RepositoryError.InvalidEvent | RepositoryError.InvalidStoredData | RepositoryError.MissingStoredResult =>
         failure(FailureMetadata.RepositoryUnavailable, "Repository unavailable")
       case RepositoryError.Unavailable => failure(FailureMetadata.RepositoryUnavailable, "Repository unavailable")
     }
@@ -241,9 +236,16 @@ private[graphql] object GraphQLFailureCatalog {
         failure(FailureMetadata.VectorSearchUnavailable, "Vector search unavailable")
     }
 
+  /** A short password as the only violation is `INVALID_PASSWORD`; combined with other violations the failure stays
+    * `VALIDATION_FAILED` and lists every message.
+    */
   private def classifyValidation(errors: NonEmptyList[DomainValidationError]): GraphQLFailure = {
     val fields = errors.toList.map(validationMessage).mkString(", ")
-    failure(FailureMetadata.ValidationFailed, if (fields.isEmpty) "Validation failed" else fields)
+    val metadata = errors match {
+      case NonEmptyList(DomainValidationError.PasswordTooShort(_, _), Nil) => FailureMetadata.InvalidPassword
+      case _                                                               => FailureMetadata.ValidationFailed
+    }
+    failure(metadata, if (fields.isEmpty) "Validation failed" else fields)
   }
 
   private def validationMessage(error: DomainValidationError): String =
@@ -255,6 +257,7 @@ private[graphql] object GraphQLFailureCatalog {
       case DomainValidationError.TextTooLong(field, maximum, _)        => s"$field must be at most $maximum characters"
       case DomainValidationError.ByteLengthExceeded(field, maximum, _) => s"$field must be at most $maximum bytes"
       case DomainValidationError.TooManyValues(field, maximum, _)      => s"$field must contain at most $maximum values"
+      case DomainValidationError.PasswordTooShort(minimum, _)          => s"password must be at least $minimum bytes"
       case DomainValidationError.InvalidCoordinates                    => "Coordinates are outside geographic bounds"
     }
 

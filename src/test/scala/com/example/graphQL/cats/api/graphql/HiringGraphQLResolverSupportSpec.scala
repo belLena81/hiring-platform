@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.api.graphql
 
-import cats.data.NonEmptyList
+import cats.data.{EitherT, NonEmptyList}
 import cats.effect.IO
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLResolverSupport.*
@@ -15,7 +15,7 @@ import com.example.graphQL.cats.service.{
   SearchError,
   UseCaseError
 }
-import com.example.graphQL.cats.service.protocol.{IdempotencyRequest, UseCaseIO}
+import com.example.graphQL.cats.service.protocol.IdempotencyRequest
 import io.circe.{Json, Printer}
 import io.circe.syntax.*
 import munit.CatsEffectSuite
@@ -175,11 +175,6 @@ final class HiringGraphQLResolverSupportSpec extends CatsEffectSuite {
         GraphQLFailure("PROFILE_UNSUPPORTED_FOR_ROLE", "This role does not support a profile", exceptional = false)
       ),
       Scenario(
-        "password policy",
-        UseCaseError.Account(AccountError.PasswordPolicyViolation),
-        GraphQLFailure("INVALID_PASSWORD", "Password does not meet policy", exceptional = false)
-      ),
-      Scenario(
         "account already deleted",
         UseCaseError.Account(AccountError.AccountAlreadyDeleted),
         GraphQLFailure("ACCOUNT_ALREADY_DELETED", "Account is already deleted", exceptional = false)
@@ -207,11 +202,6 @@ final class HiringGraphQLResolverSupportSpec extends CatsEffectSuite {
         "dynamic not found",
         UseCaseError.Domain(DomainFailure.NotFound("candidate")),
         GraphQLFailure("NOT_FOUND", "candidate not found", exceptional = false)
-      ),
-      Scenario(
-        "domain duplicate application",
-        UseCaseError.Domain(DomainFailure.DuplicateApplication),
-        GraphQLFailure("DUPLICATE_APPLICATION", "Application already exists", exceptional = false)
       ),
       Scenario(
         "search pending",
@@ -336,6 +326,18 @@ final class HiringGraphQLResolverSupportSpec extends CatsEffectSuite {
         GraphQLFailure("VALIDATION_FAILED", "description must be at most 1000 bytes", exceptional = false)
       ),
       Scenario(
+        "short password alone",
+        UseCaseError.ValidationFailed(NonEmptyList.one(DomainValidationError.PasswordTooShort(12, 5))),
+        GraphQLFailure("INVALID_PASSWORD", "password must be at least 12 bytes", exceptional = false)
+      ),
+      Scenario(
+        "short password with another violation",
+        UseCaseError.ValidationFailed(
+          NonEmptyList.of(DomainValidationError.BlankField("name"), DomainValidationError.PasswordTooShort(12, 5))
+        ),
+        GraphQLFailure("VALIDATION_FAILED", "name is required, password must be at least 12 bytes", exceptional = false)
+      ),
+      Scenario(
         "too many values",
         UseCaseError.ValidationFailed(NonEmptyList.one(DomainValidationError.TooManyValues("skills", 20, 21))),
         GraphQLFailure("VALIDATION_FAILED", "skills must contain at most 20 values", exceptional = false)
@@ -372,10 +374,10 @@ final class HiringGraphQLResolverSupportSpec extends CatsEffectSuite {
   test("turns expected mutation failures into typed domain errors") {
     for {
       account <- HiringGraphQLResolverSupport.mutationResult(
-        UseCaseIO.left[String](UseCaseError.Account(AccountError.NameTaken))
+        EitherT.leftT[IO, String](UseCaseError.Account(AccountError.NameTaken))
       )
       repository <- HiringGraphQLResolverSupport.mutationResult(
-        UseCaseIO.left[String](UseCaseError.Repository(RepositoryError.Conflict))
+        EitherT.leftT[IO, String](UseCaseError.Repository(RepositoryError.Conflict))
       )
     } yield {
       assertEquals(account, DomainError("REGISTRATION_FAILED", "Registration failed"))
@@ -386,7 +388,7 @@ final class HiringGraphQLResolverSupportSpec extends CatsEffectSuite {
   test("raises exceptional mutation failures as read failures") {
     val error = UseCaseError.Repository(RepositoryError.Unavailable)
     HiringGraphQLResolverSupport
-      .mutationResult(UseCaseIO.left[String](error))
+      .mutationResult(EitherT.leftT[IO, String](error))
       .value
       .map(result => assertEquals(result, Left(HiringGraphQLFailure.UseCase(error))))
   }

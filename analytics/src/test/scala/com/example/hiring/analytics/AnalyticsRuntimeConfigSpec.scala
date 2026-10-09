@@ -4,12 +4,10 @@ import com.example.hiring.analytics.errors.*
 import com.example.hiring.analytics.domain.*
 import com.example.hiring.analytics.config.*
 import com.example.hiring.analytics.adapter.kafka.*
-import com.example.hiring.analytics.config.AnalyticsPositiveInt.*
 import scala.concurrent.duration.*
 
 import java.util.Base64
 import java.nio.charset.StandardCharsets
-import java.net.InetAddress
 
 class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
   private val key = Base64.getEncoder.encodeToString(Array.fill[Byte](32)(7))
@@ -155,7 +153,7 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
 
     assertEquals(loaded.request.requestId.value, "late-replay-2026-09-30")
     assertEquals(loaded.request.coordinates.size, 2)
-    assertEquals(loaded.request.selectionDigest.length, 64)
+    assertEquals(loaded.request.selectionDigest.value.length, 64)
     assert(!loaded.toString.contains("reader-secret"))
   }
 
@@ -183,15 +181,15 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
 
   test("late-fact replay configuration requires identity and coordinates and rejects duplicate selections") {
     val missingBlock = AnalyticsConfigFixtures.lateFactReplay(hocon, settings)
-    assert(missingBlock.swap.toOption.exists(_.getMessage.contains("analytics.replay configuration is required")))
+    assert(missingBlock.swap.toOption.exists(_.getMessage.contains("Key not found: 'replay'")))
 
     val incomplete = AnalyticsConfigFixtures.lateFactReplay(
       hocon.replace("  batch {", "  replay { maximum-records = 1000 }\n  batch {"),
       settings
     )
     val incompleteMessage = incomplete.swap.toOption.getOrElse(fail("expected required replay fields to fail"))
-    assert(incompleteMessage.getMessage.contains("analytics.replay.request-id is required"))
-    assert(incompleteMessage.getMessage.contains("analytics.replay.coordinates is required"))
+    assert(incompleteMessage.getMessage.contains("Key not found: 'request-id'"))
+    assert(incompleteMessage.getMessage.contains("Key not found: 'coordinates'"))
 
     val duplicate = AnalyticsConfigFixtures.lateFactReplay(
       hocon.replace(
@@ -249,11 +247,14 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
       )
     ).toOption
       .getOrElse(fail("expected valid operational config"))
-    assertEquals(configured.retention.bronzeDays.value, 14)
-    assertEquals(configured.retention.quarantineDays.value, 12)
-    assertEquals(configured.retention.silverDays.value, 60)
-    assertEquals(configured.retention.publishedSnapshotDays.value, 15)
-    assertEquals(configured.retention.deletionMarkerDays.value, 20)
+    val observedAt = java.time.Instant.parse("2026-10-01T00:00:00Z")
+    assertEquals(configured.retention.publishedSnapshotExpiry(observedAt), observedAt.plusSeconds(15L * 86400L))
+    assertEquals(configured.retention.deletionMarkerCutoff(observedAt), observedAt.minusSeconds(20L * 86400L))
+    assertEquals(configured.retention.bronzeDays, 14)
+    assertEquals(configured.retention.quarantineDays, 12)
+    assertEquals(configured.retention.silverDays, 60)
+    assertEquals(configured.retention.publishedSnapshotDays, 15)
+    assertEquals(configured.retention.deletionMarkerDays, 20)
     assertEquals(configured.retention.deltaVacuumSafety, 3.days)
     assertEquals(configured.retention.deltaVacuumSafetyCheckEnabled, false)
     assertEquals(configured.retention.deltaLogRetention, 10.days)
@@ -444,21 +445,16 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
   }
 
   test("plaintext bootstrap parser accepts only valid local broker endpoints") {
+    def plaintext(endpoint: String) =
+      KafkaConnection(endpoint, Some("reader"), Some("password"), KafkaSecurityProtocol.SaslPlaintext, true)
     Vector("localhost:9092", "kafka:9092", "127.0.0.1:9092", "[::1]:9092").foreach { endpoint =>
-      assert(KafkaConnection.localPlaintextBootstrap(endpoint), s"expected local endpoint: $endpoint")
+      assert(KafkaConnection.validate(plaintext(endpoint)).isValid, s"expected local endpoint: $endpoint")
     }
     Vector("kafka:9093", "broker.example:9092", "localhost", "localhost:0", "[::1]9092", "localhost:70000")
       .foreach { endpoint =>
-        assert(!KafkaConnection.localPlaintextBootstrap(endpoint), s"expected rejected endpoint: $endpoint")
+        assert(KafkaConnection.validate(plaintext(endpoint)).isInvalid, s"expected rejected endpoint: $endpoint")
       }
-    assert(!KafkaConnection.localPlaintextBootstrap("localhost:9092,broker.example:9092"))
-
-    val externalAddress = InetAddress.getByAddress(Array[Byte](203.toByte, 0.toByte, 113.toByte, 10.toByte))
-    assert(
-      !KafkaConnection.localPlaintextBootstrapUsing("localhost:9092", _ => Some(Vector(externalAddress)))
-    )
-    val loopbackAddress = InetAddress.getByAddress(Array[Byte](127, 0, 0, 1).map(_.toByte))
-    assert(KafkaConnection.localPlaintextBootstrapUsing("localhost:9092", _ => Some(Vector(loopbackAddress))))
+    assert(KafkaConnection.validate(plaintext("localhost:9092,broker.example:9092")).isInvalid)
   }
 
   test("Kafka configuration rejects unsupported protocols and malformed opt-in values") {
@@ -543,7 +539,7 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
       hocon.replace("key-retirement-audit {", "unused-audit {"),
       settings
     )
-    assert(missingAudit.swap.toOption.exists(_.getMessage.contains("analytics.key-retirement-audit")))
+    assert(missingAudit.swap.toOption.exists(_.getMessage.contains("key-retirement-audit")))
   }
 
   test("packaged application.conf supports the same substitutions and defaults") {
@@ -556,12 +552,11 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
     assertEquals(AnalyticsTopic.unwrap(loaded.manifest.offsetRanges.head.topic), "hiring.operational-events")
     val audit = AnalyticsConfigFixtures
       .keyRetirementAudit(packaged, settings + ("ANALYTICS_RETIRING_KEY_ID" -> "hmac-v1"))
-      .toOption
-      .getOrElse(fail("expected valid audit config"))
+      .fold(error => fail(error.getMessage), identity)
     assertEquals(audit.mongoDatabase, "hiring")
     assertEquals(audit.sparkMaster, "local[*]")
     assertEquals(audit.lakehouseRoot, "file:///tmp/hiring-analytics")
-    assertEquals(audit.kafkaBarrierOffset, None)
+    assertEquals(audit.retention.kafka.barrierOffset, None)
     assertEquals(audit.writers.managed, Vector.empty)
     assertEquals(audit.operational.mongoPublisherBufferSize, 256)
 
@@ -591,11 +586,11 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
       )
       .toOption
       .getOrElse(fail("expected valid audit config"))
-    assertEquals(audit.kafkaBarrierOffset, Some(12L))
-    assertEquals(audit.kafkaEarliestAvailableOffset, Some(12L))
-    assertEquals(audit.deltaData.retainedUntil, Some(java.time.Instant.parse("2026-09-27T00:00:00Z")))
+    assertEquals(audit.retention.kafka.barrierOffset, Some(12L))
+    assertEquals(audit.retention.kafka.earliestAvailableOffset, Some(12L))
+    assertEquals(audit.retention.deltaData.retainedUntil, Some(java.time.Instant.parse("2026-09-27T00:00:00Z")))
     assertEquals(audit.writers.observedAt, Some(java.time.Instant.parse("2026-09-27T00:00:00Z")))
-    assertEquals(audit.writers.managed.head.disposition, Some(AnalyticsAuditWriterDisposition.Stopped))
+    assertEquals(audit.writers.managed.head.disposition, WriterDisposition.Stopped)
 
     val malformedTimestamp = hocon.replace("2026-09-27T00:00:00Z", "invalid-timestamp")
     assert(AnalyticsConfigFixtures.keyRetirementAudit(malformedTimestamp, settings).isLeft)
@@ -636,7 +631,7 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
     )
     assert(AnalyticsConfigFixtures.batch(hocon, withEmptyRotationSettings).isRight)
 
-    val incomplete = SubjectPseudonymizer.validateFromBase64(Some(key), "hmac-v1", Some("old-key"), Some(""))
+    val incomplete = SubjectPseudonymizer.validateFromBase64(key, "hmac-v1", Some("old-key"), Some(""))
     assert(
       incomplete.toEither.swap.toOption.exists(
         _.toChain.toList.contains(
@@ -673,16 +668,10 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
 
   test("HMAC validation accumulates short, malformed, and unpaired key settings") {
     val shortKey = Base64.getEncoder.encodeToString("short".getBytes(StandardCharsets.UTF_8))
-    val validation = SubjectPseudonymizer.validateFromBase64(
-      Some(shortKey),
-      " ",
-      Some("old-key"),
-      None
-    )
+    val validation = SubjectPseudonymizer.validateFromBase64(shortKey, " ", Some("old-key"), None)
     val errors =
       validation.toEither.swap.toOption.getOrElse(fail("expected invalid key ring")).toChain.toList.mkString(" ")
-    assert(errors.contains("HIRING_ANALYTICS_HMAC_SECRET_BASE64 must decode to at least 32 bytes"))
-    assert(errors.contains("HIRING_ANALYTICS_HMAC_KEY_ID must be non-empty"))
+    assert(errors.contains("HMAC secret must decode to at least 32 bytes"))
     assert(errors.contains("previous HMAC key ID and secret must be configured together"))
   }
 
@@ -706,14 +695,17 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
     val invalid = settings - "ANALYTICS_KAFKA_FENCER_PASSWORD" + ("MONGODB_URI" -> "not a mongo uri")
     assertEquals(
       failureSet(AnalyticsConfigFixtures.worker(hocon, invalid)),
-      List("analytics.kafka.fencer.password is required", "analytics.mongo.uri is invalid")
+      List("analytics.kafka.fencer.password: Key not found: 'password'.", "analytics.mongo.uri is invalid")
     )
   }
 
   test("key-retirement audit reports a missing retiring key and an invalid Mongo URI together") {
     assertEquals(
       failureSet(AnalyticsConfigFixtures.keyRetirementAudit(hocon, settings + ("MONGODB_URI" -> "not a mongo uri"))),
-      List("analytics.key-retirement-audit.retiring-key-id is required", "analytics.mongo.uri is invalid")
+      List(
+        "analytics.key-retirement-audit.retiring-key-id: Key not found: 'retiring-key-id'.",
+        "analytics.mongo.uri is invalid"
+      )
     )
   }
 

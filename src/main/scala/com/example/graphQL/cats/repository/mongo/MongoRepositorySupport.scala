@@ -29,7 +29,6 @@ import org.bson.Document
 
 import scala.jdk.CollectionConverters.*
 import java.time.Instant
-import java.util.Date
 import org.bson.conversions.Bson
 
 /** Effectfully acquired document collections used by repository adapters. */
@@ -57,9 +56,9 @@ private[mongo] object MongoFilter {
     MongoFilter(Filters.all(field, values.asJava), Filter.all(field, values))
   def beforeCursor(timestampField: String, occurredAt: Instant, id: String): MongoFilter =
     or(
-      lt(timestampField, java.util.Date.from(occurredAt)),
+      lt(timestampField, occurredAt.toDate),
       and(
-        eq(timestampField, java.util.Date.from(occurredAt)),
+        eq(timestampField, occurredAt.toDate),
         lt(MongoFields.Id, id)
       )
     )
@@ -131,10 +130,10 @@ private[mongo] object MongoSessionOperations {
       collection: IO[Documents],
       session: Option[ClientSession[IO]],
       document: Document
-  ): IO[Option[InsertOneResult]] =
+  ): IO[InsertOneResult] =
     collection.flatMap(c =>
-      session.fold(c.insertOne(document, new InsertOneOptions).map(Some(_)))(active =>
-        c.insertOne(active, document, new InsertOneOptions).map(Some(_))
+      session.fold(c.insertOne(document, new InsertOneOptions))(active =>
+        c.insertOne(active, document, new InsertOneOptions)
       )
     )
 
@@ -144,10 +143,10 @@ private[mongo] object MongoSessionOperations {
       filter: MongoFilter,
       update: MongoUpdate,
       options: UpdateOptions = new UpdateOptions
-  ): IO[Option[UpdateResult]] =
+  ): IO[UpdateResult] =
     collection.flatMap(c =>
-      session.fold(c.updateOne(filter.bson, update.bson, options).map(Some(_)))(active =>
-        c.updateOne(active, filter.sessionFilter, update.sessionUpdate, options).map(Some(_))
+      session.fold(c.updateOne(filter.bson, update.bson, options))(active =>
+        c.updateOne(active, filter.sessionFilter, update.sessionUpdate, options)
       )
     )
 
@@ -158,15 +157,13 @@ private[mongo] object MongoSessionOperations {
       filter: MongoFilter,
       pipeline: Seq[Bson],
       options: UpdateOptions
-  ): IO[Option[com.mongodb.bulk.BulkWriteResult]] = {
+  ): IO[com.mongodb.bulk.BulkWriteResult] = {
     val commands = List(
       mongo4cats.models.collection.WriteCommand.PipelinedUpdateOne(filter.sessionFilter, pipeline, options)
     )
     val bulkOptions = new com.mongodb.client.model.BulkWriteOptions()
     collection.flatMap(c =>
-      session
-        .fold(c.bulkWrite(commands, bulkOptions))(active => c.bulkWrite(active, commands, bulkOptions))
-        .map(Some(_))
+      session.fold(c.bulkWrite(commands, bulkOptions))(active => c.bulkWrite(active, commands, bulkOptions))
     )
   }
 
@@ -176,10 +173,10 @@ private[mongo] object MongoSessionOperations {
       filter: MongoFilter,
       update: MongoUpdate,
       options: UpdateOptions = new UpdateOptions
-  ): IO[Option[UpdateResult]] =
+  ): IO[UpdateResult] =
     collection.flatMap(c =>
-      session.fold(c.updateMany(filter.bson, update.bson, options).map(Some(_)))(active =>
-        c.updateMany(active, filter.sessionFilter, update.sessionUpdate, options).map(Some(_))
+      session.fold(c.updateMany(filter.bson, update.bson, options))(active =>
+        c.updateMany(active, filter.sessionFilter, update.sessionUpdate, options)
       )
     )
 
@@ -189,10 +186,10 @@ private[mongo] object MongoSessionOperations {
       filter: MongoFilter,
       document: Document,
       options: ReplaceOptions = new ReplaceOptions
-  ): IO[Option[UpdateResult]] =
+  ): IO[UpdateResult] =
     collection.flatMap(c =>
-      session.fold(c.replaceOne(filter.bson, document, options).map(Some(_)))(active =>
-        c.replaceOne(active, filter.sessionFilter, document, options).map(Some(_))
+      session.fold(c.replaceOne(filter.bson, document, options))(active =>
+        c.replaceOne(active, filter.sessionFilter, document, options)
       )
     )
 
@@ -214,11 +211,9 @@ private[mongo] object MongoSessionOperations {
       session: Option[ClientSession[IO]],
       filter: MongoFilter,
       options: DeleteOptions = new DeleteOptions
-  ): IO[Option[DeleteResult]] =
+  ): IO[DeleteResult] =
     collection.flatMap(c =>
-      session.fold(c.deleteOne(filter.bson, options).map(Some(_)))(active =>
-        c.deleteOne(active, filter.sessionFilter, options).map(Some(_))
-      )
+      session.fold(c.deleteOne(filter.bson, options))(active => c.deleteOne(active, filter.sessionFilter, options))
     )
 }
 
@@ -228,9 +223,9 @@ private[mongo] object MongoSessionOperations {
   * fields plus `updatedAt`. State names and sort orders stay repository-owned because stored values differ per queue.
   */
 private[mongo] object MongoLeaseQueue {
-  def leaseHeld(now: Instant): MongoFilter = MongoFilter.gt(MongoFields.LeaseUntil, Date.from(now))
+  def leaseHeld(now: Instant): MongoFilter = MongoFilter.gt(MongoFields.LeaseUntil, now.toDate)
 
-  def leaseExpired(now: Instant): MongoFilter = MongoFilter.lte(MongoFields.LeaseUntil, Date.from(now))
+  def leaseExpired(now: Instant): MongoFilter = MongoFilter.lte(MongoFields.LeaseUntil, now.toDate)
 
   /** Work is claimable when it is available or when its in-progress lease has expired at `now`. */
   def claimable(available: MongoFilter, inProgress: MongoFilter, now: Instant): MongoFilter =
@@ -255,8 +250,8 @@ private[mongo] object MongoLeaseQueue {
       MongoUpdate.set(MongoFields.State, inProgressState),
       MongoUpdate.set(MongoFields.LeaseOwner, workerId),
       MongoUpdate.set(MongoFields.LeaseToken, leaseToken),
-      MongoUpdate.set(MongoFields.LeaseUntil, Date.from(leaseUntil)),
-      MongoUpdate.set(MongoFields.UpdatedAt, Date.from(now))
+      MongoUpdate.set(MongoFields.LeaseUntil, leaseUntil.toDate),
+      MongoUpdate.set(MongoFields.UpdatedAt, now.toDate)
     )
 
   /** Atomically claims the first claimable document in `sort` order and decodes the post-claim document. */
@@ -284,33 +279,32 @@ private[mongo] object MongoLeaseQueue {
       collection: IO[MongoSessionOperations.Documents],
       session: Option[ClientSession[IO]],
       held: MongoFilter,
-      leaseUntil: Instant
+      leaseUntil: Instant,
+      leaseField: String = MongoFields.LeaseUntil
   ): RepositoryIO[Boolean] =
     RepositoryIO
       .lift(
         MongoSessionOperations
-          .updateOne(collection, session, held, MongoUpdate.set(MongoFields.LeaseUntil, Date.from(leaseUntil)))
+          .updateOne(collection, session, held, MongoUpdate.set(leaseField, leaseUntil.toDate))
       )
-      .subflatMap {
-        case Some(result) => Right(result.getMatchedCount == 1L)
-        case None         => Left(RepositoryError.MissingWriteResult)
-      }
+      .map(_.getMatchedCount == 1L)
 }
 
 private[mongo] object MongoRepositorySupport {
-  def writeResult[A](result: Option[A]): Either[RepositoryError, A] =
-    result.toRight(RepositoryError.MissingWriteResult)
 
   /** A guarded single-document transition: exactly one match succeeds, a lost guard is `mismatch`. */
   def matchedOne(
-      result: Option[UpdateResult],
+      result: UpdateResult,
       mismatch: RepositoryError = RepositoryError.Conflict
   ): Either[RepositoryError, Unit] =
-    result match {
-      case Some(value) if value.getMatchedCount == 1L => Right(())
-      case Some(_)                                    => Left(mismatch)
-      case None                                       => Left(RepositoryError.MissingWriteResult)
-    }
+    Either.cond(result.getMatchedCount == 1L, (), mismatch)
+
+  /** A guarded single-document delete: exactly one deletion succeeds, a lost guard is `mismatch`. */
+  def deletedOne(
+      result: DeleteResult,
+      mismatch: RepositoryError = RepositoryError.Conflict
+  ): Either[RepositoryError, Unit] =
+    Either.cond(result.getDeletedCount == 1L, (), mismatch)
 
   def reportFailure(diagnostics: Diagnostics, operation: String, error: Throwable): IO[Unit] =
     diagnostics.emit(
@@ -376,6 +370,11 @@ private[mongo] object MongoErrors {
     case _                     => false
   }
 
+  def isUnknownCommitResult(error: Throwable): Boolean = error match {
+    case mongo: MongoException => mongo.hasErrorLabel(UnknownTransactionCommitResultLabel)
+    case _                     => false
+  }
+
   def isDuplicateKey(error: Throwable): Boolean = MongoDuplicateKey.unapply(error).nonEmpty
 
   def isWriteConflict(error: MongoCommandException): Boolean =
@@ -412,19 +411,8 @@ private[mongo] object MongoApplicationEventInsertion {
       events: IO[MongoCollection[IO, Document]],
       session: Option[ClientSession[IO]],
       event: ApplicationEvent
-  ): IO[Option[InsertOneResult]] =
+  ): IO[InsertOneResult] =
     MongoSessionOperations.insertOne(events, session, MongoHiringCodecs.event(event))
-}
-
-/** Retained for the interview workflow repository; delegates to `MongoOperationalEventInsertion.insert`. */
-private[mongo] trait MongoOperationalEventInsertion {
-  protected final def insertOperationalEvents(
-      outbox: IO[MongoCollection[IO, Document]],
-      session: Option[ClientSession[IO]],
-      events: List[OperationalEventEnvelope],
-      now: Instant,
-      diagnostics: Diagnostics
-  ): RepositoryIO[Unit] = MongoOperationalEventInsertion.insert(outbox, session, events, now, diagnostics)
 }
 
 private[mongo] object MongoOperationalEventInsertion {
@@ -439,8 +427,7 @@ private[mongo] object MongoOperationalEventInsertion {
       .repositoryGuard(diagnostics, "repository.outbox.insert")(
         insertSequence(events, now)(document =>
           RepositoryIO
-            .lift(MongoSessionOperations.insertOne(outbox, session, document))
-            .subflatMap(MongoRepositorySupport.writeResult(_).void)
+            .lift(MongoSessionOperations.insertOne(outbox, session, document).void)
         )
       )(MongoErrors.duplicateAsConflict)
 

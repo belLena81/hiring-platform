@@ -27,8 +27,8 @@ object InterviewProducerFencer {
       val _ = properties.setProperty("bootstrap.servers", bootstrapServers)
       val _ = properties.setProperty("request.timeout.ms", RequestTimeoutMillis.toString)
       val _ = properties.setProperty("default.api.timeout.ms", RequestTimeoutMillis.toString)
-      OperationalEventKafkaRuntime
-        .saslProperties(Some(username), Some(password), protocol)
+      KafkaClientSettings
+        .security(Some(username), Some(password), protocol)
         .foreach { case (key, value) => val _ = properties.setProperty(key, value) }
       Admin.create(properties)
     }

@@ -59,7 +59,6 @@ private[analytics] final class AnalyticsDeltaRetention[F[_]: Async: UUIDGen](
     )
     tables.foreach { path =>
       if (DeltaTables.exists(spark, path)) {
-        val escaped = SparkPhysicalLocation.resolve(path).replace("`", "``")
         // DESCRIBE DETAIL computes file counts and sizes even when only properties are selected.
         // Read the same fresh snapshot's metadata without reconstructing those unused statistics.
         val properties = DeltaLogFactory.system(spark, path).update().metadata.configuration
@@ -70,7 +69,7 @@ private[analytics] final class AnalyticsDeltaRetention[F[_]: Async: UUIDGen](
         val changes = desired.filter { case (key, value) => properties.get(key).forall(_ != value) }
         if (changes.nonEmpty) {
           val rendered = changes.map { case (key, value) => s"'$key' = '$value'" }.mkString(", ")
-          val _ = spark.sql(s"ALTER TABLE delta.`$escaped` SET TBLPROPERTIES ($rendered)")
+          val _ = spark.sql(s"ALTER TABLE ${DeltaTables.sqlIdentifier(path)} SET TBLPROPERTIES ($rendered)")
         }
       }
     }
@@ -132,7 +131,6 @@ private[analytics] final class AnalyticsDeltaRetention[F[_]: Async: UUIDGen](
           val path = surface.location
           if (!DeltaTables.exists(spark, path)) 0L
           else {
-            val escaped = SparkPhysicalLocation.resolve(path).replace("`", "``")
             val hours = retention.deltaVacuumSafety.toMillis.toDouble / 3600000d
             val noCandidates = DeltaVacuumEligibility.canSkip(
               spark,
@@ -142,7 +140,7 @@ private[analytics] final class AnalyticsDeltaRetention[F[_]: Async: UUIDGen](
             )
             val candidates =
               if (noCandidates) 0L
-              else spark.sql(s"VACUUM delta.`$escaped` RETAIN $hours HOURS DRY RUN").limit(1).count()
+              else spark.sql(s"VACUUM ${DeltaTables.sqlIdentifier(path)} RETAIN $hours HOURS DRY RUN").limit(1).count()
             if (candidates == 0L) 0L
             else DeltaTables.forPath(spark, path).vacuum(hours).count()
           }

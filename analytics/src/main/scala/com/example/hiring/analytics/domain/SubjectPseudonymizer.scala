@@ -1,8 +1,7 @@
 package com.example.hiring.analytics.domain
 
-import cats.data.{NonEmptyVector, ValidatedNec}
+import cats.data.{NonEmptyChain, NonEmptyVector, Validated, ValidatedNec}
 import cats.syntax.all.*
-import io.github.iltotore.iron.*
 
 import java.nio.charset.StandardCharsets
 import java.util.Base64
@@ -97,58 +96,34 @@ object SubjectPseudonymizer {
     }
     val duplicateIds = Option.when(ids.distinct.size != ids.size)("HMAC key IDs must be unique").toVector
     val errors = idAndKeyErrors ++ duplicateIds
-    cats.data.NonEmptyChain.fromSeq(errors) match {
-      case Some(problems) => cats.data.Validated.Invalid(problems)
-      case None           => cats.data.Validated.Valid(new SubjectPseudonymizer(primaryKeyId -> secret, previousKeys))
-    }
+    NonEmptyChain.fromSeq(errors).toInvalid(new SubjectPseudonymizer(primaryKeyId -> secret, previousKeys))
   }
 
   def validateFromBase64(
-      secret: Option[String],
+      secret: String,
       primaryKeyId: String,
       previousKeyId: Option[String],
       previousSecret: Option[String]
   ): ValidatedNec[String, SubjectPseudonymizer] = {
-    val primary = decode(secret, "HIRING_ANALYTICS_HMAC_SECRET_BASE64")
-    val configuredPreviousKeyId = previousKeyId.filter(_.trim.nonEmpty)
-    val configuredPreviousSecret = previousSecret.filter(_.trim.nonEmpty)
-    val previous = (configuredPreviousKeyId, configuredPreviousSecret) match {
+    val previous = (previousKeyId.filter(_.trim.nonEmpty), previousSecret.filter(_.trim.nonEmpty)) match {
       case (None, None)            => Vector.empty[(String, Array[Byte])].validNec[String]
-      case (Some(id), Some(value)) =>
-        (
-          id.refineEither[io.github.iltotore.iron.constraint.any.Not[io.github.iltotore.iron.constraint.string.Blank]]
-            .leftMap(_ => "HIRING_ANALYTICS_HMAC_PREVIOUS_KEY_ID must be non-empty")
-            .toValidatedNec,
-          decode(Some(value), "HIRING_ANALYTICS_HMAC_PREVIOUS_SECRET_BASE64")
-        ).mapN(_ -> _).map(Vector(_))
-      case _ => "previous HMAC key ID and secret must be configured together".invalidNec
+      case (Some(id), Some(value)) => decode(value, "previous HMAC secret").map(key => Vector(id -> key))
+      case _                       => "previous HMAC key ID and secret must be configured together".invalidNec
     }
-    (
-      primaryKeyId
-        .refineEither[io.github.iltotore.iron.constraint.any.Not[io.github.iltotore.iron.constraint.string.Blank]]
-        .leftMap(_ => "HIRING_ANALYTICS_HMAC_KEY_ID must be non-empty")
-        .toValidatedNec,
-      primary,
-      previous
-    ).mapN { (id, key, oldKeys) => (id: String, key, oldKeys) }
-      .andThen { case (id, key, oldKeys) => validatedKeyRing(id, key, oldKeys) }
+    (decode(secret, "HMAC secret"), previous).tupled.andThen { case (key, oldKeys) =>
+      validatedKeyRing(primaryKeyId, key, oldKeys)
+    }
   }
 
-  private def decode(value: Option[String], name: String): ValidatedNec[String, Array[Byte]] =
-    value.filter(_.nonEmpty) match {
-      case None          => s"$name is required".invalidNec
-      case Some(encoded) =>
-        Either
-          .catchNonFatal(Base64.getDecoder.decode(encoded))
-          .leftMap(_ => s"$name is malformed")
-          .toValidatedNec
-          .andThen { bytes =>
-            if (bytes.length < MinimumKeyBytes)
-              s"$name must decode to at least $MinimumKeyBytes bytes".invalidNec
-            else bytes.validNec
-          }
-    }
-
+  private def decode(encoded: String, name: String): ValidatedNec[String, Array[Byte]] =
+    Either
+      .catchNonFatal(Base64.getDecoder.decode(encoded))
+      .leftMap(_ => s"$name is malformed")
+      .toValidatedNec
+      .andThen(bytes =>
+        Validated
+          .condNec(bytes.length >= MinimumKeyBytes, bytes, s"$name must decode to at least $MinimumKeyBytes bytes")
+      )
 }
 
 /** Spark-only privacy transforms. Raw identifiers exist only in the input frame before `silver`. */

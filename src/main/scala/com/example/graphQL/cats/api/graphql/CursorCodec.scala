@@ -5,24 +5,20 @@ import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, Ap
 import com.example.graphQL.cats.shared.Parsing
 import com.example.graphQL.cats.domain.pagination.TimestampIdCursor
 import com.example.graphQL.cats.service.search.NearbyJobCursor
-import pdi.jwt.{JwtAlgorithm, JwtCirce, JwtClaim, JwtOptions}
+import com.example.graphQL.cats.shared.crypto.{Hmac, HmacJwt}
+import pdi.jwt.{JwtAlgorithm, JwtCirce, JwtClaim}
 
 import java.nio.charset.StandardCharsets
-import java.time.{Clock as JavaClock, Instant, ZoneOffset}
+import java.time.Instant
 import java.util.UUID
-import javax.crypto.Mac
-import javax.crypto.spec.SecretKeySpec
 
 private[cats] object CursorCodec {
-  private val HmacAlgorithm = "HmacSHA256"
   private val KeyDerivationLabel = "hiring-platform:graphql-cursor"
   private val CursorIssuer = "hiring-platform-cursor"
   private val CursorAudience = "hiring-graphql-api"
-  private val Algorithms = Seq(JwtAlgorithm.HS256)
-  private val Options = JwtOptions(signature = true, expiration = true, notBefore = true, leeway = 0)
 
   final class CursorKey private[graphql] (private val bytes: Array[Byte], val ttlSeconds: Long) {
-    private[graphql] val secretKey = new SecretKeySpec(bytes, HmacAlgorithm)
+    private[graphql] val secretKey = Hmac.secretKey(bytes)
   }
 
   /** Wire shape of one cursor type: the payload is `kind|field|field...` signed inside the JWT subject. */
@@ -102,9 +98,7 @@ private[cats] object CursorCodec {
       }
 
   def keyFromSecret(secret: String, ttlSeconds: Long = 900L): CursorKey = {
-    val mac = Mac.getInstance(HmacAlgorithm)
-    mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), HmacAlgorithm))
-    new CursorKey(mac.doFinal(KeyDerivationLabel.getBytes(StandardCharsets.UTF_8)), ttlSeconds)
+    new CursorKey(Hmac.sha256(secret.getBytes(StandardCharsets.UTF_8), KeyDerivationLabel), ttlSeconds)
   }
 
   def encode[A](value: A, now: Instant)(using keyed: Keyed[A], key: CursorKey): String = {
@@ -119,15 +113,10 @@ private[cats] object CursorCodec {
   }
 
   def decode[A](value: String, now: Instant)(using keyed: Keyed[A], key: CursorKey): Either[CursorError, A] = {
-    given clock: JavaClock = JavaClock.fixed(now, ZoneOffset.UTC)
-
     for {
-      claim <- JwtCirce(clock)
-        .decode(value, key.secretKey, Algorithms, Options)
-        .toEither
-        .left
-        .map(_ => CursorError.Malformed("Invalid cursor"))
-      _ <- Either.cond(claim.isValid(CursorIssuer, CursorAudience), (), CursorError.Malformed("Invalid cursor"))
+      claim <- HmacJwt
+        .decode(value, key.secretKey, now, CursorIssuer, CursorAudience)
+        .toRight(CursorError.Malformed("Invalid cursor"))
       payload <- claim.subject.toRight(CursorError.Malformed("Invalid cursor subject"))
       tagged <- payload.split("\\|", -1).toList match {
         case tag :: rest => Right((tag, rest))

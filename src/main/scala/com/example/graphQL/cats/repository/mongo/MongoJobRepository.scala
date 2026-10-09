@@ -25,8 +25,7 @@ final class MongoJobRepository(
     embeddingWork: MongoEmbeddingWorkEnqueuer,
     diagnostics: Diagnostics,
     discoveryPolicy: Option[DiscoveryQueryPolicy] = None
-) extends JobRepository
-    with MongoOperationalEventInsertion {
+) extends JobRepository {
   private def collection = Mongo4catsCollections.documents(database, MongoCollections.Jobs)
   private def outbox = Mongo4catsCollections.documents(database, MongoCollections.EventOutbox)
 
@@ -334,10 +333,9 @@ final class MongoJobRepository(
       session: Option[ClientSession[IO]]
   ): RepositoryIO[Unit] =
     for {
-      result <- RepositoryIO.lift(MongoSessionOperations.insertOne(collection, session, MongoHiringCodecs.job(job)))
-      _ <- RepositoryIO.fromEither(MongoRepositorySupport.writeResult(result))
+      _ <- RepositoryIO.lift(MongoSessionOperations.insertOne(collection, session, MongoHiringCodecs.job(job)))
       _ <- embeddingWork.enqueue(session, EmbeddingWorkKey(EmbeddingWorkKind.Job, job.id.value.toString), now)
-      _ <- insertOperationalEvents(outbox, session, events, now, diagnostics)
+      _ <- MongoOperationalEventInsertion.insert(outbox, session, events, now, diagnostics)
     } yield ()
 
   override def updateWithEvents(
@@ -380,7 +378,7 @@ final class MongoJobRepository(
       )
       _ <- RepositoryIO.fromEither(MongoRepositorySupport.matchedOne(result))
       _ <- embeddingWork.enqueue(session, EmbeddingWorkKey(EmbeddingWorkKind.Job, replacement.id.value.toString), now)
-      _ <- insertOperationalEvents(outbox, session, events, now, diagnostics)
+      _ <- MongoOperationalEventInsertion.insert(outbox, session, events, now, diagnostics)
     } yield Versioned(replacement, nextVersion)
 
   override def updateEmbedding(id: JobId, embedding: EntityEmbedding): RepositoryIO[Unit] =
@@ -430,9 +428,7 @@ final class MongoJobRepository(
         Some(MongoFilter.eq(MongoFields.Status, JobStatus.Open.toString)),
         filter.city.map(city => MongoFilter.eq(s"${MongoFields.Location}.${MongoFields.City}", city)),
         Option.when(filter.skills.nonEmpty)(MongoFilter.all(MongoFields.Skills, filter.skills.toList.sorted)),
-        filter.createdAfter.map(createdAfter =>
-          MongoFilter.gte(MongoFields.CreatedAt, java.util.Date.from(createdAfter))
-        )
+        filter.createdAfter.map(createdAfter => MongoFilter.gte(MongoFields.CreatedAt, createdAfter.toDate))
       ),
       page
     )
@@ -486,9 +482,7 @@ object MongoJobRepository {
           new Document("skills", new Document("$all", filter.skills.toList.map(_.trim).distinct.sorted.asJava))
         )
         .toList ++
-      filter.createdAfter.toList.map(value =>
-        new Document("createdAt", new Document("$gte", java.util.Date.from(value)))
-      )
+      filter.createdAfter.toList.map(value => new Document("createdAt", new Document("$gte", value.toDate)))
     new Document("$and", clauses.asJava)
   }
 

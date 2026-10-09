@@ -33,10 +33,14 @@ private[analytics] final class SparkBlockingExecution[F[_]] private (
 
   /** Registers Spark's driver context once it has been acquired on this resource. */
   private[analytics] def attachSparkContext(context: SparkContext): F[Unit] =
-    async.delay {
-      if (!sparkContext.compareAndSet(None, Some(context)) && !sparkContext.get().contains(context))
-        throw new IllegalStateException("Spark context is already attached to this driver executor")
-    }
+    async
+      .delay(sparkContext.compareAndSet(None, Some(context)) || sparkContext.get().contains(context))
+      .ifM(
+        async.unit,
+        async.raiseError(
+          AnalyticsError.InvalidConfiguration("Spark context is already attached to this driver executor")
+        )
+      )
 
   private def runSpark[A](context: SparkContext, work: => A): F[A] = {
     val groupId = UUID.randomUUID().toString

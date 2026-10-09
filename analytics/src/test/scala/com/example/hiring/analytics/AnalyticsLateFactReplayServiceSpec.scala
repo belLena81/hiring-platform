@@ -1,7 +1,6 @@
 package com.example.hiring.analytics
 
 import cats.effect.{IO, Ref}
-import com.example.hiring.analytics.config.AnalyticsPositiveInt
 import com.example.hiring.analytics.domain.*
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.batch.*
@@ -158,7 +157,7 @@ final class AnalyticsLateFactReplayServiceSpec extends CatsEffectSuite {
             at: Instant
         ): IO[AnalyticsLateFactReplayRecord] = {
           val value = AnalyticsLateFactReplayRecord(
-            request.selectionDigest,
+            request.selectionDigest.value,
             AnalyticsLateFactReplayProgress.Prepared,
             0,
             reservation
@@ -174,7 +173,7 @@ final class AnalyticsLateFactReplayServiceSpec extends CatsEffectSuite {
             at: Instant
         ): IO[AnalyticsLateFactReplayRecord] = {
           val value = AnalyticsLateFactReplayRecord(
-            request.selectionDigest,
+            request.selectionDigest.value,
             AnalyticsLateFactReplayProgress.Prepared,
             expectedAttempt + 1,
             reservation
@@ -250,7 +249,7 @@ final class AnalyticsLateFactReplayServiceSpec extends CatsEffectSuite {
           stages,
           publisher,
           lock,
-          30.asInstanceOf[AnalyticsPositiveInt],
+          AnalyticsTestOperationalConfig.operational.retention,
           AnalyticsTestClocks.fixed(Now)
         ),
         calls,
@@ -259,9 +258,9 @@ final class AnalyticsLateFactReplayServiceSpec extends CatsEffectSuite {
     }
 
   private def record(attempt: Int, progress: AnalyticsLateFactReplayProgress): AnalyticsLateFactReplayRecord = {
-    val identity = AnalyticsLateFactReplayService.reservationIdentityFor(request, attempt).toOption.get
+    val identity = AnalyticsLateFactReplayService.reservationIdentityFor(request, attempt)
     AnalyticsLateFactReplayRecord(
-      request.selectionDigest,
+      request.selectionDigest.value,
       progress,
       attempt,
       AnalyticsReportReservation(identity._1, identity._2, 0L, 1L)

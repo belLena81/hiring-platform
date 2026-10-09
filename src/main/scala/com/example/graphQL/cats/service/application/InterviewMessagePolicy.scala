@@ -1,5 +1,7 @@
 package com.example.graphQL.cats.service.application
 
+import com.example.graphQL.cats.domain.policy.RetryBackoff
+
 import com.example.graphQL.cats.domain.workflow.*
 import cats.syntax.all.*
 import com.example.graphQL.cats.service.port.*
@@ -130,7 +132,7 @@ object InterviewMessagePolicy {
       maximumMillis: Long
   ): Option[Instant] =
     Option.when(result.contains(InterviewResult.OutcomeUnknown) || result.contains(InterviewResult.Absent))(
-      now.plusMillis(InterviewWorkflowPolicy.backoffMillis(attempts, initialMillis, maximumMillis))
+      now.plusMillis(RetryBackoff.exponentialMillis(attempts, initialMillis, maximumMillis))
     )
 
   def step(command: InterviewCommand): InterviewStep = command match {

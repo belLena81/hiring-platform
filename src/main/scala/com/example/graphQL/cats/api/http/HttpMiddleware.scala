@@ -6,7 +6,7 @@ import com.example.graphQL.cats.service.{Diagnostics, FailureReason, LogEvent, L
 import com.example.graphQL.cats.service.Diagnostics.*
 import io.circe.Json
 import org.http4s.*
-import org.http4s.circe.*
+import org.http4s.circe.CirceEntityEncoder.circeEntityEncoder
 import org.http4s.headers.`Cache-Control`
 import org.http4s.server.middleware.{EntityLimiter, MaxActiveRequests, RequestId, Timeout}
 import org.typelevel.ci.{CIString, CIStringSyntax}
@@ -53,40 +53,41 @@ object HttpMiddleware {
       new IllegalStateException("Missing request correlation ID")
     )
 
-  private def errorResponse(status: Status, message: String): Response[IO] =
+  private[http] def errorResponse(status: Status, message: String): Response[IO] =
     Response[IO](status).withEntity(
       Json.obj("errors" -> Json.arr(Json.obj("message" -> Json.fromString(message))))
-    )(using jsonEncoderOf[IO, Json])
+    )
 
+  private[http] def statusResponse(status: Status, value: String): Response[IO] =
+    Response[IO](status).withEntity(Json.obj("status" -> Json.fromString(value)))
+
+  /** `routes` run behind the shared limits; requests matching `unmetered` skip only the active-request cap. */
   def apply(
       config: HiringApiRoutes.HttpConfig,
       routes: HttpApp[IO],
+      unmetered: Request[IO] => Boolean,
       diagnostics: Diagnostics,
       tracer: Tracer[IO],
       onError: (Request[IO], Throwable) => IO[Response[IO]],
-      onEntityTooLarge: Request[IO] => IO[Response[IO]],
-      applyAdmissionControl: Boolean = true
+      onEntityTooLarge: Request[IO] => IO[Response[IO]]
   ): IO[HttpApp[IO]] = {
     val limited = EntityLimiter.httpApp[IO](routes, MaxRequestBytes)
     val timed = Timeout.httpApp[IO](
       config.requestTimeout,
       IO.pure(errorResponse(Status.GatewayTimeout, "Request deadline exceeded"))
     )(limited)
-    val active: IO[HttpApp[IO]] =
-      if (applyAdmissionControl)
-        MaxActiveRequests
-          .forHttpApp[IO](config.admissionPermits, errorResponse(Status.ServiceUnavailable, "Server busy"))
-          .map(limitActive => limitActive(timed))
-      else IO.pure(timed)
 
-    active.map { admitted =>
-      val handled: HttpApp[IO] = Kleisli { request =>
-        admitted.run(request).handleErrorWith {
-          case _: EntityLimiter.EntityTooLarge => onEntityTooLarge(request)
-          case failure                         => onError(request, failure)
+    MaxActiveRequests
+      .forHttpApp[IO](config.admissionPermits, errorResponse(Status.ServiceUnavailable, "Server busy"))
+      .map { limitActive =>
+        val metered = limitActive(timed)
+        val handled: HttpApp[IO] = Kleisli { request =>
+          (if (unmetered(request)) timed else metered).run(request).handleErrorWith {
+            case _: EntityLimiter.EntityTooLarge => onEntityTooLarge(request)
+            case failure                         => onError(request, failure)
+          }
         }
+        correlation(diagnostics, tracer)(handled)
       }
-      correlation(diagnostics, tracer)(handled)
-    }
   }
 }

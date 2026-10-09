@@ -28,9 +28,7 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]](
 
   override def load(identity: StreamingBatchIdentity): F[Option[StreamingJournalState]] =
     execution.either {
-      if (!deltaTableExists(paths.streamingProgress)) Right(None)
-      else {
-        ensureProgressSchema()
+      withProgress(Option.empty[StreamingJournalState]) {
         readProgress(identity) match {
           case None      => Right(None)
           case Some(row) =>
@@ -50,26 +48,19 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]](
     }
 
   override def latestWatermark(lineage: StreamingLineage): F[Option[Instant]] =
-    execution.either {
-      if (!deltaTableExists(paths.streamingProgress)) Right(None)
-      else {
-        ensureProgressSchema()
-        latestPublishedWatermark(lineage)
-      }
-    }
+    execution.either(withProgress(Option.empty[Instant])(latestPublishedWatermark(lineage)))
 
   override def hasLineageState(lineage: StreamingLineage): F[Boolean] =
     execution.either {
-      if (!deltaTableExists(paths.streamingProgress)) Right(false)
-      else {
-        ensureProgressSchema()
-        val found = DeltaTables
-          .read(spark, paths.streamingProgress)
-          .filter(col(LineageColumn) === lit(lineage.value))
-          .limit(1)
-          .take(1)
-          .nonEmpty
-        Right(found)
+      withProgress(false) {
+        Right(
+          DeltaTables
+            .read(spark, paths.streamingProgress)
+            .filter(col(LineageColumn) === lit(lineage.value))
+            .limit(1)
+            .take(1)
+            .nonEmpty
+        )
       }
     }
 
@@ -78,9 +69,7 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]](
       retainedBatchIds: Set[StreamingBatchId]
   ): F[Vector[StreamingJournalState]] =
     execution.either {
-      if (!deltaTableExists(paths.streamingProgress)) Right(Vector.empty)
-      else {
-        ensureProgressSchema()
+      withProgress(Vector.empty[StreamingJournalState]) {
         val retained =
           if (retainedBatchIds.isEmpty) lit(false) else col(BatchIdColumn).isin(retainedBatchIds.toSeq.map(_.value)*)
         val unfinished = col(OutcomeColumn).isin(PreparedName, IngestionCommittedName)
@@ -96,30 +85,30 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]](
 
   /** Candidate-filtered across every lineage and every retained decision revision. */
   def referencedPublicationRunIds(candidates: Set[RunId]): F[Set[RunId]] = execution.either {
-    if (candidates.isEmpty || !deltaTableExists(paths.streamingDecisions)) Right(Set.empty)
-    else {
-      ensureDecisionSchema()
-      val stored = DeltaTables.read(spark, paths.streamingDecisions)
-      if (
-        stored
-          .filter(
-            col(PublicationRunIdColumn).isNull || col(PublicationRunIdColumn).rlike("^[\\p{javaWhitespace}]*$")
-          )
-          .limit(1)
-          .count() != 0
-      )
-        Left(malformedProgress)
-      else
-        stored
-          .filter(col(PublicationRunIdColumn).isin(candidates.toVector.map(_.value)*))
-          .select(col(PublicationRunIdColumn))
-          .distinct()
-          .limit(candidates.size)
-          .collect()
-          .toVector
-          .traverse(row => RunId.from(row.getString(0)).leftMap(_ => malformedProgress))
-          .map(_.toSet)
-    }
+    if (candidates.isEmpty) Right(Set.empty)
+    else
+      withDecisions(Set.empty[RunId]) {
+        val stored = DeltaTables.read(spark, paths.streamingDecisions)
+        if (
+          stored
+            .filter(
+              col(PublicationRunIdColumn).isNull || col(PublicationRunIdColumn).rlike("^[\\p{javaWhitespace}]*$")
+            )
+            .limit(1)
+            .count() != 0
+        )
+          Left(malformedProgress)
+        else
+          stored
+            .filter(col(PublicationRunIdColumn).isin(candidates.toVector.map(_.value)*))
+            .select(col(PublicationRunIdColumn))
+            .distinct()
+            .limit(candidates.size)
+            .collect()
+            .toVector
+            .traverse(row => RunId.from(row.getString(0)).leftMap(_ => malformedProgress))
+            .map(_.toSet)
+      }
   }
 
   /** Call under the lakehouse mutex, after reading Spark's retained offset/commit IDs. Never edits Spark logs. */
@@ -131,86 +120,82 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]](
   ): F[Unit] = execution.either {
     if (retention.toMillis <= 0L)
       Left(AnalyticsError.InvalidConfiguration("streaming progress retention must be positive"))
-    else if (!deltaTableExists(paths.streamingProgress)) Right(())
-    else {
-      ensureProgressSchema()
-      if (deltaTableExists(paths.streamingDecisions)) ensureDecisionSchema()
-      val progress = DeltaTables
-        .read(spark, paths.streamingProgress)
-        .filter(col(LineageColumn) === lit(lineage.value))
-      val malformed = progress
-        .filter(
-          col(OutcomeColumn).isNull || !col(OutcomeColumn).isin(
-            PreparedName,
-            IngestionCommittedName,
-            QualityBlockedName,
-            ErasurePendingName,
-            PublishedName
-          )
-        )
-        .limit(1)
-        .count() > 0L
-      if (malformed) Left(malformedProgress)
-      else {
-        val unfinished = col(OutcomeColumn).isin(PreparedName, IngestionCommittedName)
-        val terminal = progress.filter(!unfinished)
-        val latestTerminal = terminal.orderBy(col(BatchIdColumn).desc).limit(1).select(col(BatchIdColumn))
-        val latestWatermark = progress
-          .filter(col(OutcomeColumn) === lit(PublishedName) && col(CandidateWatermarkColumn).isNotNull)
-          .orderBy(col(BatchIdColumn).desc)
-          .limit(1)
-          .select(col(BatchIdColumn))
-        val sparkRetained =
-          if (retainedBatchIds.isEmpty) lit(false)
-          else col(BatchIdColumn).isin(retainedBatchIds.toVector.map(_.value)*)
-        val recent = col(CompletedAtColumn).isNull || col(CompletedAtColumn) > lit(
-          Timestamp.from(observedAt.minusMillis(retention.toMillis))
-        )
-        val protectedIds = progress
-          .filter(unfinished || sparkRetained || recent)
-          .select(col(BatchIdColumn))
-          .union(latestTerminal)
-          .union(latestWatermark)
-          .distinct()
-        val obsolete = progress
-          .join(protectedIds, Seq(BatchIdColumn), "left_anti")
-          .select(col(LineageColumn), col(BatchIdColumn))
-        // Materialize selection before mutating the source table; a crash can only leave extra decision records.
-        val cached = obsolete.persist()
-        try {
-          if (cached.limit(1).count() > 0L) {
-            val _ = DeltaTables
-              .forPath(spark, paths.streamingProgress)
-              .as("target")
-              .merge(cached.as("source"), identityCondition)
-              .whenMatched()
-              .delete()
-              .execute()
-          }
-          if (deltaTableExists(paths.streamingDecisions)) {
-            val remaining = DeltaTables
-              .read(spark, paths.streamingProgress)
-              .select(col(LineageColumn), col(BatchIdColumn))
-            val orphaned = DeltaTables
-              .read(spark, paths.streamingDecisions)
-              .filter(col(LineageColumn) === lit(lineage.value))
-              .select(col(LineageColumn), col(BatchIdColumn))
+    else
+      withProgress(()) {
+        withDecisions(())(Right(())).flatMap { _ =>
+          val progress = DeltaTables
+            .read(spark, paths.streamingProgress)
+            .filter(col(LineageColumn) === lit(lineage.value))
+          val malformed = progress
+            .filter(
+              col(OutcomeColumn).isNull || !col(OutcomeColumn).isin(
+                PreparedName,
+                IngestionCommittedName,
+                QualityBlockedName,
+                ErasurePendingName,
+                PublishedName
+              )
+            )
+            .limit(1)
+            .count() > 0L
+          if (malformed) Left(malformedProgress)
+          else {
+            val unfinished = col(OutcomeColumn).isin(PreparedName, IngestionCommittedName)
+            val terminal = progress.filter(!unfinished)
+            val latestTerminal = terminal.orderBy(col(BatchIdColumn).desc).limit(1).select(col(BatchIdColumn))
+            val latestWatermark = progress
+              .filter(col(OutcomeColumn) === lit(PublishedName) && col(CandidateWatermarkColumn).isNotNull)
+              .orderBy(col(BatchIdColumn).desc)
+              .limit(1)
+              .select(col(BatchIdColumn))
+            val sparkRetained =
+              if (retainedBatchIds.isEmpty) lit(false)
+              else col(BatchIdColumn).isin(retainedBatchIds.toVector.map(_.value)*)
+            val recent = col(CompletedAtColumn).isNull || col(CompletedAtColumn) > lit(
+              Timestamp.from(observedAt.minusMillis(retention.toMillis))
+            )
+            val protectedIds = progress
+              .filter(unfinished || sparkRetained || recent)
+              .select(col(BatchIdColumn))
+              .union(latestTerminal)
+              .union(latestWatermark)
               .distinct()
-              .join(remaining, Seq(LineageColumn, BatchIdColumn), "left_anti")
-            if (orphaned.limit(1).count() > 0L) {
-              val _ = DeltaTables
-                .forPath(spark, paths.streamingDecisions)
-                .as("target")
-                .merge(orphaned.as("source"), identityCondition)
-                .whenMatched()
-                .delete()
-                .execute()
-            }
+            val obsolete = progress
+              .join(protectedIds, Seq(BatchIdColumn), "left_anti")
+              .select(col(LineageColumn), col(BatchIdColumn))
+            // Materialize selection before mutating the source table; a crash can only leave extra decision records.
+            val cached = obsolete.persist()
+            try {
+              if (cached.limit(1).count() > 0L) {
+                val _ = DeltaTables
+                  .mergeOn(spark, paths.streamingProgress, cached, IdentityKeys)
+                  .whenMatched()
+                  .delete()
+                  .execute()
+              }
+              withDecisions(()) {
+                val remaining = DeltaTables
+                  .read(spark, paths.streamingProgress)
+                  .select(col(LineageColumn), col(BatchIdColumn))
+                val orphaned = DeltaTables
+                  .read(spark, paths.streamingDecisions)
+                  .filter(col(LineageColumn) === lit(lineage.value))
+                  .select(col(LineageColumn), col(BatchIdColumn))
+                  .distinct()
+                  .join(remaining, Seq(LineageColumn, BatchIdColumn), "left_anti")
+                if (orphaned.limit(1).count() > 0L) {
+                  val _ = DeltaTables
+                    .mergeOn(spark, paths.streamingDecisions, orphaned, IdentityKeys)
+                    .whenMatched()
+                    .delete()
+                    .execute()
+                }
+                Right(())
+              }
+            } finally { cached.unpersist(); () }
           }
-          Right(())
-        } finally { cached.unpersist(); () }
+        }
       }
-    }
   }
 
   private def latestPublishedWatermark(lineage: StreamingLineage): Either[AnalyticsError, Option[Instant]] = {
@@ -236,9 +221,7 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]](
         case None      =>
           val frame = spark.createDataFrame(Vector(preparationRow(preparation)).asJava, ProgressSchema)
           DeltaTables
-            .forPath(spark, paths.streamingProgress)
-            .as("target")
-            .merge(frame.as("source"), identityCondition)
+            .mergeOn(spark, paths.streamingProgress, frame, IdentityKeys)
             .whenNotMatched()
             .insertAll()
             .execute()
@@ -289,9 +272,7 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]](
                 else {
                   val frame = spark.createDataFrame(Vector(decisionRow(decision)).asJava, DecisionSchema)
                   DeltaTables
-                    .forPath(spark, paths.streamingDecisions)
-                    .as("target")
-                    .merge(frame.as("source"), decisionCondition)
+                    .mergeOn(spark, paths.streamingDecisions, frame, IdentityKeys :+ RevisionColumn)
                     .whenNotMatched()
                     .insertAll()
                     .execute()
@@ -373,16 +354,15 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]](
   private def latestDecision(
       identity: StreamingBatchIdentity
   ): Either[AnalyticsError, Option[StreamingDecisionRevision]] =
-    if (!deltaTableExists(paths.streamingDecisions)) Right(None)
-    else {
-      ensureDecisionSchema()
-      val rows = DeltaTables
+    withDecisions(Option.empty[StreamingDecisionRevision]) {
+      DeltaTables
         .read(spark, paths.streamingDecisions)
         .filter(identityFilter(identity))
         .orderBy(col(RevisionColumn).desc)
         .limit(1)
         .collect()
-      rows.headOption.traverse(decodeDecision)
+        .headOption
+        .traverse(decodeDecision)
     }
 
   private def readProgress(identity: StreamingBatchIdentity): Option[Row] =
@@ -397,9 +377,7 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]](
       identity: StreamingBatchIdentity,
       revision: Long
   ): Either[AnalyticsError, Option[StreamingDecisionRevision]] =
-    if (!deltaTableExists(paths.streamingDecisions)) Right(None)
-    else {
-      ensureDecisionSchema()
+    withDecisions(Option.empty[StreamingDecisionRevision]) {
       DeltaTables
         .read(spark, paths.streamingDecisions)
         .filter(identityFilter(identity) && col(RevisionColumn) === lit(revision))
@@ -620,33 +598,27 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]](
   private def ensureProgressTable(): Unit =
     AnalyticsTableSchemas.createOrValidate(spark, paths.streamingProgress, ProgressShape)
 
-  private def ensureProgressSchema(): Unit =
-    if (
-      !AnalyticsTableSchemas.matches(
-        DeltaTables.read(spark, paths.streamingProgress).schema,
-        ProgressShape
-      )
-    )
-      throw malformedProgress
-
   private def ensureDecisionTable(): Unit =
     AnalyticsTableSchemas.createOrValidate(spark, paths.streamingDecisions, DecisionShape)
 
-  private def ensureDecisionSchema(): Unit =
-    if (
-      !AnalyticsTableSchemas.matches(
-        DeltaTables.read(spark, paths.streamingDecisions).schema,
-        DecisionShape
-      )
-    )
-      throw malformedProgress
+  private def withProgress[A](absent: A)(present: => Either[AnalyticsError, A]): Either[AnalyticsError, A] =
+    withTable(paths.streamingProgress, ProgressShape, absent)(present)
 
-  private def deltaTableExists(path: String): Boolean = {
+  private def withDecisions[A](absent: A)(present: => Either[AnalyticsError, A]): Either[AnalyticsError, A] =
+    withTable(paths.streamingDecisions, DecisionShape, absent)(present)
+
+  /** A missing table yields `absent`; an existing path that is not a Delta table with the shape is malformed. */
+  private def withTable[A](path: String, shape: AnalyticsTableSchemas.Shape, absent: A)(
+      present: => Either[AnalyticsError, A]
+  ): Either[AnalyticsError, A] = {
     val tablePath = new org.apache.hadoop.fs.Path(SparkPhysicalLocation.resolve(path))
     val fileSystem = tablePath.getFileSystem(spark.sparkContext.hadoopConfiguration)
-    if (!fileSystem.exists(tablePath)) false
-    else if (DeltaTables.exists(spark, path)) true
-    else throw malformedProgress
+    if (!fileSystem.exists(tablePath)) Right(absent)
+    else if (
+      !DeltaTables.exists(spark, path) || !AnalyticsTableSchemas.matches(DeltaTables.read(spark, path).schema, shape)
+    )
+      Left(malformedProgress)
+    else present
   }
 
   private def readRequiredInstant(row: Row, name: String): Option[Instant] =
@@ -737,11 +709,7 @@ private object DeltaStreamingBatchJournal {
   )
   private val ProgressSchema = AnalyticsTableSchemas.struct(ProgressShape)
   private val DecisionSchema = AnalyticsTableSchemas.struct(DecisionShape)
-  private val identityCondition =
-    s"target.$LineageColumn = source.$LineageColumn AND target.$BatchIdColumn = source.$BatchIdColumn"
-  private val decisionCondition =
-    s"target.$LineageColumn = source.$LineageColumn AND target.$BatchIdColumn = source.$BatchIdColumn AND " +
-      s"target.$RevisionColumn = source.$RevisionColumn"
+  private val IdentityKeys = Seq(LineageColumn, BatchIdColumn)
 
   private val malformedProgress = AnalyticsError.InvalidConfiguration("streaming batch journal record is malformed")
   private val preparationConflict =

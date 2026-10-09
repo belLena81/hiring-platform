@@ -5,8 +5,6 @@ import com.example.hiring.analytics.{AnalyticsTestSubjectPseudonymizer, TestAnal
 import com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock
 import com.example.hiring.analytics.domain.{
   AnalyticsLakehouseIdentity,
-  AnalyticsRunManifest,
-  PartitionOffsetRange,
   RangeFingerprint,
   StreamingBatchId,
   StreamingBatchIdentity,
@@ -88,10 +86,12 @@ final class HiringAnalyticsStorageLocationsSpec extends CatsEffectSuite {
       val token = checked(keys.typedToken("084c58fe-787b-410b-b1bb-7193931f06e3")).value
       val at = Instant.parse("2026-10-01T12:00:00Z")
       val manifest = checked(
-        AnalyticsRunManifest
-          .validated(
+        com.example.hiring.analytics.TestPartitionOffsetRange
+          .manifestOf(
             "hiring-storage-boundary",
-            Vector(checked(PartitionOffsetRange.from("hiring.events", 0, 0L, 1L).toEither))
+            Vector(
+              checked(com.example.hiring.analytics.TestPartitionOffsetRange.from("hiring.events", 0, 0L, 1L).toEither)
+            )
           )
           .toEither
       )

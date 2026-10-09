@@ -24,7 +24,7 @@ private[analytics] object AnalyticsTestSubjectPseudonymizer {
       previousKeyId: Option[String],
       previousSecret: Option[String]
   ): SubjectPseudonymizer =
-    unwrap(SubjectPseudonymizer.validateFromBase64(Option(secret), primaryKeyId, previousKeyId, previousSecret))
+    unwrap(SubjectPseudonymizer.validateFromBase64(secret, primaryKeyId, previousKeyId, previousSecret))
 
   def token(pseudonymizer: SubjectPseudonymizer, subjectId: String): SubjectToken =
     pseudonymizer.typedToken(subjectId).fold(error => throw new AssertionError(error), identity)

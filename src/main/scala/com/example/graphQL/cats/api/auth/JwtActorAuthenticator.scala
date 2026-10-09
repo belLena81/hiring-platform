@@ -7,11 +7,12 @@ import com.example.graphQL.cats.service.ActorContext
 import com.example.graphQL.cats.config.JwtAuthConfig
 import com.example.graphQL.cats.domain.model.Identifiers.{UserId, parse as parseIdentifier}
 import com.example.graphQL.cats.service.protocol.UserAuthenticator
-import java.time.{Clock as JavaClock, Instant, ZoneOffset}
+import com.example.graphQL.cats.shared.crypto.{Hmac, HmacJwt}
+import java.nio.charset.StandardCharsets.UTF_8
+import java.time.Instant
 import org.http4s.Request
 import org.http4s.{AuthScheme, Credentials}
 import org.http4s.headers.Authorization
-import pdi.jwt.{JwtAlgorithm, JwtCirce, JwtOptions}
 
 enum AuthFailure {
   case MalformedCredentials, InvalidToken, UnknownActor, Unavailable
@@ -48,9 +49,6 @@ final class JwtActorAuthenticator(config: JwtAuthConfig, users: UserAuthenticato
 }
 
 object JwtActorAuthenticator {
-  private val Algorithms = Seq(JwtAlgorithm.HS256)
-  private val Options = JwtOptions(signature = true, expiration = true, notBefore = true, leeway = 0)
-
   def verify(
       token: String,
       secret: String,
@@ -67,12 +65,8 @@ object JwtActorAuthenticator {
       audience: String,
       now: Instant
   ): Option[UserId] =
-    given clock: JavaClock = JavaClock.fixed(now, ZoneOffset.UTC)
-
-    JwtCirce(clock)
-      .decode(token, secret, Algorithms, Options)
-      .toOption
-      .filter(_.isValid(issuer, audience))
+    HmacJwt
+      .decode(token, Hmac.secretKey(secret.getBytes(UTF_8)), now, issuer, audience)
       .flatMap(_.subject)
       .flatMap(subject => parseIdentifier(subject)(UserId.apply))
 }

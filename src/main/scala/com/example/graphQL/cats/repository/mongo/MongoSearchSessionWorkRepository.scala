@@ -22,8 +22,7 @@ final class MongoSearchSessionWorkRepository(
     transactionRunner: MongoTransactionRunner,
     diagnostics: Diagnostics,
     uuidGen: UUIDGen[IO] = UUIDGen[IO]
-) extends SearchSessionWorkRepository
-    with MongoOperationalEventInsertion {
+) extends SearchSessionWorkRepository {
   private val work = Mongo4catsCollections.documents(database, MongoCollections.SearchSessionWork)
   private val sessions = Mongo4catsCollections.documents(database, MongoCollections.SearchSessions)
   private val outbox = Mongo4catsCollections.documents(database, MongoCollections.EventOutbox)
@@ -53,10 +52,7 @@ final class MongoSearchSessionWorkRepository(
                 MongoSessionOperations
                   .updateOne(work, None, filter, setOnInsertDocument(sanitized), new UpdateOptions().upsert(true))
               )
-              .subflatMap {
-                case Some(_) => Right(())
-                case None    => Left(RepositoryError.MissingWriteResult)
-              }
+              .void
           }(MongoErrors.duplicateAsConflict)
       }
 
@@ -118,7 +114,7 @@ final class MongoSearchSessionWorkRepository(
       val available = MongoFilter.and(
         MongoFilter
           .in(MongoFields.State, List(SearchSessionWorkState.Ready, SearchSessionWorkState.Retry).map(_.toString)),
-        MongoFilter.lte(MongoFields.AvailableAt, Date.from(now))
+        MongoFilter.lte(MongoFields.AvailableAt, now.toDate)
       )
       MongoRepositorySupport
         .repositoryGuard(diagnostics, "searchSessionWork.claim") {
@@ -156,17 +152,11 @@ final class MongoSearchSessionWorkRepository(
                 new UpdateOptions().upsert(true)
               )
             )
-            saveSession.flatMap {
-              case None    => RepositoryIO.fromEither(Left(RepositoryError.MissingWriteResult))
-              case Some(_) =>
-                insertOperationalEvents(outbox, active, List(claim.work.event), now, diagnostics).flatMap { _ =>
-                  RepositoryIO.lift(MongoSessionOperations.deleteOne(work, active, lease)).subflatMap {
-                    case Some(result) if result.getDeletedCount == 1L => Right(())
-                    case Some(_)                                      => Left(RepositoryError.Conflict)
-                    case None                                         => Left(RepositoryError.MissingWriteResult)
-                  }
-                }
-            }
+            saveSession *>
+              MongoOperationalEventInsertion.insert(outbox, active, List(claim.work.event), now, diagnostics) *>
+              RepositoryIO
+                .lift(MongoSessionOperations.deleteOne(work, active, lease))
+                .subflatMap(MongoRepositorySupport.deletedOne(_))
           }
       }(MongoErrors.duplicateAsConflict)
 
@@ -175,10 +165,10 @@ final class MongoSearchSessionWorkRepository(
       claim,
       MongoUpdate.combine(
         MongoUpdate.set(MongoFields.State, SearchSessionWorkState.Retry.toString),
-        MongoUpdate.set(MongoFields.AvailableAt, Date.from(availableAt)),
+        MongoUpdate.set(MongoFields.AvailableAt, availableAt.toDate),
         MongoUpdate.inc(MongoFields.Attempts, java.lang.Integer.valueOf(1)),
         MongoLeaseQueue.releaseLease,
-        MongoUpdate.set(MongoFields.UpdatedAt, Date.from(availableAt))
+        MongoUpdate.set(MongoFields.UpdatedAt, availableAt.toDate)
       )
     )
 
@@ -192,10 +182,10 @@ final class MongoSearchSessionWorkRepository(
       MongoUpdate.combine(
         MongoUpdate.set(MongoFields.State, SearchSessionWorkState.Failed.toString),
         MongoUpdate.set(MongoFields.Failure, failure.toString),
-        MongoUpdate.set(MongoFields.FinishedAt, Date.from(now)),
+        MongoUpdate.set(MongoFields.FinishedAt, now.toDate),
         MongoUpdate.set(MongoFields.RetentionExpiresAt, Date.from(now.plusSeconds(7L * 24L * 60L * 60L))),
         MongoLeaseQueue.releaseLease,
-        MongoUpdate.set(MongoFields.UpdatedAt, Date.from(now))
+        MongoUpdate.set(MongoFields.UpdatedAt, now.toDate)
       )
     )
 

@@ -60,8 +60,8 @@ class MongoActiveDeletionMarkerIntegrationSpec extends AnalyticsMongoIntegration
     mongo4catsClient.getDatabase(name).unsafeRunSync()
 
   private def manifest(runId: String): AnalyticsRunManifest =
-    AnalyticsRunManifest
-      .validated(runId, Vector(IntegrationPartitionOffsetRange.unsafe("topic", 0, 0L, 1L)))
+    TestPartitionOffsetRange
+      .manifestOf(runId, Vector(TestPartitionOffsetRange.unsafe("topic", 0, 0L, 1L)))
       .toEither
       .fold(errors => fail(errors.toString), identity)
 

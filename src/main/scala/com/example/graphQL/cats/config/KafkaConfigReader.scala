@@ -3,6 +3,7 @@ package com.example.graphQL.cats.config
 import io.github.iltotore.iron.*
 import io.github.iltotore.iron.pureconfig.{RefinedConfigError, given}
 import _root_.pureconfig.*
+import _root_.pureconfig.error.CannotConvert
 
 /** Pureconfig's tuple derivation nests one inline per field, so the 23-field interview section exceeds the compiler's
   * successive-inline limit when iron's inline readers are resolved inside it. These resolve them once, outside.
@@ -25,34 +26,83 @@ private object InterviewSettingReaders {
 }
 import InterviewSettingReaders.given
 
+private[config] given ConfigReader[KafkaPublisherConfig] =
+  ConfigReader.forProduct8(
+    "worker-id",
+    "batch-size",
+    "lease-seconds",
+    "retry-delay-seconds",
+    "max-attempts",
+    "poll-interval-ms",
+    "sasl-username",
+    "sasl-password"
+  )(
+    (
+        workerId: NonBlankStr,
+        batchSize: KafkaBatchSize,
+        leaseSeconds: KafkaLeaseSeconds,
+        retryDelaySeconds: KafkaRetryDelaySeconds,
+        maxAttempts: KafkaMaxAttempts,
+        pollIntervalMs: KafkaPollIntervalMs,
+        username: Option[String],
+        password: Option[String]
+    ) =>
+      KafkaPublisherConfig(
+        workerId,
+        batchSize,
+        leaseSeconds,
+        retryDelaySeconds,
+        maxAttempts,
+        pollIntervalMs,
+        username,
+        password
+      )
+  )
+
+private[config] given ConfigReader[KafkaConsumerConfig] =
+  ConfigReader.forProduct6(
+    "enabled",
+    "receipt-ttl-days",
+    "quarantine-ttl-days",
+    "sasl-username",
+    "sasl-password",
+    "partition-concurrency"
+  )(
+    (
+        enabled: Boolean,
+        receiptTtlDays: KafkaRetentionDays,
+        quarantineTtlDays: KafkaRetentionDays,
+        username: Option[String],
+        password: Option[String],
+        partitionConcurrency: Option[PartitionConcurrency]
+    ) =>
+      KafkaConsumerConfig(
+        enabled,
+        receiptTtlDays,
+        quarantineTtlDays,
+        username,
+        password,
+        partitionConcurrency.getOrElse(KafkaConsumerConfig.DefaultPartitionConcurrency)
+      )
+  )
+
+private[config] given ConfigReader[KafkaSaslSecurityProtocol] =
+  ConfigReader[String].emap(value =>
+    KafkaSaslSecurityProtocol.values
+      .find(_.kafkaValue == value)
+      .toRight(CannotConvert(value, "KafkaSaslSecurityProtocol", "unknown protocol"))
+  )
+
 private[config] final case class RawKafkaConfig(
     enabled: Boolean,
     bootstrapServers: KafkaBootstrapServers,
     topic: KafkaTopic,
     consumerGroup: KafkaConsumerGroup,
-    publisher: RawKafkaPublisherConfig,
-    consumer: RawKafkaConsumerConfig,
-    saslSecurityProtocol: Option[String] = None,
+    publisher: KafkaPublisherConfig,
+    consumer: KafkaConsumerConfig,
+    saslSecurityProtocol: Option[KafkaSaslSecurityProtocol] = None,
     interview: Option[RawInterviewRuntimeConfig] = None,
     restartMaxDelaySeconds: Option[KafkaRestartMaxDelaySeconds] = None
-) derives ConfigReader
-private[config] final case class RawKafkaPublisherConfig(
-    workerId: NonBlankStr,
-    batchSize: KafkaBatchSize,
-    leaseSeconds: KafkaLeaseSeconds,
-    retryDelaySeconds: KafkaRetryDelaySeconds,
-    maxAttempts: KafkaMaxAttempts,
-    pollIntervalMs: KafkaPollIntervalMs,
-    saslUsername: Option[String],
-    saslPassword: Option[String]
-) derives ConfigReader
-private[config] final case class RawKafkaConsumerConfig(
-    enabled: Boolean,
-    receiptTtlDays: KafkaRetentionDays,
-    quarantineTtlDays: KafkaRetentionDays,
-    saslUsername: Option[String],
-    saslPassword: Option[String],
-    partitionConcurrency: Option[PartitionConcurrency] = None
 ) derives ConfigReader
 
 /** Scala defaults apply when the whole `kafka.interview` section is absent; present sections list every required key.

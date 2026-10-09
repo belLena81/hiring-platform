@@ -34,12 +34,8 @@ private[analytics] final class DeltaManifestStore[F[_]: Async](
       )
       AnalyticsTableSchemas.createOrValidate(spark, paths.manifests, AnalyticsTableSchemas.manifests)
       val frame = spark.createDataFrame(rows.asJava, AnalyticsTableSchemas.struct(AnalyticsTableSchemas.manifests))
-      val condition =
-        "target.runId = source.runId AND target.topic = source.topic AND target.partition = source.partition"
       DeltaTables
-        .forPath(spark, paths.manifests)
-        .as("target")
-        .merge(frame.as("source"), condition)
+        .mergeOn(spark, paths.manifests, frame, Seq("runId", Columns.Topic, Columns.Partition))
         .whenMatched()
         .updateAll()
         .whenNotMatched()

@@ -13,8 +13,6 @@ import mongo4cats.client.ClientSession
 import org.reactivestreams.Publisher
 import retry.{ResultHandler, retryingOnErrors}
 
-import scala.util.control.NoStackTrace
-
 /** FS2 boundary for Mongo's cold Reactive Streams publishers. */
 private[analytics] final class MongoPublisherStream(settings: AnalyticsOperationalSettings) {
   def stream[F[_], A](query: Int => Stream[F, A]): Stream[F, A] =
@@ -31,7 +29,11 @@ private[analytics] final class MongoPublisherStream(settings: AnalyticsOperation
   def optional[F[_]: Async, A](publisher: => Publisher[A]): F[Option[A]] = stream[F, A](publisher).compile.last
 
   def one[F[_]: Async, A](publisher: => Publisher[A]): F[A] =
-    optional[F, A](publisher).flatMap(_.liftTo[F](MongoPublisherStream.CompletedWithoutValue))
+    optional[F, A](publisher).flatMap(
+      _.liftTo[F](
+        AnalyticsError.MongoConnectionFailure(new NoSuchElementException("Mongo publisher completed without a value"))
+      )
+    )
 
   def drain[F[_]: Async, A](publisher: => Publisher[A]): F[Unit] = stream[F, A](publisher).compile.drain
 
@@ -78,12 +80,4 @@ private[analytics] final class MongoPublisherStream(settings: AnalyticsOperation
 
       retryingOnErrors(runOnce)(deadline, retryOn(hasLabel(MongoException.TRANSIENT_TRANSACTION_ERROR_LABEL)))
     })
-}
-
-private[analytics] object MongoPublisherStream {
-
-  /** A single-result driver operation completed empty; adapters translate it into their owning [[AnalyticsError]]. */
-  case object CompletedWithoutValue
-      extends RuntimeException("Mongo publisher completed without a value")
-      with NoStackTrace
 }

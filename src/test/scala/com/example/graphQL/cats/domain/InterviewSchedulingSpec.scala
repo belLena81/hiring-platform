@@ -1,5 +1,7 @@
 package com.example.graphQL.cats.domain
 
+import com.example.graphQL.cats.domain.policy.RetryBackoff
+
 import com.example.graphQL.cats.domain.model.ApplicationStatus
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, UserId}
 import com.example.graphQL.cats.domain.workflow.*
@@ -283,10 +285,10 @@ class InterviewSchedulingSpec extends FunSuite {
   }
 
   test("retry backoff is pure, capped and cannot overflow for exhausted budgets") {
-    assertEquals(InterviewWorkflowPolicy.backoffMillis(1L, 1000L, 30000L), 1000L)
-    assertEquals(InterviewWorkflowPolicy.backoffMillis(3L, 1000L, 30000L), 4000L)
-    assertEquals(InterviewWorkflowPolicy.backoffMillis(Long.MaxValue, 1000L, 30000L), 30000L)
-    assertEquals(InterviewWorkflowPolicy.backoffMillis(2L, Long.MaxValue / 2L + 1L, Long.MaxValue), Long.MaxValue)
+    assertEquals(RetryBackoff.exponentialMillis(1L, 1000L, 30000L), 1000L)
+    assertEquals(RetryBackoff.exponentialMillis(3L, 1000L, 30000L), 4000L)
+    assertEquals(RetryBackoff.exponentialMillis(Long.MaxValue, 1000L, 30000L), 30000L)
+    assertEquals(RetryBackoff.exponentialMillis(2L, Long.MaxValue / 2L + 1L, Long.MaxValue), Long.MaxValue)
   }
 
 }

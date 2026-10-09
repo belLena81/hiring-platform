@@ -18,10 +18,17 @@ import com.example.graphQL.cats.service.application.{
 }
 import com.example.graphQL.cats.service.Diagnostics
 import com.example.graphQL.cats.service.port.*
-import com.mongodb.client.model.{FindOneAndUpdateOptions, ReturnDocument, Sorts, UpdateOptions}
+import com.mongodb.client.model.{Sorts, UpdateOptions}
 import mongo4cats.client.{ClientSession, MongoClient}
 import mongo4cats.database.MongoDatabase
 import org.bson.Document
+import com.example.graphQL.cats.repository.mongo.MongoDocumentFields.Repository.{
+  instant,
+  int32,
+  optionalInstant,
+  string,
+  stringList
+}
 
 import java.time.Instant
 import java.time.temporal.ChronoUnit
@@ -43,8 +50,7 @@ final class MongoInterviewWorkflowRepository(
     completedEvidenceRetention: FiniteDuration = 8.days
 ) extends InterviewWorkflowRepository
     with InterviewCalendarLedger
-    with InterviewNotificationReceiptLedger
-    with MongoOperationalEventInsertion {
+    with InterviewNotificationReceiptLedger {
   private val workflows = Mongo4catsCollections.documents(database, MongoCollections.InterviewWorkflows)
   private val commands = Mongo4catsCollections.documents(database, MongoCollections.InterviewWorkflowCommands)
   private val inbox = Mongo4catsCollections.documents(database, MongoCollections.InterviewWorkflowInbox)
@@ -91,11 +97,7 @@ final class MongoInterviewWorkflowRepository(
               for {
                 _ <- fenceSubjects(session, List(workflow.candidateId, workflow.recruiterId, workflow.initiatedBy))
                 current <- RepositoryIO.lift(
-                  MongoSessionOperations.findOne(
-                    commands,
-                    session,
-                    MongoFilter.eq(MongoFields.Id, commandId(command.workflowId, command.stepId))
-                  )
+                  MongoSessionOperations.findById(commands, session, commandId(command.workflowId, command.stepId))
                 )
                 outcome <- current match {
                   case None           => RepositoryIO.fromEither(Right(InterviewExecutionClaimOutcome.AlreadyHandled))
@@ -123,7 +125,7 @@ final class MongoInterviewWorkflowRepository(
                                     MongoFilter.eq(CommandStateField, InterviewWorkflowCommandState.Executing.toString),
                                     MongoFilter.eq(OwnerField, lease.owner),
                                     MongoFilter.eq(FencingTokenField, lease.token.toString),
-                                    MongoFilter.lte(LeaseUntilField, Date.from(now)),
+                                    MongoFilter.lte(LeaseUntilField, now.toDate),
                                     MongoFilter.exists("result", false)
                                   ),
                                   MongoUpdate.combine(
@@ -183,7 +185,7 @@ final class MongoInterviewWorkflowRepository(
                                       .set(CommandStateField, InterviewWorkflowCommandState.Executing.toString),
                                     MongoUpdate.set(OwnerField, workerId),
                                     MongoUpdate.set(FencingTokenField, token.toString),
-                                    MongoUpdate.set(LeaseUntilField, Date.from(leaseUntil)),
+                                    MongoUpdate.set(LeaseUntilField, leaseUntil.toDate),
                                     MongoUpdate.inc("executionAttempts", additional)
                                   )
                                 )
@@ -230,7 +232,7 @@ final class MongoInterviewWorkflowRepository(
         else claimFilter(claim, now),
         if (valid)
           MongoUpdate.combine(
-            MongoUpdate.set("publicationCheckedAt", Date.from(now)),
+            MongoUpdate.set("publicationCheckedAt", now.toDate),
             MongoUpdate.inc(MongoFields.Attempts, java.lang.Integer.valueOf(1))
           )
         else terminalCommand(InterviewWorkflowCommandState.Superseded, "publication_obsolete", now)
@@ -269,8 +271,7 @@ final class MongoInterviewWorkflowRepository(
       val resultId = UUID.nameUUIDFromBytes(s"$commandId:result".getBytes(java.nio.charset.StandardCharsets.UTF_8))
       RepositoryIO
         .lift(
-          MongoSessionOperations
-            .findOne(inbox, session, MongoFilter.eq(MongoFields.Id, s"${workflow.id.value}:$resultId"))
+          MongoSessionOperations.findById(inbox, session, s"${workflow.id.value}:$resultId")
         )
         .map(receipt => decide(receipt.nonEmpty))
     }
@@ -326,7 +327,7 @@ final class MongoInterviewWorkflowRepository(
     attemptScope(command).fold(RepositoryIO.fromEither[Long](Right(0L))) { case (kinds, scope) =>
       RepositoryIO
         .lift(
-          MongoSessionOperations.findOne(workflows, session, MongoFilter.eq(MongoFields.Id, workflowId.value.toString))
+          MongoSessionOperations.findById(workflows, session, workflowId.value.toString)
         )
         .subflatMap(_.toRight(RepositoryError.Conflict))
         .flatMap { stored =>
@@ -347,7 +348,7 @@ final class MongoInterviewWorkflowRepository(
                 session.fold(collection.find(filter.bson))(active => collection.find(active, filter.sessionFilter))
               query.boundedStream(32).compile.fold[Either[RepositoryError, Long]](Right(0L)) { (sum, row) =>
                 for {
-                  total <- sum; attempts <- integer(row, "executionAttempts");
+                  total <- sum; attempts <- int32(row, "executionAttempts");
                   _ <- Either.cond(attempts >= 0, (), RepositoryError.InvalidStoredData)
                 } yield total + attempts.toLong
               }
@@ -368,7 +369,7 @@ final class MongoInterviewWorkflowRepository(
             MongoUpdate.combine(
               MongoUpdate.setOnInsert(DocumentTypeField, "quarantine"),
               MongoUpdate.setOnInsert("failureCode", "invalid_message"),
-              MongoUpdate.setOnInsert(MongoFields.OccurredAt, Date.from(now)),
+              MongoUpdate.setOnInsert(MongoFields.OccurredAt, now.toDate),
               MongoUpdate.setOnInsert(
                 MongoFields.RetentionExpiresAt,
                 Date.from(now.plusMillis(completedEvidenceRetention.toMillis))
@@ -377,10 +378,7 @@ final class MongoInterviewWorkflowRepository(
             new UpdateOptions().upsert(true)
           )
         )
-        .subflatMap {
-          case Some(result) if result.wasAcknowledged() => Right(())
-          case _                                        => Left(RepositoryError.MissingWriteResult)
-        }
+        .void
 
   override def recordResult(
       claim: ClaimedInterviewWorkflowCommand,
@@ -402,7 +400,7 @@ final class MongoInterviewWorkflowRepository(
                 MongoFilter.eq(OwnerField, claim.owner),
                 MongoFilter.eq(FencingTokenField, claim.fencingToken.toString),
                 MongoFilter.eq(CommandStateField, InterviewWorkflowCommandState.Executing.toString),
-                MongoFilter.gt(LeaseUntilField, Date.from(now)),
+                MongoFilter.gt(LeaseUntilField, now.toDate),
                 MongoFilter.exists("result", false)
               ),
               MongoUpdate.combine(
@@ -431,7 +429,7 @@ final class MongoInterviewWorkflowRepository(
   ): RepositoryIO[Option[InterviewWorkflowCommandRecord]] =
     RepositoryIO
       .lift(
-        MongoSessionOperations.findOne(commands, None, MongoFilter.eq(MongoFields.Id, commandId(workflowId, stepId)))
+        MongoSessionOperations.findById(commands, None, commandId(workflowId, stepId))
       )
       .flatMap(_.traverse(document => RepositoryIO.fromEither(decodeCommandRecord(document))))
 
@@ -441,8 +439,7 @@ final class MongoInterviewWorkflowRepository(
   override def hasRescheduleApproval(workflowId: InterviewWorkflowId, generation: Int): RepositoryIO[Boolean] =
     RepositoryIO
       .lift(
-        MongoSessionOperations
-          .findOne(inbox, None, MongoFilter.eq(MongoFields.Id, swapReceiptId(workflowId, generation)))
+        MongoSessionOperations.findById(inbox, None, swapReceiptId(workflowId, generation))
       )
       .map(_.nonEmpty)
 
@@ -471,7 +468,7 @@ final class MongoInterviewWorkflowRepository(
         for {
           _ <- fenceExecution(session, workflow.id, Some(execution))
           existing <- RepositoryIO.lift(
-            MongoSessionOperations.findOne(inbox, session, MongoFilter.eq(MongoFields.Id, receiptId))
+            MongoSessionOperations.findById(inbox, session, receiptId)
           )
           _ <-
             if (existing.nonEmpty) RepositoryIO.fromEither(Right(()))
@@ -517,7 +514,7 @@ final class MongoInterviewWorkflowRepository(
               } yield ()
         } yield ()
       }
-    }(_ => Left(RepositoryError.Unavailable))
+    }
 
   override def settleNotificationResult(
       record: InterviewWorkflowCommandRecord,
@@ -563,7 +560,7 @@ final class MongoInterviewWorkflowRepository(
           case InterviewNotificationSettlement.Retry(availableAt) =>
             MongoUpdate.combine(
               MongoUpdate.set(CommandStateField, InterviewWorkflowCommandState.Pending.toString),
-              MongoUpdate.set(MongoFields.AvailableAt, Date.from(availableAt)),
+              MongoUpdate.set(MongoFields.AvailableAt, availableAt.toDate),
               MongoUpdate.set(FailureCodeField, "notification_retry"),
               MongoUpdate.inc("executionAttempts", Int.box(1)),
               // Publication attempts bound one delivery cycle of the broker; every logical retry starts a fresh one.
@@ -584,11 +581,8 @@ final class MongoInterviewWorkflowRepository(
         else
           RepositoryIO
             .lift(MongoSessionOperations.updateOne(commands, None, failedResult, update))
-            .subflatMap {
-              case Some(result) => Right(result.getMatchedCount == 1L)
-              case None         => Left(RepositoryError.MissingWriteResult)
-            }
-      }(_ => Left(RepositoryError.Unavailable))
+            .map(_.getMatchedCount == 1L)
+      }
 
   override def deferExpiry(record: InterviewWorkflowCommandRecord, availableAt: Instant): RepositoryIO[Boolean] =
     record.command match {
@@ -619,11 +613,8 @@ final class MongoInterviewWorkflowRepository(
                 )
               )
             )
-            .subflatMap {
-              case Some(result) => Right(result.getMatchedCount == 1L)
-              case None         => Left(RepositoryError.MissingWriteResult)
-            }
-        }(_ => Left(RepositoryError.Unavailable))
+            .map(_.getMatchedCount == 1L)
+        }
       case _ => RepositoryIO.fromEither(Left(RepositoryError.InvalidEvent))
     }
 
@@ -650,7 +641,7 @@ final class MongoInterviewWorkflowRepository(
             .findManyById(commands, None, notificationRepairFilter(workflowId), NotificationRepairLimit)
         )
         .flatMap(_.traverse(document => RepositoryIO.fromEither(decodeCommandRecord(document))))
-    }(_ => Left(RepositoryError.Unavailable))
+    }
 
   override def repairNotifications(
       workflowId: InterviewWorkflowId,
@@ -662,9 +653,9 @@ final class MongoInterviewWorkflowRepository(
       transactionRunner.run { session =>
         val receiptId = s"${workflowId.value}:repair-notifications:$requestKey"
         RepositoryIO
-          .lift(MongoSessionOperations.findOne(inbox, session, MongoFilter.eq(MongoFields.Id, receiptId)))
+          .lift(MongoSessionOperations.findById(inbox, session, receiptId))
           .flatMap {
-            case Some(receipt) => RepositoryIO.fromEither(integer(receipt, "repaired"))
+            case Some(receipt) => RepositoryIO.fromEither(int32(receipt, "repaired"))
             case None          =>
               for {
                 workflow <- loadWorkflow(workflowId, session).subflatMap(_.toRight(RepositoryError.Conflict))
@@ -683,7 +674,7 @@ final class MongoInterviewWorkflowRepository(
                     ),
                     MongoUpdate.combine(
                       MongoUpdate.set(CommandStateField, InterviewWorkflowCommandState.Pending.toString),
-                      MongoUpdate.set(MongoFields.AvailableAt, Date.from(now)),
+                      MongoUpdate.set(MongoFields.AvailableAt, now.toDate),
                       MongoUpdate.set("executionAttempts", Int.box(0)),
                       MongoUpdate.set(MongoFields.Attempts, Int.box(0)),
                       MongoUpdate.unset(FailureCodeField),
@@ -701,11 +692,11 @@ final class MongoInterviewWorkflowRepository(
               } yield rows.size
           }
       }
-    }(_ => Left(RepositoryError.Unavailable))
+    }
 
   override def hasHiringReceipt(workflowId: InterviewWorkflowId): RepositoryIO[Boolean] =
     RepositoryIO
-      .lift(MongoSessionOperations.findOne(inbox, None, MongoFilter.eq(MongoFields.Id, s"${workflowId.value}:hiring")))
+      .lift(MongoSessionOperations.findById(inbox, None, s"${workflowId.value}:hiring"))
       .map(_.nonEmpty)
 
   override def commitHiring(
@@ -719,7 +710,7 @@ final class MongoInterviewWorkflowRepository(
         for {
           _ <- fenceExecution(session, workflow.id, execution)
           existing <- RepositoryIO.lift(
-            MongoSessionOperations.findOne(inbox, session, MongoFilter.eq(MongoFields.Id, receiptId))
+            MongoSessionOperations.findById(inbox, session, receiptId)
           )
           _ <-
             if (existing.nonEmpty) RepositoryIO.fromEither(Right(()))
@@ -810,7 +801,7 @@ final class MongoInterviewWorkflowRepository(
                   ),
                   MongoUpdate.combine(
                     MongoUpdate.set(MongoFields.Status, updated.status.toString),
-                    MongoUpdate.set(MongoFields.UpdatedAt, Date.from(updated.updatedAt))
+                    MongoUpdate.set(MongoFields.UpdatedAt, updated.updatedAt.toDate)
                   )
                 )
                 eventId = UUID.nameUUIDFromBytes(
@@ -831,7 +822,7 @@ final class MongoInterviewWorkflowRepository(
                   Mongo4catsCollections.documents(database, MongoCollections.ApplicationEvents),
                   MongoHiringCodecs.event(statusEvent)
                 )
-                _ <- insertOperationalEvents(
+                _ <- MongoOperationalEventInsertion.insert(
                   Mongo4catsCollections.documents(database, MongoCollections.EventOutbox),
                   session,
                   List(
@@ -847,7 +838,7 @@ final class MongoInterviewWorkflowRepository(
                     .append(WorkflowIdField, workflow.id.value.toString)
                     .append("candidateId", workflow.candidateId.value.toString)
                     .append("recruiterId", workflow.recruiterId.value.toString)
-                    .append(MongoFields.OccurredAt, Date.from(now))
+                    .append(MongoFields.OccurredAt, now.toDate)
                 )
                 next <- RepositoryIO.fromEither(
                   InterviewWorkflow
@@ -888,7 +879,7 @@ final class MongoInterviewWorkflowRepository(
             }
         } yield ()
       }
-    }(_ => Left(RepositoryError.Unavailable))
+    }
 
   private def guardWrite(
       collection: IO[MongoSessionOperations.Documents],
@@ -896,11 +887,9 @@ final class MongoInterviewWorkflowRepository(
       filter: MongoFilter,
       update: MongoUpdate
   ): RepositoryIO[Unit] =
-    RepositoryIO.lift(MongoSessionOperations.updateOne(collection, session, filter, update)).subflatMap {
-      case Some(result) if result.getMatchedCount == 1L => Right(())
-      case Some(_)                                      => Left(RepositoryError.Conflict)
-      case None                                         => Left(RepositoryError.MissingWriteResult)
-    }
+    RepositoryIO
+      .lift(MongoSessionOperations.updateOne(collection, session, filter, update))
+      .subflatMap(MongoRepositorySupport.matchedOne(_))
 
   override def repair(
       workflow: InterviewWorkflow,
@@ -911,8 +900,7 @@ final class MongoInterviewWorkflowRepository(
   ): RepositoryIO[InterviewWorkflow] =
     RepositoryIO
       .lift(
-        MongoSessionOperations
-          .findOne(inbox, None, MongoFilter.eq(MongoFields.Id, s"${workflow.id.value}:repair:$requestKey"))
+        MongoSessionOperations.findById(inbox, None, s"${workflow.id.value}:repair:$requestKey")
       )
       .flatMap {
         case Some(receipt) =>
@@ -1001,11 +989,7 @@ final class MongoInterviewWorkflowRepository(
         _ <- fenceSubjects(session, List(workflow.candidateId, workflow.recruiterId, workflow.initiatedBy))
         receipt <- RepositoryIO
           .lift(
-            MongoSessionOperations.findOne(
-              workflows,
-              session,
-              MongoFilter.eq(MongoFields.Id, receiptId)
-            )
+            MongoSessionOperations.findById(workflows, session, receiptId)
           )
           .flatMap {
             case Some(document) =>
@@ -1048,7 +1032,7 @@ final class MongoInterviewWorkflowRepository(
                   MongoFilter.eq(MongoFields.Id, workflow.applicationId.value.toString),
                   MongoFilter.eq(MongoFields.Status, ApplicationStatus.Accepted.toString)
                 ),
-                MongoUpdate.set(MongoFields.UpdatedAt, Date.from(acceptanceUpdatedAt))
+                MongoUpdate.set(MongoFields.UpdatedAt, acceptanceUpdatedAt.toDate)
               )
               _ <- guardWrite(
                 Mongo4catsCollections.documents(database, MongoCollections.Jobs),
@@ -1114,7 +1098,7 @@ final class MongoInterviewWorkflowRepository(
                 )
             )
             .flatMap(_.traverse(document => RepositoryIO.fromEither(decodeWorkflow(document))))
-        }(_ => Left(RepositoryError.Unavailable))
+        }
     }
   }
 
@@ -1133,7 +1117,7 @@ final class MongoInterviewWorkflowRepository(
             )
         )
         .flatMap(_.traverse(document => RepositoryIO.fromEither(decodeWorkflow(document))))
-    }(_ => Left(RepositoryError.Unavailable))
+    }
 
   override def advance(
       workflow: InterviewWorkflow,
@@ -1171,7 +1155,7 @@ final class MongoInterviewWorkflowRepository(
           for {
             _ <- fenceSubjects(session, List(workflow.candidateId, workflow.recruiterId, workflow.initiatedBy))
             duplicate <- RepositoryIO.lift(
-              MongoSessionOperations.findOne(inbox, session, MongoFilter.eq(MongoFields.Id, inboxId))
+              MongoSessionOperations.findById(inbox, session, inboxId)
             )
             result <- duplicate match {
               case Some(_) =>
@@ -1203,7 +1187,7 @@ final class MongoInterviewWorkflowRepository(
                       )
                   )
                   .flatMap {
-                    case Some(update) if update.getMatchedCount == 1L =>
+                    case update if update.getMatchedCount == 1L =>
                       for {
                         _ <- insert(
                           session,
@@ -1239,13 +1223,12 @@ final class MongoInterviewWorkflowRepository(
                             retainCompleted(session, workflow, occurredAt)
                           else RepositoryIO.fromEither(Right(()))
                       } yield InterviewWorkflowAdvanceResult.Applied
-                    case Some(_) => RepositoryIO.fromEither(Right(InterviewWorkflowAdvanceResult.StaleRevision))
-                    case None    => RepositoryIO.fromEither(Left(RepositoryError.MissingWriteResult))
+                    case _ => RepositoryIO.fromEither(Right(InterviewWorkflowAdvanceResult.StaleRevision))
                   }
             }
           } yield result
         }
-      }(_ => Left(RepositoryError.Unavailable))
+      }
     }
   }
 
@@ -1307,7 +1290,7 @@ final class MongoInterviewWorkflowRepository(
           }
         case other => IO.pure(other)
       })
-    }(_ => Left(RepositoryError.Unavailable))
+    }
 
   /** A repeated request (same actor and key) or cause returns the stored workflow; a reused key with another operation,
     * input or workflow is a typed conflict.
@@ -1325,8 +1308,7 @@ final class MongoInterviewWorkflowRepository(
       case InterviewLifecycleOrigin.Actor(access, requestKey, fingerprint) =>
         RepositoryIO
           .lift(
-            MongoSessionOperations
-              .findOne(workflows, session, MongoFilter.eq(MongoFields.Id, requestReceiptId(access.actorId, requestKey)))
+            MongoSessionOperations.findById(workflows, session, requestReceiptId(access.actorId, requestKey))
           )
           .flatMap {
             case None           => RepositoryIO.fromEither(Right(None))
@@ -1339,8 +1321,7 @@ final class MongoInterviewWorkflowRepository(
       case InterviewLifecycleOrigin.Internal(cause) =>
         RepositoryIO
           .lift(
-            MongoSessionOperations
-              .findOne(inbox, session, MongoFilter.eq(MongoFields.Id, s"${workflowId.value}:${cause.receiptIdentity}"))
+            MongoSessionOperations.findById(inbox, session, s"${workflowId.value}:${cause.receiptIdentity}")
           )
           .flatMap(found => if (found.isEmpty) RepositoryIO.fromEither(Right(None)) else stored(workflowId))
     }
@@ -1665,7 +1646,7 @@ final class MongoInterviewWorkflowRepository(
         ),
         MongoUpdate.combine(
           MongoUpdate.set(MongoFields.Status, write.application.status.toString),
-          MongoUpdate.set(MongoFields.UpdatedAt, Date.from(write.application.updatedAt))
+          MongoUpdate.set(MongoFields.UpdatedAt, write.application.updatedAt.toDate)
         )
       ) *>
       insert(
@@ -1673,7 +1654,7 @@ final class MongoInterviewWorkflowRepository(
         Mongo4catsCollections.documents(database, MongoCollections.ApplicationEvents),
         MongoHiringCodecs.event(write.history)
       ) *>
-      insertOperationalEvents(
+      MongoOperationalEventInsertion.insert(
         Mongo4catsCollections.documents(database, MongoCollections.EventOutbox),
         session,
         List(OperationalEvents.statusChanged(write.history.id.value, write.application, write.history)),
@@ -1723,28 +1704,27 @@ final class MongoInterviewWorkflowRepository(
           CommandStateField,
           List(InterviewWorkflowCommandState.Pending.toString, InterviewWorkflowCommandState.ResultPending.toString)
         ),
-        MongoFilter.lte(MongoFields.AvailableAt, Date.from(now))
+        MongoFilter.lte(MongoFields.AvailableAt, now.toDate)
       )
       val expired = MongoFilter.and(
         MongoFilter.eq(CommandStateField, InterviewWorkflowCommandState.Claimed.toString),
-        MongoFilter.lte(LeaseUntilField, Date.from(now))
+        MongoFilter.lte(LeaseUntilField, now.toDate)
       )
       val update = MongoUpdate.combine(
         MongoUpdate.set(CommandStateField, InterviewWorkflowCommandState.Claimed.toString),
         MongoUpdate.set(OwnerField, workerId),
         MongoUpdate.set(FencingTokenField, token.toString),
-        MongoUpdate.set(LeaseUntilField, Date.from(leaseUntil))
+        MongoUpdate.set(LeaseUntilField, leaseUntil.toDate)
       )
-      val options = new FindOneAndUpdateOptions()
-        .returnDocument(ReturnDocument.AFTER)
-        .sort(Sorts.ascending(MongoFields.AvailableAt, MongoFields.Id))
       MongoRepositorySupport.repositoryGuard(diagnostics, "interviewWorkflow.claim") {
-        RepositoryIO
-          .lift(
-            commands.flatMap(_.findOneAndUpdate(MongoFilter.or(available, expired).bson, update.bson, options))
-          )
-          .flatMap(_.traverse(document => RepositoryIO.fromEither(readClaim(document))))
-      }(_ => Left(RepositoryError.Unavailable))
+        MongoLeaseQueue.claimNext(
+          commands,
+          None,
+          MongoFilter.or(available, expired),
+          update,
+          Sorts.ascending(MongoFields.AvailableAt, MongoFields.Id)
+        )(document => RepositoryIO.fromEither(readClaim(document)))
+      }
     }
 
   override def renewPublication(
@@ -1755,20 +1735,8 @@ final class MongoInterviewWorkflowRepository(
     if (!leaseUntil.isAfter(now)) RepositoryIO.fromEither(Left(RepositoryError.InvalidStoredData))
     else
       MongoRepositorySupport.repositoryGuard(diagnostics, "interviewWorkflow.renewPublication") {
-        RepositoryIO
-          .lift(
-            MongoSessionOperations.updateOne(
-              commands,
-              None,
-              claimFilter(claim, now),
-              MongoUpdate.set(LeaseUntilField, Date.from(leaseUntil))
-            )
-          )
-          .subflatMap {
-            case Some(result) => Right(result.getMatchedCount == 1L)
-            case None         => Left(RepositoryError.MissingWriteResult)
-          }
-      }(_ => Left(RepositoryError.Unavailable))
+        MongoLeaseQueue.renewHeld(commands, None, claimFilter(claim, now), leaseUntil, LeaseUntilField)
+      }
 
   override def markPublished(claim: ClaimedInterviewWorkflowCommand, publishedAt: Instant): RepositoryIO[Unit] =
     transitionClaim(
@@ -1779,7 +1747,7 @@ final class MongoInterviewWorkflowRepository(
           (if (claim.record.result.nonEmpty) InterviewWorkflowCommandState.ResultPublished
            else InterviewWorkflowCommandState.Published).toString
         ),
-        MongoUpdate.set("publishedAt", Date.from(publishedAt)),
+        MongoUpdate.set("publishedAt", publishedAt.toDate),
         MongoUpdate.unset(OwnerField),
         MongoUpdate.unset(FencingTokenField),
         MongoUpdate.unset(LeaseUntilField)
@@ -1857,17 +1825,17 @@ final class MongoInterviewWorkflowRepository(
   private def availableFrom(command: InterviewCommand, at: Instant): MongoUpdate = command match {
     case InterviewLifecycleCommand.ExpireProposal(_) =>
       MongoUpdate.combine(
-        MongoUpdate.set(MongoFields.AvailableAt, Date.from(at)),
-        MongoUpdate.set(s"$CommandField.${MongoFields.AvailableAt}", Date.from(at))
+        MongoUpdate.set(MongoFields.AvailableAt, at.toDate),
+        MongoUpdate.set(s"$CommandField.${MongoFields.AvailableAt}", at.toDate)
       )
-    case _ => MongoUpdate.set(MongoFields.AvailableAt, Date.from(at))
+    case _ => MongoUpdate.set(MongoFields.AvailableAt, at.toDate)
   }
 
   private def terminalCommand(state: InterviewWorkflowCommandState, reason: String, now: Instant): MongoUpdate =
     MongoUpdate.combine(
       MongoUpdate.set(CommandStateField, state.toString),
       MongoUpdate.set(FailureCodeField, reason),
-      MongoUpdate.set("finishedAt", Date.from(now)),
+      MongoUpdate.set("finishedAt", now.toDate),
       MongoUpdate.unset(OwnerField),
       MongoUpdate.unset(FencingTokenField),
       MongoUpdate.unset(LeaseUntilField)
@@ -1968,12 +1936,8 @@ final class MongoInterviewWorkflowRepository(
           MongoSessionOperations
             .updateOne(commands, None, claimFilter(claim, now), update)
         )
-        .flatMap {
-          case Some(result) if result.getMatchedCount == 1L => RepositoryIO.fromEither(Right(()))
-          case Some(_)                                      => RepositoryIO.fromEither(Left(RepositoryError.Conflict))
-          case None => RepositoryIO.fromEither(Left(RepositoryError.MissingWriteResult))
-        }
-    }(_ => Left(RepositoryError.Unavailable))
+        .subflatMap(MongoRepositorySupport.matchedOne(_))
+    }
 
   private def claimFilter(claim: ClaimedInterviewWorkflowCommand, now: Instant): MongoFilter =
     MongoFilter.and(
@@ -1982,7 +1946,7 @@ final class MongoInterviewWorkflowRepository(
       MongoFilter.eq(OwnerField, claim.owner),
       MongoFilter.eq(FencingTokenField, claim.fencingToken.toString),
       MongoFilter.eq(RevisionField, java.lang.Long.valueOf(claim.record.revision)),
-      MongoFilter.gt(LeaseUntilField, Date.from(now))
+      MongoFilter.gt(LeaseUntilField, now.toDate)
     )
 
   override def reserveIfAvailable(
@@ -2043,8 +2007,8 @@ final class MongoInterviewWorkflowRepository(
               val overlap = MongoFilter.and(
                 MongoFilter.in("participants", participants.map(_.value.toString)),
                 MongoFilter.ne(WorkflowIdField, reservation.workflowId.value.toString),
-                MongoFilter.lt(StartField, Date.from(reservation.interval.endsAt)),
-                MongoFilter.gt(EndField, Date.from(reservation.interval.startsAt)),
+                MongoFilter.lt(StartField, reservation.interval.endsAt.toDate),
+                MongoFilter.gt(EndField, reservation.interval.startsAt.toDate),
                 MongoFilter.exists(ReleasedAtField, false)
               )
               RepositoryIO.lift(MongoSessionOperations.findOne(reservations, session, overlap)).flatMap {
@@ -2075,7 +2039,7 @@ final class MongoInterviewWorkflowRepository(
                 MongoSessionOperations.findOne(reservations, None, reservationIdentity(workflowId, key))
               )
               .flatMap(_.traverse(document => RepositoryIO.fromEither(decodeReservation(document))))
-          }(_ => Left(RepositoryError.Unavailable))
+          }
           .leftMap(_ => InterviewProviderError.Unavailable)
     }
 
@@ -2096,8 +2060,7 @@ final class MongoInterviewWorkflowRepository(
                 reservation <- RepositoryIO.fromEither(decodeReservation(document))
                 _ <- fenceExecution(session, reservation.workflowId, execution)
                 receipt <- RepositoryIO.lift(
-                  MongoSessionOperations
-                    .findOne(inbox, session, MongoFilter.eq(MongoFields.Id, s"${reservation.workflowId.value}:hiring"))
+                  MongoSessionOperations.findById(inbox, session, s"${reservation.workflowId.value}:hiring")
                 )
                 _ <- RepositoryIO.fromEither(Either.cond(receipt.isEmpty, (), RepositoryError.Conflict))
                 _ <- guardWrite(
@@ -2113,7 +2076,7 @@ final class MongoInterviewWorkflowRepository(
               } yield ()
           }
       }
-    }(_ => Left(RepositoryError.Unavailable))
+    }
     result.leftMap(_ => InterviewProviderError.Unavailable)
   }
 
@@ -2167,7 +2130,7 @@ final class MongoInterviewWorkflowRepository(
                   }
               }
           }
-        }(_ => Left(RepositoryError.Unavailable))
+        }
         mapProvider(result)
     }
 
@@ -2186,7 +2149,7 @@ final class MongoInterviewWorkflowRepository(
           reservationIdentity(reservation.workflowId, reservation.idempotencyKey),
           MongoFilter.exists(ReleasedAtField, false)
         ),
-        MongoUpdate.set(ReleasedAtField, Date.from(at))
+        MongoUpdate.set(ReleasedAtField, at.toDate)
       )
 
   /** A reservation is addressed by workflow and reserve key, never by workflow alone. */
@@ -2209,11 +2172,7 @@ final class MongoInterviewWorkflowRepository(
             new UpdateOptions().upsert(true)
           )
       )
-      .flatMap {
-        case Some(result) if result.wasAcknowledged() => RepositoryIO.fromEither(Right(()))
-        case Some(_)                                  => RepositoryIO.fromEither(Left(RepositoryError.Conflict))
-        case None => RepositoryIO.fromEither(Left(RepositoryError.MissingWriteResult))
-      }
+      .void
   }
 
   private def fenceSubjects(session: Option[ClientSession[IO]], subjects: List[UserId]): RepositoryIO[Unit] =
@@ -2239,10 +2198,7 @@ final class MongoInterviewWorkflowRepository(
                 new UpdateOptions().upsert(true)
               )
             )
-            .subflatMap {
-              case Some(result) if result.wasAcknowledged() => Right(())
-              case _                                        => Left(RepositoryError.MissingWriteResult)
-            }
+            .void
       )
 
   private def fenceExecution(
@@ -2264,7 +2220,7 @@ final class MongoInterviewWorkflowRepository(
               MongoFilter.eq(CommandStateField, InterviewWorkflowCommandState.Executing.toString),
               MongoFilter.eq(OwnerField, claim.owner),
               MongoFilter.eq(FencingTokenField, claim.fencingToken.toString),
-              MongoFilter.gt(LeaseUntilField, Date.from(now))
+              MongoFilter.gt(LeaseUntilField, now.toDate)
             ),
             MongoUpdate.inc("effectFence", 1L)
           )
@@ -2286,7 +2242,7 @@ final class MongoInterviewWorkflowRepository(
             collection,
             session,
             related,
-            MongoUpdate.set(MongoFields.RetentionExpiresAt, Date.from(expires))
+            MongoUpdate.set(MongoFields.RetentionExpiresAt, expires.toDate)
           )
         )
         .void
@@ -2322,8 +2278,7 @@ final class MongoInterviewWorkflowRepository(
                   MongoUpdate.inc("providerFence", 1L)
                 )
                 receiptExists <- RepositoryIO.lift(
-                  MongoSessionOperations
-                    .findOne(inbox, session, MongoFilter.eq(MongoFields.Id, s"${workflow.id.value}:hiring"))
+                  MongoSessionOperations.findById(inbox, session, s"${workflow.id.value}:hiring")
                 )
                 // Only the scheduling notification requires the hiring commit; later kinds follow other durable events.
                 _ <- RepositoryIO.fromEither(
@@ -2337,11 +2292,7 @@ final class MongoInterviewWorkflowRepository(
             ) *>
           RepositoryIO
             .lift(
-              MongoSessionOperations.findOne(
-                notificationReceipts,
-                session,
-                MongoFilter.eq(MongoFields.Id, receipt.idempotencyKey)
-              )
+              MongoSessionOperations.findById(notificationReceipts, session, receipt.idempotencyKey)
             )
             .flatMap {
               case Some(document) =>
@@ -2351,14 +2302,10 @@ final class MongoInterviewWorkflowRepository(
               case None =>
                 RepositoryIO
                   .lift(MongoSessionOperations.insertOne(notificationReceipts, session, notificationDocument(receipt)))
-                  .flatMap {
-                    case Some(inserted) if inserted.wasAcknowledged() => RepositoryIO.fromEither(Right(receipt))
-                    case Some(_) => RepositoryIO.fromEither(Left(RepositoryError.Conflict))
-                    case None    => RepositoryIO.fromEither(Left(RepositoryError.MissingWriteResult))
-                  }
+                  .as(receipt)
             }
       }
-    }(_ => Left(RepositoryError.Unavailable))
+    }
     mapProvider(result)
   }
 
@@ -2367,11 +2314,10 @@ final class MongoInterviewWorkflowRepository(
       .repositoryGuard(diagnostics, "interviewNotification.find") {
         RepositoryIO
           .lift(
-            MongoSessionOperations
-              .findOne(notificationReceipts, None, MongoFilter.eq(MongoFields.Id, idempotencyKey))
+            MongoSessionOperations.findById(notificationReceipts, None, idempotencyKey)
           )
           .flatMap(_.traverse(document => RepositoryIO.fromEither(decodeNotification(document))))
-      }(_ => Left(RepositoryError.Unavailable))
+      }
       .leftMap(_ => InterviewProviderError.Unavailable)
 
   private def mapProvider[A](result: RepositoryIO[A]): InterviewProviderIO[A] =
@@ -2385,11 +2331,7 @@ final class MongoInterviewWorkflowRepository(
       collection: IO[MongoSessionOperations.Documents],
       document: Document
   ): RepositoryIO[Unit] =
-    RepositoryIO.lift(MongoSessionOperations.insertOne(collection, session, document)).flatMap {
-      case Some(result) if result.wasAcknowledged() => RepositoryIO.fromEither(Right(()))
-      case Some(_)                                  => RepositoryIO.fromEither(Left(RepositoryError.Conflict))
-      case None                                     => RepositoryIO.fromEither(Left(RepositoryError.MissingWriteResult))
-    }
+    RepositoryIO.lift(MongoSessionOperations.insertOne(collection, session, document)).void
 
   private def loadWorkflow(
       id: InterviewWorkflowId,
@@ -2420,9 +2362,9 @@ final class MongoInterviewWorkflowRepository(
         MongoFields.SubjectIds,
         List(value.candidateId.value.toString, value.recruiterId.value.toString).distinct.asJava
       )
-      .append(StartField, Date.from(value.interval.startsAt))
-      .append(EndField, Date.from(value.interval.endsAt))
-      .append("preCommitDeadline", Date.from(value.preCommitDeadline))
+      .append(StartField, value.interval.startsAt.toDate)
+      .append(EndField, value.interval.endsAt.toDate)
+      .append("preCommitDeadline", value.preCommitDeadline.toDate)
       .append(IdempotencyKeyField, value.idempotencyKey.toString)
       .append(RevisionField, value.revision)
       .append("phase", value.phase.toString)
@@ -2442,7 +2384,7 @@ final class MongoInterviewWorkflowRepository(
       .append(DocumentTypeField, "requestReceipt")
       .append(RequestWorkflowField, workflowId.value.toString)
       .append(RequestFingerprintField, fingerprint.value)
-      .append(MongoFields.CreatedAt, Date.from(createdAt))
+      .append(MongoFields.CreatedAt, createdAt.toDate)
 
   private def requestReceiptId(actorId: UserId, requestKey: UUID): String =
     s"request:${actorId.value}:$requestKey"
@@ -2457,7 +2399,7 @@ final class MongoInterviewWorkflowRepository(
       receiptId: String
   ): RepositoryIO[Option[(InterviewWorkflowId, String)]] =
     RepositoryIO
-      .lift(MongoSessionOperations.findOne(workflows, None, MongoFilter.eq(MongoFields.Id, receiptId)))
+      .lift(MongoSessionOperations.findById(workflows, None, receiptId))
       .flatMap {
         case None           => RepositoryIO.fromEither(Right(None))
         case Some(document) =>
@@ -2476,7 +2418,7 @@ final class MongoInterviewWorkflowRepository(
       .append(WorkflowIdField, workflowId.value.toString)
       .append(MessageIdField, messageId)
       .append(RevisionField, revision)
-      .append(MongoFields.OccurredAt, Date.from(at))
+      .append(MongoFields.OccurredAt, at.toDate)
 
   private def commandDocument(record: InterviewWorkflowCommandRecord): Document =
     commandEnvelope(
@@ -2514,8 +2456,8 @@ final class MongoInterviewWorkflowRepository(
       .append(CommandStateField, state.toString)
       .append(MongoFields.Attempts, publicationAttempts)
       .append("executionAttempts", executionAttempts)
-      .append(MongoFields.AvailableAt, Date.from(availableAt))
-      .append(MongoFields.OccurredAt, Date.from(occurredAt))
+      .append(MongoFields.AvailableAt, availableAt.toDate)
+      .append(MongoFields.OccurredAt, occurredAt.toDate)
 
   private def commandId(workflowId: InterviewWorkflowId, stepId: String): String =
     s"${workflowId.value}:$stepId"
@@ -2570,9 +2512,9 @@ final class MongoInterviewWorkflowRepository(
       .append("candidateId", value.candidateId.value.toString)
       .append("recruiterId", value.recruiterId.value.toString)
       .append("participants", List(value.candidateId.value.toString, value.recruiterId.value.toString).distinct.asJava)
-      .append(StartField, Date.from(value.interval.startsAt))
-      .append(EndField, Date.from(value.interval.endsAt))
-      .append("reservedAt", Date.from(value.reservedAt))
+      .append(StartField, value.interval.startsAt.toDate)
+      .append(EndField, value.interval.endsAt.toDate)
+      .append("reservedAt", value.reservedAt.toDate)
 
   private def decodeReservation(document: Document): Either[RepositoryError, InterviewCalendarReservation] =
     for {
@@ -2605,7 +2547,7 @@ final class MongoInterviewWorkflowRepository(
       .append(MongoFields.SubjectIds, List(value.recipientId.value.toString).asJava)
       .append("participant", value.participant.toString)
       .append("kind", value.kind.toString)
-      .append("deliveredAt", Date.from(value.deliveredAt))
+      .append("deliveredAt", value.deliveredAt.toDate)
 
   private def decodeNotification(document: Document): Either[RepositoryError, InterviewNotificationReceipt] =
     for {
@@ -2682,38 +2624,9 @@ final class MongoInterviewWorkflowRepository(
       lifecycle.skippedGenerations
     )
 
-  private def optionalInstant(document: Document, field: String): Either[RepositoryError, Option[Instant]] =
-    Option(document.get(field)) match {
-      case None              => Right(None)
-      case Some(value: Date) => Right(Some(value.toInstant))
-      case _                 => Left(RepositoryError.InvalidStoredData)
-    }
-
-  private def instant(document: Document, field: String): Either[RepositoryError, Instant] =
-    Option(document.get(field))
-      .collect { case value: Date => value.toInstant }
-      .toRight(RepositoryError.InvalidStoredData)
-
-  private def string(document: Document, field: String): Either[RepositoryError, String] =
-    Option(document.get(field)).collect { case value: String => value }.toRight(RepositoryError.InvalidStoredData)
-
-  private def stringList(document: Document, field: String): Either[RepositoryError, List[String]] =
-    Option(document.get(field))
-      .collect { case values: java.util.List[?] => values.asScala.toList }
-      .toRight(RepositoryError.InvalidStoredData)
-      .flatMap(_.traverse {
-        case value: String => Right(value)
-        case _             => Left(RepositoryError.InvalidStoredData)
-      })
-
   private def long(document: Document, field: String): Either[RepositoryError, Long] =
     Option(document.get(field))
       .collect { case value: java.lang.Number => value.longValue }
-      .toRight(RepositoryError.InvalidStoredData)
-
-  private def integer(document: Document, field: String): Either[RepositoryError, Int] =
-    Option(document.get(field))
-      .collect { case value: java.lang.Integer => value.intValue }
       .toRight(RepositoryError.InvalidStoredData)
 
   private def uuid(value: String): Either[RepositoryError, UUID] =

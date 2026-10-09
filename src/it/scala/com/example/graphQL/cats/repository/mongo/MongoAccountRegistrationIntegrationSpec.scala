@@ -2,7 +2,7 @@ package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.IO
 import cats.syntax.all.*
-import com.example.graphQL.cats.config.AppConfigFixtures
+import com.example.graphQL.cats.config.{AppConfig, AppConfigFixtures}
 import com.example.graphQL.cats.domain.model.{CandidateProfile, RecruiterProfile, UserProfile, UserRole}
 import com.example.graphQL.cats.runtime.MongoHiringRuntime
 import com.example.graphQL.cats.service.{AccountError, Diagnostics, UseCaseError}
@@ -23,7 +23,7 @@ final class MongoAccountRegistrationIntegrationSpec extends MongoIntegrationSuit
   private def configuration(
       instance: MongoAccessEvaluationSupport.Fixture,
       database: String
-  ): IO[MongoHiringRuntime.RuntimeConfig] = {
+  ): IO[AppConfig] = {
     val uri = instance.uri
     val raw = s"""include classpath("application.conf")
                  |http.host="127.0.0.1"
@@ -39,17 +39,6 @@ final class MongoAccountRegistrationIntegrationSpec extends MongoIntegrationSuit
       AppConfigFixtures
         .fromConfig(raw, Map.empty)
         .leftMap(_ => new AssertionError("Account-registration config rejected"))
-    ).map(config =>
-      MongoHiringRuntime.RuntimeConfig(
-        config.mongoUri,
-        config.mongoDatabase,
-        Diagnostics.noop,
-        config.vectorSearch,
-        config.jwtAuth,
-        config.passwordHash,
-        config.kafka,
-        resetOnStart = false
-      )
     )
   }
 
@@ -63,7 +52,7 @@ final class MongoAccountRegistrationIntegrationSpec extends MongoIntegrationSuit
         seed = com.example.graphQL.cats.config
           .AdminSeedConfig(true, Some("Synthetic admin"), Some("synthetic-admin-password"))
         config = base.copy(adminSeed = seed)
-        _ <- MongoHiringRuntime.resource(config).use { runtime =>
+        _ <- MongoHiringRuntime.resource(config, Diagnostics.noop).use { runtime =>
           for {
             candidate <- runtime.services.accountService
               .signUp(
@@ -91,7 +80,7 @@ final class MongoAccountRegistrationIntegrationSpec extends MongoIntegrationSuit
           } yield ()
         }
         _ <- MongoHiringRuntime
-          .resource(config.copy(adminSeed = seed.copy(password = Some("changed-password-unused"))))
+          .resource(config.copy(adminSeed = seed.copy(password = Some("changed-password-unused"))), Diagnostics.noop)
           .use { runtime =>
             for {
               old <- runtime.services.accountService
@@ -113,7 +102,7 @@ final class MongoAccountRegistrationIntegrationSpec extends MongoIntegrationSuit
             } yield ()
           }
         conflict <- MongoHiringRuntime
-          .resource(config.copy(adminSeed = seed.copy(name = Some("Another admin"))))
+          .resource(config.copy(adminSeed = seed.copy(name = Some("Another admin"))), Diagnostics.noop)
           .use(_ => IO.unit)
           .attempt
         _ <- IO(assert(conflict.isLeft))
@@ -125,8 +114,8 @@ final class MongoAccountRegistrationIntegrationSpec extends MongoIntegrationSuit
     replicaSet.use { instance =>
       for {
         config <- configuration(instance, instance.database.underlying.getName)
-        _ <- MongoDatabaseProbe.clientResource(config.uri).use { client =>
-          client.getDatabase(config.databaseName).flatMap { database =>
+        _ <- MongoDatabaseProbe.clientResource(config.mongoUri).use { client =>
+          client.getDatabase(config.mongoDatabase).flatMap { database =>
             val users =
               MongoUserRepository.transactional(database, client, MongoEmbeddingWorkEnqueuer.disabled, Diagnostics.noop)
             val filter = Filters.eq(MongoFields.Id, "user-account-registry")

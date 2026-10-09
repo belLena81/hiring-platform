@@ -1,6 +1,5 @@
 package com.example.hiring.analytics
 import com.example.hiring.analytics.service.batch.*
-import com.example.hiring.analytics.domain.*
 
 import com.example.hiring.analytics.adapter.spark.*
 
@@ -145,8 +144,8 @@ class HiringAnalyticsWorkloadSpec extends FunSuite {
     }
 
   private def runWorkload(spark: SparkSession, root: Path): IO[Unit] = {
-    val manifest = AnalyticsRunManifest
-      .validated("hal07-fixed-seed-424242", Vector(TestPartitionOffsetRange.unsafe(Topic, 0, 0L, TotalRecords.toLong)))
+    val manifest = TestPartitionOffsetRange
+      .manifestOf("hal07-fixed-seed-424242", Vector(TestPartitionOffsetRange.unsafe(Topic, 0, 0L, TotalRecords.toLong)))
       .toEither
       .fold(errors => fail(errors.toString), identity)
     val paths = TestAnalyticsLakehousePaths.unsafe(root.toUri.toString)

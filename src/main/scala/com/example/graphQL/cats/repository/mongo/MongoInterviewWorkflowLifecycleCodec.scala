@@ -5,6 +5,7 @@ import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.domain.workflow.*
 import com.example.graphQL.cats.service.RepositoryError
 import org.bson.Document
+import com.example.graphQL.cats.repository.mongo.MongoDocumentFields.Repository.{instant, optionalInstant}
 import java.time.Instant
 import java.util.{Date, UUID}
 
@@ -30,11 +31,11 @@ private[mongo] object MongoInterviewWorkflowLifecycleCodec {
   def insertFields(workflow: InterviewWorkflow): List[(String, AnyRef)] =
     List(GenerationField -> Int.box(workflow.generation)) ++
       workflow.pendingInterval.toList.flatMap(interval =>
-        List(PendingStartField -> Date.from(interval.startsAt), PendingEndField -> Date.from(interval.endsAt))
+        List(PendingStartField -> interval.startsAt.toDate, PendingEndField -> interval.endsAt.toDate)
       ) ++
-      workflow.cancelledAt.map(value => CancelledAtField -> Date.from(value)) ++
+      workflow.cancelledAt.map(value => CancelledAtField -> value.toDate) ++
       workflow.proposal.map(value => ProposalField -> proposalDocument(value)) ++
-      workflow.rescheduleRequestedAt.map(value => RescheduleRequestedAtField -> Date.from(value)) ++
+      workflow.rescheduleRequestedAt.map(value => RescheduleRequestedAtField -> value.toDate) ++
       workflow.repairOrigin.map(value => RepairOriginField -> value.toString) ++
       Option.when(workflow.skippedGenerations != 0)(SkippedGenerationsField -> Int.box(workflow.skippedGenerations))
 
@@ -44,11 +45,11 @@ private[mongo] object MongoInterviewWorkflowLifecycleCodec {
     def optional(field: String, value: Option[AnyRef]): MongoUpdate =
       value.fold(MongoUpdate.unset(field))(MongoUpdate.set(field, _))
     MongoUpdate.combine(
-      MongoUpdate.set(StartField, Date.from(workflow.interval.startsAt)),
-      MongoUpdate.set(EndField, Date.from(workflow.interval.endsAt)),
+      MongoUpdate.set(StartField, workflow.interval.startsAt.toDate),
+      MongoUpdate.set(EndField, workflow.interval.endsAt.toDate),
       MongoUpdate.set(GenerationField, Int.box(workflow.generation)),
-      optional(PendingStartField, workflow.pendingInterval.map(value => Date.from(value.startsAt))),
-      optional(PendingEndField, workflow.pendingInterval.map(value => Date.from(value.endsAt))),
+      optional(PendingStartField, workflow.pendingInterval.map(value => value.startsAt.toDate)),
+      optional(PendingEndField, workflow.pendingInterval.map(value => value.endsAt.toDate)),
       optional(CancelledAtField, workflow.cancelledAt.map(Date.from)),
       optional(ProposalField, workflow.proposal.map(proposalDocument)),
       optional(RescheduleRequestedAtField, workflow.rescheduleRequestedAt.map(Date.from)),
@@ -147,10 +148,10 @@ private[mongo] object MongoInterviewWorkflowLifecycleCodec {
   }
 
   private def proposalDocument(value: InterviewRescheduleProposal): Document =
-    new Document(StartField, Date.from(value.interval.startsAt))
-      .append(EndField, Date.from(value.interval.endsAt))
+    new Document(StartField, value.interval.startsAt.toDate)
+      .append(EndField, value.interval.endsAt.toDate)
       .append(ProposedByField, value.proposedBy.value.toString)
-      .append(ExpiresAtField, Date.from(value.expiresAt))
+      .append(ExpiresAtField, value.expiresAt.toDate)
 
   private def decodeProposal(document: Document): Either[RepositoryError, InterviewRescheduleProposal] =
     for {
@@ -164,16 +165,6 @@ private[mongo] object MongoInterviewWorkflowLifecycleCodec {
         .toRight(RepositoryError.InvalidStoredData)
       expiresAt <- instant(document, ExpiresAtField)
     } yield InterviewRescheduleProposal(InterviewInterval(starts, ends), proposer, expiresAt)
-
-  private def instant(document: Document, field: String): Either[RepositoryError, Instant] =
-    optionalInstant(document, field).flatMap(_.toRight(RepositoryError.InvalidStoredData))
-
-  private def optionalInstant(document: Document, field: String): Either[RepositoryError, Option[Instant]] =
-    Option(document.get(field)) match {
-      case None              => Right(None)
-      case Some(value: Date) => Right(Some(value.toInstant))
-      case _                 => Left(RepositoryError.InvalidStoredData)
-    }
 
   private def optionalInterval(
       document: Document,

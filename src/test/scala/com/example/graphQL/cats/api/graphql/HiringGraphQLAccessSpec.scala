@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.api.graphql
 
+import cats.data.EitherT
 import com.example.graphQL.cats.FixedTestClock
 
 import com.example.graphQL.cats.AccountValueFixtures.email
@@ -154,7 +155,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
           actor: ActorContext,
           period: com.example.graphQL.cats.service.AnalyticsPeriod
       ): UseCaseIO[com.example.graphQL.cats.service.AnalyticsReportSnapshot] =
-        UseCaseIO.left(UseCaseError.Analytics(AnalyticsError.ReportsUnavailable))
+        EitherT.leftT(UseCaseError.Analytics(AnalyticsError.ReportsUnavailable))
     }
     val query =
       """query { analyticsReport(from: "2026-09-16T00:00:00Z", to: "2026-09-17T00:00:00Z") { asOf } }"""
@@ -176,7 +177,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       override def report(
           actor: ActorContext,
           period: com.example.graphQL.cats.service.AnalyticsPeriod
-      ): UseCaseIO[AnalyticsReportSnapshot] = UseCaseIO.pure(snapshot)
+      ): UseCaseIO[AnalyticsReportSnapshot] = EitherT.rightT(snapshot)
     }
     val query =
       """query { analyticsReport(from: "2026-09-16T00:00:00Z", to: "2026-09-17T00:00:00Z") { asOf } }"""
@@ -1500,20 +1501,20 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       UseCaseError.Account(com.example.graphQL.cats.service.AccountError.ProfileUnsupportedForRole)
 
     override def signUp(request: IdempotencyRequest, input: SignUpInput): UseCaseIO[(User, AccountToken)] =
-      UseCaseIO.left(unsupported)
+      EitherT.leftT(unsupported)
 
     override def login(request: IdempotencyRequest, input: LoginInput): UseCaseIO[(User, AccountToken)] =
-      UseCaseIO.left(unsupported)
+      EitherT.leftT(unsupported)
 
     override def me(actor: ActorContext): UseCaseIO[User] =
-      UseCaseIO.left(unsupported)
+      EitherT.leftT(unsupported)
 
     override def updateMyProfile(
         request: IdempotencyRequest,
         actor: ActorContext,
         input: AccountProfileInput
     ): UseCaseIO[User] =
-      UseCaseIO.fromIO(
+      EitherT(
         updateCalls.update(_ + 1) *> IO.pure(
           UserProfile
             .validateFor(actor.role, Some(input.profile))
@@ -1524,20 +1525,20 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       )
 
     override def deleteMyAccount(request: IdempotencyRequest, actor: ActorContext): UseCaseIO[String] =
-      UseCaseIO.left(unsupported)
+      EitherT.leftT(unsupported)
 
     override def accountDeletionStatus(actor: ActorContext, receiptId: String): UseCaseIO[AccountDeletionStatus] =
-      UseCaseIO.pure(AccountDeletionStatus.NotFound)
+      EitherT.rightT(AccountDeletionStatus.NotFound)
 
     override def listUsers(actor: ActorContext, page: UserPageRequest): UseCaseIO[List[User]] =
-      UseCaseIO.left(unsupported)
+      EitherT.leftT(unsupported)
   }
 
   private object SignUpReturningCandidateService extends AccountUseCases {
     private def unsupported[A]: UseCaseIO[A] =
-      UseCaseIO.left(UseCaseError.Account(com.example.graphQL.cats.service.AccountError.ProfileUnsupportedForRole))
+      EitherT.leftT(UseCaseError.Account(com.example.graphQL.cats.service.AccountError.ProfileUnsupportedForRole))
     override def signUp(request: IdempotencyRequest, input: SignUpInput): UseCaseIO[(User, AccountToken)] =
-      UseCaseIO.pure(candidate -> AccountToken("token", now.plusSeconds(60)))
+      EitherT.rightT(candidate -> AccountToken("token", now.plusSeconds(60)))
     override def login(request: IdempotencyRequest, input: LoginInput): UseCaseIO[(User, AccountToken)] = unsupported
     override def me(actor: ActorContext): UseCaseIO[User] = unsupported
     override def updateMyProfile(
@@ -1547,19 +1548,19 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     ): UseCaseIO[User] = unsupported
     override def deleteMyAccount(request: IdempotencyRequest, actor: ActorContext): UseCaseIO[String] = unsupported
     override def accountDeletionStatus(actor: ActorContext, receiptId: String): UseCaseIO[AccountDeletionStatus] =
-      UseCaseIO.pure(AccountDeletionStatus.NotFound)
+      EitherT.rightT(AccountDeletionStatus.NotFound)
     override def listUsers(actor: ActorContext, page: UserPageRequest): UseCaseIO[List[User]] = unsupported
   }
 
   private final class PublicAccountService(calls: Ref[IO, Int]) extends AccountUseCases {
     private def unavailable[A]: UseCaseIO[A] =
-      UseCaseIO.left(UseCaseError.Availability(com.example.graphQL.cats.service.AvailabilityError.ServiceNotReady))
+      EitherT.leftT(UseCaseError.Availability(com.example.graphQL.cats.service.AvailabilityError.ServiceNotReady))
 
     override def signUp(request: IdempotencyRequest, input: SignUpInput): UseCaseIO[(User, AccountToken)] =
-      UseCaseIO.liftIO(calls.update(_ + 1)) *> unavailable
+      EitherT.liftF(calls.update(_ + 1)) *> unavailable
 
     override def login(request: IdempotencyRequest, input: LoginInput): UseCaseIO[(User, AccountToken)] =
-      UseCaseIO.liftIO(calls.update(_ + 1)) *> unavailable
+      EitherT.liftF(calls.update(_ + 1)) *> unavailable
 
     override def me(actor: ActorContext): UseCaseIO[User] = unavailable
     override def updateMyProfile(
@@ -1569,7 +1570,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     ): UseCaseIO[User] = unavailable
     override def deleteMyAccount(request: IdempotencyRequest, actor: ActorContext): UseCaseIO[String] = unavailable
     override def accountDeletionStatus(actor: ActorContext, receiptId: String): UseCaseIO[AccountDeletionStatus] =
-      UseCaseIO.pure(AccountDeletionStatus.NotFound)
+      EitherT.rightT(AccountDeletionStatus.NotFound)
     override def listUsers(actor: ActorContext, page: UserPageRequest): UseCaseIO[List[User]] = unavailable
   }
 
@@ -1578,29 +1579,29 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       UseCaseError.Account(com.example.graphQL.cats.service.AccountError.ProfileUnsupportedForRole)
 
     override def signUp(request: IdempotencyRequest, input: SignUpInput): UseCaseIO[(User, AccountToken)] =
-      UseCaseIO.left(UseCaseError.Account(com.example.graphQL.cats.service.AccountError.NameTaken))
+      EitherT.leftT(UseCaseError.Account(com.example.graphQL.cats.service.AccountError.NameTaken))
 
     override def login(request: IdempotencyRequest, input: LoginInput): UseCaseIO[(User, AccountToken)] =
-      UseCaseIO.left(unsupported)
+      EitherT.leftT(unsupported)
 
     override def me(actor: ActorContext): UseCaseIO[User] =
-      UseCaseIO.left(unsupported)
+      EitherT.leftT(unsupported)
 
     override def updateMyProfile(
         request: IdempotencyRequest,
         actor: ActorContext,
         input: AccountProfileInput
     ): UseCaseIO[User] =
-      UseCaseIO.left(unsupported)
+      EitherT.leftT(unsupported)
 
     override def deleteMyAccount(request: IdempotencyRequest, actor: ActorContext): UseCaseIO[String] =
-      UseCaseIO.left(unsupported)
+      EitherT.leftT(unsupported)
 
     override def accountDeletionStatus(actor: ActorContext, receiptId: String): UseCaseIO[AccountDeletionStatus] =
-      UseCaseIO.pure(AccountDeletionStatus.NotFound)
+      EitherT.rightT(AccountDeletionStatus.NotFound)
 
     override def listUsers(actor: ActorContext, page: UserPageRequest): UseCaseIO[List[User]] =
-      UseCaseIO.left(unsupported)
+      EitherT.leftT(unsupported)
   }
 
   private def job(id: JobId, status: JobStatus): Job =

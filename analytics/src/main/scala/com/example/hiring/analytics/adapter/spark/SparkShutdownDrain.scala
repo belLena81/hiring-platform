@@ -27,7 +27,7 @@ private[analytics] final class SparkShutdownDrain private (
       withBarrierProperty(context, marker) {
         // One real, in-memory task: no SQL, Kafka, Delta, Mongo, or external I/O.
         val count = context.parallelize(Vector(1), 1).count()
-        if (count != 1L) throw new IllegalStateException("Spark shutdown control task returned an invalid count")
+        if (count != 1L) throw new DrainFailure("control-count")
       }
     }
     awaitKnownTasks(tracker, control, Deadline)
@@ -43,8 +43,11 @@ private[analytics] object SparkShutdownDrain {
 
   private[analytics] final case class Attempt(stageId: Int, stageAttemptId: Int, taskId: Long)
 
-  private def failure(category: String): AnalyticsError =
-    AnalyticsError.LakehouseFailure(new IllegalStateException(s"Spark shutdown drain failed: $category"))
+  private final class DrainFailure(category: String)
+      extends RuntimeException(s"Spark shutdown drain failed: $category")
+      with scala.util.control.NoStackTrace
+
+  private def failure(category: String): AnalyticsError = AnalyticsError.LakehouseFailure(new DrainFailure(category))
 
   /** Synchronized mutable state is confined to Spark's listener callback boundary. */
   private[analytics] final class Tracker(maximumAttempts: Int) {

@@ -20,7 +20,6 @@ import mongo4cats.database.MongoDatabase
 import org.bson.Document
 
 import java.time.Instant
-import java.util.Date
 import scala.jdk.CollectionConverters.*
 
 /** Read-only coverage scan. Each page is one aggregation under snapshot read concern that reads the entities and their
@@ -258,7 +257,7 @@ private[mongo] object MongoEmbeddingCoverageRepository {
       "$and",
       List(
         waiting,
-        new Document("$lt", List(s"$$${MongoFields.AvailableAt}", Date.from(request.stuckBefore)).asJava)
+        new Document("$lt", List(s"$$${MongoFields.AvailableAt}", request.stuckBefore.toDate).asJava)
       ).asJava
     )
     List(

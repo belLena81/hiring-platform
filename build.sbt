@@ -48,6 +48,8 @@ lazy val root = (project in file("."))
     IntegrationTest / parallelExecution := false,
     Test / fork := true,
     Test / jacocoReportSettings := JacocoReportSettings()
+      .withFormats(JacocoReportFormats.ScalaHTML, JacocoReportFormats.XML),
+    IntegrationTest / jacocoMergedReportSettings := JacocoReportSettings()
       .withThresholds(JacocoThresholds(line = 60))
       .withFormats(JacocoReportFormats.ScalaHTML, JacocoReportFormats.XML),
     Test / unmanagedSourceDirectories += baseDirectory.value / "test-support" / "src" / "main" / "scala",
@@ -68,7 +70,6 @@ lazy val root = (project in file("."))
       "org.typelevel" %% "cats-core" % catsVersion,
       "org.typelevel" %% "cats-effect" % catsEffectVersion,
       "co.fs2" %% "fs2-core" % fs2Version,
-      "co.fs2" %% "fs2-io" % fs2Version,
       "co.fs2" %% "fs2-reactive-streams" % fs2Version,
       "com.github.fd4s" %% "fs2-kafka" % fs2KafkaVersion,
       "org.apache.kafka" % "kafka-clients" % kafkaClientsVersion,
@@ -98,7 +99,7 @@ lazy val root = (project in file("."))
       "org.typelevel" %% "log4cats-slf4j" % log4catsVersion,
       "com.github.cb372" %% "cats-retry" % catsRetryVersion,
       "com.github.ben-manes.caffeine" % "caffeine" % caffeineVersion,
-      "ch.qos.logback" % "logback-classic" % logbackVersion % Runtime,
+      "ch.qos.logback" % "logback-classic" % logbackVersion,
       "org.scalameta" %% "munit" % munitVersion % Test,
       "org.typelevel" %% "munit-cats-effect" % munitCatsEffectVersion % Test,
       "org.testcontainers" % "testcontainers" % testcontainersVersion % Test

@@ -30,14 +30,10 @@ final case class TelemetryRuntime(
 
     val pathRedactor = new PathRedactor with QueryRedactor {
       def redactPath(path: Uri.Path): Uri.Path =
-        if (TelemetryRuntime.safePaths.contains(path.renderString)) path else Uri.Path.Root
+        if (TelemetryRuntime.isSafe(path)) path else Uri.Path.Root
       def redactQuery(query: org.http4s.Query): org.http4s.Query = org.http4s.Query.empty
     }
-    val routeClassifier = RouteClassifier.of[IO] {
-      case request if TelemetryRuntime.safePaths.contains(request.uri.path.renderString) =>
-        request.uri.path.renderString
-      case _ => "_unmatched"
-    }
+    val routeClassifier = RouteClassifier.of[IO] { case request => TelemetryRuntime.routeLabel(request) }
     val spanDataProvider = ServerSpanDataProvider
       .openTelemetry(pathRedactor)
       .withRouteClassifier(routeClassifier)
@@ -58,10 +54,11 @@ final case class TelemetryRuntime(
 
 object TelemetryRuntime {
   private val TracerName = "hiring-platform"
-  private[telemetry] val safePaths = HiringHttpPaths.public
+
+  private[telemetry] def isSafe(path: Uri.Path): Boolean = HiringHttpPaths.public.contains(path.renderString)
 
   private[telemetry] def routeLabel(request: Request[IO]): String =
-    if (safePaths.contains(request.uri.path.renderString)) request.uri.path.renderString else "_unmatched"
+    if (isSafe(request.uri.path)) request.uri.path.renderString else "_unmatched"
 
   def resource: Resource[IO, TelemetryRuntime] =
     OtelJava.autoConfigured[IO]().flatMap { otel =>

@@ -1,7 +1,5 @@
 package com.example.hiring.analytics.adapter.spark
 
-import com.example.hiring.analytics.config.AnalyticsPositiveInt.*
-
 import com.example.hiring.analytics.adapter.kafka.KafkaRetentionAdapter
 import com.example.hiring.analytics.adapter.local.LocalHmacKeyWriterExclusion
 import com.example.hiring.analytics.adapter.mongo.HmacKeyRetirementKafkaLineage
@@ -269,7 +267,7 @@ private[analytics] final class HmacKeyRetirementCoordinator[F[_]: Async](
         java.time.Duration.ofMillis(operational.retention.deltaLogRetention.toMillis)
       )
       reportsDeadline = preparation.capturedAt.plus(
-        java.time.Duration.ofDays(operational.retention.publishedSnapshotDays.value.toLong)
+        java.time.Duration.ofDays(operational.retention.publishedSnapshotDays.toLong)
       )
       finalDeadline = List(dataDeadline, logsDeadline, reportsDeadline).max
       _ <- Async[F].raiseWhen(now.isBefore(finalDeadline))(

@@ -3,7 +3,7 @@ package com.example.graphQL.cats.infrastructure.kafka
 import cats.effect.{Clock, IO, Resource}
 import cats.effect.std.UUIDGen
 import cats.syntax.all.*
-import com.example.graphQL.cats.config.{KafkaConfig, KafkaSaslSecurityProtocol}
+import com.example.graphQL.cats.config.KafkaConfig
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.port.{
   ClaimedOperationalEvent,
@@ -17,6 +17,7 @@ import com.example.graphQL.cats.service.port.{
 import com.example.graphQL.cats.service.{BackgroundWorker, Diagnostics, LogEvent, LogFields, LogField}
 import com.example.graphQL.cats.service.Diagnostics.*
 import com.example.graphQL.cats.service.events.OperationalEventJson
+import com.example.graphQL.cats.shared.CauseChain
 import fs2.Stream
 import fs2.kafka.*
 import fs2.kafka.producer.MkProducer
@@ -26,6 +27,7 @@ import retry.{HandlerDecision, RetryPolicies, retryingOnErrors}
 
 import java.time.Instant
 import scala.concurrent.duration.*
+import scala.util.control.NoStackTrace
 
 object OperationalEventKafkaRuntime {
   private val PublisherWorker = "operational-event-publisher"
@@ -68,7 +70,7 @@ object OperationalEventKafkaRuntime {
 
     def generation: Stream[IO, Unit] =
       Stream.eval(uuidGen.randomUUID).flatMap { id =>
-        val transactionalId = "hiring-publisher-" + id.toString
+        val transactionalId = KafkaProducerGenerationRetirement.PublisherPrefix + id.toString
         Stream
           .resource(
             observedGeneration(transactionalId, diagnostics)(
@@ -155,7 +157,7 @@ object OperationalEventKafkaRuntime {
         claim(limit).flatMap {
           case Nil                           => IO.unit
           case claims if claims.size > limit =>
-            IO.raiseError(new IllegalStateException("outbox claim exceeded requested publication wave"))
+            IO.raiseError(OutboxOperationFailed("claim exceeded requested publication wave"))
           case claims => publishClaims(claims)(publish) *> loop(remaining - claims.size)
         }
       }
@@ -187,7 +189,7 @@ object OperationalEventKafkaRuntime {
         case Left(outcome) => IO.pure(outcome)
         case Right(_)      =>
           IO.raiseError[Either[Throwable, Unit]](
-            new IllegalStateException("outbox lease heartbeat stopped before Kafka send completed")
+            OutboxOperationFailed("lease heartbeat stopped before Kafka send completed")
           )
       }
       .flatMap {
@@ -219,7 +221,7 @@ object OperationalEventKafkaRuntime {
   }
 
   private def requireOutboxSuccess[A](result: RepositoryIO[A]): IO[A] =
-    result.leftMap(OutboxOperationFailed(_)).rethrowT
+    result.leftMap(error => OutboxOperationFailed(error.toString)).rethrowT
 
   /** Operational facts may arrive out of order; Kafka preserves append order within each partition. */
   private[kafka] def publishClaims(
@@ -273,26 +275,6 @@ object OperationalEventKafkaRuntime {
     )
   }
 
-  /** Compatibility entry point for the interview runtime; the builder itself is [[KafkaClientSettings]]. */
-  private[kafka] def saslProperties(
-      username: Option[String],
-      password: Option[String],
-      protocol: KafkaSaslSecurityProtocol = KafkaSaslSecurityProtocol.Tls
-  ): Map[String, String] = KafkaClientSettings.security(username, password, protocol)
-
-  /** Boolean form of [[recordDurably]] kept for the interview runtime; the repository failure is not carried. */
-  private[kafka] def handleRecord(
-      config: KafkaConfig,
-      receipts: ConsumerReceiptRepository,
-      quarantine: EventQuarantineRepository,
-      topic: String,
-      partition: Int,
-      offset: Long,
-      bytes: Option[Array[Byte]],
-      clock: Clock[IO] = Clock[IO]
-  ): IO[Boolean] =
-    recordDurably(config, receipts, quarantine, topic, partition, offset, bytes, clock).value.map(_.isRight)
-
   /** Makes the record durable (receipt, or quarantine when malformed); a repository failure stays typed. */
   private[kafka] def recordDurably(
       config: KafkaConfig,
@@ -329,16 +311,6 @@ object OperationalEventKafkaRuntime {
             .void
       }
     }
-
-  /** Boolean form of [[processRecord]] kept for the interview runtime. */
-  private[kafka] def processRecordBeforeCommit(
-      topic: String,
-      partition: Int,
-      offset: Long
-  )(process: IO[Boolean])(commit: IO[Unit]): IO[Unit] =
-    processRecord(topic, partition, offset)(
-      RepositoryIO.fromIOEither(process.map(durable => Either.cond(durable, (), RepositoryError.Unavailable)))
-    )(commit)
 
   private[kafka] def processRecord(
       topic: String,
@@ -398,10 +370,7 @@ object OperationalEventKafkaRuntime {
 
   /** Client exception messages can embed rejected configuration values, so only class names reach the outbox. */
   private[kafka] def sanitized(error: Throwable): String =
-    Iterator
-      .iterate(Option(error))(_.flatMap(value => Option(value.getCause).filterNot(_ eq value)))
-      .takeWhile(_.nonEmpty)
-      .flatten
+    CauseChain(error)
       .take(5)
       .map(_.getClass.getName)
       .mkString(" <- ")
@@ -410,14 +379,12 @@ object OperationalEventKafkaRuntime {
   private final case class RecordNotDurable(topic: String, partition: Int, offset: Long, cause: RepositoryError)
       extends RuntimeException(s"Kafka record could not be durably processed: $topic-$partition@$offset ($cause)")
 
-  private final case class OutboxOperationFailed(error: RepositoryError)
-      extends RuntimeException(s"outbox operation failed: $error")
+  private final case class OutboxOperationFailed(reason: String)
+      extends RuntimeException(s"outbox operation failed: $reason")
+      with NoStackTrace
 
   private[kafka] def isProducerFenced(error: Throwable): Boolean =
-    Iterator
-      .iterate(Option(error))(_.flatMap(value => Option(value.getCause)))
-      .takeWhile(_.nonEmpty)
-      .flatten
+    CauseChain(error)
       .exists(value => value.isInstanceOf[ProducerFencedException] || value.isInstanceOf[InvalidProducerEpochException])
 
   private final case class ProducerGenerationFenced(cause: Throwable)

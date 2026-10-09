@@ -1,7 +1,5 @@
 package com.example.hiring.analytics.adapter.spark
 
-import com.example.hiring.analytics.config.AnalyticsPositiveInt.*
-
 import com.example.hiring.analytics.domain.AnalyticsRunManifest
 import com.example.hiring.analytics.domain.AnalyticsTopic
 import com.example.hiring.analytics.domain.SubjectPseudonymizer
@@ -86,7 +84,7 @@ private[analytics] final class AnalyticsBatchIngestionStage[F[_]: Async](
         deltaWriter.withExpiry(
           OperationalEventTransforms.bronze(safeToPersist),
           observedAt,
-          retention.bronzeDays.value
+          retention.bronzeDays
         )
       )
       counts <- blocking {

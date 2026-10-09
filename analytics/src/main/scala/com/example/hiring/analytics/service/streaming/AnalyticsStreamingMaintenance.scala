@@ -22,10 +22,8 @@ final class AnalyticsStreamingMaintenance[F[_]: Async](
 ) {
   import AnalyticsStreamingMaintenance.*
 
-  private val F = Async[F]
-
   /** Finish an acquired tick before shutdown releases its mutex and the shared Spark resources. */
-  private def maintainOwned: F[Unit] = F.uncancelable(_ => F.realTimeInstant.flatMap(maintain))
+  private def maintainOwned: F[Unit] = Async[F].uncancelable(_ => Async[F].realTimeInstant.flatMap(maintain))
 
   private final case class State(
       started: FiniteDuration,
@@ -48,10 +46,10 @@ final class AnalyticsStreamingMaintenance[F[_]: Async](
   }
 
   private def snapshot(state: Ref[F, State]): F[Observation] =
-    (state.get, F.monotonic).mapN((current, now) => current.observation(now))
+    (state.get, Async[F].monotonic).mapN((current, now) => current.observation(now))
 
   private def record(state: Ref[F, State], outcome: TickOutcome): F[Unit] =
-    (F.realTimeInstant, F.monotonic).tupled.flatMap { case (at, now) =>
+    (Async[F].realTimeInstant, Async[F].monotonic).tupled.flatMap { case (at, now) =>
       state.update { previous =>
         val current = previous.copy(maximumElapsed =
           previous.maximumElapsed.max(now - previous.lastSuccessMonotonic.getOrElse(previous.started))
@@ -72,40 +70,34 @@ final class AnalyticsStreamingMaintenance[F[_]: Async](
       } *> observe.traverse_(callback => snapshot(state).flatMap(callback))
     }
 
+  /** One tick: a busy mutex defers, any other lock failure propagates, and an acquired mutex runs maintenance. */
+  private[analytics] def tick: F[TickOutcome] =
+    lakehouseLock
+      .resource(lakehouseRoot)
+      .attempt
+      .use {
+        case Left(AnalyticsError.LakehouseLockTimeout) => Async[F].pure(TickOutcome.Deferred)
+        case Left(error)                               => Async[F].raiseError[TickOutcome](error)
+        case Right(_)                                  => maintainOwned.as(TickOutcome.Succeeded)
+      }
+
   private def observedTick(state: Ref[F, State]): F[Unit] =
-    (record(state, TickOutcome.Started) *>
-      lakehouseLock
-        .resource(lakehouseRoot)
-        .attempt
-        .use {
-          case Left(AnalyticsError.LakehouseLockTimeout) => F.pure(TickOutcome.Deferred)
-          case Left(error)                               => F.raiseError[TickOutcome](error)
-          case Right(_)                                  => maintainOwned.as(TickOutcome.Succeeded)
-        }
-        .flatMap(record(state, _))).guaranteeCase {
+    (record(state, TickOutcome.Started) *> tick.flatMap(record(state, _))).guaranteeCase {
       case Outcome.Canceled()   => record(state, TickOutcome.Cancelled)
       case Outcome.Errored(_)   => record(state, TickOutcome.Failed)
-      case Outcome.Succeeded(_) => F.unit
+      case Outcome.Succeeded(_) => Async[F].unit
     }
 
   /** State is allocated for each runtime; elapsed time also advances while no tick can acquire ownership. */
   def observedResource: Resource[F, Runtime[F]] =
     for {
-      started <- Resource.eval(F.monotonic)
+      started <- Resource.eval(Async[F].monotonic)
       state <- Resource.eval(
         Ref.of[F, State](State(started, None, None, None, None, 0L, scala.concurrent.duration.Duration.Zero))
       )
-      _ <- Resource.make(F.unit)(_ => record(state, TickOutcome.Stopped))
-      joined <- (F.sleep(interval) *> observedTick(state)).foreverM[Unit].background
+      _ <- Resource.make(Async[F].unit)(_ => record(state, TickOutcome.Stopped))
+      joined <- (Async[F].sleep(interval) *> observedTick(state)).foreverM[Unit].background
     } yield Runtime(joined.flatMap(_.embedNever), snapshot(state))
-
-  def runOnce: F[Unit] = lakehouseLock.resource(lakehouseRoot).attempt.use {
-    case Left(AnalyticsError.LakehouseLockTimeout) => F.unit
-    case Left(error)                               => F.raiseError(error)
-    case Right(_)                                  => maintainOwned
-  }
-
-  def run: F[Unit] = (F.sleep(interval) *> runOnce).foreverM
 
   /** Race the returned join effect against query execution; Resource cancels maintenance during shutdown. */
   def resource: Resource[F, F[Unit]] = observedResource.map(_.join)

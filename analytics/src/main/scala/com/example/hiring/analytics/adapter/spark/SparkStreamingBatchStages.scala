@@ -12,7 +12,6 @@ import com.example.hiring.analytics.service.batch.{
   AnalyticsReportReservation
 }
 import com.example.hiring.analytics.service.streaming.*
-import com.example.hiring.analytics.config.AnalyticsPositiveInt.*
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.sql.functions.*
 import org.apache.spark.sql.types.*
@@ -249,7 +248,7 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
             for {
               report <- rebuildAndExtract(preparation.observedAt)
               _ <- authorizePublication
-              expiresAt = preparation.observedAt.plusMillis(retention.publishedSnapshotDays.value.toLong * 86400000L)
+              expiresAt = retention.publishedSnapshotExpiry(preparation.observedAt)
               result <- reportPublisher
                 .publish(decision.publicationReservation, report, expiresAt)
                 .as(StreamingPublicationResult.Published)
@@ -580,7 +579,7 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
             Timestamp.from(
               observedAt.plus(
                 java.time.Duration.ofDays(
-                  retention.quarantineDays.value.toLong
+                  retention.quarantineDays.toLong
                 )
               )
             )

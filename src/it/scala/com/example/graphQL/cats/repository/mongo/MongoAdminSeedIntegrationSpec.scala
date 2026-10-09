@@ -3,7 +3,7 @@ package com.example.graphQL.cats.repository.mongo
 import cats.effect.IO
 import cats.effect.std.Semaphore
 import cats.syntax.all.*
-import com.example.graphQL.cats.config.AdminSeedConfig
+import com.example.graphQL.cats.config.{AdminSeedConfig, PasswordHashConfig}
 import com.example.graphQL.cats.infrastructure.auth.Argon2PasswordHasher
 import com.example.graphQL.cats.service.Diagnostics
 import com.mongodb.client.model.{Filters, UpdateOptions, Updates}
@@ -14,7 +14,7 @@ final class MongoAdminSeedIntegrationSpec extends MongoIntegrationSuite {
       for {
         _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
         permits <- Semaphore[IO](2)
-        _ <- Argon2PasswordHasher.resource(1, 8192, 1, permits).use { hasher =>
+        _ <- Argon2PasswordHasher.create(PasswordHashConfig(1, 8192, 1), permits).flatMap { hasher =>
           val accounts = MongoUserRepository.transactional(
             fixture.database,
             fixture.client,

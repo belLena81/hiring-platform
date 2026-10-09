@@ -27,8 +27,8 @@ object InterviewKafkaRetention {
     properties.put("enable.auto.commit", "false")
     properties.put("request.timeout.ms", "10000")
     properties.put("default.api.timeout.ms", "10000")
-    OperationalEventKafkaRuntime
-      .saslProperties(Some(username), Some(password), protocol)
+    KafkaClientSettings
+      .security(Some(username), Some(password), protocol)
       .foreach { case (key, value) => properties.put(key, value) }
     Resource
       .make(IO.blocking(new KafkaConsumer[String, Array[Byte]](properties)))(consumer => IO.blocking(consumer.close()))

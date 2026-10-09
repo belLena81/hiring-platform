@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.mongodb.client.result.{DeleteResult, UpdateResult}
 import cats.effect.IO
 import cats.effect.{Deferred, Outcome, Ref}
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
@@ -74,9 +75,9 @@ final class MongoRepositorySupportSpec extends CatsEffectSuite {
     MongoRepositorySupport
       .repositoryGuard[Unit](diagnostics, "job.find")(
         RepositoryIO.lift(IO.raiseError(new IllegalArgumentException("driver failure")))
-      )(_ => Left(RepositoryError.MissingWriteResult))
+      )(_ => Left(RepositoryError.Conflict))
       .value
-      .map(result => assertEquals(result, Left(RepositoryError.MissingWriteResult)))
+      .map(result => assertEquals(result, Left(RepositoryError.Conflict)))
   }
 
   test("RepositoryIO wraps the expected repository failure channel") {
@@ -85,9 +86,18 @@ final class MongoRepositorySupportSpec extends CatsEffectSuite {
     }
   }
 
-  test("a missing write result has its own repository error") {
-    assertEquals(MongoRepositorySupport.writeResult(None), Left(RepositoryError.MissingWriteResult))
-    assertEquals(MongoRepositorySupport.writeResult(Some(1)), Right(1))
+  test("a guarded single-document write succeeds on one match and reports the supplied mismatch otherwise") {
+    assertEquals(MongoRepositorySupport.matchedOne(UpdateResult.acknowledged(1L, 1L, null)), Right(()))
+    assertEquals(
+      MongoRepositorySupport.matchedOne(UpdateResult.acknowledged(0L, 0L, null)),
+      Left(RepositoryError.Conflict)
+    )
+    assertEquals(
+      MongoRepositorySupport.matchedOne(UpdateResult.acknowledged(0L, 0L, null), RepositoryError.AuthorityRevoked),
+      Left(RepositoryError.AuthorityRevoked)
+    )
+    assertEquals(MongoRepositorySupport.deletedOne(DeleteResult.acknowledged(1L)), Right(()))
+    assertEquals(MongoRepositorySupport.deletedOne(DeleteResult.acknowledged(0L)), Left(RepositoryError.Conflict))
   }
 
   test("invalid middle event rejects the complete outbox list before any insert") {
@@ -120,14 +130,14 @@ final class MongoRepositorySupportSpec extends CatsEffectSuite {
         .insertSequence(events, now)(document =>
           RepositoryIO.lift(written.update(_ :+ document.getString(MongoFields.Id))).subflatMap { _ =>
             if (document.getString(MongoFields.Id) == second.eventId.toString)
-              Left(RepositoryError.MissingWriteResult)
+              Left(RepositoryError.Unavailable)
             else Right(())
           }
         )
         .value
       ids <- written.get
     } yield {
-      assertEquals(result, Left(RepositoryError.MissingWriteResult))
+      assertEquals(result, Left(RepositoryError.Unavailable))
       assertEquals(ids, events.take(2).map(_.eventId.toString).toVector)
     }
   }

@@ -3,10 +3,13 @@ package com.example.graphQL.cats.config
 import com.comcast.ip4s.{Cidr, IpAddress}
 import com.example.graphQL.cats.domain.search.SearchFusionStrategy
 import io.github.iltotore.iron.*
+import io.github.iltotore.iron.pureconfig.given
 import io.github.iltotore.iron.constraint.any.{In, Not, StrictEqual}
 import io.github.iltotore.iron.constraint.collection.MaxLength
 import io.github.iltotore.iron.constraint.numeric.*
 import io.github.iltotore.iron.constraint.string.*
+import org.http4s.Uri
+import _root_.pureconfig.ConfigReader
 
 /** Startup configuration failures. `key` is the public, loggable identity; `paths` are the HOCON settings whose
   * decoding failure maps to this error, so pureconfig/iron field failures need no separate lookup table.
@@ -190,38 +193,50 @@ enum KafkaSaslSecurityProtocol(val kafkaValue: String) {
   case Plaintext extends KafkaSaslSecurityProtocol("SASL_PLAINTEXT")
 }
 
-final case class VectorSearchConfig(
-    enabled: Boolean,
-    voyageApiKey: Option[String],
-    voyageEndpoint: String,
-    voyageModel: String,
-    voyageDimension: Int,
+/** Embedding provider settings; `apiKey` exists only when vector search is enabled, so a missing key is
+  * unrepresentable.
+  */
+final case class VoyageConfig(apiKey: String, endpoint: Uri, model: String, dimension: Int) {
+  override def toString: String = s"VoyageConfig($endpoint, $model, $dimension, [REDACTED])"
+}
+final case class EmbeddingConfig(
     queueSize: Int,
     parallelism: Int,
-    timeoutMillis: Int,
+    timeoutMs: Int,
     retryAttempts: Int,
-    retryDelayMillis: Int,
-    jobVectorIndex: String,
-    candidateVectorIndex: String,
-    jobLexicalIndex: String,
-    candidateLexicalIndex: String,
-    fusionStrategy: SearchFusionStrategy,
-    rerankEnabled: Boolean,
-    rerankModel: String,
-    indexReadyTimeoutMillis: Int,
-    indexPollIntervalMillis: Int,
-    numCandidates: Int,
-    branchResultLimit: Int,
-    durableRetryAttempts: Int = VectorSearchConfig.DefaultDurableRetryAttempts,
-    durableRetryBaseMillis: Int = VectorSearchConfig.DefaultDurableRetryBaseMillis,
-    durableRetryCapMillis: Int = VectorSearchConfig.DefaultDurableRetryCapMillis,
-    workerRestartDelayMillis: Int = VectorSearchConfig.DefaultWorkerRestartDelayMillis
+    retryDelayMs: Int,
+    durableRetryAttempts: Int = EmbeddingConfig.DefaultDurableRetryAttempts,
+    durableRetryBaseMillis: Int = EmbeddingConfig.DefaultDurableRetryBaseMillis,
+    durableRetryCapMillis: Int = EmbeddingConfig.DefaultDurableRetryCapMillis,
+    workerRestartDelayMillis: Int = EmbeddingConfig.DefaultWorkerRestartDelayMillis
 )
-object VectorSearchConfig {
+object EmbeddingConfig {
   val DefaultDurableRetryAttempts: Int = 8
   val DefaultDurableRetryBaseMillis: Int = 1000
   val DefaultDurableRetryCapMillis: Int = 300000
   val DefaultWorkerRestartDelayMillis: Int = 1000
+}
+final case class VectorIndexesConfig(
+    jobs: NonBlankStr,
+    candidates: NonBlankStr,
+    lexical: NonBlankStr,
+    candidateLexical: NonBlankStr,
+    readyTimeoutMs: SearchIndexReadyTimeoutMs,
+    pollIntervalMs: SearchIndexPollIntervalMs
+) derives ConfigReader
+final case class RerankConfig(enabled: Boolean, model: RerankModel) derives ConfigReader
+
+enum VectorSearchConfig {
+  case Disabled
+  case Enabled(
+      voyage: VoyageConfig,
+      embedding: EmbeddingConfig,
+      indexes: VectorIndexesConfig,
+      numCandidates: Int,
+      branchResultLimit: Int,
+      fusionStrategy: SearchFusionStrategy,
+      rerank: RerankConfig
+  )
 }
 
 final case class JwtAuthConfig(
@@ -240,7 +255,7 @@ final case class JwtAuthConfig(
   def receiptSecret: String = receiptFingerprintSecret.getOrElse(hmacSecret)
   override def toString: String = s"JwtAuthConfig($issuer, $audience, [REDACTED])"
 }
-final case class PasswordHashConfig(iterations: Int, memoryKilobytes: Int, parallelism: Int)
+final case class PasswordHashConfig(iterations: Int = 2, memoryKilobytes: Int = 19456, parallelism: Int = 1)
 final case class AuthRateLimitConfig(windowSeconds: Int, attempts: Int, maxBuckets: Int)
 
 /** Per-actor allowance for interview cancel and reschedule actions: `attempts` actions per `windowSeconds`. */
@@ -265,7 +280,7 @@ final case class KafkaConsumerConfig(
     partitionConcurrency: Int = KafkaConsumerConfig.DefaultPartitionConcurrency
 )
 object KafkaConsumerConfig {
-  val DefaultPartitionConcurrency: Int = 4
+  inline val DefaultPartitionConcurrency = 4
 }
 final case class KafkaConfig(
     enabled: Boolean,
@@ -279,7 +294,7 @@ final case class KafkaConfig(
     restartMaxDelaySeconds: Int = KafkaConfig.DefaultRestartMaxDelaySeconds
 )
 object KafkaConfig {
-  val DefaultRestartMaxDelaySeconds: Int = 30
+  inline val DefaultRestartMaxDelaySeconds = 30
 }
 
 type Port = Int :| Interval.Closed[1, 65535]
@@ -372,6 +387,6 @@ final case class AdminSeedConfig(
     enabled: Boolean = false,
     name: Option[String] = None,
     password: Option[String] = None
-) {
+) derives ConfigReader {
   override def toString: String = "AdminSeedConfig([REDACTED])"
 }

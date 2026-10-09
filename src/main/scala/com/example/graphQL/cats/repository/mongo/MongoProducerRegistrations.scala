@@ -36,15 +36,12 @@ private[mongo] object MongoProducerRegistrations {
             MongoUpdate.setOnInsert("transactionalId", transactionalId),
             MongoUpdate.setOnInsert("kind", kind),
             MongoUpdate.setOnInsert("state", "Active"),
-            MongoUpdate.setOnInsert("registeredAt", Date.from(now))
+            MongoUpdate.setOnInsert("registeredAt", now.toDate)
           ),
           new UpdateOptions().upsert(true)
         )
       )
-      .subflatMap {
-        case Some(result) if result.wasAcknowledged() => Right(())
-        case _                                        => Left(RepositoryError.MissingWriteResult)
-      }
+      .void
 
   def batch(database: MongoDatabase[IO], subject: String, kind: String): RepositoryIO[Vector[String]] =
     RepositoryIO
@@ -93,13 +90,10 @@ private[mongo] object MongoProducerRegistrations {
             ),
             MongoUpdate.combine(
               MongoUpdate.set("state", "Fenced"),
-              MongoUpdate.set("fencedAt", Date.from(now)),
+              MongoUpdate.set("fencedAt", now.toDate),
               MongoUpdate.set("expiresAt", Date.from(now.plusSeconds(RetentionSeconds)))
             )
           )
         )
-        .subflatMap {
-          case Some(result) if result.wasAcknowledged() => Right(())
-          case _                                        => Left(RepositoryError.MissingWriteResult)
-        }
+        .void
 }

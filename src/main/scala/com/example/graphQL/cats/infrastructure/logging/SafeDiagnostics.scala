@@ -3,6 +3,8 @@ package com.example.graphQL.cats.infrastructure.logging
 import cats.effect.IO
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFields, LogLevel}
 import com.example.graphQL.cats.service.Diagnostics.*
+import ch.qos.logback.core.{Appender, FileAppender}
+import ch.qos.logback.core.spi.AppenderAttachable
 import io.circe.Json
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path, Paths}
@@ -75,29 +77,22 @@ object SafeDiagnostics {
     )
   }
 
-  private def activeLogFiles: List[Path] = {
-    val logger = LoggerFactory.getLogger(loggerName)
-    Option(logger.getClass.getMethod("iteratorForAppenders").invoke(logger))
-      .collect { case iterator: java.util.Iterator[?] => iterator.asScala.toList }
-      .getOrElse(Nil)
-      .flatMap(appenderFiles)
-  }
-
-  private def appenderFiles(appender: Any): List[Path] = {
-    val direct = try
-      Option(appender.getClass.getMethod("getFile").invoke(appender)).collect {
-        case file: String if file.nonEmpty => Paths.get(file).toAbsolutePath.normalize
-      }.toList
-    catch {
-      case _: ReflectiveOperationException => Nil
+  private def activeLogFiles: List[Path] =
+    LoggerFactory.getLogger(loggerName) match {
+      case logger: ch.qos.logback.classic.Logger => logger.iteratorForAppenders.asScala.toList.flatMap(appenderFiles)
+      case _                                     => Nil
     }
-    val nested = try
-      Option(appender.getClass.getMethod("iteratorForAppenders").invoke(appender))
-        .collect { case iterator: java.util.Iterator[?] => iterator.asScala.toList }
-        .getOrElse(Nil)
-        .flatMap(appenderFiles)
-    catch {
-      case _: ReflectiveOperationException => Nil
+
+  /** File paths of an appender and of any appenders it wraps (for example an async appender). */
+  private def appenderFiles(appender: Appender[?]): List[Path] = {
+    val direct = appender match {
+      case file: FileAppender[?] =>
+        Option(file.getFile).filter(_.nonEmpty).map(Paths.get(_).toAbsolutePath.normalize).toList
+      case _ => Nil
+    }
+    val nested = appender match {
+      case wrapper: AppenderAttachable[?] => wrapper.iteratorForAppenders.asScala.toList.flatMap(appenderFiles)
+      case _                              => Nil
     }
     direct ++ nested
   }
@@ -184,6 +179,7 @@ object SafeDiagnostics {
             }
         }
       }
+      // Logging must never fail the caller: a diagnostics failure is dropped, since there is nowhere safer to report it.
       .handleError(_ => ())
   }
 

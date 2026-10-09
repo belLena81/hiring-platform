@@ -20,9 +20,13 @@ if [[ -n "${JAVA_HOME:-}" ]]; then
   sbt_args=(-java-home "$JAVA_HOME")
 fi
 
-# Both builds: formatting gates first, then the Docker-independent unit suites under JaCoCo.
-# `jacoco` runs the unit tests once and fails when line coverage is below the build's threshold (60%).
-sbt "${sbt_args[@]}" scalafmtCheckAll scalafmtSbtCheck jacoco
-(cd analytics && sbt "${sbt_args[@]}" scalafmtCheckAll scalafmtSbtCheck jacoco)
+# Both builds: formatting gates first, then unit and integration suites under JaCoCo.
+# The integration suites need Docker; the runner owns this workspace's test services.
+# A full run fails when merged unit + integration line coverage is below 60%.
+sbt "${sbt_args[@]}" scalafmtCheckAll scalafmtSbtCheck
+(cd analytics && sbt "${sbt_args[@]}" scalafmtCheckAll scalafmtSbtCheck)
+export HIRING_TEST_JAVA_HOME="${HIRING_TEST_JAVA_HOME:-${JAVA_HOME:-}}"
+scripts/run-local-tests.sh test
+scripts/run-local-tests.sh analytics
 
-printf '%s\n' 'Formatting, unit and coverage checks passed for the application and analytics builds. Run any additional integration, migration, compatibility, or performance checks required by this task; see docs/engineering-quality.md.'
+printf '%s\n' 'Formatting, unit, integration and merged coverage checks passed for the application and analytics builds. Run any additional migration, compatibility, or performance checks required by this task; see docs/engineering-quality.md.'

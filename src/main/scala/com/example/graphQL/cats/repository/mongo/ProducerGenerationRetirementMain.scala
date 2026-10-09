@@ -1,8 +1,10 @@
 package com.example.graphQL.cats.repository.mongo
 
-import cats.effect.{IO, IOApp, ExitCode}
+import cats.effect.{ExitCode, IO, IOApp, Resource}
+import cats.syntax.all.*
 import com.example.graphQL.cats.config.AppConfig
 import com.example.graphQL.cats.infrastructure.kafka.KafkaProducerGenerationRetirement
+import com.example.graphQL.cats.infrastructure.logging.SafeDiagnostics
 import io.circe.Json
 
 /** Inventory is read-only; retirement requires stopping the selected publisher before invoking its exact ID. */
@@ -18,13 +20,16 @@ object ProducerGenerationRetirementMain extends IOApp {
       AppConfig.load.flatMap {
         case Left(_)       => IO.pure(ExitCode.Error)
         case Right(config) =>
-          MongoDatabaseProbe
-            .clientResource(config.mongoUri)
-            .use { client =>
+          (
+            Resource.eval(SafeDiagnostics.configure(config.maskSensitive)),
+            MongoDatabaseProbe.clientResource(config.mongoUri)
+          ).tupled
+            .use { case (diagnostics, client) =>
               client.getDatabase(config.mongoDatabase).flatMap { database =>
                 val maintenance = new MongoProducerGenerationMaintenance(
                   database,
-                  id => KafkaProducerGenerationRetirement.fence(config.kafka, id)
+                  id => KafkaProducerGenerationRetirement.fence(config.kafka, id),
+                  diagnostics = diagnostics
                 )
                 selected match {
                   case Left(cursor) =>

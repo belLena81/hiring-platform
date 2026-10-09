@@ -1,6 +1,5 @@
 package com.example.hiring.analytics.service.batch
 
-import com.example.hiring.analytics.config.AnalyticsPositiveInt.value
 import com.example.hiring.analytics.config.AnalyticsOperationalSettings
 import com.example.hiring.analytics.domain.{AnalyticsRunManifest, RangeFingerprint}
 import com.example.hiring.analytics.domain.AnalyticsTopic
@@ -23,7 +22,6 @@ final class HiringAnalyticsBatch[F[_]: Async](
     operational: AnalyticsOperationalSettings,
     clock: Clock[F]
 ) {
-  private val effect = Async[F]
   private val retention = operational.retention
   private val now = clock.realTimeInstant
 
@@ -31,10 +29,10 @@ final class HiringAnalyticsBatch[F[_]: Async](
     for {
       _ <- manifest.offsetRanges.find(range => range.startOffset == range.endOffsetExclusive) match {
         case Some(range) =>
-          effect.raiseError[Unit](
+          Async[F].raiseError[Unit](
             AnalyticsError.EmptyRequestedRange(AnalyticsTopic.unwrap(range.topic), range.partition, range.startOffset)
           )
-        case None => effect.unit
+        case None => Async[F].unit
       }
       publication <- lakehouseLock.resource(paths.root).use { _ =>
         for {
@@ -82,7 +80,7 @@ final class HiringAnalyticsBatch[F[_]: Async](
         _ <- reportPublisher.publish(
           reservation,
           report,
-          completedAt.plusSeconds(retention.publishedSnapshotDays.value.toLong * 86400L)
+          retention.publishedSnapshotExpiry(completedAt)
         )
         _ <- persistManifest(manifest, AnalyticsManifestStatus.Published, completedAt)
       } yield AnalyticsRunOutcome.Published

@@ -1,6 +1,6 @@
 package com.example.hiring.analytics.config
 
-import com.example.hiring.analytics.domain.AnalyticsTopic
+import com.example.hiring.analytics.domain.{AnalyticsReplayRequestId, AnalyticsTopic, RunId, WriterDisposition}
 import com.example.hiring.analytics.errors.AnalyticsError
 
 import cats.data.{Chain, NonEmptyChain, ValidatedNec}
@@ -19,7 +19,6 @@ import _root_.pureconfig.error.{
   UserValidationFailed
 }
 
-import java.time.Instant
 import scala.concurrent.duration.*
 
 /** Iron constraints for `FiniteDuration` settings; iron-pureconfig turns each refined alias into a bounded reader. */
@@ -67,8 +66,20 @@ private[analytics] object AnalyticsConfigReaders {
       value.refineEither[Not[Blank]].leftMap(_ => UserValidationFailed("must be non-empty"))
     )
 
-  given ConfigReader[AnalyticsTopic] =
-    ConfigReader[String].emap(value => AnalyticsTopic.from(value).leftMap(UserValidationFailed.apply))
+  private def validated[A](parse: String => Either[String, A]): ConfigReader[A] =
+    ConfigReader[String].emap(parse(_).leftMap(UserValidationFailed.apply))
+
+  given ConfigReader[AnalyticsTopic] = validated(AnalyticsTopic.from)
+  given ConfigReader[RunId] = validated(RunId.from)
+  given ConfigReader[AnalyticsReplayRequestId] = validated(AnalyticsReplayRequestId.from)
+
+  given ConfigReader[WriterDisposition] = ConfigReader[String].emap {
+    case "stopped"        => Right(WriterDisposition.Stopped)
+    case "access-revoked" => Right(WriterDisposition.AccessRevoked)
+    case "active"         => Right(WriterDisposition.Active)
+    case "unknown"        => Right(WriterDisposition.Unknown)
+    case _                => Left(UserValidationFailed("must be stopped, access-revoked, active, or unknown"))
+  }
 
   /** `${?NAME}` placeholders set to an empty string mean "not configured", so empty optional strings read as `None`. */
   given ConfigReader[Option[AnalyticsNonBlank]] with ReadsMissingKeys {
@@ -79,12 +90,6 @@ private[analytics] object AnalyticsConfigReaders {
           if (value.trim.isEmpty) Right(None)
           else ConfigReader[AnalyticsNonBlank].from(cursor).map(Some(_))
         }
-  }
-
-  given ConfigReader[Instant] = ConfigReader[String].emap { value =>
-    Either
-      .catchNonFatal(Instant.parse(value))
-      .leftMap(_ => UserValidationFailed("must be an ISO-8601 UTC timestamp"))
   }
 
   given ConfigReader[AnalyticsHmacSettings] =
@@ -163,7 +168,7 @@ private[analytics] object AnalyticsConfigReaders {
     source.at(path).load[A].toValidated.leftMap(describe)
 
   def complete[A](value: ValidatedNec[String, A]): Either[AnalyticsError, A] =
-    value.toEither.leftMap(errors => AnalyticsError.InvalidConfiguration(errors.toChain.toList.mkString("; ")))
+    value.toEither.leftMap(AnalyticsError.fromProblems)
 
   private def describe(failures: ConfigReaderFailures): NonEmptyChain[String] =
     NonEmptyChain.fromChainPrepend(describe(failures.head), Chain.fromSeq(failures.tail.map(describe)))
@@ -181,7 +186,7 @@ private[analytics] object AnalyticsConfigReaders {
   }
 
   private val SensitiveAssignment =
-    "(?i)((?:previous-)?secret-base64|(?:sasl-)?(?:username|password)|mongo(?:db)?-uri)\\s*[:=]\\s*(\"(?:\\\\.|[^\"])*\"|[^,\\s}]+)".r
+    "(?i)((?:previous-)?secret-base64|(?:sasl-)?(?:username|password)|mongo(?:db)?-uri)\\s*[:=]\\s*(?!Key not found)(\"(?:\\\\.|[^\"])*\"|[^,\\s}]+)".r
   private val MongoCredentials = "(?i)(mongodb(?:\\+srv)?://)[^/@\\s]+@".r
   private val LongEncodedSecret = "(?<![A-Za-z0-9])[A-Za-z0-9+/]{32,}={0,2}(?![A-Za-z0-9])".r
 

@@ -11,15 +11,6 @@ import java.util.UUID
 type UseCaseIO[A] = EitherT[IO, UseCaseError, A]
 
 object UseCaseIO {
-  def pure[A](value: A): UseCaseIO[A] = EitherT.rightT(value)
-
-  def left[A](error: UseCaseError): UseCaseIO[A] = EitherT.leftT(error)
-
-  def fromEither[A](value: Either[UseCaseError, A]): UseCaseIO[A] = EitherT.fromEither(value)
-
-  def fromIO[A](value: IO[Either[UseCaseError, A]]): UseCaseIO[A] = EitherT(value)
-
-  def liftIO[A](value: IO[A]): UseCaseIO[A] = EitherT.liftF(value)
 
   /** Fails with `error` unless `condition` holds. */
   def ensure(condition: Boolean, error: => UseCaseError): UseCaseIO[Unit] =

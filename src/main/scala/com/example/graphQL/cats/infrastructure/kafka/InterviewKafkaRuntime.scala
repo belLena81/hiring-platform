@@ -11,7 +11,9 @@ import com.example.graphQL.cats.service.port.{
   InterviewTransport,
   InterviewPublisherRole,
   InterviewPublisherGeneration,
-  InterviewProducerGenerationFenced
+  InterviewProducerGenerationFenced,
+  RepositoryError,
+  RepositoryIO
 }
 import fs2.kafka.*
 import fs2.kafka.producer.MkProducer
@@ -20,7 +22,6 @@ import io.circe.generic.semiauto.*
 import io.circe.parser.decode
 import io.circe.syntax.*
 import org.apache.kafka.clients.consumer.ConsumerConfig
-import org.apache.kafka.clients.producer.ProducerConfig
 
 import java.nio.charset.StandardCharsets
 import scala.concurrent.duration.*
@@ -99,21 +100,9 @@ object InterviewKafkaRuntime {
       config: InterviewKafkaConfig,
       diagnostics: Diagnostics = Diagnostics.noop
   ): Resource[IO, InterviewTransport] = {
-    val properties = OperationalEventKafkaRuntime.saslProperties(
-      Some(config.username),
-      Some(config.password),
-      config.protocol
-    )
-    val producerSettings = properties.foldLeft(
-      ProducerSettings(Serializer[IO, String], Serializer[IO, Array[Byte]])
-        .withBootstrapServers(config.bootstrapServers)
-        .withCloseTimeout(5.seconds)
-        .withProperty(ProducerConfig.ACKS_CONFIG, "all")
-        .withProperty(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, "true")
-        .withProperty(ProducerConfig.MAX_REQUEST_SIZE_CONFIG, "65536")
-        .withProperty(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG, "30000")
-        .withProperty(ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG, "10000")
-    ) { case (current, (key, value)) => current.withProperty(key, value) }
+    val producerSettings = KafkaClientSettings
+      .producer(config.bootstrapServers, Some(config.username), Some(config.password), config.protocol, 65536)
+      .withCloseTimeout(5.seconds)
     val role = if (config.worker) InterviewPublisherRole.Worker else InterviewPublisherRole.Orchestrator
     val output = if (config.worker) config.topics.results else config.topics.commands
     for {
@@ -153,16 +142,12 @@ object InterviewKafkaRuntime {
   def consumerResource(config: InterviewKafkaConfig, diagnostics: Diagnostics)(
       receive: Either[String, InterviewMessage] => IO[Boolean]
   ): Resource[IO, Unit] = {
-    val properties =
-      OperationalEventKafkaRuntime.saslProperties(Some(config.username), Some(config.password), config.protocol)
-    val consumerSettings = properties.foldLeft(
-      ConsumerSettings(Deserializer[IO, String], Deserializer[IO, Array[Byte]])
-        .withBootstrapServers(config.bootstrapServers)
-        .withGroupId(if (config.worker) config.workerGroup else config.orchestratorGroup)
-        .withEnableAutoCommit(false)
-        .withAutoOffsetReset(AutoOffsetReset.Earliest)
-        .withProperty(ConsumerConfig.ISOLATION_LEVEL_CONFIG, "read_committed")
-    ) { case (current, (key, value)) => current.withProperty(key, value) }
+    val consumerSettings = KafkaClientSettings
+      .consumer(config.bootstrapServers, Some(config.username), Some(config.password), config.protocol)
+      .withGroupId(if (config.worker) config.workerGroup else config.orchestratorGroup)
+      .withEnableAutoCommit(false)
+      .withAutoOffsetReset(AutoOffsetReset.Earliest)
+      .withProperty(ConsumerConfig.ISOLATION_LEVEL_CONFIG, "read_committed")
     val input = if (config.worker) config.topics.commands else config.topics.results
     val consumer = KafkaPartitionProcessing(
       KafkaConsumer.stream(consumerSettings).subscribeTo(input).partitionedRecords,
@@ -171,17 +156,19 @@ object InterviewKafkaRuntime {
       val parsed = InterviewMessageCodec
         .parse(message.record.value)
         .flatMap(value => Either.cond(value.workflowId.toString == message.record.key, value, "workflow key mismatch"))
-      OperationalEventKafkaRuntime.processRecordBeforeCommit(input, message.record.partition, message.record.offset)(
-        receive(
-          parsed.left.map(reason =>
-            rejectionIdentity(
-              input,
-              message.record.partition,
-              message.record.offset,
-              Option(message.record.value),
-              reason
+      OperationalEventKafkaRuntime.processRecord(input, message.record.partition, message.record.offset)(
+        RepositoryIO.fromIOEither(
+          receive(
+            parsed.left.map(reason =>
+              rejectionIdentity(
+                input,
+                message.record.partition,
+                message.record.offset,
+                Option(message.record.value),
+                reason
+              )
             )
-          )
+          ).map(durable => Either.cond(durable, (), RepositoryError.Unavailable))
         )
       )(message.offset.commit)
     }

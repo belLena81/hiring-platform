@@ -67,9 +67,6 @@ object StreamingActivationAuthorization {
       evidenceReferences: Vector[String],
       independentReviewerReferences: Vector[String]
   ): Either[String, StreamingActivationAuthorization] = {
-    val authorizationFacts = Vector(identity.canonical, grantId, validFrom.toString, expiresAt.toString)
-    val canonicalEvidence = (authorizationFacts ++ (evidenceReferences ++ independentReviewerReferences).sorted)
-      .mkString("\n")
     validate(
       StreamingActivationAuthorization(
         identity,
@@ -78,13 +75,24 @@ object StreamingActivationAuthorization {
         expiresAt,
         evidenceReferences,
         independentReviewerReferences,
-        AnalyticsDigest.sha256Hex(canonicalEvidence)
+        evidenceDigest(identity, grantId, validFrom, expiresAt, evidenceReferences ++ independentReviewerReferences)
       ),
       identity,
       grantId,
       validFrom
     )
   }
+
+  private def evidenceDigest(
+      identity: StreamingActivationIdentity,
+      grantId: String,
+      validFrom: Instant,
+      expiresAt: Instant,
+      references: Vector[String]
+  ): String =
+    AnalyticsDigest.sha256Hex(
+      (Vector(identity.canonical, grantId, validFrom.toString, expiresAt.toString) ++ references.sorted).mkString("\n")
+    )
 
   def validate(
       authorization: StreamingActivationAuthorization,
@@ -93,14 +101,13 @@ object StreamingActivationAuthorization {
       now: Instant
   ): Either[String, StreamingActivationAuthorization] = {
     val references = authorization.evidenceReferences ++ authorization.independentReviewerReferences
-    val authorizationFacts = Vector(
-      authorization.identity.canonical,
+    val digest = evidenceDigest(
+      authorization.identity,
       authorization.grantId,
-      authorization.validFrom.toString,
-      authorization.expiresAt.toString
+      authorization.validFrom,
+      authorization.expiresAt,
+      references
     )
-    val canonicalEvidence = (authorizationFacts ++ references.sorted).mkString("\n")
-    val digest = AnalyticsDigest.sha256Hex(canonicalEvidence)
     for {
       _ <- Either.cond(authorization.identity == expected, (), "activation authorization identity does not match")
       _ <- Either.cond(
@@ -197,7 +204,7 @@ object AnalyticsEventTimePolicy {
   ): Option[Instant] =
     admittedUnambiguousEventTimes.iterator
       .map(time => if (time.isAfter(observedAt)) observedAt else time)
-      .reduceOption((left, right) => if (left.isAfter(right)) left else right)
+      .maxOption
       .map(_.minusNanos(WatermarkLag.toNanos))
-      .map(candidate => previousWatermark.fold(candidate)(prior => if (candidate.isAfter(prior)) candidate else prior))
+      .map(candidate => previousWatermark.fold(candidate)(Ordering[Instant].max(candidate, _)))
 }

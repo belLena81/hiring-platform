@@ -139,29 +139,26 @@ final case class StreamingCoordinatorResult(
     candidateWatermark: Option[Instant]
 )
 
-/** Spark-free orchestration for one at-least-once micro-batch. */
+/** Spark-free orchestration for one at-least-once micro-batch. `authorize` is re-checked before every durable write and
+  * before the checkpoint may be acknowledged.
+  */
 final class StreamingBatchCoordinator[F[_]: Async](
     journal: StreamingBatchJournal[F],
     deletionMarkers: ActiveDeletionMarkerSource[F],
     stages: StreamingBatchStages[F],
-    checkpoint: StreamingCheckpointAcknowledgement[F]
+    checkpoint: StreamingCheckpointAcknowledgement[F],
+    authorize: F[Unit]
 ) {
-  private val F = Async[F]
+  private val MaximumDecisionAttempts = 3
 
   def process(preparation: StreamingInputPreparation): F[StreamingCoordinatorResult] =
-    process(preparation, F.unit)
-
-  def process(
-      preparation: StreamingInputPreparation,
-      authorizeAcknowledgement: F[Unit]
-  ): F[StreamingCoordinatorResult] =
     for {
       existing <- journal.load(preparation.identity)
       stable = existing.fold(preparation)(_.preparation)
       _ <- validateRetry(preparation, existing)
-      _ <- authorizeAcknowledgement *> existing.fold(journal.prepare(preparation))(_ => F.unit)
+      _ <- authorize *> existing.fold(journal.prepare(preparation))(_ => Async[F].unit)
       result <- existing.flatMap(_.terminalOutcome) match {
-        case Some(outcome) => F.pure(resultFor(outcome, existing.flatMap(_.latestDecision)))
+        case Some(outcome) => Async[F].pure(resultFor(outcome, existing.flatMap(_.latestDecision)))
         case None          =>
           existing match {
             case Some(state) if state.ingestionCommitted =>
@@ -170,58 +167,33 @@ final class StreamingBatchCoordinator[F[_]: Async](
                 .flatMap {
                   case Some((decision, AnalyticsReportPublicationReceipt.CurrentGeneration)) =>
                     deletionMarkers.activeSubjectTokens.flatMap { markers =>
-                      if (
-                        markers.isEmpty && fingerprint(markers.map(_.value).sorted.mkString("\n")) ==
-                          decision.deletionMarkerFingerprint
-                      )
-                        F.realTimeInstant.flatMap { completedAt =>
-                          (authorizeAcknowledgement *> journal
-                            .commitPublished(decision, completedAt))
-                            .as(
-                              StreamingCoordinatorResult(
-                                StreamingTerminalOutcome.Published,
-                                decision.candidateWatermark
-                              )
-                            )
-                        }
-                      else
-                        processUnfinished(
-                          stable,
-                          isRecoveryAttempt = true,
-                          forceDecisionRevision = true,
-                          authorize = authorizeAcknowledgement
-                        )
+                      if (markers.isEmpty && markerFingerprint(markers) == decision.deletionMarkerFingerprint)
+                        publishedResult(decision)
+                      else retryRevised(stable, attempt = 0)
                     }
-                  case Some((_, AnalyticsReportPublicationReceipt.Superseded)) =>
-                    processUnfinished(
-                      stable,
-                      isRecoveryAttempt = true,
-                      forceDecisionRevision = true,
-                      authorize = authorizeAcknowledgement
-                    )
-                  case _ => processUnfinished(stable, existing.nonEmpty, authorize = authorizeAcknowledgement)
+                  case Some((_, AnalyticsReportPublicationReceipt.Superseded)) => retryRevised(stable, attempt = 0)
+                  case _ => processUnfinished(stable, existing.nonEmpty)
                 }
-            case _ => processUnfinished(stable, existing.nonEmpty, authorize = authorizeAcknowledgement)
+            case _ => processUnfinished(stable, existing.nonEmpty)
           }
       }
-      _ <- authorizeAcknowledgement *> checkpoint.callbackMayAcknowledge(preparation.identity)
+      _ <- authorize *> checkpoint.callbackMayAcknowledge(preparation.identity)
     } yield result
 
   private def processUnfinished(
       preparation: StreamingInputPreparation,
       isRecoveryAttempt: Boolean,
       forceDecisionRevision: Boolean = false,
-      attempt: Int = 0,
-      authorize: F[Unit]
+      attempt: Int = 0
   ): F[StreamingCoordinatorResult] =
     for {
       _ <- authorize
-      _ <- F.raiseWhen(attempt >= MaximumDecisionAttempts)(
+      _ <- Async[F].raiseWhen(attempt >= MaximumDecisionAttempts)(
         AnalyticsError.InvalidConfiguration("streaming publication generation did not stabilize")
       )
       current <- journal.load(preparation.identity)
       previous = current.flatMap(_.latestDecision)
-      revision <- F.fromEither(previous.fold[Either[Throwable, Long]](Right(0L)) { value =>
+      revision <- Async[F].fromEither(previous.fold[Either[Throwable, Long]](Right(0L)) { value =>
         if (!forceDecisionRevision) Right(value.revision)
         else
           Either.cond(
@@ -232,7 +204,7 @@ final class StreamingBatchCoordinator[F[_]: Async](
       })
       reservation <- previous
         .filter(_.revision == revision)
-        .fold(stages.reservePublication(preparation, revision))(value => F.pure(value.publicationReservation))
+        .fold(stages.reservePublication(preparation, revision))(value => Async[F].pure(value.publicationReservation))
       markers <- deletionMarkers.activeSubjectTokens
       assessment <- stages.assess(preparation, markers, isRecoveryAttempt)
       prior <- journal.latestWatermark(preparation.identity.lineage)
@@ -240,13 +212,13 @@ final class StreamingBatchCoordinator[F[_]: Async](
         case StreamingIngestionResult.Ready(times) => times
         case _                                     => Vector.empty
       }
-      markerFingerprint = fingerprint(markers.map(_.value).sorted.mkString("\n"))
+      fingerprint = markerFingerprint(markers)
       // A retry may find its original facts already merged. Keep the durable admission only under
       // the same deletion view and pinned attempt; publication still fences its current generation.
       recoveredCandidate = previous
         .filter(value =>
           isRecoveryAttempt && !forceDecisionRevision && value.revision == revision &&
-            value.deletionMarkerFingerprint == markerFingerprint && value.publicationReservation == reservation
+            value.deletionMarkerFingerprint == fingerprint && value.publicationReservation == reservation
         )
         .flatMap(_.candidateWatermark)
       candidate = assessment match {
@@ -256,90 +228,60 @@ final class StreamingBatchCoordinator[F[_]: Async](
           )
         case _ => None
       }
-      decision = StreamingDecisionRevision(
-        preparation.identity,
-        revision,
-        markerFingerprint,
-        candidate,
-        reservation
-      )
+      decision = StreamingDecisionRevision(preparation.identity, revision, fingerprint, candidate, reservation)
       result <- previous match {
         case Some(value) if value.revision == revision && value != decision =>
-          processUnfinished(
-            preparation,
-            isRecoveryAttempt = true,
-            forceDecisionRevision = true,
-            attempt = attempt + 1,
-            authorize = authorize
-          )
+          retryRevised(preparation, attempt + 1)
         case _ =>
           for {
-            _ <- authorize *> (if (previous.contains(decision)) F.unit else journal.appendDecision(decision))
+            _ <- authorize *> (if (previous.contains(decision)) Async[F].unit else journal.appendDecision(decision))
             _ <- stages.ingest(preparation, markers, assessment, decision, isRecoveryAttempt)
             _ <- authorize *> journal.markIngestionCommitted(preparation.identity)
             result <- assessment match {
               case StreamingIngestionResult.QualityBlocked =>
-                complete(preparation.identity, StreamingTerminalOutcome.QualityBlocked, authorize)
+                complete(preparation.identity, StreamingTerminalOutcome.QualityBlocked)
               case StreamingIngestionResult.ErasurePending =>
-                complete(preparation.identity, StreamingTerminalOutcome.ErasurePending, authorize)
+                complete(preparation.identity, StreamingTerminalOutcome.ErasurePending)
               case StreamingIngestionResult.Ready(_) =>
                 deletionMarkers.activeSubjectTokens.flatMap { refreshed =>
-                  if (refreshed.nonEmpty)
-                    complete(preparation.identity, StreamingTerminalOutcome.ErasurePending, authorize)
-                  else if (
-                    fingerprint(refreshed.map(_.value).sorted.mkString("\n")) != decision.deletionMarkerFingerprint
-                  )
-                    processUnfinished(
-                      preparation,
-                      isRecoveryAttempt = true,
-                      forceDecisionRevision = true,
-                      attempt = attempt + 1,
-                      authorize = authorize
-                    )
-                  else publish(preparation, refreshed, decision, attempt, authorize)
+                  if (refreshed.nonEmpty) complete(preparation.identity, StreamingTerminalOutcome.ErasurePending)
+                  else if (markerFingerprint(refreshed) != decision.deletionMarkerFingerprint)
+                    retryRevised(preparation, attempt + 1)
+                  else publish(preparation, refreshed, decision, attempt)
                 }
             }
           } yield result
       }
     } yield result
 
-  private val MaximumDecisionAttempts = 3
-
   private def publish(
       preparation: StreamingInputPreparation,
       markers: Vector[SubjectToken],
       decision: StreamingDecisionRevision,
-      attempt: Int,
-      authorize: F[Unit]
+      attempt: Int
   ): F[StreamingCoordinatorResult] =
-    for {
-      publication <- stages.publish(preparation, decision, markers)
-      result <- publication match {
-        case StreamingPublicationResult.Superseded =>
-          processUnfinished(
-            preparation,
-            isRecoveryAttempt = true,
-            forceDecisionRevision = true,
-            attempt = attempt + 1,
-            authorize = authorize
-          )
-        case StreamingPublicationResult.ErasurePending =>
-          complete(preparation.identity, StreamingTerminalOutcome.ErasurePending, authorize)
-        case StreamingPublicationResult.Published =>
-          F.realTimeInstant.flatMap { completedAt =>
-            (authorize *> journal
-              .commitPublished(decision, completedAt))
-              .as(StreamingCoordinatorResult(StreamingTerminalOutcome.Published, decision.candidateWatermark))
-          }
-      }
-    } yield result
+    stages.publish(preparation, decision, markers).flatMap {
+      case StreamingPublicationResult.Superseded     => retryRevised(preparation, attempt + 1)
+      case StreamingPublicationResult.ErasurePending =>
+        complete(preparation.identity, StreamingTerminalOutcome.ErasurePending)
+      case StreamingPublicationResult.Published => publishedResult(decision)
+    }
+
+  /** Re-runs the batch under a new decision revision after the deletion view or report generation moved. */
+  private def retryRevised(preparation: StreamingInputPreparation, attempt: Int): F[StreamingCoordinatorResult] =
+    processUnfinished(preparation, isRecoveryAttempt = true, forceDecisionRevision = true, attempt = attempt)
+
+  private def publishedResult(decision: StreamingDecisionRevision): F[StreamingCoordinatorResult] =
+    Async[F].realTimeInstant.flatMap { completedAt =>
+      (authorize *> journal.commitPublished(decision, completedAt))
+        .as(StreamingCoordinatorResult(StreamingTerminalOutcome.Published, decision.candidateWatermark))
+    }
 
   private def complete(
       identity: StreamingBatchIdentity,
-      outcome: StreamingTerminalOutcome,
-      authorize: F[Unit]
+      outcome: StreamingTerminalOutcome
   ): F[StreamingCoordinatorResult] =
-    F.realTimeInstant.flatMap { completedAt =>
+    Async[F].realTimeInstant.flatMap { completedAt =>
       (authorize *> journal.complete(identity, outcome, completedAt)).as(StreamingCoordinatorResult(outcome, None))
     }
 
@@ -347,13 +289,13 @@ final class StreamingBatchCoordinator[F[_]: Async](
       incoming: StreamingInputPreparation,
       existing: Option[StreamingJournalState]
   ): F[Unit] = existing match {
-    case None        => F.unit
+    case None        => Async[F].unit
     case Some(state) =>
       val stableIncoming = incoming.copy(
         observedAt = state.preparation.observedAt,
         priorWatermark = state.preparation.priorWatermark
       )
-      F.raiseWhen(stableIncoming != state.preparation)(
+      Async[F].raiseWhen(stableIncoming != state.preparation)(
         AnalyticsError.InvalidInput.one("streaming batch identity was reused with different immutable input evidence")
       )
   }
@@ -367,6 +309,6 @@ final class StreamingBatchCoordinator[F[_]: Async](
       if (outcome == StreamingTerminalOutcome.Published) decision.flatMap(_.candidateWatermark) else None
     )
 
-  private def fingerprint(value: String): String =
-    AnalyticsDigest.sha256Hex(value)
+  private def markerFingerprint(markers: Vector[SubjectToken]): String =
+    AnalyticsDigest.sha256Hex(markers.map(_.value).sorted.mkString("\n"))
 }

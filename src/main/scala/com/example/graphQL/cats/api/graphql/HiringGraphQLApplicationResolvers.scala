@@ -1,67 +1,42 @@
 package com.example.graphQL.cats.api.graphql
 
-import cats.effect.IO
-import cats.data.EitherT
 import com.example.graphQL.cats.api.graphql.HiringGraphQLInputs.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLResolverSupport.*
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.ApplicationId
-import com.example.graphQL.cats.domain.pagination.{ApplicationCursor, ApplicationEventCursor}
+import com.example.graphQL.cats.domain.pagination.{
+  ApplicationCursor,
+  ApplicationEventCursor,
+  ApplicationEventPageRequest,
+  ApplicationPageRequest
+}
 import sangria.schema.Context
-import java.time.Instant
 
 private[graphql] object HiringGraphQLApplicationResolvers {
   def myApplications(context: Context[RequestContext, Unit]): HiringGraphQLResult[Connection[Application]] =
     authenticated(context) { case (actor, hiring) =>
-      given CursorCodec.CursorKey = hiring.cursorKey
-      for {
-        now <- EitherT.liftF[IO, HiringGraphQLFailure, Instant](IO.realTimeInstant)
-        (pageRequest, requested) <- inputResult(
-          applicationPage(
-            context.arg(firstArgument),
-            context.arg(afterArgument),
-            context.arg(applicationStatusArgument),
-            cursor => CursorCodec.decode[ApplicationCursor](cursor, now)
-          )
-        )
-        values <- raiseOnUseCaseError(hiring.applicationService.myApplications(actor, pageRequest))
-      } yield applicationConnection(values, requested, now)
+      applicationConnection(context, hiring)(request =>
+        raiseOnUseCaseError(hiring.applicationService.myApplications(actor, request))
+      )
     }
 
   def jobApplications(context: Context[RequestContext, Unit]): HiringGraphQLResult[Connection[Application]] =
     authenticated(context) { case (actor, hiring) =>
-      given CursorCodec.CursorKey = hiring.cursorKey
-      val jobId = context.arg(jobIdArgument)
-      for {
-        now <- EitherT.liftF[IO, HiringGraphQLFailure, Instant](IO.realTimeInstant)
-        (pageRequest, requested) <- inputResult(
-          applicationPage(
-            context.arg(firstArgument),
-            context.arg(afterArgument),
-            context.arg(applicationStatusArgument),
-            cursor => CursorCodec.decode[ApplicationCursor](cursor, now)
-          )
-        )
-        values <- raiseOnUseCaseError(hiring.applicationService.jobApplications(actor, jobId, pageRequest))
-      } yield applicationConnection(values, requested, now)
+      applicationConnection(context, hiring)(request =>
+        raiseOnUseCaseError(hiring.applicationService.jobApplications(actor, context.arg(jobIdArgument), request))
+      )
     }
 
   def applicationHistory(context: Context[RequestContext, Unit]): HiringGraphQLResult[Connection[ApplicationEvent]] =
     authenticated(context) { case (actor, hiring) =>
-      given CursorCodec.CursorKey = hiring.cursorKey
-      val applicationId = context.arg(applicationIdArgument)
-      for {
-        now <- EitherT.liftF[IO, HiringGraphQLFailure, Instant](IO.realTimeInstant)
-        (pageRequest, requested) <- inputResult(
-          pageEvent(
-            context.arg(firstArgument),
-            context.arg(afterArgument),
-            cursor => CursorCodec.decode[ApplicationEventCursor](cursor, now)
-          )
-        )
-        values <- raiseOnUseCaseError(hiring.readModel.applicationHistory(actor, applicationId, pageRequest))
-      } yield eventConnection(values, requested, now)
+      paged[ApplicationEventCursor, ApplicationEventPageRequest, ApplicationEvent](
+        hiring,
+        context.arg(firstArgument),
+        context.arg(afterArgument)
+      )(ApplicationEventPageRequest.apply)(request =>
+        raiseOnUseCaseError(hiring.readModel.applicationHistory(actor, context.arg(applicationIdArgument), request))
+      )(event => ApplicationEventCursor(event.occurredAt, event.id))
     }
 
   def submitApplication(context: Context[RequestContext, Unit]): HiringGraphQLResult[MutationOutcome[Application]] =
@@ -132,20 +107,14 @@ private[graphql] object HiringGraphQLApplicationResolvers {
       )
     }
 
-  private def applicationConnection(
-      values: List[Application],
-      requested: Int,
-      now: Instant
-  )(using CursorCodec.CursorKey): Connection[Application] =
-    connection(values, requested)(application =>
-      CursorCodec.encode(ApplicationCursor(application.createdAt, application.id), now)
+  private def applicationConnection(context: Context[RequestContext, Unit], hiring: HiringGraphQLServices)(
+      fetch: ApplicationPageRequest => HiringGraphQLResult[List[Application]]
+  ): HiringGraphQLResult[Connection[Application]] =
+    paged[ApplicationCursor, ApplicationPageRequest, Application](
+      hiring,
+      context.arg(firstArgument),
+      context.arg(afterArgument)
+    )((cursor, size) => ApplicationPageRequest(context.arg(applicationStatusArgument), cursor, size))(fetch)(
+      application => ApplicationCursor(application.createdAt, application.id)
     )
-
-  private def eventConnection(
-      values: List[ApplicationEvent],
-      requested: Int,
-      now: Instant
-  )(using CursorCodec.CursorKey): Connection[ApplicationEvent] =
-    connection(values, requested)(event => CursorCodec.encode(ApplicationEventCursor(event.occurredAt, event.id), now))
-
 }

@@ -1,7 +1,5 @@
 package com.example.hiring.analytics.adapter.mongo
 
-import com.example.hiring.analytics.config.AnalyticsPositiveInt.*
-
 import com.example.hiring.analytics.config.AnalyticsOperationalSettings
 import com.example.hiring.analytics.domain.AnalyticsReportOutput
 import com.example.hiring.analytics.domain.RangeFingerprint
@@ -642,7 +640,7 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
                 Updates.set(
                   AnalyticsCollections.Fields.ExpiresAt,
                   Date.from(
-                    completedAt.plus(java.time.Duration.ofDays(operational.retention.deletionMarkerDays.value.toLong))
+                    completedAt.plus(java.time.Duration.ofDays(operational.retention.deletionMarkerDays.toLong))
                   )
                 ),
                 Updates.unset(AnalyticsCollections.Fields.LeaseToken),
@@ -701,7 +699,7 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
       references: Set[RunId] => F[Set[RunId]],
       observedAt: Instant
   ): F[Long] = rethrow(withCollections { collections =>
-    val cutoff = observedAt.minusSeconds(operational.retention.deletionMarkerDays.value.toLong * 86400L)
+    val cutoff = operational.retention.deletionMarkerCutoff(observedAt)
     val eligible = Filters.and(
       Filters.or(
         Filters.eq(AnalyticsCollections.Fields.State, "Published"),

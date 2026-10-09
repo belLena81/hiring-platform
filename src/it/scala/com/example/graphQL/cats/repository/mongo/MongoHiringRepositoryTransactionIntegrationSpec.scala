@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import cats.data.EitherT
 import com.example.graphQL.cats.AccountValueFixtures.email
 import cats.effect.{Deferred, IO, Outcome, Ref, Resource}
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField}
@@ -353,7 +354,7 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends MongoIntegrationSu
                 recruiterId.value.toString,
                 IdempotencyRequest.fromCanonicalInput(UUID.randomUUID(), receiptRolledBackJob.id.value.toString),
                 value => MutationEntityReference("Job", value.id.value.toString),
-                _ => UseCaseIO.pure(receiptRolledBackJob)
+                _ => EitherT.rightT(receiptRolledBackJob)
               ) { context =>
                 UseCaseIO
                   .repository(jobs.createWithEvents(receiptRolledBackJob, now, List(receiptDuplicateEvent), context))

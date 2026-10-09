@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.service.protocol
 
+import cats.data.EitherT
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId}
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, ApplicationStatus, Job}
@@ -109,7 +110,7 @@ trait SearchUseCases {
   ): UseCaseIO[List[RankedCandidate]] =
     if (query.isEmpty && filters == com.example.graphQL.cats.service.search.CandidateMatchFilters.empty)
       candidateMatches(actor, jobId, first, searchId)
-    else UseCaseIO.left(UseCaseError.Search(SearchError.VectorSearchUnavailable))
+    else EitherT.leftT(UseCaseError.Search(SearchError.VectorSearchUnavailable))
 }
 
 trait InteractionUseCases {

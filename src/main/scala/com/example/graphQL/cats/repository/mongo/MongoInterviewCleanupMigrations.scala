@@ -57,7 +57,7 @@ private[mongo] object MongoInterviewCleanupMigrations {
       case (Some(id), Some(_))
           if knownLegacyState && scala.util.Try(UUID.fromString(id)).toOption.exists(_.toString == id) =>
         for {
-          fence <- fences.find(Filters.eq(MongoFields.Id, id)).first
+          fence <- MongoSessionOperations.findById(IO.pure(fences), None, id)
           ids <- snapshot(run, fence)
           update <- queue.updateOne(
             Filters.and(Filters.eq(MongoFields.Id, id), legacy),

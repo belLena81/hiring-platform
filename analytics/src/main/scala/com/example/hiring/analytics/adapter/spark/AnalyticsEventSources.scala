@@ -143,13 +143,7 @@ object KafkaOffsetRangeSource {
         .blocking {
           val topic = AnalyticsTopic.unwrap(manifest.offsetRanges.head.topic)
           val partitions = Option(client.partitionsFor(topic)).toVector.flatMap(_.asScala).map(_.partition()).toSet
-          def missing(range: PartitionOffsetRange) =
-            AnalyticsError.MissingOffsetRange(
-              AnalyticsTopic.unwrap(range.topic),
-              range.partition,
-              range.endOffsetExclusive - range.startOffset,
-              0L
-            )
+          def missing(range: PartitionOffsetRange) = AnalyticsOffsetRanges.missing(range, 0L)
           manifest.offsetRanges.find(range => !partitions.contains(range.partition)).map(missing).toLeft(()).flatMap {
             _ =>
               val requested = manifest.offsetRanges

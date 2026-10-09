@@ -117,30 +117,20 @@ class AppConfigSpec extends FunSuite {
       |}
       |""".stripMargin
 
-  private val defaultVectorSearch =
-    VectorSearchConfig(
-      enabled = false,
-      voyageApiKey = None,
-      voyageEndpoint = "https://api.voyageai.com/v1/embeddings",
-      voyageModel = "voyage-4-lite",
-      voyageDimension = 1024,
-      queueSize = 128,
-      parallelism = 4,
-      timeoutMillis = 5000,
-      retryAttempts = 3,
-      retryDelayMillis = 250,
-      jobVectorIndex = "jobs_embedding_vector",
-      candidateVectorIndex = "candidates_embedding_vector_match_v1",
-      jobLexicalIndex = "jobs_text_search",
-      candidateLexicalIndex = "candidates_text_search",
-      fusionStrategy = com.example.graphQL.cats.domain.search.SearchFusionStrategy.ApplicationRrf,
-      rerankEnabled = false,
-      rerankModel = "rerank-2.5-lite",
-      indexReadyTimeoutMillis = 120000,
-      indexPollIntervalMillis = 1000,
-      numCandidates = 100,
-      branchResultLimit = 100
-    )
+  private val defaultVectorSearch: VectorSearchConfig = VectorSearchConfig.Disabled
+
+  /** The default configuration with vector search enabled; `extra` overrides are appended. */
+  private def enabledVectorSearch(extra: String = ""): VectorSearchConfig.Enabled =
+    AppConfigFixtures
+      .fromConfig(
+        defaultConfig + "vector-search.enabled = true\nvector-search.voyage.api-key = \"synthetic-voyage-key\"\n" + extra,
+        Map.empty
+      )
+      .map(_.vectorSearch) match {
+      case Right(enabled: VectorSearchConfig.Enabled) => enabled
+      case other                                      => fail(s"expected enabled vector search, got $other")
+    }
+
   private val defaultJwtAuth =
     JwtAuthConfig("01234567890123456789012345678901", "hiring-platform-local", "hiring-graphql-api")
   private val defaultPasswordHash =
@@ -675,7 +665,7 @@ class AppConfigSpec extends FunSuite {
           defaultJwtAuth,
           defaultPasswordHash,
           defaultAuthRateLimit,
-          defaultVectorSearch.copy(enabled = false),
+          defaultVectorSearch,
           defaultKafka,
           interviewActionRateLimit = InterviewActionRateLimitConfig(60, 30, 10000)
         )
@@ -688,14 +678,8 @@ class AppConfigSpec extends FunSuite {
       AppConfigFixtures.fromConfig(defaultConfig + "vector-search.enabled = true\n", Map.empty),
       ConfigError.InvalidVoyageApiKey
     )
-    val result = AppConfigFixtures.fromConfig(
-      defaultConfig +
-        """vector-search.enabled = true
-        |vector-search.voyage.api-key = ${VOYAGE_API_KEY}
-        |""".stripMargin,
-      Map("VOYAGE_API_KEY" -> "synthetic-voyage-key")
-    )
-    assertEquals(result.map(_.vectorSearch.voyageApiKey), Right(Some("synthetic-voyage-key")))
+    assertEquals(enabledVectorSearch().voyage.apiKey, "synthetic-voyage-key")
+    assert(!enabledVectorSearch().voyage.toString.contains("synthetic-voyage-key"))
   }
 
   test("HGQL-AC02 JWT auth config requires a strong secret") {
@@ -875,8 +859,8 @@ class AppConfigSpec extends FunSuite {
 
   test("branch result limit defaults to num-candidates and stays above maximum requested page size") {
     assertEquals(
-      AppConfigFixtures.fromConfig(defaultConfig, Map.empty).map(_.vectorSearch.branchResultLimit),
-      Right(100)
+      enabledVectorSearch().branchResultLimit,
+      100
     )
     assert(AppConfigFixtures.fromConfig(defaultConfig + "vector-search.branch-result-limit = 100\n", Map.empty).isRight)
     assertContainsError(
@@ -934,8 +918,8 @@ class AppConfigSpec extends FunSuite {
 
   test("durable embedding settings name each violated field and the retry window") {
     assertEquals(
-      AppConfigFixtures.fromConfig(defaultConfig, Map.empty).map(_.vectorSearch.durableRetryAttempts),
-      Right(8)
+      enabledVectorSearch().embedding.durableRetryAttempts,
+      8
     )
     List(
       ("durable-retry-attempts = 0", ConfigError.InvalidEmbeddingDurableRetryAttempts),

@@ -129,6 +129,20 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
       Fakes(receipts, quarantines, quarantineState)
     }
 
+  private def durable(
+      config: KafkaConfig,
+      receipts: ConsumerReceiptRepository,
+      quarantine: EventQuarantineRepository,
+      topic: String,
+      partition: Int,
+      offset: Long,
+      bytes: Option[Array[Byte]]
+  ): IO[Boolean] =
+    OperationalEventKafkaRuntime
+      .recordDurably(config, receipts, quarantine, topic, partition, offset, bytes)
+      .value
+      .map(_.isRight)
+
   test("tombstones quarantine safely before committing and failures retain the offset") {
     fakes.flatMap { values =>
       val failing = new EventQuarantineRepository {
@@ -136,7 +150,7 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
           RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
       }
       for {
-        success <- OperationalEventKafkaRuntime.handleRecord(
+        success <- durable(
           config,
           values.receipts,
           values.quarantines,
@@ -145,7 +159,7 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
           1L,
           None
         )
-        failure <- OperationalEventKafkaRuntime.handleRecord(
+        failure <- durable(
           config,
           values.receipts,
           failing,
@@ -168,7 +182,7 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
   test("malformed records commit after durable quarantine") {
     fakes.flatMap { values =>
       for {
-        malformedCommit <- OperationalEventKafkaRuntime.handleRecord(
+        malformedCommit <- durable(
           config,
           values.receipts,
           values.quarantines,
@@ -188,7 +202,7 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
   test("empty non-null records retain a distinct malformed quarantine reason") {
     fakes.flatMap { values =>
       for {
-        accepted <- OperationalEventKafkaRuntime.handleRecord(
+        accepted <- durable(
           config,
           values.receipts,
           values.quarantines,
@@ -212,16 +226,15 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
         com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Left(RepositoryError.Unavailable)))
     }
     fakes.flatMap { values =>
-      OperationalEventKafkaRuntime
-        .handleRecord(
-          config,
-          values.receipts,
-          failedQuarantine,
-          config.topic,
-          0,
-          2L,
-          Some("not-json".getBytes)
-        )
+      durable(
+        config,
+        values.receipts,
+        failedQuarantine,
+        config.topic,
+        0,
+        2L,
+        Some("not-json".getBytes)
+      )
         .map(commit => assert(!commit))
     }
   }
@@ -231,8 +244,10 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
       processed <- cats.effect.Ref.of[IO, Vector[Long]](Vector.empty)
       committed <- cats.effect.Ref.of[IO, Vector[Long]](Vector.empty)
       result <- List(10L, 11L).traverse_ { offset =>
-        OperationalEventKafkaRuntime.processRecordBeforeCommit("hiring.events", 0, offset)(
-          processed.update(_ :+ offset).as(offset != 10L)
+        OperationalEventKafkaRuntime.processRecord("hiring.events", 0, offset)(
+          RepositoryIO
+            .lift(processed.update(_ :+ offset))
+            .flatMap(_ => RepositoryIO.fromEither(Either.cond(offset != 10L, (), RepositoryError.Unavailable)))
         )(committed.update(_ :+ offset))
       }.attempt
       handled <- processed.get
@@ -249,7 +264,7 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
       val first = event(OperationalEventType.JOB_CREATED)
       val independent = event(OperationalEventType.JOB_UPDATED)
       for {
-        firstCommit <- OperationalEventKafkaRuntime.handleRecord(
+        firstCommit <- durable(
           config,
           values.receipts,
           values.quarantines,
@@ -258,7 +273,7 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
           4L,
           Some(OperationalEventJson.bytes(first))
         )
-        duplicateCommit <- OperationalEventKafkaRuntime.handleRecord(
+        duplicateCommit <- durable(
           config,
           values.receipts,
           values.quarantines,
@@ -267,7 +282,7 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
           5L,
           Some(OperationalEventJson.bytes(first))
         )
-        independentCommit <- OperationalEventKafkaRuntime.handleRecord(
+        independentCommit <- durable(
           config,
           values.receipts,
           values.quarantines,
@@ -300,16 +315,15 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
           ): RepositoryIO[Boolean] =
             RepositoryIO.fromEither(Left(error))
         }
-        OperationalEventKafkaRuntime
-          .handleRecord(
-            config,
-            receipts,
-            values.quarantines,
-            config.topic,
-            0,
-            7L,
-            Some(OperationalEventJson.bytes(event(OperationalEventType.JOB_CREATED)))
-          )
+        durable(
+          config,
+          receipts,
+          values.quarantines,
+          config.topic,
+          0,
+          7L,
+          Some(OperationalEventJson.bytes(event(OperationalEventType.JOB_CREATED)))
+        )
           .map(commit => assert(!commit))
       }
     }

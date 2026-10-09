@@ -89,6 +89,16 @@ final class AnalyticsReportingServiceSpec extends CatsEffectSuite {
       }
   }
 
+  test("a non-singleton Admin cannot read aggregate analytics") {
+    val duplicate = User(adminId, None, "Admin", UserRole.Admin, None, now, adminSingleton = false)
+    val service =
+      new AnalyticsReportingService(new TestUsers(Map(adminId -> duplicate)), new TestReports(Some(snapshot)))
+    service.report(ActorContext(adminId, UserRole.Admin), AnalyticsPeriod(now.minusSeconds(60), now)).value.map {
+      result =>
+        assertEquals(result, Left(UseCaseError.Authentication(AuthenticationError.Unauthorized)))
+    }
+  }
+
   test("a deleted Admin cannot read aggregate analytics") {
     val deletedAdmin = User(adminId, None, "Admin", UserRole.Admin, None, now, adminSingleton = true).copy(
       accountStatus = AccountStatus.Deleted,

@@ -1,6 +1,8 @@
 package com.example.graphQL.cats.domain
 
-import com.example.graphQL.cats.domain.model.{EmailAddress, PasswordHash}
+import cats.data.NonEmptyList
+import com.example.graphQL.cats.domain.error.DomainValidationError.*
+import com.example.graphQL.cats.domain.model.{Credentials, EmailAddress, PasswordHash}
 import munit.FunSuite
 import scala.compiletime.testing.typeCheckErrors
 
@@ -9,6 +11,18 @@ final class AccountValuesSpec extends FunSuite {
     assertEquals(EmailAddress.from("  person@example.com  ").map(_.value), Right("person@example.com"))
     assert(EmailAddress.from(" ").isLeft)
     assert(EmailAddress.from("x" * 257).isLeft)
+  }
+
+  test("credentials normalize the name and accumulate name and password violations") {
+    assertEquals(Credentials.validate("  Ｌena ", "twelve-bytes").toEither, Right("Lena"))
+    assertEquals(
+      Credentials.validate(" ", "short").toEither,
+      Left(NonEmptyList.of(BlankField("name"), PasswordTooShort(12, 5)))
+    )
+    assertEquals(
+      Credentials.validate("a" * 257, "p" * 1025).toEither,
+      Left(NonEmptyList.of(TextTooLong("name", 256, 257), ByteLengthExceeded("password", 1024, 1025)))
+    )
   }
 
   test("password hashes preserve the encoded value across their typed boundary") {
@@ -27,7 +41,9 @@ final class AccountValuesSpec extends FunSuite {
       val passwordHash: PasswordHash = "encoded-hash"
     """)
     val hashToEmail = typeCheckErrors("""
-      import com.example.graphQL.cats.domain.model.{EmailAddress, PasswordHash}
+      import cats.data.NonEmptyList
+import com.example.graphQL.cats.domain.error.DomainValidationError.*
+import com.example.graphQL.cats.domain.model.{Credentials, EmailAddress, PasswordHash}
       val passwordHash = PasswordHash.fromEncoded("encoded-hash")
       val email: EmailAddress = passwordHash
     """)

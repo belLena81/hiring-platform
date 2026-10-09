@@ -43,7 +43,7 @@ object AnalyticsReplayCoordinate {
 final case class AnalyticsLateFactReplayRequest private (
     requestId: AnalyticsReplayRequestId,
     coordinates: Vector[AnalyticsReplayCoordinate],
-    selectionDigest: String
+    selectionDigest: RangeFingerprint
 )
 
 object AnalyticsLateFactReplayRequest {
@@ -53,8 +53,22 @@ object AnalyticsLateFactReplayRequest {
       requestId: String,
       coordinates: Vector[(String, Int, Long)],
       configuredMaximum: Int = MaximumCoordinates
+  ): ValidatedNec[String, AnalyticsLateFactReplayRequest] =
+    build(AnalyticsReplayRequestId.from(requestId).toValidatedNec, coordinates, configuredMaximum)
+
+  @scala.annotation.targetName("fromRequestId")
+  def from(
+      requestId: AnalyticsReplayRequestId,
+      coordinates: Vector[(String, Int, Long)],
+      configuredMaximum: Int
+  ): ValidatedNec[String, AnalyticsLateFactReplayRequest] =
+    build(requestId.validNec, coordinates, configuredMaximum)
+
+  private def build(
+      validId: ValidatedNec[String, AnalyticsReplayRequestId],
+      coordinates: Vector[(String, Int, Long)],
+      configuredMaximum: Int
   ): ValidatedNec[String, AnalyticsLateFactReplayRequest] = {
-    val validId = AnalyticsReplayRequestId.from(requestId).toValidatedNec
     val validCoordinates = coordinates.traverse { case (topic, partition, offset) =>
       AnalyticsReplayCoordinate.from(topic, partition, offset)
     }
@@ -99,7 +113,7 @@ object AnalyticsLateFactReplayRequest {
           AnalyticsLateFactReplayRequest(
             id,
             selected,
-            AnalyticsDigest.sha256Hex(canonical)
+            RangeFingerprint.ofSha256(canonical)
           ).validNec
       }
   }

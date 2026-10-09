@@ -435,7 +435,7 @@ final class HiringAnalyticsStreamingRecoveryIntegrationSpec extends AnalyticsMon
         result <- harness
           .streamingStages(frame)
           .use(stages =>
-            new StreamingBatchCoordinator[IO](store, harness.markers, stages, harness.checkpoint(store))
+            new StreamingBatchCoordinator[IO](store, harness.markers, stages, harness.checkpoint(store), IO.unit)
               .process(preparation)
           )
       } yield result

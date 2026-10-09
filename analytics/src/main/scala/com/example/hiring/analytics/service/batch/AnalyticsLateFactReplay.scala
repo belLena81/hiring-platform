@@ -2,7 +2,8 @@ package com.example.hiring.analytics.service.batch
 
 import cats.effect.{Async, Clock}
 import cats.syntax.all.*
-import com.example.hiring.analytics.config.AnalyticsPositiveInt
+import io.github.iltotore.iron.*
+import com.example.hiring.analytics.config.AnalyticsRetentionSettings
 import com.example.hiring.analytics.domain.{
   AnalyticsLateFactReplayRequest,
   AnalyticsReplayRequestId,
@@ -74,11 +75,10 @@ final class AnalyticsLateFactReplayService[F[_]: Async](
     stages: AnalyticsLateFactReplayStages[F],
     reportPublisher: AnalyticsReportPublisher[F],
     lakehouseLock: AnalyticsLakehouseLock[F],
-    publishedSnapshotDays: AnalyticsPositiveInt,
+    retention: AnalyticsRetentionSettings,
     clock: Clock[F]
 ) {
   import AnalyticsLateFactReplayService.*
-  private val F = Async[F]
   private val now = clock.realTimeInstant
 
   def run(request: AnalyticsLateFactReplayRequest): F[AnalyticsLateFactReplayOutcome] =
@@ -88,7 +88,7 @@ final class AnalyticsLateFactReplayService[F[_]: Async](
         _ <- existing.traverse_(validateRecord(request, _))
         outcome <- existing match {
           case Some(record) if record.progress == AnalyticsLateFactReplayProgress.Published =>
-            F.pure(AnalyticsLateFactReplayOutcome.AlreadyPublished)
+            Async[F].pure(AnalyticsLateFactReplayOutcome.AlreadyPublished)
           case Some(record) => processAttempt(request, record)
           case None         =>
             for {
@@ -149,10 +149,10 @@ final class AnalyticsLateFactReplayService[F[_]: Async](
         if (beforeReport.toSet != beforePublish.toSet && refreshes + 1 < MaximumPublicationAttempts)
           rebuildAndPublish(request, record, refreshes + 1)
         else if (beforeReport.toSet != beforePublish.toSet)
-          F.raiseError[AnalyticsLateFactReplayOutcome](AnalyticsError.LateFactReplayRejected)
-        else if (beforePublish.nonEmpty) F.pure(AnalyticsLateFactReplayOutcome.ErasurePending)
+          Async[F].raiseError[AnalyticsLateFactReplayOutcome](AnalyticsError.LateFactReplayRejected)
+        else if (beforePublish.nonEmpty) Async[F].pure(AnalyticsLateFactReplayOutcome.ErasurePending)
         else {
-          val expiresAt = observedAt.plusSeconds(publishedSnapshotDays.toLong * 86400L)
+          val expiresAt = retention.publishedSnapshotExpiry(observedAt)
           reportPublisher
             .publish(record.reservation, report, expiresAt)
             .as(AnalyticsLateFactReplayOutcome.Published)
@@ -161,7 +161,7 @@ final class AnalyticsLateFactReplayService[F[_]: Async](
             }
             .flatTap {
               case AnalyticsLateFactReplayOutcome.Published => now.flatMap(journal.markPublished(request, _))
-              case _                                        => F.unit
+              case _                                        => Async[F].unit
             }
         }
     } yield outcome
@@ -171,7 +171,7 @@ final class AnalyticsLateFactReplayService[F[_]: Async](
       record: AnalyticsLateFactReplayRecord
   ): F[AnalyticsLateFactReplayOutcome] =
     if (record.publicationAttempt + 1 >= MaximumPublicationAttempts)
-      F.raiseError(AnalyticsError.LateFactReplayRejected)
+      Async[F].raiseError(AnalyticsError.LateFactReplayRejected)
     else
       for {
         observedAt <- now
@@ -179,7 +179,7 @@ final class AnalyticsLateFactReplayService[F[_]: Async](
         _ <- validateSelection(request, observedAt)
         next <- journal.advancePublicationAttempt(request, record.publicationAttempt, reservation, observedAt)
         _ <- validateRecord(request, next)
-        _ <- F.raiseUnless(next.publicationAttempt == record.publicationAttempt + 1)(
+        _ <- Async[F].raiseUnless(next.publicationAttempt == record.publicationAttempt + 1)(
           AnalyticsError.LateFactReplayRequestConflict
         )
         outcome <- processAttempt(request, next)
@@ -196,35 +196,28 @@ final class AnalyticsLateFactReplayService[F[_]: Async](
       request: AnalyticsLateFactReplayRequest,
       attempt: Int,
       observedAt: Instant
-  ): F[AnalyticsReportReservation] =
-    F.fromEither(reservationIdentityFor(request, attempt)).flatMap { case (runId, fingerprint) =>
-      reportPublisher.reservePinned(runId, fingerprint, observedAt)
-    }
+  ): F[AnalyticsReportReservation] = {
+    val (runId, fingerprint) = reservationIdentityFor(request, attempt)
+    reportPublisher.reservePinned(runId, fingerprint, observedAt)
+  }
 
-  private def validateRecord(request: AnalyticsLateFactReplayRequest, record: AnalyticsLateFactReplayRecord): F[Unit] =
-    F.fromEither(reservationIdentityFor(request, record.publicationAttempt)).flatMap { case (runId, fingerprint) =>
-      F.raiseUnless(
-        record.selectionDigest == request.selectionDigest && record.publicationAttempt >= 0 &&
-          record.publicationAttempt < MaximumPublicationAttempts && record.reservation.runId == runId &&
-          record.reservation.rangeFingerprint == fingerprint && record.reservation.generation >= 0L &&
-          record.reservation.revision >= 0L
-      )(AnalyticsError.LateFactReplayRequestConflict)
-    }
+  private def validateRecord(
+      request: AnalyticsLateFactReplayRequest,
+      record: AnalyticsLateFactReplayRecord
+  ): F[Unit] = {
+    val (runId, fingerprint) = reservationIdentityFor(request, record.publicationAttempt)
+    Async[F].raiseUnless(
+      record.selectionDigest == request.selectionDigest.value && record.publicationAttempt >= 0 &&
+        record.publicationAttempt < MaximumPublicationAttempts && record.reservation.runId == runId &&
+        record.reservation.rangeFingerprint == fingerprint && record.reservation.generation >= 0L &&
+        record.reservation.revision >= 0L
+    )(AnalyticsError.LateFactReplayRequestConflict)
+  }
 }
 
 private[analytics] object AnalyticsLateFactReplayService {
   val MaximumPublicationAttempts: Int = 3
 
-  def reservationIdentityFor(
-      request: AnalyticsLateFactReplayRequest,
-      attempt: Int
-  ): Either[AnalyticsError, (RunId, RangeFingerprint)] =
-    for {
-      runId <- RunId
-        .from(s"late-replay-${request.requestId.value}-$attempt")
-        .leftMap(_ => AnalyticsError.InvalidConfiguration("late-fact replay request identity is invalid"))
-      fingerprint <- RangeFingerprint
-        .from(request.selectionDigest)
-        .leftMap(_ => AnalyticsError.InvalidConfiguration("late-fact replay selection digest is invalid"))
-    } yield runId -> fingerprint
+  def reservationIdentityFor(request: AnalyticsLateFactReplayRequest, attempt: Int): (RunId, RangeFingerprint) =
+    RunId.prefixed("late-replay-", s"${request.requestId.value}-$attempt") -> request.selectionDigest
 }

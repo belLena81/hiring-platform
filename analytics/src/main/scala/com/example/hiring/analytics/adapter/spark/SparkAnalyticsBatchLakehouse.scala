@@ -11,8 +11,7 @@ import com.example.hiring.analytics.service.batch.{
 
 import cats.effect.{Async, Resource}
 import cats.syntax.all.*
-import org.apache.spark.sql.{DataFrame, Row, SparkSession}
-import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.storage.StorageLevel
 
 import java.time.Instant
@@ -55,18 +54,9 @@ private[analytics] final class SparkAnalyticsBatchLakehouse[F[_]: Async](
     } yield report
 
   private def cachedMarkers(tokens: Vector[SubjectToken]): Resource[F, DataFrame] =
-    Resource.make(execution {
-      import scala.jdk.CollectionConverters.*
-      val schema = StructType(
-        Seq(
-          org.apache.spark.sql.types
-            .StructField(Columns.SubjectToken, org.apache.spark.sql.types.StringType, nullable = false)
-        )
-      )
-      spark
-        .createDataFrame(tokens.map(token => Row(token.value)).asJava, schema)
-        .persist(StorageLevel.MEMORY_AND_DISK)
-    })(frame => execution(frame.unpersist(blocking = true)).void)
+    Resource.make(execution(AnalyticsTableSchemas.markerFrame(spark, tokens).persist(StorageLevel.MEMORY_AND_DISK)))(
+      frame => execution(frame.unpersist(blocking = true)).void
+    )
 
   private def validateMarkerColumns(frame: DataFrame): F[Unit] =
     execution(frame.columns.toVector).flatMap { columns =>

@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.api.graphql
 
+import cats.data.EitherT
 import cats.effect.IO
 import com.example.graphQL.cats.api.admission.AuthRateLimiter.Operation
 import com.example.graphQL.cats.api.graphql.HiringGraphQLInputs.*
@@ -8,9 +9,8 @@ import com.example.graphQL.cats.api.graphql.HiringGraphQLResolverSupport.*
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.error.DomainValidationError
 import com.example.graphQL.cats.service.{AccountError, UseCaseError}
-import com.example.graphQL.cats.service.protocol.{AccountProfileInput, LoginInput, SignUpInput, UseCaseIO}
+import com.example.graphQL.cats.service.protocol.{AccountProfileInput, LoginInput, SignUpInput}
 import sangria.schema.Context
-import java.time.Instant
 
 private[graphql] object HiringGraphQLAccountResolvers {
   def accountMe(context: Context[RequestContext, Unit]): HiringGraphQLResult[User] =
@@ -19,9 +19,9 @@ private[graphql] object HiringGraphQLAccountResolvers {
   def signUp(context: Context[RequestContext, Unit]): HiringGraphQLResult[MutationOutcome[AuthSuccess]] =
     rateLimited(context, Operation.SignUp).flatMap { _ =>
       val input = context.arg(signUpInputArgument)
-      publicMutation(context) { hiring =>
+      withHiring(context) { hiring =>
         signUpProfile(input).fold(
-          error => mutationResult(UseCaseIO.left(error)),
+          error => mutationResult(EitherT.leftT(error)),
           profile =>
             mutationResult(
               hiring.accountService
@@ -38,7 +38,7 @@ private[graphql] object HiringGraphQLAccountResolvers {
   def login(context: Context[RequestContext, Unit]): HiringGraphQLResult[MutationOutcome[AuthSuccess]] =
     rateLimited(context, Operation.Login).flatMap { _ =>
       val input = context.arg(loginInputArgument)
-      publicMutation(context) { hiring =>
+      withHiring(context) { hiring =>
         mutationResult(
           hiring.accountService
             .login(
@@ -54,7 +54,7 @@ private[graphql] object HiringGraphQLAccountResolvers {
     authenticated(context) { case (actor, hiring) =>
       val input = context.arg(updateProfileInputArgument)
       updateProfileInput(actor.role, input).fold(
-        error => mutationResult(UseCaseIO.left(error)),
+        error => mutationResult(EitherT.leftT(error)),
         profile =>
           mutationResult(
             hiring.accountService.updateMyProfile(
@@ -67,72 +67,34 @@ private[graphql] object HiringGraphQLAccountResolvers {
     }
 
   def deleteMyAccount(context: Context[RequestContext, Unit]): HiringGraphQLResult[MutationOutcome[DeletionReceipt]] =
-    cats.data.EitherT
-      .liftF[IO, HiringGraphQLFailure, com.example.graphQL.cats.service.ProbeResult](
-        context.ctx.hiringAvailable
-      )
-      .flatMap {
-        case com.example.graphQL.cats.service.ProbeResult.Ready =>
-          context.ctx.deletionActor.flatMap { actor =>
-            val input = context.arg(deleteMyAccountInputArgument)
-            mutationResult(
-              context.ctx.hiring.accountService
-                .deleteMyAccount(idempotencyRequest(input.idempotencyKey, input.idempotencyPayload), actor)
-                .semiflatTap(_ => context.ctx.invalidateViewer)
-                .map(receiptId => DeletionReceipt(receiptId, AccountDeletionStatus.Pending))
-            )
-          }
-        case _ =>
-          cats.data.EitherT.leftT(
-            HiringGraphQLFailure.UseCase(
-              UseCaseError.Availability(
-                com.example.graphQL.cats.service.AvailabilityError.ServiceNotReady
-              )
-            )
-          )
+    withHiring(context)(hiring =>
+      context.ctx.deletionActor.flatMap { actor =>
+        val input = context.arg(deleteMyAccountInputArgument)
+        mutationResult(
+          hiring.accountService
+            .deleteMyAccount(idempotencyRequest(input.idempotencyKey, input.idempotencyPayload), actor)
+            .semiflatTap(_ => context.ctx.invalidateViewer)
+            .map(receiptId => DeletionReceipt(receiptId, AccountDeletionStatus.Pending))
+        )
       }
+    )
 
   def accountDeletionStatus(context: Context[RequestContext, Unit]): HiringGraphQLResult[AccountDeletionStatus] =
-    cats.data.EitherT
-      .liftF[IO, HiringGraphQLFailure, com.example.graphQL.cats.service.ProbeResult](
-        context.ctx.hiringAvailable
+    withHiring(context)(hiring =>
+      context.ctx.deletionActor.flatMap(actor =>
+        raiseOnUseCaseError(hiring.accountService.accountDeletionStatus(actor, context.arg(deletionReceiptIdArgument)))
       )
-      .flatMap {
-        case com.example.graphQL.cats.service.ProbeResult.Ready =>
-          context.ctx.deletionActor.flatMap { actor =>
-            raiseOnUseCaseError(
-              context.ctx.hiring.accountService.accountDeletionStatus(actor, context.arg(deletionReceiptIdArgument))
-            )
-          }
-        case _ =>
-          cats.data.EitherT.leftT(
-            HiringGraphQLFailure.UseCase(
-              UseCaseError.Availability(
-                com.example.graphQL.cats.service.AvailabilityError.ServiceNotReady
-              )
-            )
-          )
-      }
+    )
 
   def users(context: Context[RequestContext, Unit]): HiringGraphQLResult[Connection[User]] =
     authenticated(context) { case (actor, hiring) =>
-      given CursorCodec.CursorKey = hiring.cursorKey
-      val requested = context.arg(firstArgument)
       val status = context.arg(userStatusArgument).getOrElse(AccountStatus.Active)
       val role = context.arg(userRoleArgument)
-      for {
-        now <- cats.data.EitherT.liftF[IO, HiringGraphQLFailure, Instant](IO.realTimeInstant)
-        (request, pageSize) <- inputResult(
-          userPage(
-            requested,
-            context.arg(afterArgument),
-            status,
-            role,
-            cursor => CursorCodec.decode[UserCursor](cursor, now)
-          )
-        )
-        values <- raiseOnUseCaseError(hiring.accountService.listUsers(actor, request))
-      } yield userConnection(values, pageSize, now)
+      paged[UserCursor, UserPageRequest, User](hiring, context.arg(firstArgument), context.arg(afterArgument))(
+        (cursor, size) => UserPageRequest(status, role, cursor, size)
+      )(request => raiseOnUseCaseError(hiring.accountService.listUsers(actor, request)))(user =>
+        UserCursor(user.createdAt, user.id)
+      )
     }
 
   private def updateProfileInput(
@@ -216,9 +178,4 @@ private[graphql] object HiringGraphQLAccountResolvers {
   private def authSuccess(result: (User, AccountToken)): AuthSuccess = result match {
     case (user, token) => AuthSuccess(user, token.value, token.expiresAt)
   }
-
-  private def userConnection(values: List[User], requested: Int, now: Instant)(using
-      CursorCodec.CursorKey
-  ): Connection[User] =
-    connection(values, requested)(user => CursorCodec.encode(UserCursor(user.createdAt, user.id), now))
 }

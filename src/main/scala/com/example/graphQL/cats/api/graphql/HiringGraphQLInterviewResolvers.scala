@@ -12,7 +12,6 @@ import com.example.graphQL.cats.service.application.{
   InterviewActionIO,
   InterviewSchedulingService
 }
-import com.example.graphQL.cats.service.protocol.UseCaseIO
 import sangria.schema.Context
 
 private[graphql] object HiringGraphQLInterviewResolvers {
@@ -167,7 +166,7 @@ private[graphql] object HiringGraphQLInterviewResolvers {
       case Left(InterviewActionError.UseCase(error)) if GraphQLFailureCatalog.isAuthorizationRefusal(error) =>
         val failure = toGraphQLFailure(error)
         IO.pure(Right(DomainError(failure.code, failure.message)))
-      case Left(InterviewActionError.UseCase(error))  => mutationResult(UseCaseIO.left(error)).value
+      case Left(InterviewActionError.UseCase(error))  => mutationResult(EitherT.leftT(error)).value
       case Left(InterviewActionError.Workflow(error)) =>
         val failure = GraphQLFailureCatalog.classifyInterviewRule(error)
         IO.pure(

@@ -1,5 +1,7 @@
 package com.example.graphQL.cats.service.search
 
+import com.example.graphQL.cats.domain.policy.RetryBackoff
+
 import cats.effect.std.{Queue, UUIDGen}
 import cats.effect.{Clock, IO, Resource}
 import cats.syntax.all.*
@@ -48,6 +50,13 @@ object DurableEmbeddingWorkPublisher {
   }
 }
 
+/** Bounded durable retries of failed embedding work: attempts before failure, then capped exponential backoff. */
+final class DurableRetrySettings(
+    val attempts: Int = 1,
+    val base: FiniteDuration = 1.second,
+    val cap: FiniteDuration = 5.minutes
+)
+
 final class EmbeddingPipeline(
     wakeups: Queue[IO, Unit],
     work: EmbeddingWorkRepository,
@@ -62,9 +71,7 @@ final class EmbeddingPipeline(
     clock: Clock[IO],
     workerId: String,
     diagnostics: Diagnostics,
-    durableRetryAttempts: Int = 1,
-    durableRetryBase: FiniteDuration = 1.second,
-    durableRetryCap: FiniteDuration = 5.minutes,
+    durableRetry: DurableRetrySettings = new DurableRetrySettings(),
     workerHealth: Boolean => IO[Unit] = _ => IO.unit
 ) {
   private val now: IO[Instant] = clock.realTimeInstant
@@ -125,20 +132,20 @@ final class EmbeddingPipeline(
               case _ =>
                 RepositoryIO
                   .lift(now)
-                  .flatMap(at => work.retry(claim, at.plusMillis(durableRetryBase.toMillis), chargeAttempt = false))
+                  .flatMap(at => work.retry(claim, at.plusMillis(durableRetry.base.toMillis), chargeAttempt = false))
             }
           )
         case ProcessingOutcome.Retry =>
           orReport(
             RepositoryIO.lift(now).flatMap { at =>
-              if (claim.attempts + 1 < durableRetryAttempts)
+              if (claim.attempts + 1 < durableRetry.attempts)
                 work.retry(
                   claim,
                   at.plusMillis(
-                    EmbeddingRecoveryPolicy.backoffMillis(
+                    RetryBackoff.exponentialMillis(
                       claim.attempts.toLong + 1L,
-                      durableRetryBase.toMillis,
-                      durableRetryCap.toMillis
+                      durableRetry.base.toMillis,
+                      durableRetry.cap.toMillis
                     )
                   )
                 )
@@ -162,31 +169,26 @@ final class EmbeddingPipeline(
         case EmbeddingPreparation.Prepared(_, _)   => ProcessingOutcome.Retry
       }
 
-    val reread = claim.key.kind match {
-      case EmbeddingWorkKind.Job =>
-        parseIdentifier(claim.key.entityId)(JobId.apply).fold(invalidWorkKey)(id =>
-          jobs.findVersioned(id).value.map {
-            case Right(Some(observed)) =>
-              preparedOutcome(Some(SearchableText.job(observed.value)), observed.value.embedding.map(_.meta))
-            case Right(None) => ProcessingOutcome.Completed
-            case Left(_)     => ProcessingOutcome.Retry
-          }
-        )
-      case EmbeddingWorkKind.CandidateProfile =>
-        parseIdentifier(claim.key.entityId)(UserId.apply).fold(invalidWorkKey)(id =>
-          users.findVersioned(id).value.map {
-            case Right(Some(observed))
-                if observed.value.accountStatus == com.example.graphQL.cats.domain.model.AccountStatus.Active &&
-                  observed.value.role == com.example.graphQL.cats.domain.model.UserRole.Candidate =>
-              preparedOutcome(
-                observed.value.candidateProfile.map(SearchableText.candidate),
-                observed.value.embedding.map(_.meta)
-              )
-            case Right(_) => ProcessingOutcome.Completed
-            case Left(_)  => ProcessingOutcome.Retry
-          }
-        )
-    }
+    val reread = onKey(claim)(id =>
+      jobs.findVersioned(id).value.map {
+        case Right(Some(observed)) =>
+          preparedOutcome(Some(SearchableText.job(observed.value)), observed.value.embedding.map(_.meta))
+        case Right(None) => ProcessingOutcome.Completed
+        case Left(_)     => ProcessingOutcome.Retry
+      }
+    )(id =>
+      users.findVersioned(id).value.map {
+        case Right(Some(observed))
+            if observed.value.accountStatus == com.example.graphQL.cats.domain.model.AccountStatus.Active &&
+              observed.value.role == com.example.graphQL.cats.domain.model.UserRole.Candidate =>
+          preparedOutcome(
+            observed.value.candidateProfile.map(SearchableText.candidate),
+            observed.value.embedding.map(_.meta)
+          )
+        case Right(_) => ProcessingOutcome.Completed
+        case Left(_)  => ProcessingOutcome.Retry
+      }
+    )
     reread.handleErrorWith(error =>
       diagnostics
         .emit(LogEvent.EmbeddingProcessingFailed, fields = LogFields.failure(error))
@@ -209,11 +211,16 @@ final class EmbeddingPipeline(
       .drain
 
   private def process(claim: ClaimedEmbeddingWork): IO[ProcessingOutcome] =
+    onKey(claim)(processJob)(processCandidate)
+
+  /** Runs the step for the claimed entity kind; a key that is not a valid identifier is terminal. */
+  private def onKey(claim: ClaimedEmbeddingWork)(job: JobId => IO[ProcessingOutcome])(
+      candidate: UserId => IO[ProcessingOutcome]
+  ): IO[ProcessingOutcome] =
     claim.key.kind match {
-      case EmbeddingWorkKind.Job =>
-        parseIdentifier(claim.key.entityId)(JobId.apply).fold(invalidWorkKey)(processJob)
+      case EmbeddingWorkKind.Job => parseIdentifier(claim.key.entityId)(JobId.apply).fold(invalidWorkKey)(job)
       case EmbeddingWorkKind.CandidateProfile =>
-        parseIdentifier(claim.key.entityId)(UserId.apply).fold(invalidWorkKey)(processCandidate)
+        parseIdentifier(claim.key.entityId)(UserId.apply).fold(invalidWorkKey)(candidate)
     }
 
   private def processJob(id: JobId): IO[ProcessingOutcome] =
@@ -297,9 +304,7 @@ object EmbeddingPipeline {
       leaseDuration: FiniteDuration,
       workerReady: IO[Boolean] = IO.pure(true),
       diagnostics: Diagnostics,
-      durableRetryAttempts: Int = 8,
-      durableRetryBase: FiniteDuration = 1.second,
-      durableRetryCap: FiniteDuration = 5.minutes,
+      durableRetry: DurableRetrySettings = new DurableRetrySettings(attempts = 8),
       workerRestartDelay: FiniteDuration = 1.second,
       workerHealth: Boolean => IO[Unit] = _ => IO.unit,
       clock: Clock[IO] = Clock[IO],
@@ -323,9 +328,7 @@ object EmbeddingPipeline {
           clock,
           workerId,
           diagnostics,
-          durableRetryAttempts,
-          durableRetryBase,
-          durableRetryCap,
+          durableRetry,
           workerHealth
         )
         _ <- BackgroundWorker.resource(WorkerName, diagnostics)(

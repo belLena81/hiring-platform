@@ -90,10 +90,4 @@ object InterviewWorkflowPolicy {
     else if (publicationAttempts > maxAttempts) InterviewPublicationDisposition.RequireRepair
     else InterviewPublicationDisposition.Send
   }
-
-  def backoffMillis(attempt: Long, initialMillis: Long, maximumMillis: Long): Long =
-    (0L until math.min(math.max(attempt - 1L, 0L), 63L)).foldLeft(math.min(initialMillis, maximumMillis)) {
-      (delay, _) =>
-        if (delay >= maximumMillis - delay) maximumMillis else delay * 2L
-    }
 }

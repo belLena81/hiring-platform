@@ -1,7 +1,5 @@
 package com.example.graphQL.cats.api.graphql
 
-import cats.effect.IO
-import cats.data.EitherT
 import com.example.graphQL.cats.api.graphql.HiringGraphQLInputs.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLResolverSupport.*
@@ -10,37 +8,34 @@ import com.example.graphQL.cats.domain.model.Identifiers.JobId
 import com.example.graphQL.cats.service.job.{CreateJobInput, UpdateJobInput}
 import com.example.graphQL.cats.service.protocol.{IdempotencyRequest, JobUseCases, UseCaseIO}
 import com.example.graphQL.cats.service.search.JobSearchFilter
-import com.example.graphQL.cats.domain.pagination.JobCursor
+import com.example.graphQL.cats.domain.pagination.{JobCursor, JobPageRequest}
 import com.example.graphQL.cats.service.events.OperationalEventPayload.SearchKind
 import sangria.schema.Context
-
-import java.time.Instant
 
 private[graphql] object HiringGraphQLJobResolvers {
   def jobs(context: Context[RequestContext, Unit]): HiringGraphQLResult[Connection[Job]] =
     authenticated(context) { case (actor, hiring) =>
-      given CursorCodec.CursorKey = hiring.cursorKey
       val filter = JobSearchFilter(
         context.arg(cityArgument),
         context.arg(skillsArgument).fold(Set.empty[String])(_.toSet),
         context.arg(createdAfterArgument)
       )
       for {
-        now <- EitherT.liftF[IO, HiringGraphQLFailure, Instant](IO.realTimeInstant)
-        (pageRequest, requested) <- inputResult(
-          page(
-            context.arg(firstArgument),
-            context.arg(afterArgument),
-            cursor => CursorCodec.decode[JobCursor](cursor, now)
-          )
-        )
         searchId <- searchIdFor(hiring, context.arg(searchIdArgument))
-        values <- raiseOnUseCaseError(hiring.jobService.searchOpenJobs(actor, filter, pageRequest))
-        _ <- recordSearch(hiring, actor.userId, SearchKind.Jobs, searchId, filterJson(filter))(values)(
-          _.id.value.toString,
-          _ => 0d
-        )
-      } yield jobConnection(values, requested, now).copy(searchId = Some(searchId.toString))
+        connection <- paged[JobCursor, JobPageRequest, Job](
+          hiring,
+          context.arg(firstArgument),
+          context.arg(afterArgument)
+        )((cursor, size) => JobPageRequest(None, cursor, size))(request =>
+          for {
+            values <- raiseOnUseCaseError(hiring.jobService.searchOpenJobs(actor, filter, request))
+            _ <- recordSearch(hiring, actor.userId, SearchKind.Jobs, searchId, filterJson(filter))(values)(
+              _.id.value.toString,
+              _ => 0d
+            )
+          } yield values
+        )(job => JobCursor(job.createdAt, job.id))
+      } yield connection.copy(searchId = Some(searchId.toString))
     }
 
   def job(context: Context[RequestContext, Unit]): HiringGraphQLResult[Job] =
@@ -50,20 +45,11 @@ private[graphql] object HiringGraphQLJobResolvers {
 
   def myJobs(context: Context[RequestContext, Unit]): HiringGraphQLResult[Connection[Job]] =
     authenticated(context) { case (actor, hiring) =>
-      given CursorCodec.CursorKey = hiring.cursorKey
-      for {
-        now <- EitherT.liftF[IO, HiringGraphQLFailure, Instant](IO.realTimeInstant)
-        (pageRequest, requested) <- inputResult(
-          page(
-            context.arg(firstArgument),
-            context.arg(afterArgument),
-            cursor => CursorCodec.decode[JobCursor](cursor, now)
-          )
-        )
-        values <- raiseOnUseCaseError(
-          hiring.jobService.myJobs(actor, pageRequest.copy(status = context.arg(jobStatusArgument)))
-        )
-      } yield jobConnection(values, requested, now)
+      paged[JobCursor, JobPageRequest, Job](hiring, context.arg(firstArgument), context.arg(afterArgument))(
+        (cursor, size) => JobPageRequest(context.arg(jobStatusArgument), cursor, size)
+      )(request => raiseOnUseCaseError(hiring.jobService.myJobs(actor, request)))(job =>
+        JobCursor(job.createdAt, job.id)
+      )
     }
 
   def createJob(context: Context[RequestContext, Unit]): HiringGraphQLResult[MutationOutcome[Job]] =
@@ -137,10 +123,4 @@ private[graphql] object HiringGraphQLJobResolvers {
         input.coordinates.map(point => com.example.graphQL.cats.domain.model.GeoPoint(point.latitude, point.longitude))
       )
     )
-
-  private def jobConnection(values: List[Job], requested: Int, now: Instant)(using
-      CursorCodec.CursorKey
-  ): Connection[Job] =
-    connection(values, requested)(job => CursorCodec.encode(JobCursor(job.createdAt, job.id), now))
-
 }

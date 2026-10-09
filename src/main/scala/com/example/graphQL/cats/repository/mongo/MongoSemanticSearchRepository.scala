@@ -52,7 +52,7 @@ final class MongoSemanticSearchRepository(
   private def metadataFilter(meta: EmbeddingMeta): Bson = Filters.and(
     Filters.eq(MongoFields.EmbeddingMetaModel, meta.model),
     Filters.eq(s"${MongoFields.EmbeddingMeta}.${MongoFields.SourceHash}", meta.sourceHash),
-    Filters.eq(s"${MongoFields.EmbeddingMeta}.${MongoFields.UpdatedAt}", java.util.Date.from(meta.updatedAt))
+    Filters.eq(s"${MongoFields.EmbeddingMeta}.${MongoFields.UpdatedAt}", meta.updatedAt.toDate)
   )
 
   override def authorizedJobEligibility(
@@ -512,7 +512,7 @@ private[mongo] object MongoSearchEligibilityRendering {
   }
   def operational(criteria: SearchEligibilityCriteria): Bson = criteria match {
     case SearchEligibilityCriteria.Equal(field, value)   => Filters.eq(path(field), literal(value))
-    case SearchEligibilityCriteria.AtLeast(field, value) => Filters.gte(path(field), java.util.Date.from(value))
+    case SearchEligibilityCriteria.AtLeast(field, value) => Filters.gte(path(field), value.toDate)
     case SearchEligibilityCriteria.Missing(field)        => Filters.exists(path(field), false)
     case SearchEligibilityCriteria.All(values)           => Filters.and(values.map(operational)*)
     case SearchEligibilityCriteria.AnyOf(values)         => Filters.or(values.map(operational)*)
@@ -521,7 +521,7 @@ private[mongo] object MongoSearchEligibilityRendering {
     case SearchEligibilityCriteria.Equal(field, value) =>
       new Document("equals", new Document("path", path(field)).append("value", literal(value)))
     case SearchEligibilityCriteria.AtLeast(field, value) =>
-      new Document("range", new Document("path", path(field)).append("gte", java.util.Date.from(value)))
+      new Document("range", new Document("path", path(field)).append("gte", value.toDate))
     case SearchEligibilityCriteria.Missing(field) =>
       new Document(
         "compound",

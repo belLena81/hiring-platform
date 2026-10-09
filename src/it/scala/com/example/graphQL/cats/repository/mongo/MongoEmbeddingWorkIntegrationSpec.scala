@@ -210,8 +210,7 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
               10.millis,
               30.seconds,
               diagnostics = Diagnostics.noop,
-              durableRetryBase = 10.millis,
-              durableRetryCap = 20.millis
+              durableRetry = new com.example.graphQL.cats.service.search.DurableRetrySettings(8, 10.millis, 20.millis)
             )
             .use { publisher =>
               for {

@@ -176,8 +176,7 @@ private[analytics] final class SparkAnalyticsLateFactReplayStages[F[_]: Async](
         )
       }
       _ <- execution.either {
-        val markerSchema = StructType(Seq(StructField(Columns.SubjectToken, StringType, false)))
-        val markers = spark.createDataFrame(activeTokens.map(token => Row(token.value)).asJava, markerSchema)
+        val markers = AnalyticsTableSchemas.markerFrame(spark, activeTokens)
         AnalyticsSubjectPrivacy
           .excludeActiveDeletionMarkers(selected, markers)
           .flatMap(safe =>

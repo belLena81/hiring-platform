@@ -13,7 +13,7 @@ class KafkaConnectionPreflightSpec extends munit.CatsEffectSuite {
       connection,
       _ => {
         calls += 1
-        Some(
+        Right(
           Vector(InetAddress.getByAddress(Array[Byte](127, 0, 0, 1)), InetAddress.getByAddress(Array[Byte](8, 8, 8, 8)))
         )
       }
@@ -26,7 +26,11 @@ class KafkaConnectionPreflightSpec extends munit.CatsEffectSuite {
     for {
       _ <- KafkaConnection
         .preflightUsing[IO](connection.copy(bootstrapServers = "kafka:9092"), _ => throw new AssertionError("DNS"))
-      failed <- KafkaConnection.preflightUsing[IO](connection, _ => None).attempt
+      _ <- KafkaConnection
+        .preflightUsing[IO](connection, _ => Right(Vector(InetAddress.getByAddress(Array[Byte](127, 0, 0, 1)))))
+      failed <- KafkaConnection
+        .preflightUsing[IO](connection, _ => Left(new java.net.UnknownHostException("unresolved")))
+        .attempt
     } yield assert(failed.isLeft)
   }
 }

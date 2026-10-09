@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.service.search
 
+import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.EmbeddingMeta
 import com.example.graphQL.cats.service.port.{EmbeddingWorkFailure, EmbeddingWorkKind, EmbeddingWorkState}
 
@@ -109,18 +110,13 @@ final case class EmbeddingCoverageTally(
       changed <- entity.changedAt
       if freshness == EmbeddingFreshness.Current
     } yield math.max(0L, Duration.between(changed, meta.updatedAt).getSeconds)
-    val older =
-      if (freshness == EmbeddingFreshness.Current) oldestNotCurrentChangedAt
-      else
-        (oldestNotCurrentChangedAt.toList ++ entity.changedAt.toList).minOption
     copy(
-      cells = cells.updated(key, cells.getOrElse(key, 0L) + 1L),
-      models = entity.stored.fold(models) { meta =>
-        val modelKey = entity.kind -> meta.model
-        models.updated(modelKey, models.getOrElse(modelKey, 0L) + 1L)
-      },
+      cells = cells |+| Map(key -> 1L),
+      models = models |+| entity.stored.map(meta => (entity.kind -> meta.model) -> 1L).toMap,
       lagSeconds = lagSeconds ++ lag,
-      oldestNotCurrentChangedAt = older
+      oldestNotCurrentChangedAt =
+        if (freshness == EmbeddingFreshness.Current) oldestNotCurrentChangedAt
+        else (oldestNotCurrentChangedAt ++ entity.changedAt).minOption
     )
   }
 

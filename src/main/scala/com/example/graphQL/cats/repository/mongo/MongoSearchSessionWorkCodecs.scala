@@ -9,7 +9,6 @@ import com.example.graphQL.cats.service.port.{
 import org.bson.Document
 
 import java.time.Instant
-import java.util.Date
 import scala.jdk.CollectionConverters.*
 
 /** BSON representation for durable, query-free search-session materialization work. */
@@ -26,9 +25,9 @@ private[mongo] object MongoSearchSessionWorkCodecs {
         MongoFields.Event -> MongoHiringCodecs.operationalEvent(value.event),
         MongoFields.State -> SearchSessionWorkState.Ready.toString,
         MongoFields.Attempts -> java.lang.Integer.valueOf(0),
-        MongoFields.AvailableAt -> Date.from(now),
-        MongoFields.CreatedAt -> Date.from(now),
-        MongoFields.UpdatedAt -> Date.from(now)
+        MongoFields.AvailableAt -> now.toDate,
+        MongoFields.CreatedAt -> now.toDate,
+        MongoFields.UpdatedAt -> now.toDate
       ).asJava
     )
   }

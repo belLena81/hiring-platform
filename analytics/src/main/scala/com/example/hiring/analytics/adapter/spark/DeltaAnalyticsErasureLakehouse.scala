@@ -17,7 +17,6 @@ import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.typelevel.log4cats.Logger
 
 import java.time.Instant
-import scala.jdk.CollectionConverters.*
 
 /** Coordinates Delta-backed erasure maintenance independently of batch publication. */
 private[analytics] final class DeltaAnalyticsErasureLakehouse[F[_]: Async: UUIDGen](
@@ -118,15 +117,7 @@ private[analytics] final class DeltaAnalyticsErasureLakehouse[F[_]: Async: UUIDG
     rebuildGoldFromStoredSilver(spark) *> AnalyticsGoldStage.extract(spark, paths, asOf, execution)
 
   private def withMarkerTokens[A](tokens: Vector[SubjectToken])(use: DataFrame => F[A]): F[A] =
-    execution {
-      val schema = org.apache.spark.sql.types.StructType(
-        Seq(
-          org.apache.spark.sql.types
-            .StructField(Columns.SubjectToken, org.apache.spark.sql.types.StringType, nullable = false)
-        )
-      )
-      spark.createDataFrame(tokens.map(token => org.apache.spark.sql.Row(token.value)).asJava, schema)
-    }.flatMap(use)
+    execution(AnalyticsTableSchemas.markerFrame(spark, tokens)).flatMap(use)
 
   private def rebuildGoldFromStoredSilver(spark: SparkSession): F[Unit] =
     execution(DeltaTables.exists(spark, paths.silver)).flatMap {

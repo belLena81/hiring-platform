@@ -314,15 +314,19 @@ PY_RUN
         if (( $# > 1 )); then
           sbt "${java_args[@]}" "-Dhiring.test.buildRoot=$build_target" "it:testOnly ${*:2}"
         else
-          sbt "${java_args[@]}" "-Dhiring.test.buildRoot=$build_target" test 'it:test'
+          # Full runs merge unit and integration coverage and enforce the 60% line threshold.
+          sbt "${java_args[@]}" "-Dhiring.test.buildRoot=$build_target" jacoco 'it:jacoco'
         fi
         ;;
       interview) sbt "${java_args[@]}" "-Dhiring.test.buildRoot=$build_target" 'it:testOnly *InterviewKafkaRestartIntegrationSpec *InterviewPublicationFencingIntegrationSpec *InterviewSchedulingWorkerIntegrationSpec' ;;
       retention) sbt "${java_args[@]}" "-Dhiring.test.buildRoot=$build_target" 'Test / runMain com.example.hiring.testing.KafkaRetentionProof' ;;
       test)
-        integration_task='it:test'
-        if (( $# > 1 )); then integration_task="it:testOnly ${*:2}"; fi
-        sbt "${java_args[@]}" "-Dhiring.test.buildRoot=$build_target" test "$integration_task"
+        if (( $# > 1 )); then
+          sbt "${java_args[@]}" "-Dhiring.test.buildRoot=$build_target" test "it:testOnly ${*:2}"
+        else
+          # Full runs merge unit and integration coverage and enforce the 60% line threshold.
+          sbt "${java_args[@]}" "-Dhiring.test.buildRoot=$build_target" jacoco 'it:jacoco'
+        fi
         ;;
     esac
     ;;

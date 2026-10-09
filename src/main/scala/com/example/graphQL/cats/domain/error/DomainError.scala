@@ -7,7 +7,6 @@ enum DomainError {
   case CandidateRequired
   case RecruiterRequired
   case JobMustBeOpen
-  case DuplicateApplication
   case SearchSessionPending
   case SearchSessionUnavailable
   case Forbidden
@@ -26,5 +25,6 @@ enum DomainValidationError {
   case TextTooLong(field: String, maximum: Int, actual: Int)
   case ByteLengthExceeded(field: String, maximum: Int, actual: Int)
   case TooManyValues(field: String, maximum: Int, actual: Int)
+  case PasswordTooShort(minimum: Int, actual: Int)
   case InvalidCoordinates
 }

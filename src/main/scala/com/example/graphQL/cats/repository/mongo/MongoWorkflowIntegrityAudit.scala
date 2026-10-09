@@ -96,7 +96,7 @@ object MongoWorkflowIntegrityAudit extends IOApp {
         }
     }
     for {
-      previous <- ledger.flatMap(_.find(Filters.eq(MongoFields.Id, AuditId)).first)
+      previous <- MongoSessionOperations.findById(ledger, None, AuditId)
       resume = previous.filter(row => row.getString(MongoFields.State) != "Complete")
       selected = resume.flatMap(row => Option(row.getString("collection")))
       _ <- IO.raiseUnless(selected.forall(collections.contains))(

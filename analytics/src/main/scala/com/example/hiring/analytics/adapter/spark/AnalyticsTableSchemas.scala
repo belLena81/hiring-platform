@@ -1,10 +1,14 @@
 package com.example.hiring.analytics.adapter.spark
 
+import com.example.hiring.analytics.domain.SubjectToken
 import com.example.hiring.analytics.errors.AnalyticsError
+import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
 
 import io.delta.tables.DeltaTable
-import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.sql.types.*
+
+import scala.jdk.CollectionConverters.*
 
 /** Column order and types shared by projections, Delta initialization, and persisted-schema checks. */
 private[analytics] object AnalyticsTableSchemas {
@@ -101,9 +105,22 @@ private[analytics] object AnalyticsTableSchemas {
     Columns.SubjectTokens -> ArrayType(StringType, containsNull = false)
   ) ++ expiry
 
+  /** The shape a merge target must have, and whether it holds raw records (no data-skipping statistics). */
+  def targetOf(paths: AnalyticsLakehousePaths, path: String): (Shape, Boolean) =
+    Map(paths.bronze -> bronze, paths.quarantine -> quarantine, paths.lateFacts -> lateFacts)
+      .get(path)
+      .fold((silver ++ expiry, false))(_ -> true)
+
   def struct(shape: Shape): StructType = StructType(shape.map { case (name, dataType) =>
     StructField(name, dataType, nullable = true)
   })
+
+  /** Single non-null `subjectToken` column holding the given deletion-marker tokens. */
+  def markerFrame(spark: SparkSession, tokens: Vector[SubjectToken]): DataFrame =
+    spark.createDataFrame(
+      tokens.map(token => Row(token.value)).asJava,
+      StructType(Seq(StructField(Columns.SubjectToken, StringType, nullable = false)))
+    )
 
   def matches(actual: StructType, shape: Shape): Boolean =
     actual.fields.toVector.map(field => field.name -> field.dataType.simpleString) ==

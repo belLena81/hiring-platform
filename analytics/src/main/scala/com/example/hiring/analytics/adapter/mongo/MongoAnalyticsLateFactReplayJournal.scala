@@ -86,7 +86,7 @@ private[analytics] final class MongoAnalyticsLateFactReplayJournal[F[_]: Async](
       key,
       root,
       request.requestId.value,
-      request.selectionDigest,
+      request.selectionDigest.value,
       Some(
         request.coordinates.map(coordinate =>
           Coordinate(
@@ -145,7 +145,7 @@ private[analytics] final class MongoAnalyticsLateFactReplayJournal[F[_]: Async](
               value.underlying.updateOne(
                 Filters.and(
                   Filters.eq("_id", key),
-                  Filters.eq("selectionDigest", request.selectionDigest),
+                  Filters.eq("selectionDigest", request.selectionDigest.value),
                   Filters.eq("publicationAttempt", current.publicationAttempt),
                   Filters.eq("progress", previous.toString)
                 ),
@@ -182,7 +182,7 @@ private[analytics] final class MongoAnalyticsLateFactReplayJournal[F[_]: Async](
               value.underlying.updateOne(
                 Filters.and(
                   Filters.eq("_id", key),
-                  Filters.eq("selectionDigest", request.selectionDigest),
+                  Filters.eq("selectionDigest", request.selectionDigest.value),
                   Filters.eq("publicationAttempt", expectedAttempt),
                   Filters.ne("progress", "Published")
                 ),
@@ -274,7 +274,7 @@ private[analytics] final class MongoAnalyticsLateFactReplayJournal[F[_]: Async](
   private def required(request: AnalyticsLateFactReplayRequest): F[AnalyticsLateFactReplayRecord] =
     load(request.requestId)
       .flatMap(_.liftTo[F](Conflict))
-      .flatTap(value => F.raiseUnless(value.selectionDigest == request.selectionDigest)(Conflict))
+      .flatTap(value => F.raiseUnless(value.selectionDigest == request.selectionDigest.value)(Conflict))
 
   private def decode(
       requestId: AnalyticsReplayRequestId,
@@ -300,7 +300,7 @@ private[analytics] final class MongoAnalyticsLateFactReplayJournal[F[_]: Async](
             .from(value.requestId, coordinates.map(row => (row.topic, row.partition, row.offset)))
             .toEither
             .leftMap(_ => Conflict)
-            .flatMap(request => Either.cond(request.selectionDigest == value.selectionDigest, (), Conflict))
+            .flatMap(request => Either.cond(request.selectionDigest.value == value.selectionDigest, (), Conflict))
         case Some(_) => Left(Conflict)
         case None    => Either.cond(progress == AnalyticsLateFactReplayProgress.Published, (), Conflict)
       }
@@ -328,15 +328,15 @@ private[analytics] final class MongoAnalyticsLateFactReplayJournal[F[_]: Async](
       request: AnalyticsLateFactReplayRequest,
       attempt: Int,
       reservation: AnalyticsReportReservation
-  ): Either[AnalyticsError, Unit] =
-    AnalyticsLateFactReplayService.reservationIdentityFor(request, attempt).flatMap { case (runId, fingerprint) =>
-      Either.cond(
-        reservation.runId == runId && reservation.rangeFingerprint == fingerprint &&
-          reservation.generation >= 0L && reservation.revision >= 0L,
-        (),
-        Conflict
-      )
-    }
+  ): Either[AnalyticsError, Unit] = {
+    val (runId, fingerprint) = AnalyticsLateFactReplayService.reservationIdentityFor(request, attempt)
+    Either.cond(
+      reservation.runId == runId && reservation.rangeFingerprint == fingerprint &&
+        reservation.generation >= 0L && reservation.revision >= 0L,
+      (),
+      Conflict
+    )
+  }
 
   private def guarded[A](work: F[A]): F[A] =
     work.translatingWith { case _: mongo4cats.errors.MongoJsonParsingException => Conflict }(

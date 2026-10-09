@@ -73,19 +73,11 @@ object OperationalEventJson {
   val MaxEnvelopeBytes: Int = 256 * 1024
 
   def validate(value: OperationalEventEnvelope): Either[OperationalEventContractError, OperationalEventEnvelope] =
-    for {
-      nonNull <- Option(value).toRight(OperationalEventContractError.MalformedEnvelope)
-      _ <- Either.cond(
-        Option(nonNull.eventId).nonEmpty && Option(nonNull.occurredAt).nonEmpty &&
-          Option(nonNull.actorId).exists(actor => Option(actor.value).nonEmpty) &&
-          Option(nonNull.eventType).nonEmpty && Option(nonNull.aggregateType).nonEmpty &&
-          Option(nonNull.aggregateId).nonEmpty && Option(nonNull.payload).nonEmpty,
-        (),
-        OperationalEventContractError.MalformedEnvelope
+    OperationalEventPayload
+      .decode(value)
+      .flatMap(_ =>
+        Either.cond(bytes(value).length <= MaxEnvelopeBytes, value, OperationalEventContractError.EnvelopeTooLarge)
       )
-      _ <- OperationalEventPayload.decode(nonNull)
-      _ <- Either.cond(bytes(nonNull).length <= MaxEnvelopeBytes, (), OperationalEventContractError.EnvelopeTooLarge)
-    } yield nonNull
 
   def encode(value: OperationalEventEnvelope): Either[OperationalEventContractError, Array[Byte]] =
     validate(value).map(bytes)

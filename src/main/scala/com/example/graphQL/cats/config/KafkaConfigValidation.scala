@@ -2,12 +2,16 @@ package com.example.graphQL.cats.config
 
 import cats.data.ValidatedNel
 import cats.syntax.all.*
+import com.comcast.ip4s.{IpAddress, SocketAddress}
 import com.example.graphQL.cats.domain.workflow.InterviewTopicPair
 
 private[config] object KafkaConfigValidation {
   def read(kafka: RawKafkaConfig): ValidatedNel[ConfigError, KafkaConfig] =
     (
-      validKafkaSaslSecurityProtocol(kafka.saslSecurityProtocol, kafka.bootstrapServers),
+      validKafkaSaslSecurityProtocol(
+        kafka.saslSecurityProtocol.getOrElse(KafkaSaslSecurityProtocol.Tls),
+        kafka.bootstrapServers
+      ),
       validKafkaCredentials(kafka.enabled, kafka.publisher.saslUsername, kafka.publisher.saslPassword),
       validKafkaCredentials(
         kafka.enabled && kafka.consumer.enabled,
@@ -25,24 +29,8 @@ private[config] object KafkaConfigValidation {
         kafka.bootstrapServers,
         kafka.topic,
         kafka.consumerGroup,
-        KafkaPublisherConfig(
-          kafka.publisher.workerId,
-          kafka.publisher.batchSize,
-          kafka.publisher.leaseSeconds,
-          kafka.publisher.retryDelaySeconds,
-          kafka.publisher.maxAttempts,
-          kafka.publisher.pollIntervalMs,
-          kafka.publisher.saslUsername,
-          kafka.publisher.saslPassword
-        ),
-        KafkaConsumerConfig(
-          kafka.consumer.enabled,
-          kafka.consumer.receiptTtlDays,
-          kafka.consumer.quarantineTtlDays,
-          kafka.consumer.saslUsername,
-          kafka.consumer.saslPassword,
-          kafka.consumer.partitionConcurrency.getOrElse(KafkaConsumerConfig.DefaultPartitionConcurrency)
-        ),
+        kafka.publisher,
+        kafka.consumer,
         saslSecurityProtocol,
         interview,
         kafka.restartMaxDelaySeconds.getOrElse(KafkaConfig.DefaultRestartMaxDelaySeconds)
@@ -134,36 +122,26 @@ private[config] object KafkaConfigValidation {
   private val ClaimMarginSeconds = 30L
 
   def validKafkaSaslSecurityProtocol(
-      value: Option[String],
+      protocol: KafkaSaslSecurityProtocol,
       bootstrapServers: String
   ): ValidatedNel[ConfigError, KafkaSaslSecurityProtocol] =
-    value.getOrElse("SASL_SSL") match {
-      case "SASL_SSL" => KafkaSaslSecurityProtocol.Tls.validNel
-      case "SASL_PLAINTEXT" if isLoopbackKafkaBootstrapServers(bootstrapServers) =>
-        KafkaSaslSecurityProtocol.Plaintext.validNel
-      case _ => ConfigError.InvalidKafkaSaslSecurityProtocol.invalidNel
-    }
+    Either
+      .cond(
+        protocol == KafkaSaslSecurityProtocol.Tls || isLoopbackKafkaBootstrapServers(bootstrapServers),
+        protocol,
+        ConfigError.InvalidKafkaSaslSecurityProtocol
+      )
+      .toValidatedNel
 
+  /** Every `host:port` entry must be `localhost` or a loopback address (IPv6 literals in brackets). */
   def isLoopbackKafkaBootstrapServers(value: String): Boolean =
     value.split(",").toList.forall { server =>
-      val address = server.trim
-      val host =
-        if (address.startsWith("[")) address.drop(1).takeWhile(_ != ']')
-        else address.takeWhile(_ != ':')
-
-      host.equalsIgnoreCase("localhost") || host == "::1" || isLoopbackIpv4(host)
-    }
-
-  def isLoopbackIpv4(host: String): Boolean =
-    host.split("\\.").toList match {
-      case first :: second :: third :: fourth :: Nil =>
-        val octets = List(first, second, third, fourth).traverse(_.toIntOption)
-        octets.exists {
-          case firstOctet :: remaining =>
-            firstOctet == 127 && remaining.forall(value => value >= 0 && value <= 255)
-          case Nil => false
-        }
-      case _ => false
+      SocketAddress
+        .fromString(server.trim)
+        .exists(_.host match {
+          case ip: IpAddress => ip.isLoopback
+          case host          => host.toString.equalsIgnoreCase("localhost")
+        })
     }
 
   def validKafkaCredentials(

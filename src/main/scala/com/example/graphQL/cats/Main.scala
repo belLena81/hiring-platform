@@ -15,42 +15,15 @@ import com.example.graphQL.cats.infrastructure.logging.SafeDiagnostics
 import com.example.graphQL.cats.infrastructure.telemetry.TelemetryRuntime
 import com.example.graphQL.cats.runtime.{HiringPlatformServer, MongoHiringRuntime}
 
-import scala.util.control.NoStackTrace
-
 object Main extends IOApp {
-  private final case class ConfigInvalid(errors: NonEmptyList[ConfigError]) extends RuntimeException with NoStackTrace
-
   override protected def reportFailure(error: Throwable): IO[Unit] =
     SafeDiagnostics.configure().flatMap { diagnostics =>
       diagnostics.emit(LogEvent.RuntimeFailed, fields = LogFields.failure(error))
     }
 
-  private def program: Resource[IO, Unit] = for {
-    mask <- Resource.eval(AppConfig.loadMaskSensitive)
+  private def program(config: AppConfig, diagnostics: Diagnostics): Resource[IO, Unit] = for {
     telemetry <- TelemetryRuntime.resource
-    config <- Resource.eval(
-      AppConfig.load.flatMap(
-        _.fold(
-          errors => IO.raiseError[AppConfig](ConfigInvalid(errors)),
-          IO.pure
-        )
-      )
-    )
-    diagnostics <- Resource.eval(SafeDiagnostics.configure(mask && config.maskSensitive))
-    runtime <- MongoHiringRuntime.resource(
-      MongoHiringRuntime.RuntimeConfig(
-        config.mongoUri,
-        config.mongoDatabase,
-        diagnostics,
-        config.vectorSearch,
-        config.jwtAuth,
-        config.passwordHash,
-        config.kafka,
-        config.resetOnStart,
-        discovery = config.discovery,
-        adminSeed = config.adminSeed
-      )
-    )
+    runtime <- MongoHiringRuntime.resource(config, diagnostics)
     contextFactory <- RequestContextFactory.resource
     documentCache <- GraphQLDocumentCache.resource
     rateLimiter <- Resource.eval(AuthRateLimiter.create(config.authRateLimit))
@@ -88,23 +61,26 @@ object Main extends IOApp {
     )(_ => diagnostics.emit(LogEvent.Shutdown))
   } yield ()
 
-  private def handleStartupFailure(error: Throwable): IO[ExitCode] =
-    AppConfig.loadMaskSensitive.flatMap { maskSensitive =>
-      SafeDiagnostics.configure(maskSensitive).flatMap { diagnostics =>
-        val event = error match {
-          case ConfigInvalid(errors) => configInvalidEvents(diagnostics, errors)
-          case _                     => diagnostics.emit(LogEvent.StartupFailed, fields = LogFields.failure(error))
-        }
-        event.as(ExitCode.Error)
-      }
-    }
-
   /** One `CONFIG_INVALID` event per distinct public key; values never leave the validation boundary. */
   private[cats] def configInvalidEvents(diagnostics: Diagnostics, errors: NonEmptyList[ConfigError]): IO[Unit] =
     errors.map(_.key).distinct.traverse_ { key =>
       diagnostics.emit(LogEvent.ConfigInvalid, fields = Map(LogField.ConfigKey -> key))
     }
 
+  /** The configuration is read once; the masking flag is read leniently first so invalid files still log safely. */
   def run(args: List[String]): IO[ExitCode] =
-    program.useForever.as(ExitCode.Success).handleErrorWith(handleStartupFailure)
+    for {
+      mask <- AppConfig.loadMaskSensitive
+      diagnostics <- SafeDiagnostics.configure(mask)
+      loaded <- AppConfig.load
+      exit <- loaded.fold(
+        errors => configInvalidEvents(diagnostics, errors).as(ExitCode.Error),
+        config =>
+          program(config, diagnostics).useForever
+            .as(ExitCode.Success)
+            .handleErrorWith(error =>
+              diagnostics.emit(LogEvent.StartupFailed, fields = LogFields.failure(error)).as(ExitCode.Error)
+            )
+      )
+    } yield exit
 }

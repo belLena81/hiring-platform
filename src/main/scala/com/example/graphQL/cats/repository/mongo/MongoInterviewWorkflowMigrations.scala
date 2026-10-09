@@ -3,7 +3,6 @@ package com.example.graphQL.cats.repository.mongo
 import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.workflow.InterviewParticipant
-import com.mongodb.MongoWriteException
 import com.mongodb.client.model.{CountOptions, Filters, Indexes, UpdateOptions, Updates}
 import org.bson.Document
 import org.bson.conversions.Bson
@@ -87,8 +86,8 @@ private[mongo] object MongoInterviewWorkflowMigrations {
         )
         .void
         .handleErrorWith {
-          case error: MongoWriteException if error.getError.getCode == 11000 => IO.unit
-          case error                                                         => IO.raiseError(error)
+          case MongoDuplicateKey(_) => IO.unit
+          case error                => IO.raiseError(error)
         } *> scan(None, true) *> scan(None, false) *>
         ledger
           .updateOne(

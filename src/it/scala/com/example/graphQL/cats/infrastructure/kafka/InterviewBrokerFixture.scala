@@ -54,8 +54,8 @@ private[graphQL] object InterviewBrokerFixture {
     def adminProperties: Properties = {
       val properties = new Properties()
       properties.put("bootstrap.servers", bootstrap)
-      OperationalEventKafkaRuntime
-        .saslProperties(Some("broker"), Some(password), KafkaSaslSecurityProtocol.Plaintext)
+      KafkaClientSettings
+        .security(Some("broker"), Some(password), KafkaSaslSecurityProtocol.Plaintext)
         .foreach { case (key, value) => val _ = properties.put(key, value) }
       properties.put("request.timeout.ms", "2000")
       properties.put("default.api.timeout.ms", "3000")

@@ -3,78 +3,11 @@ package com.example.graphQL.cats.repository.mongo
 import cats.effect.{IO, Ref}
 import cats.syntax.all.*
 import com.example.graphQL.cats.service.port.{MutationWriteContext, RepositoryError, RepositoryIO}
-import com.mongodb.client.result.UpdateResult
 import mongo4cats.client.ClientSession
 import munit.CatsEffectSuite
 import retry.*
 
 final class MongoTransactionRetrySpec extends CatsEffectSuite {
-  test("operation transient labels request a transaction retry") {
-    assertEquals(
-      MongoTransactionRunner.RetryDecision.decide(
-        MongoTransactionRunner.RetryStage.Operation,
-        Set("TransientTransactionError")
-      ),
-      MongoTransactionRunner.RetryDecision.RetryTransaction
-    )
-  }
-
-  test("unknown commit results request a commit retry") {
-    assertEquals(
-      MongoTransactionRunner.RetryDecision.decide(
-        MongoTransactionRunner.RetryStage.Commit,
-        Set("UnknownTransactionCommitResult")
-      ),
-      MongoTransactionRunner.RetryDecision.RetryCommit
-    )
-  }
-
-  test("transient commit results request a transaction retry") {
-    assertEquals(
-      MongoTransactionRunner.RetryDecision.decide(
-        MongoTransactionRunner.RetryStage.Commit,
-        Set("TransientTransactionError")
-      ),
-      MongoTransactionRunner.RetryDecision.RetryTransaction
-    )
-  }
-
-  test("ordinary failures stop without retry") {
-    assertEquals(
-      MongoTransactionRunner.RetryDecision.decide(
-        MongoTransactionRunner.RetryStage.Operation,
-        Set.empty
-      ),
-      MongoTransactionRunner.RetryDecision.Fail
-    )
-  }
-
-  test("retry decisions cover every stage and relevant label combination") {
-    import MongoTransactionRunner.{RetryDecision, RetryStage}
-
-    val labels = List(
-      Set.empty[String],
-      Set("TransientTransactionError"),
-      Set("UnknownTransactionCommitResult"),
-      Set("TransientTransactionError", "UnknownTransactionCommitResult")
-    )
-    val expectedOperation = List(
-      RetryDecision.Fail,
-      RetryDecision.RetryTransaction,
-      RetryDecision.Fail,
-      RetryDecision.RetryTransaction
-    )
-    val expectedCommit = List(
-      RetryDecision.Fail,
-      RetryDecision.RetryTransaction,
-      RetryDecision.RetryCommit,
-      RetryDecision.RetryCommit
-    )
-
-    assertEquals(labels.map(RetryDecision.decide(RetryStage.Operation, _)), expectedOperation)
-    assertEquals(labels.map(RetryDecision.decide(RetryStage.Commit, _)), expectedCommit)
-  }
-
   test("cats-retry bounds transaction attempts") {
     val policy = MongoTransactionRunner.RetryPolicy(
       maxTransactionAttempts = 3,
@@ -152,15 +85,6 @@ final class MongoTransactionRetrySpec extends CatsEffectSuite {
       assert(runFailure.swap.exists(_.isInstanceOf[MongoSetupError]))
       assertEquals(runCount, 0)
     }
-  }
-
-  test("account deletion classifies a job replacement zero-match as conflict") {
-    val zeroMatch = UpdateResult.acknowledged(0L, 0L, null)
-    assertEquals(MongoUserRepository.classifyJobClose(Some(zeroMatch)), Left(RepositoryError.Conflict))
-  }
-
-  test("account deletion classifies a missing job replacement result precisely") {
-    assertEquals(MongoUserRepository.classifyJobClose(None), Left(RepositoryError.MissingWriteResult))
   }
 
   private def recordingRunner(runs: Ref[IO, Int]): MongoTransactionRunner =

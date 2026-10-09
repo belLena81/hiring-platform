@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.service.events
 
+import cats.data.EitherT
 import cats.effect.{Clock, IO}
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.error.DomainError
@@ -7,6 +8,7 @@ import com.example.graphQL.cats.domain.model.Identifiers.JobId
 import com.example.graphQL.cats.service.events.OperationalEvents
 import com.example.graphQL.cats.service.port.{
   JobRepository,
+  MutationEntityReference,
   RepositoryError,
   SearchSessionLookup,
   SearchSessionRepository,
@@ -41,9 +43,9 @@ final class OperationalTelemetryService(
       jobId: JobId,
       searchId: Option[UUID]
   ): UseCaseIO[Unit] =
-    idempotent.execute[Unit](
+    idempotent.executeFor[Unit](
+      actor,
       "recordJobView",
-      Idempotent.actorScope(actor),
       request,
       _ => interactionReference(eventId),
       replayInteraction(actor, eventId)
@@ -52,10 +54,10 @@ final class OperationalTelemetryService(
         user <- authorization.resolve(actor)
         job <- UseCase.found(jobs.find(jobId), "job")
         _ <- UseCase.ensure(authorization.canView(user, job), UseCaseError.Domain(DomainError.Forbidden))
-        rank <- searchId.fold(UseCase.pure(Option.empty[Int]))(id =>
+        rank <- searchId.fold(EitherT.rightT[IO, UseCaseError](Option.empty[Int]))(id =>
           verifiedSearchResult(actor, id, jobId.value.toString).map(value => Some(value._1))
         )
-        now <- UseCase.liftIO(clock.realTimeInstant)
+        now <- EitherT.liftF(clock.realTimeInstant)
         event = OperationalEvents.jobViewed(eventId, jobId, actor.userId, searchId, rank, now)
         _ <- UseCase.repository(searchSessions.recordInteraction(event, context))
       } yield ()
@@ -68,17 +70,17 @@ final class OperationalTelemetryService(
       searchId: UUID,
       resultId: String
   ): UseCaseIO[Unit] =
-    idempotent.execute[Unit](
+    idempotent.executeFor[Unit](
+      actor,
       "recordSearchResultClick",
-      Idempotent.actorScope(actor),
       request,
       _ => interactionReference(eventId),
       replayInteraction(actor, eventId)
     ) { context =>
       for {
         verified <- verifiedSearchResult(actor, searchId, resultId)
-        now <- UseCase.liftIO(clock.realTimeInstant)
-        event <- UseCase.fromEither(
+        now <- EitherT.liftF(clock.realTimeInstant)
+        event <- EitherT.fromEither[IO](
           OperationalEvents
             .searchResultClicked(
               eventId,
@@ -110,9 +112,9 @@ final class OperationalTelemetryService(
           case _ => Left(UseCaseError.Domain(DomainError.NotFound("search session")))
         }
       case Some(session) if session.actorId != actor.userId =>
-        UseCase.left(UseCaseError.Domain(DomainError.Forbidden))
+        EitherT.leftT(UseCaseError.Domain(DomainError.Forbidden))
       case Some(session) =>
-        UseCase.fromEither(
+        EitherT.fromEither[IO](
           session.results
             .find(_.resultId == resultId)
             .map(result => (result.rank, session.searchKind))
@@ -120,16 +122,14 @@ final class OperationalTelemetryService(
         )
     }
 
-  private def interactionReference(
-      eventId: UUID
-  ): com.example.graphQL.cats.service.port.MutationEntityReference =
-    com.example.graphQL.cats.service.port.MutationEntityReference("interaction", eventId.toString)
+  private def interactionReference(eventId: UUID): MutationEntityReference =
+    MutationEntityReference.of("interaction", eventId)
 
   private def replayInteraction(actor: ActorContext, eventId: UUID)(
-      reference: com.example.graphQL.cats.service.port.MutationEntityReference
+      reference: MutationEntityReference
   ): UseCaseIO[Unit] =
     if (reference == interactionReference(eventId)) authorization.resolve(actor).void
-    else UseCase.left(UseCaseError.Repository(com.example.graphQL.cats.service.RepositoryError.Unavailable))
+    else Idempotent.corruptReference
 }
 
 object OperationalTelemetryService {

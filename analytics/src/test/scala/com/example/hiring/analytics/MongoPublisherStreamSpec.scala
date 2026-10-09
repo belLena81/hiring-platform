@@ -1,5 +1,4 @@
 package com.example.hiring.analytics
-import com.example.hiring.analytics.adapter.mongo.MongoPublisherStream
 import com.example.hiring.analytics.errors.*
 
 import cats.effect.{Clock, IO}
@@ -282,6 +281,6 @@ final class MongoPublisherStreamSpec extends FunSuite {
     assert(requested.get() <= 256L, s"publisher demand exceeded the configured bound: ${requested.get()}")
     assertEquals(cancellations.get(), 1)
     val empty = AnalyticsTestOperationalConfig.streams.one[IO, Void](completedPublisher).attempt.unsafeRunSync()
-    assertEquals(empty, Left(MongoPublisherStream.CompletedWithoutValue))
+    assert(empty.left.exists(_.isInstanceOf[AnalyticsError.MongoConnectionFailure]))
   }
 }

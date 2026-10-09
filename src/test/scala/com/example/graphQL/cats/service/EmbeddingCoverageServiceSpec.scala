@@ -20,6 +20,8 @@ final class EmbeddingCoverageServiceSpec extends CatsEffectSuite {
   private val admin = User(adminId, None, "Admin", UserRole.Admin, None, now, adminSingleton = true)
   private val recruiter = User(recruiterId, None, "Recruiter", UserRole.Recruiter, None, now)
   private val candidate = User(candidateId, None, "Candidate", UserRole.Candidate, None, now)
+  private val duplicateAdmin =
+    admin.copy(id = UserId(UUID.fromString("40000000-0000-0000-0000-000000000004")), adminSingleton = false)
   private val deletedAdmin = admin.copy(accountStatus = AccountStatus.Deleted, deletedAt = Some(now))
   private val empty = EmbeddingCoverageObservation(
     EmbeddingCoverageTally.empty,
@@ -53,7 +55,9 @@ final class EmbeddingCoverageServiceSpec extends CatsEffectSuite {
     }
   }
 
-  test("ECR-05 Candidates, Recruiters, deleted Admins and unknown actors are rejected before any scan") {
+  test(
+    "ECR-05 Candidates, Recruiters, deleted and non-singleton Admins and unknown actors are rejected before any scan"
+  ) {
     val denied = Left(UseCaseError.Authentication(AuthenticationError.Unauthorized))
     for {
       requests <- Ref.of[IO, List[EmbeddingCoverageScanRequest]](Nil)
@@ -61,11 +65,12 @@ final class EmbeddingCoverageServiceSpec extends CatsEffectSuite {
       byRecruiter <- service.report(actor(recruiter), None).value
       byCandidate <- service.report(actor(candidate), None).value
       byDeleted <- live(deletedAdmin)(requests).report(actor(deletedAdmin), None).value
+      byNonSingleton <- live(duplicateAdmin)(requests).report(actor(duplicateAdmin), None).value
       byAdminClaim <- service.report(ActorContext(recruiterId, UserRole.Admin), None).value
       unknown <- service.report(ActorContext(UserId(UUID.randomUUID()), UserRole.Admin), None).value
       seen <- requests.get
     } yield {
-      List(byRecruiter, byCandidate, byDeleted, byAdminClaim, unknown).foreach(assertEquals(_, denied))
+      List(byRecruiter, byCandidate, byDeleted, byNonSingleton, byAdminClaim, unknown).foreach(assertEquals(_, denied))
       assertEquals(seen, Nil)
     }
   }
