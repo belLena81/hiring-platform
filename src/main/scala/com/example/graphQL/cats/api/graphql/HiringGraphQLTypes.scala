@@ -24,10 +24,20 @@ private[graphql] object HiringGraphQLTypes {
       simple("endsAt", instantType)(_.interval.endsAt),
       simple("revision", LongType)(_.revision),
       simple("progress", StringType)(_.phase.toString),
-      simple("notifiedParticipants", ListType(StringType))(_.notified.toList.map(_.toString).sorted)
+      simple("notifiedParticipants", ListType(StringType))(_.notified.toList.map(_.toString).sorted),
+      // The replacement interval held after the candidate accepted a proposal, until the swap settles.
+      simple("pendingStartsAt", OptionType(instantType))(_.pendingInterval.map(_.startsAt)),
+      simple("pendingEndsAt", OptionType(instantType))(_.pendingInterval.map(_.endsAt)),
+      simple("cancelledAt", OptionType(instantType))(_.cancelledAt),
+      // The open reschedule proposal, if any. Who proposed it is not exposed.
+      simple("proposedStartsAt", OptionType(instantType))(_.proposal.map(_.interval.startsAt)),
+      simple("proposedEndsAt", OptionType(instantType))(_.proposal.map(_.interval.endsAt)),
+      simple("proposalExpiresAt", OptionType(instantType))(_.proposal.map(_.expiresAt)),
+      simple("rescheduleRequested", BooleanType)(_.rescheduleRequestedAt.nonEmpty)
     )
   )
   lazy val scheduleInterviewResultType = mutationResultType("ScheduleInterviewResult", interviewWorkflowType)
+  lazy val interviewActionResultType = mutationResultType("InterviewActionResult", interviewWorkflowType)
   lazy val repairInterviewResultType = mutationResultType("RepairInterviewResult", interviewWorkflowType)
   lazy val healthType: ObjectType[RequestContext, Unit] =
     ObjectType("Health", fields[RequestContext, Unit](Field("status", healthStatus, resolve = _ => "UP")))

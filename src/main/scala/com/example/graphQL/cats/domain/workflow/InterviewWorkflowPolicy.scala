@@ -64,7 +64,7 @@ object InterviewWorkflowPolicy {
   def publicationDisposition(
       workflow: InterviewWorkflow,
       commandRevision: Long,
-      command: InterviewWorkflowCommand,
+      command: InterviewCommand,
       hasResult: Boolean,
       resultApplied: Boolean,
       publicationAttempts: Int,
@@ -73,14 +73,18 @@ object InterviewWorkflowPolicy {
     val participantDone = command match {
       case InterviewWorkflowCommand.Notify(participant, _)                    => workflow.notified.contains(participant)
       case InterviewWorkflowCommand.LookupNotificationReceipt(participant, _) => workflow.notified.contains(participant)
-      case _                                                                  => false
+      case InterviewLifecycleCommand.Notify(kind, participant, _)             =>
+        InterviewCommands.isRoundKind(kind) && workflow.notified.contains(participant)
+      case InterviewLifecycleCommand.LookupNotificationReceipt(_, participant, _) =>
+        workflow.notified.contains(participant)
+      case _ => false
     }
     val administrative = command match {
-      case InterviewWorkflowCommand.RequireRepair(_) => true
-      case _                                         => false
+      case InterviewWorkflowCommand.RequireRepair(_) | InterviewLifecycleCommand.RequireRepair(_) => true
+      case _                                                                                      => false
     }
     if (
-      administrative || !InterviewWorkflow.commandIsApplicable(workflow, commandRevision, command) ||
+      administrative || !InterviewCommands.isApplicable(workflow, commandRevision, command) ||
       ((hasResult && resultApplied) || participantDone)
     ) InterviewPublicationDisposition.Supersede
     else if (publicationAttempts > maxAttempts) InterviewPublicationDisposition.RequireRepair

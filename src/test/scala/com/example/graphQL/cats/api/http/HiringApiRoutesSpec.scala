@@ -57,10 +57,12 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       ] = _ => IO.pure(Right(None)),
       hiringReady: IO[ProbeResult] = IO.pure(ProbeResult.Ready),
       authRateLimit: AuthRateLimitConfig = AuthRateLimitConfig(60, 100, 1000),
-      trustedProxy: TrustedProxyConfig = TrustedProxyConfig(Nil)
+      trustedProxy: TrustedProxyConfig = TrustedProxyConfig(Nil),
+      interviewActionRateLimit: com.example.graphQL.cats.config.InterviewActionRateLimitConfig =
+        com.example.graphQL.cats.config.InterviewActionRateLimitConfig(60, 1000, 1000)
   ): IO[HiringApiRoutes] =
     TestGraphQLSupport
-      .dependencies(hiring, authenticate, hiringReady, authRateLimit, trustedProxy)
+      .dependencies(hiring, authenticate, hiringReady, authRateLimit, trustedProxy, interviewActionRateLimit)
       .allocated
       .map { case (dependencies, _) => new HiringApiRoutes(service, diagnostics, dependencies) }
 
@@ -448,6 +450,100 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         Right("RATE_LIMITED")
       )
       assert(captured.exists(record => record._1 == LogEvent.GraphQLCompleted))
+    }
+  }
+
+  test("interview actions are limited per actor through the served routes, counting each aliased action") {
+    import com.example.graphQL.cats.domain.model.*
+    import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
+    import com.example.graphQL.cats.domain.workflow.*
+    import com.example.graphQL.cats.service.application.{
+      InMemoryInterviewWorkflowRepository,
+      InterviewSchedulingService
+    }
+    val workflowId = InterviewWorkflowId(new java.util.UUID(0L, 20L))
+    val start = ServiceFixtures.now.plusSeconds(172800)
+    val workflow = InterviewWorkflow(
+      workflowId,
+      ServiceFixtures.applicationId,
+      ServiceFixtures.candidateId,
+      ServiceFixtures.recruiterId,
+      InterviewInterval(start, start.plusSeconds(3600)),
+      ServiceFixtures.now.plusSeconds(300),
+      new java.util.UUID(0L, 21L),
+      3L,
+      InterviewWorkflowPhase.Completed,
+      Set(InterviewParticipant.Candidate, InterviewParticipant.Recruiter),
+      ServiceFixtures.recruiterId
+    )
+    def action(alias: String, key: Long) =
+      s"""$alias: requestInterviewReschedule(input: { workflowId: "${workflowId.value}", expectedRevision: 3, idempotencyKey: "${new java.util.UUID(
+          9L,
+          key
+        )}" }) { ... on InterviewWorkflow { revision } ... on DomainError { code } }"""
+    val mutation = s"mutation { ${action("first", 1)} ${action("second", 2)} }"
+    for {
+      usersRef <- Ref.of[IO, Map[UserId, User]](
+        Map(
+          ServiceFixtures.candidateId -> ServiceFixtures.candidate,
+          ServiceFixtures.recruiterId -> ServiceFixtures.recruiter
+        )
+      )
+      jobsRef <- Ref.of[IO, Map[JobId, Job]](Map(ServiceFixtures.jobId -> ServiceFixtures.openJob))
+      applicationsRef <- Ref.of[IO, Map[ApplicationId, Application]](
+        Map(
+          ServiceFixtures.applicationId -> ServiceFixtures.createdApplication.copy(status = ApplicationStatus.Interview)
+        )
+      )
+      eventsRef <- Ref.of[IO, Vector[ApplicationEvent]](Vector.empty)
+      errorRef <- Ref.of[IO, Option[com.example.graphQL.cats.service.RepositoryError]](None)
+      repository <- InMemoryInterviewWorkflowRepository.create(workflow)
+      users = ServiceFixtures.InMemoryUsers(
+        usersRef,
+        Some(ServiceFixtures.userRelations(usersRef, jobsRef, applicationsRef))
+      )
+      jobs = ServiceFixtures.InMemoryJobs(
+        jobsRef,
+        relationLookup = Some(ServiceFixtures.jobRelations(usersRef, jobsRef, applicationsRef))
+      )
+      applications = ServiceFixtures.InMemoryApplications(applicationsRef, eventsRef, errorRef)
+      interviews = new InterviewSchedulingService(
+        users,
+        jobs,
+        applications,
+        repository,
+        5.minutes,
+        IO.pure(ServiceFixtures.now)
+      )
+      services = HiringGraphQLServices(
+        HiringReadService(users, jobs, applications),
+        com.example.graphQL.cats.service.TestHiringServices.job(users, jobs),
+        com.example.graphQL.cats.service.TestHiringServices.applications(users, jobs, applications),
+        TestGraphQLSupport.cursorKey,
+        TestGraphQLSupport.accountService,
+        TestGraphQLSupport.interactions,
+        TestGraphQLSupport.searchSessions,
+        interviewScheduling = Some(interviews)
+      )
+      probe = new DatabaseProbe { def check(requestId: Option[String]): IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
+      http <- buildRoutes(
+        new HealthService(probe, Diagnostics.noop),
+        Diagnostics.noop,
+        hiring = services,
+        authenticate = _ =>
+          IO.pure(
+            Right(Some(com.example.graphQL.cats.service.ActorContext(ServiceFixtures.candidateId, UserRole.Candidate)))
+          ),
+        interviewActionRateLimit = com.example.graphQL.cats.config.InterviewActionRateLimitConfig(60, 1, 100)
+      ).flatMap(defaultApp)
+      response <- http(request(mutation))
+      body <- response.as[Json]
+    } yield {
+      assertEquals(response.status, Status.Ok)
+      val data = body.hcursor.downField("data")
+      assertEquals(data.downField("first").get[Long]("revision"), Right(4L), clue(body))
+      assertEquals(data.downField("second").get[String]("code"), Right("RATE_LIMITED"), clue(body))
+      assert(body.hcursor.downField("errors").focus.isEmpty, clue(body))
     }
   }
 

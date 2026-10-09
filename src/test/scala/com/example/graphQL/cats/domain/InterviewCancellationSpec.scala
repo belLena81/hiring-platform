@@ -57,7 +57,8 @@ class InterviewCancellationSpec extends FunSuite {
       Event.NotificationOutcomeUnknown(InterviewParticipant.Candidate),
       Event.NotificationLookupFound(InterviewParticipant.Candidate),
       Event.NotificationLookupAbsent(InterviewParticipant.Candidate),
-      Event.RetryExhausted("provider")
+      Event.RetryExhausted("provider"),
+      Event.Repair
     )
   }
 
@@ -119,7 +120,11 @@ class InterviewCancellationSpec extends FunSuite {
     val decision = decided(flagged, Event.DismissRescheduleRequest)
     assertEquals(decision.workflow, flagged.copy(revision = revision + 1L, rescheduleRequestedAt = None))
     assertEquals(decision.commands, Nil)
-    assertEquals(decide(completed, Event.DismissRescheduleRequest), Left(InterviewWorkflowError.InvalidTransition))
+    assertEquals(decide(completed, Event.DismissRescheduleRequest), Left(InterviewWorkflowError.NoRescheduleRequest))
+    assertEquals(
+      decide(proposalPending(), Event.DismissRescheduleRequest),
+      Left(InterviewWorkflowError.InvalidTransition)
+    )
   }
 
   test("DHW-14 decisions are pure: equal inputs give equal outputs and the input workflow is untouched") {
@@ -338,7 +343,7 @@ class InterviewCancellationSpec extends FunSuite {
     val swapping = withHold(Phase.RescheduleSwapPending)
     assertEquals(
       decided(swapping, Event.SwapOutcomeUnknown).commands,
-      List(Command.LookupRescheduleCommitReceipt(workflowId))
+      List(Command.LookupRescheduleCommitReceipt(workflowId, 1))
     )
     assertEquals(
       decided(swapping, Event.SwapLookupAbsent).commands,
@@ -469,13 +474,17 @@ class InterviewCancellationSpec extends FunSuite {
     }
   }
 
-  test("DHW-19 accept, decline and withdraw at or after the expiry time report an expired proposal") {
+  test("DHW-19 accept and decline at or after the expiry time report an expired proposal; withdraw still closes it") {
     val expiresAt = now.plus(ttl.duration)
     List(expiresAt, expiresAt.plusSeconds(1)).foreach { late =>
+      assertEquals(
+        decided(proposalPending(expiresAt), Event.WithdrawProposal(late)).workflow.phase,
+        Phase.Completed,
+        clue(late)
+      )
       List[InterviewLifecycleEvent](
         Event.AcceptProposal(late),
-        Event.DeclineProposal(late),
-        Event.WithdrawProposal(late)
+        Event.DeclineProposal(late)
       ).foreach(event =>
         assertEquals(
           decide(proposalPending(expiresAt), event),

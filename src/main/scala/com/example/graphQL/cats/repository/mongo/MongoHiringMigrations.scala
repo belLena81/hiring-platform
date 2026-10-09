@@ -23,9 +23,9 @@ private[mongo] object MongoHiringMigrations {
     MongoCollections.InterviewWorkflows,
     MongoCollections.InterviewWorkflowCommands,
     MongoCollections.InterviewWorkflowInbox,
-    MongoCollections.FakeInterviewCalendarReservations,
-    MongoCollections.FakeInterviewCalendarParticipantLocks,
-    MongoCollections.FakeInterviewNotificationReceipts
+    MongoCollections.InterviewCalendarReservations,
+    MongoCollections.InterviewCalendarParticipantLocks,
+    MongoCollections.InterviewNotificationReceipts
   )
 
   val ownedCollections: Set[String] = Set(
@@ -56,9 +56,9 @@ private[mongo] object MongoHiringMigrations {
     MongoCollections.InterviewWorkflows,
     MongoCollections.InterviewWorkflowCommands,
     MongoCollections.InterviewWorkflowInbox,
-    MongoCollections.FakeInterviewCalendarReservations,
-    MongoCollections.FakeInterviewCalendarParticipantLocks,
-    MongoCollections.FakeInterviewNotificationReceipts
+    MongoCollections.InterviewCalendarReservations,
+    MongoCollections.InterviewCalendarParticipantLocks,
+    MongoCollections.InterviewNotificationReceipts
   )
 
   private def collectWithin[A](run: MigrationRun, values: fs2.Stream[IO, A], maximum: Int): IO[List[A]] =
@@ -93,6 +93,7 @@ private[mongo] object MongoHiringMigrations {
           run(analyticsReportControl),
           run(analyticsDeletionReceipts),
           run(interviewWorkflowStorage),
+          run(MongoInterviewLedgerCollectionMigrations.step),
           run(interviewSubjectCleanup),
           run(interviewInboxIdentity),
           // TODO(RF-06): 010 keeps its own ledger handling until the interview workflow session releases the file.
@@ -102,6 +103,8 @@ private[mongo] object MongoHiringMigrations {
           run(MongoWorkflowIntegrityMigrations.step),
           run(MongoDeletedAccountEmbeddingMigrations.step),
           run(MongoInterviewCleanupIntegrityMigrations.step(topics)),
+          run(MongoInterviewLifecycleMigrations.step),
+          run(MongoInterviewRequestReceiptMigrations.step),
           createAccountRegistry(database)
         ).sequence_
       }
@@ -144,7 +147,7 @@ private[mongo] object MongoHiringMigrations {
     run => run.database.ensureCollection(MongoCollections.InterviewSubjectCleanup)
   )
 
-  /** Introduces empty durable-work and local fake-provider stores. There is no legacy payload to backfill; each
+  /** Introduces empty durable-work and local ledger-provider stores. There is no legacy payload to backfill; each
     * collection creation is idempotent. Index setup runs after the ledger plan and verifies each required definition on
     * every startup.
     */
@@ -621,7 +624,14 @@ private[mongo] object MongoHiringMigrations {
     }
 
   private def resetOwnedCollections(database: SetupDatabase): IO[Unit] =
-    ownedCollections.toList.traverse_(database.dropCollection)
+    ownedCollections.toList.traverse_(database.dropCollection) *>
+      // A stale original-name ledger must not be renamed back into a freshly reset installation.
+      MongoInterviewLedgerCollectionMigrations.LegacyNames.traverse_(name =>
+        database
+          .runCommand(new org.bson.Document("drop", name))
+          .void
+          .recoverWith { case error: MongoCommandException if error.getErrorCode == 26 => IO.unit }
+      )
 
   private def createAccountRegistry(database: SetupDatabase): IO[Unit] =
     database

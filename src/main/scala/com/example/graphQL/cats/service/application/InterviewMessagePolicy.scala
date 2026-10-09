@@ -1,6 +1,7 @@
 package com.example.graphQL.cats.service.application
 
 import com.example.graphQL.cats.domain.workflow.*
+import cats.syntax.all.*
 import com.example.graphQL.cats.service.port.*
 import java.nio.charset.StandardCharsets
 import java.time.Instant
@@ -40,9 +41,9 @@ object InterviewMessagePolicy {
     else if (message.occurredAt.isBefore(now.minusMillis(replayWindow.toMillis))) InterviewReplayDisposition.Expired
     else InterviewReplayDisposition.Timely
 
-  private def applicable(workflow: InterviewWorkflow, command: InterviewWorkflowCommandRecord): Boolean =
+  private[application] def applicable(workflow: InterviewWorkflow, command: InterviewWorkflowCommandRecord): Boolean =
     command.state != InterviewWorkflowCommandState.Superseded &&
-      InterviewWorkflow.commandIsApplicable(workflow, command.revision, command.command)
+      InterviewCommands.isApplicable(workflow, command.revision, command.command)
 
   private def identityMatches(
       workflow: InterviewWorkflow,
@@ -132,7 +133,7 @@ object InterviewMessagePolicy {
       now.plusMillis(InterviewWorkflowPolicy.backoffMillis(attempts, initialMillis, maximumMillis))
     )
 
-  def step(command: InterviewWorkflowCommand): InterviewStep = command match {
+  def step(command: InterviewCommand): InterviewStep = command match {
     case InterviewWorkflowCommand.ReserveCalendarSlot(_)                    => InterviewStep.Reserve
     case InterviewWorkflowCommand.LookupCalendarReservation(_)              => InterviewStep.LookupReservation
     case InterviewWorkflowCommand.CommitAcceptedToInterview(_)              => InterviewStep.CommitHiring
@@ -144,7 +145,21 @@ object InterviewMessagePolicy {
       InterviewStep.LookupNotifyCandidate
     case InterviewWorkflowCommand.LookupNotificationReceipt(InterviewParticipant.Recruiter, _) =>
       InterviewStep.LookupNotifyRecruiter
-    case InterviewWorkflowCommand.RequireRepair(_) => InterviewStep.RequireRepair
+    case InterviewWorkflowCommand.RequireRepair(_)                              => InterviewStep.RequireRepair
+    case InterviewLifecycleCommand.CancelCalendarSlot(_)                        => InterviewStep.CancelSlot
+    case InterviewLifecycleCommand.LookupCalendarCancellation(_)                => InterviewStep.LookupCancellation
+    case InterviewLifecycleCommand.HoldReplacementSlot(_, _)                    => InterviewStep.HoldReplacement
+    case InterviewLifecycleCommand.LookupReplacementHold(_)                     => InterviewStep.LookupReplacementHold
+    case InterviewLifecycleCommand.CommitRescheduledInterval(_, _)              => InterviewStep.CommitReschedule
+    case InterviewLifecycleCommand.LookupRescheduleCommitReceipt(_, _)          => InterviewStep.LookupRescheduleCommit
+    case InterviewLifecycleCommand.ExpireProposal(_)                            => InterviewStep.ExpireProposal
+    case InterviewLifecycleCommand.Notify(_, InterviewParticipant.Candidate, _) => InterviewStep.NotifyCandidate
+    case InterviewLifecycleCommand.Notify(_, InterviewParticipant.Recruiter, _) => InterviewStep.NotifyRecruiter
+    case InterviewLifecycleCommand.LookupNotificationReceipt(_, InterviewParticipant.Candidate, _) =>
+      InterviewStep.LookupNotifyCandidate
+    case InterviewLifecycleCommand.LookupNotificationReceipt(_, InterviewParticipant.Recruiter, _) =>
+      InterviewStep.LookupNotifyRecruiter
+    case InterviewLifecycleCommand.RequireRepair(_) => InterviewStep.RequireRepair
   }
 
   def event(message: InterviewMessage): Option[InterviewWorkflowEvent] = message.result.flatMap { result =>
@@ -179,4 +194,129 @@ object InterviewMessagePolicy {
       case _                               => Some(RetryExhausted("provider"))
     }
   }
+
+  /** The lifecycle transition a recorded command result stands for. `at` is when the result is being applied. */
+  def lifecycleEvent(
+      command: InterviewLifecycleCommand,
+      result: InterviewResult,
+      at: Instant
+  ): Option[InterviewLifecycleEvent] = {
+    import InterviewLifecycleCommand as C
+    import InterviewLifecycleEvent as E
+    import InterviewResult.*
+    command match {
+      case C.CancelCalendarSlot(_) =>
+        Some(result match {
+          case Succeeded => E.CancelConfirmed(at)
+          // The provider says there is no such reservation: definitive, so repair instead of a lookup loop.
+          case Rejected => E.RetryExhausted("unknown_reservation")
+          case _        => E.CancelOutcomeUnknown
+        })
+      case C.LookupCalendarCancellation(_) =>
+        Some(result match {
+          case Found  => E.CancelLookupConfirmed(at)
+          case Absent => E.CancelLookupAbsent
+          case _      => E.CancelOutcomeUnknown
+        })
+      case C.HoldReplacementSlot(_, _) =>
+        Some(result match {
+          case Succeeded => E.HoldConfirmed
+          case Rejected  => E.HoldRejected
+          case _         => E.HoldOutcomeUnknown
+        })
+      case C.LookupReplacementHold(_) =>
+        Some(result match {
+          case Found  => E.HoldLookupFound
+          case Absent => E.HoldLookupAbsent
+          case _      => E.HoldOutcomeUnknown
+        })
+      case C.CommitRescheduledInterval(_, _) =>
+        Some(result match {
+          case Succeeded => E.SwapCommitted
+          case Rejected  => E.SwapRejected
+          case _         => E.SwapOutcomeUnknown
+        })
+      case C.LookupRescheduleCommitReceipt(_, _) =>
+        Some(result match {
+          case Found  => E.SwapLookupFound
+          case Absent => E.SwapLookupAbsent
+          case _      => E.SwapOutcomeUnknown
+        })
+      // Expiry has no external effect, so even an unknown outcome (a crash before the result was recorded) is answered
+      // by applying it: the revision decides whether the proposal is still there to expire.
+      case C.ExpireProposal(_)            => Some(E.ProposalExpired(at))
+      case C.Notify(kind, participant, _) =>
+        Option.when(InterviewCommands.isRoundKind(kind))(
+          if (result == Succeeded) E.NotificationDelivered(participant) else E.NotificationOutcomeUnknown(participant)
+        )
+      case C.LookupNotificationReceipt(_, participant, _) =>
+        Some(result match {
+          case Found  => E.NotificationLookupFound(participant)
+          case Absent => E.NotificationLookupAbsent(participant)
+          case _      => E.NotificationOutcomeUnknown(participant)
+        })
+      case C.RequireRepair(_) => None
+    }
+  }
+
+  /** A retried lookup or unknown outcome that has spent its budget is exhausted instead of retried again. */
+  def lifecycleResultEvent(
+      command: InterviewLifecycleCommand,
+      result: InterviewResult,
+      at: Instant,
+      attempts: Long,
+      maxAttempts: Int
+  ): Option[InterviewLifecycleEvent] =
+    if (attempts >= maxAttempts && (result == InterviewResult.OutcomeUnknown || result == InterviewResult.Absent))
+      Some(InterviewLifecycleEvent.RetryExhausted("provider"))
+    else lifecycleEvent(command, result, at)
+
+  /** How a late or out-of-order cancel or reschedule message is failed: through the workflow, or for an informational
+    * notification through its own command only.
+    */
+  /** When a too-early proposal expiry becomes available again: after its due time, plus the distance the consumer's
+    * clock is behind clamped to the worker's backoff bounds, so a skewed consumer does not receive it in a hot loop.
+    */
+  def expiryDeferral(
+      due: Instant,
+      consumerNow: Instant,
+      initialBackoff: scala.concurrent.duration.FiniteDuration,
+      maxBackoff: scala.concurrent.duration.FiniteDuration
+  ): Instant = {
+    val behind = java.time.Duration.between(consumerNow, due).toMillis
+    due.plusMillis(behind.max(initialBackoff.toMillis).min(maxBackoff.toMillis))
+  }
+
+  enum LifecycleReplayFailure {
+    case Workflow(event: InterviewLifecycleEvent)
+    case Notification
+
+    /** A proposal's expiry that arrives too early is simply not delivered yet. */
+    case Defer
+  }
+
+  def lifecycleReplayFailure(
+      workflow: Option[InterviewWorkflow],
+      command: Option[InterviewWorkflowCommandRecord],
+      message: InterviewMessage,
+      step: String,
+      rejection: InterviewMessageRejection,
+      now: Instant
+  ): Either[InterviewMessageRejection, LifecycleReplayFailure] =
+    (workflow, command) match {
+      case (Some(current), Some(stored)) if applicable(current, stored) && identityMatches(current, stored, message) =>
+        if (InterviewCommands.isInformational(stored.command)) Right(LifecycleReplayFailure.Notification)
+        else if (rejection == InterviewMessageRejection.Future && InterviewCommands.isExpiry(stored.command))
+          Right(LifecycleReplayFailure.Defer)
+        else {
+          val event = InterviewCommands.giveUpEvent(stored.command, step, now)
+          InterviewLifecyclePolicy
+            .decide(current, current.revision, event)
+            .as(LifecycleReplayFailure.Workflow(event))
+            .left
+            .map(_ => rejection)
+        }
+      case _ => Left(rejection)
+    }
+
 }

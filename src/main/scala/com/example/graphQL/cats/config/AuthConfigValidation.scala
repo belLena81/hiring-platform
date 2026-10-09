@@ -12,6 +12,11 @@ private[config] object AuthConfigValidation {
       validAdminSeed(auth.adminSeed)
     ).mapN { (secret, receiptSecret, seed) =>
       val passwordHash = auth.passwordHash.getOrElse(defaultPasswordHash)
+      val interviewActions = InterviewActionRateLimitConfig(
+        auth.interviewActionRateLimit.windowSeconds,
+        auth.interviewActionRateLimit.attempts,
+        auth.interviewActionRateLimit.maxBuckets
+      )
       AuthSettings(
         JwtAuthConfig(
           secret,
@@ -22,6 +27,7 @@ private[config] object AuthConfigValidation {
         ),
         PasswordHashConfig(passwordHash.iterations, passwordHash.memoryKib, passwordHash.parallelism),
         AuthRateLimitConfig(auth.rateLimit.windowSeconds, auth.rateLimit.attempts, auth.rateLimit.maxBuckets),
+        interviewActions,
         seed
       )
     }

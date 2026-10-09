@@ -76,7 +76,14 @@ final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
         now: Instant,
         execution: Option[ClaimedInterviewWorkflowCommand]
     ) = unexpectedProvider[InterviewCalendarReservation]
-    override def lookup(workflowId: InterviewWorkflowId) = unexpectedProvider[Option[InterviewCalendarReservation]]
+    override def lookup(workflowId: InterviewWorkflowId, idempotencyKey: String) =
+      unexpectedProvider[Option[InterviewCalendarReservation]]
+    override def cancel(
+        workflowId: InterviewWorkflowId,
+        idempotencyKey: String,
+        now: Instant,
+        execution: Option[ClaimedInterviewWorkflowCommand]
+    ) = unexpectedProvider[InterviewCalendarCancellation]
     override def release(idempotencyKey: String, now: Instant, execution: Option[ClaimedInterviewWorkflowCommand]) =
       unexpectedProvider[Unit]
   }
@@ -85,6 +92,7 @@ final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
         workflowId: InterviewWorkflowId,
         recipientId: UserId,
         participant: InterviewParticipant,
+        kind: InterviewNotificationKind,
         idempotencyKey: String,
         now: Instant,
         execution: Option[ClaimedInterviewWorkflowCommand]
@@ -248,7 +256,7 @@ final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
             leaseUntil: Instant,
             maxAttempts: Int
         ) = RepositoryIO.lift(claims.update(_ + 1).as(InterviewExecutionClaimOutcome.AlreadyHandled))
-        override def attemptCount(id: InterviewWorkflowId, requested: InterviewWorkflowCommand) =
+        override def attemptCount(id: InterviewWorkflowId, requested: InterviewCommand) =
           RepositoryIO.fromEither(Right(0L))
         override def advance(
             next: InterviewWorkflow,

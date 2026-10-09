@@ -16,7 +16,74 @@ private[mongo] object MongoInterviewWorkflowCommandCodec {
   private val CommandField = "command"
   private val CommandStateField = "commandState"
   private val IdempotencyKeyField = "idempotencyKey"
+  private val StartField = "startsAt"
+  private val EndField = "endsAt"
+
+  /** Stored command kinds introduced for cancellation and rescheduling. */
+  object LifecycleKinds {
+    val CancelCalendar = "cancelCalendar"
+    val LookupCancellation = "lookupCancellation"
+    val HoldReplacement = "holdReplacement"
+    val LookupReplacementHold = "lookupReplacementHold"
+    val CommitReschedule = "commitReschedule"
+    val LookupRescheduleCommit = "lookupRescheduleCommit"
+    val ExpireProposal = "expireProposal"
+    val NotifyKind = "notifyKind"
+    val LookupNotificationKind = "lookupNotificationKind"
+    val all: Set[String] = Set(
+      CancelCalendar,
+      LookupCancellation,
+      HoldReplacement,
+      LookupReplacementHold,
+      CommitReschedule,
+      LookupRescheduleCommit,
+      ExpireProposal,
+      NotifyKind,
+      LookupNotificationKind
+    )
+  }
+
+  private final case class Envelope(
+      workflowId: InterviewWorkflowId,
+      step: String,
+      revision: Long,
+      command: Document,
+      state: InterviewWorkflowCommandState,
+      attempts: Int,
+      executionAttempts: Int,
+      availableAt: Instant,
+      occurredAt: Instant,
+      result: Option[InterviewCommandResult]
+  )
+
+  /** Any stored row: scheduling and lifecycle intents share one record, claim path and executor. */
   def decode(document: Document): Either[RepositoryError, InterviewWorkflowCommandRecord] =
+    envelope(document).flatMap { e =>
+      string(e.command, "kind").flatMap { kind =>
+        val command: Either[RepositoryError, InterviewCommand] =
+          if (LifecycleKinds.all(kind)) decodeLifecycleCommand(e.command, e.workflowId, e.availableAt)
+          else decodeCommand(e.command, e.workflowId)
+        command.map { value =>
+          InterviewWorkflowCommandRecord(
+            e.workflowId,
+            e.step,
+            e.revision,
+            value,
+            e.state,
+            e.attempts,
+            e.availableAt,
+            e.occurredAt,
+            e.result,
+            e.executionAttempts
+          )
+        }
+      }
+    }
+
+  /** Audits and cutovers validate every stored row through the same entry point as the claim path. */
+  def decodeStored(document: Document): Either[RepositoryError, InterviewWorkflowCommandRecord] = decode(document)
+
+  private def envelope(document: Document): Either[RepositoryError, Envelope] =
     for {
       workflowId <- string(document, WorkflowIdField).flatMap(uuid).map(InterviewWorkflowId.apply)
       step <- string(document, StepIdField)
@@ -26,24 +93,6 @@ private[mongo] object MongoInterviewWorkflowCommandCodec {
       commandDoc <- Option(document.get(CommandField))
         .collect { case value: Document => value }
         .toRight(RepositoryError.InvalidStoredData)
-      command <- decodeCommand(commandDoc)
-      _ <- command match {
-        case InterviewWorkflowCommand.Notify(participant, key) =>
-          Either.cond(key == s"${workflowId.value}:notify:$participant", (), RepositoryError.InvalidStoredData)
-        case InterviewWorkflowCommand.LookupNotificationReceipt(participant, key) =>
-          Either.cond(key == s"${workflowId.value}:notify:$participant", (), RepositoryError.InvalidStoredData)
-        case InterviewWorkflowCommand.ReserveCalendarSlot(key) =>
-          Either.cond(key == s"${workflowId.value}:reserve", (), RepositoryError.InvalidStoredData)
-        case InterviewWorkflowCommand.ReleaseCalendarSlot(key) =>
-          Either.cond(key == s"${workflowId.value}:release", (), RepositoryError.InvalidStoredData)
-        case InterviewWorkflowCommand.LookupCalendarReservation(id) =>
-          Either.cond(id == workflowId, (), RepositoryError.InvalidStoredData)
-        case InterviewWorkflowCommand.LookupStatusCommitReceipt(id) =>
-          Either.cond(id == workflowId, (), RepositoryError.InvalidStoredData)
-        case InterviewWorkflowCommand.CommitAcceptedToInterview(status) =>
-          Either.cond(status == ApplicationStatus.Accepted, (), RepositoryError.InvalidStoredData)
-        case InterviewWorkflowCommand.RequireRepair(_) => Right(())
-      }
       stateName <- string(document, CommandStateField)
       state <- InterviewWorkflowCommandState.values
         .find(_.toString == stateName)
@@ -73,20 +122,141 @@ private[mongo] object MongoInterviewWorkflowCommandCodec {
           _ <- instant(document, "claimUntil")
         } yield ()
         else Right(())
-    } yield InterviewWorkflowCommandRecord(
+    } yield Envelope(
       workflowId,
       step,
       revision,
-      command,
+      commandDoc,
       state,
       attempts,
+      executionAttempts,
       availableAt,
       occurredAt,
-      result,
-      executionAttempts
+      result
     )
 
-  private def decodeCommand(document: Document): Either[RepositoryError, InterviewWorkflowCommand] =
+  def encodeLifecycle(command: InterviewLifecycleCommand): Document = {
+    import InterviewLifecycleCommand as C
+    import LifecycleKinds as K
+    def interval(value: InterviewInterval): Document =
+      new Document(StartField, Date.from(value.startsAt)).append(EndField, Date.from(value.endsAt))
+    command match {
+      case C.CancelCalendarSlot(key)       => new Document("kind", K.CancelCalendar).append(IdempotencyKeyField, key)
+      case C.LookupCalendarCancellation(k) => new Document("kind", K.LookupCancellation).append(IdempotencyKeyField, k)
+      case C.HoldReplacementSlot(key, in)  =>
+        new Document("kind", K.HoldReplacement).append(IdempotencyKeyField, key).append("interval", interval(in))
+      case C.LookupReplacementHold(key) =>
+        new Document("kind", K.LookupReplacementHold).append(IdempotencyKeyField, key)
+      case C.CommitRescheduledInterval(in, generation) =>
+        new Document("kind", K.CommitReschedule).append("interval", interval(in)).append("generation", generation)
+      case C.LookupRescheduleCommitReceipt(id, generation) =>
+        new Document("kind", K.LookupRescheduleCommit)
+          .append(WorkflowIdField, id.value.toString)
+          .append("generation", generation)
+      case C.ExpireProposal(at) => new Document("kind", K.ExpireProposal).append(MongoFields.AvailableAt, Date.from(at))
+      case C.Notify(kind, participant, key) =>
+        new Document("kind", K.NotifyKind)
+          .append("notificationKind", kind.toString)
+          .append("participant", participant.toString)
+          .append(IdempotencyKeyField, key)
+      case C.LookupNotificationReceipt(kind, participant, key) =>
+        new Document("kind", K.LookupNotificationKind)
+          .append("notificationKind", kind.toString)
+          .append("participant", participant.toString)
+          .append(IdempotencyKeyField, key)
+      case C.RequireRepair(reason) => new Document("kind", "requireRepair").append("reason", reason)
+    }
+  }
+
+  private def decodeLifecycleCommand(
+      document: Document,
+      workflowId: InterviewWorkflowId,
+      availableAt: Instant
+  ): Either[RepositoryError, InterviewLifecycleCommand] = {
+    import InterviewLifecycleCommand as C
+    import LifecycleKinds as K
+    def keyed(valid: String => Boolean): Either[RepositoryError, String] =
+      string(document, IdempotencyKeyField).flatMap(key =>
+        Either.cond(valid(key), key, RepositoryError.InvalidStoredData)
+      )
+    def cancelKey(key: String) = InterviewCalendarKeys.cancellationGeneration(workflowId, key).isDefined
+    def holdKey(key: String) = InterviewCalendarKeys.reservationGeneration(workflowId, key).exists(_ > 0)
+    def interval(field: String): Either[RepositoryError, InterviewInterval] =
+      Option(document.get(field))
+        .collect { case value: Document => value }
+        .toRight(RepositoryError.InvalidStoredData)
+        .flatMap { value =>
+          for {
+            starts <- instant(value, StartField)
+            ends <- instant(value, EndField)
+            _ <- Either.cond(ends.isAfter(starts), (), RepositoryError.InvalidStoredData)
+          } yield InterviewInterval(starts, ends)
+        }
+    def participant: Either[RepositoryError, InterviewParticipant] =
+      string(document, "participant").flatMap(name =>
+        InterviewParticipant.values.find(_.toString == name).toRight(RepositoryError.InvalidStoredData)
+      )
+    def kindAndKey: Either[RepositoryError, (InterviewNotificationKind, InterviewParticipant, String)] =
+      for {
+        kindName <- string(document, "notificationKind")
+        kind <- InterviewNotificationKind.values.find(_.toString == kindName).toRight(RepositoryError.InvalidStoredData)
+        who <- participant
+        key <- keyed(value =>
+          value.startsWith(s"${workflowId.value}:${kind.keyName}:") && value.endsWith(s":notify:$who")
+        )
+      } yield (kind, who, key)
+    string(document, "kind").flatMap {
+      case K.CancelCalendar        => keyed(cancelKey).map(C.CancelCalendarSlot.apply)
+      case K.LookupCancellation    => keyed(cancelKey).map(C.LookupCalendarCancellation.apply)
+      case K.HoldReplacement       => (keyed(holdKey), interval("interval")).mapN(C.HoldReplacementSlot.apply)
+      case K.LookupReplacementHold => keyed(holdKey).map(C.LookupReplacementHold.apply)
+      case K.CommitReschedule      =>
+        (interval("interval"), integer(document, "generation").filterOrElse(_ > 0, RepositoryError.InvalidStoredData))
+          .mapN(C.CommitRescheduledInterval.apply)
+      case K.LookupRescheduleCommit =>
+        (
+          string(document, WorkflowIdField)
+            .flatMap(uuid)
+            .map(InterviewWorkflowId.apply)
+            .filterOrElse(_ == workflowId, RepositoryError.InvalidStoredData),
+          integer(document, "generation").filterOrElse(_ > 0, RepositoryError.InvalidStoredData)
+        ).mapN(C.LookupRescheduleCommitReceipt.apply)
+      case K.ExpireProposal =>
+        instant(document, MongoFields.AvailableAt)
+          .filterOrElse(_ == availableAt, RepositoryError.InvalidStoredData)
+          .map(C.ExpireProposal.apply)
+      case K.NotifyKind             => kindAndKey.map((kind, who, key) => C.Notify(kind, who, key))
+      case K.LookupNotificationKind => kindAndKey.map((kind, who, key) => C.LookupNotificationReceipt(kind, who, key))
+      case "requireRepair"          => string(document, "reason").map(C.RequireRepair.apply)
+      case _                        => Left(RepositoryError.InvalidStoredData)
+    }
+  }
+
+  private def decodeCommand(
+      document: Document,
+      workflowId: InterviewWorkflowId
+  ): Either[RepositoryError, InterviewWorkflowCommand] =
+    decodeCommandShape(document).flatMap(command => validateKeys(command, workflowId).as(command))
+
+  private def validateKeys(command: InterviewWorkflowCommand, workflowId: InterviewWorkflowId) = command match {
+    case InterviewWorkflowCommand.Notify(participant, key) =>
+      Either.cond(key == s"${workflowId.value}:notify:$participant", (), RepositoryError.InvalidStoredData)
+    case InterviewWorkflowCommand.LookupNotificationReceipt(participant, key) =>
+      Either.cond(key == s"${workflowId.value}:notify:$participant", (), RepositoryError.InvalidStoredData)
+    case InterviewWorkflowCommand.ReserveCalendarSlot(key) =>
+      Either.cond(key == s"${workflowId.value}:reserve", (), RepositoryError.InvalidStoredData)
+    case InterviewWorkflowCommand.ReleaseCalendarSlot(key) =>
+      Either.cond(key == s"${workflowId.value}:release", (), RepositoryError.InvalidStoredData)
+    case InterviewWorkflowCommand.LookupCalendarReservation(id) =>
+      Either.cond(id == workflowId, (), RepositoryError.InvalidStoredData)
+    case InterviewWorkflowCommand.LookupStatusCommitReceipt(id) =>
+      Either.cond(id == workflowId, (), RepositoryError.InvalidStoredData)
+    case InterviewWorkflowCommand.CommitAcceptedToInterview(status) =>
+      Either.cond(status == ApplicationStatus.Accepted, (), RepositoryError.InvalidStoredData)
+    case InterviewWorkflowCommand.RequireRepair(_) => Right(())
+  }
+
+  private def decodeCommandShape(document: Document): Either[RepositoryError, InterviewWorkflowCommand] =
     string(document, "kind").flatMap {
       case "reserveCalendar" =>
         string(document, IdempotencyKeyField).map(InterviewWorkflowCommand.ReserveCalendarSlot.apply)

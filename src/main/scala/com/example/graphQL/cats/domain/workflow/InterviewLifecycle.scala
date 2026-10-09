@@ -78,6 +78,9 @@ enum InterviewLifecycleEvent {
   case NotificationLookupFound(participant: InterviewParticipant)
   case NotificationLookupAbsent(participant: InterviewParticipant)
   case RetryExhausted(step: String)
+
+  /** Admin repair: resumes the step recorded in `repairOrigin` by lookup, never re-opening a cancelled slot. */
+  case Repair
 }
 
 /** Durable intents. None carries an application status: the service owns the cancellation status change. */
@@ -87,7 +90,7 @@ enum InterviewLifecycleCommand {
   case HoldReplacementSlot(idempotencyKey: String, interval: InterviewInterval)
   case LookupReplacementHold(idempotencyKey: String)
   case CommitRescheduledInterval(interval: InterviewInterval, generation: Int)
-  case LookupRescheduleCommitReceipt(workflowId: InterviewWorkflowId)
+  case LookupRescheduleCommitReceipt(workflowId: InterviewWorkflowId, generation: Int)
   case ExpireProposal(availableAt: Instant)
   case Notify(kind: InterviewNotificationKind, participant: InterviewParticipant, idempotencyKey: String)
   case LookupNotificationReceipt(
@@ -132,7 +135,9 @@ object InterviewLifecyclePolicy {
       recipients.map(p => Command.Notify(kind, p, informationalKey(w.id, kind, revision, p)))
 
     def repair(prefix: String, step: String) =
-      move(List(Command.RequireRepair(s"$prefix: $step")))(_.copy(phase = Phase.RepairRequired))
+      move(List(Command.RequireRepair(s"$prefix: $step")))(
+        _.copy(phase = Phase.RepairRequired, repairOrigin = Some(w.phase))
+      )
 
     def startRound(kind: InterviewNotificationKind, phase: InterviewWorkflowPhase)(
         update: InterviewWorkflow => InterviewWorkflow
@@ -159,6 +164,31 @@ object InterviewLifecyclePolicy {
         case _                               => Left(Error.InvalidTransition)
       }
 
+    def lookupDeliveries(kind: InterviewNotificationKind): List[InterviewLifecycleCommand] =
+      bothParticipants.filterNot(w.notified).map(p => Command.LookupNotificationReceipt(kind, p, roundKey(w, kind, p)))
+
+    // Lookup-first resumption of the step that exhausted its retries; a cancelled slot is never reopened.
+    def resume(origin: InterviewWorkflowPhase): Either[InterviewWorkflowError, InterviewLifecycleDecision] = {
+      val commands: Option[List[InterviewLifecycleCommand]] = origin match {
+        case Phase.CancelPending =>
+          Some(List(Command.LookupCalendarCancellation(InterviewWorkflow.cancellationKey(w.id, w.generation))))
+        case Phase.CancelNotificationsPending => Some(lookupDeliveries(InterviewNotificationKind.Cancelled))
+        case Phase.RescheduleHoldPending      =>
+          Some(List(Command.LookupReplacementHold(InterviewWorkflow.reservationKey(w.id, w.replacementGeneration))))
+        case Phase.RescheduleSwapPending =>
+          Some(List(Command.LookupRescheduleCommitReceipt(w.id, w.replacementGeneration)))
+        case Phase.RescheduleCancelOldPending =>
+          Some(List(Command.LookupCalendarCancellation(InterviewWorkflow.cancellationKey(w.id, w.retiredGeneration))))
+        case Phase.RescheduleCompensationPending =>
+          Some(
+            List(Command.LookupCalendarCancellation(InterviewWorkflow.cancellationKey(w.id, w.replacementGeneration)))
+          )
+        case Phase.RescheduleNotificationsPending => Some(lookupDeliveries(InterviewNotificationKind.Rescheduled))
+        case _                                    => None
+      }
+      commands.toRight(Error.InvalidTransition).flatMap(list => move(list)(_.copy(phase = origin, repairOrigin = None)))
+    }
+
     (w.phase, event) match {
       case (_, Event.Cancel(_, now)) =>
         w.phase match {
@@ -178,8 +208,9 @@ object InterviewLifecyclePolicy {
               _.copy(rescheduleRequestedAt = Some(now))
             )
         }
-      case (Phase.Completed, Event.DismissRescheduleRequest) if w.rescheduleRequestedAt.nonEmpty =>
-        move(Nil)(_.copy(rescheduleRequestedAt = None))
+      case (Phase.Completed, Event.DismissRescheduleRequest) =>
+        if (w.rescheduleRequestedAt.isEmpty) Left(Error.NoRescheduleRequest)
+        else move(Nil)(_.copy(rescheduleRequestedAt = None))
       case (_, Event.Propose(startsAt, endsAt, proposedBy, now, ttl)) =>
         for {
           _ <- requireSettled(w, now)
@@ -200,10 +231,13 @@ object InterviewLifecyclePolicy {
       case (_, Event.AcceptProposal(now)) =>
         for {
           proposal <- openProposal(w, now)
-          _ <- Either.cond(w.generation < Int.MaxValue, (), Error.InvalidTransition)
+          _ <- Either.cond(w.generation.toLong + 1L + w.skippedGenerations < Int.MaxValue, (), Error.InvalidTransition)
           decision <- move(
             List(
-              Command.HoldReplacementSlot(InterviewWorkflow.reservationKey(w.id, w.generation + 1), proposal.interval)
+              Command.HoldReplacementSlot(
+                InterviewWorkflow.reservationKey(w.id, w.replacementGeneration),
+                proposal.interval
+              )
             )
           )(_.copy(phase = Phase.RescheduleHoldPending, pendingInterval = Some(proposal.interval), proposal = None))
         } yield decision
@@ -213,8 +247,9 @@ object InterviewLifecyclePolicy {
             _.copy(phase = Phase.Completed, proposal = None)
           )
         }
-      case (_, Event.WithdrawProposal(now)) =>
-        openProposal(w, now).flatMap { _ =>
+      case (_, Event.WithdrawProposal(_)) =>
+        // Withdrawing stays possible after the expiry time, so a proposal whose expiry has not run can still be closed.
+        pendingProposal(w).flatMap { _ =>
           move(inform(InterviewNotificationKind.RescheduleWithdrawn, List(InterviewParticipant.Candidate)))(
             _.copy(phase = Phase.Completed, proposal = None)
           )
@@ -227,6 +262,9 @@ object InterviewLifecyclePolicy {
               _.copy(phase = Phase.Completed, proposal = None)
             )
         }
+
+      case (Phase.RepairRequired, Event.Repair) =>
+        w.repairOrigin.toRight(Error.InvalidTransition).flatMap(origin => resume(origin))
 
       case (Phase.CancelPending, _) =>
         cancelOutcome(
@@ -242,7 +280,7 @@ object InterviewLifecyclePolicy {
 
       case (Phase.RescheduleHoldPending, Event.HoldConfirmed | Event.HoldLookupFound) =>
         w.pendingInterval.toRight(Error.InvalidTransition).flatMap { interval =>
-          move(List(Command.CommitRescheduledInterval(interval, w.generation + 1)))(
+          move(List(Command.CommitRescheduledInterval(interval, w.replacementGeneration)))(
             _.copy(phase = Phase.RescheduleSwapPending)
           )
         }
@@ -251,10 +289,14 @@ object InterviewLifecyclePolicy {
           _.copy(phase = Phase.Completed, pendingInterval = None)
         )
       case (Phase.RescheduleHoldPending, Event.HoldOutcomeUnknown) =>
-        move(List(Command.LookupReplacementHold(InterviewWorkflow.reservationKey(w.id, w.generation + 1))))(identity)
+        move(List(Command.LookupReplacementHold(InterviewWorkflow.reservationKey(w.id, w.replacementGeneration))))(
+          identity
+        )
       case (Phase.RescheduleHoldPending, Event.HoldLookupAbsent) =>
         w.pendingInterval.toRight(Error.InvalidTransition).flatMap { interval =>
-          move(List(Command.HoldReplacementSlot(InterviewWorkflow.reservationKey(w.id, w.generation + 1), interval)))(
+          move(
+            List(Command.HoldReplacementSlot(InterviewWorkflow.reservationKey(w.id, w.replacementGeneration), interval))
+          )(
             identity
           )
         }
@@ -267,33 +309,37 @@ object InterviewLifecyclePolicy {
               phase = Phase.RescheduleCancelOldPending,
               interval = interval,
               pendingInterval = None,
-              generation = w.generation + 1
+              generation = w.replacementGeneration
             )
           )
         }
       case (Phase.RescheduleSwapPending, Event.SwapOutcomeUnknown) =>
-        move(List(Command.LookupRescheduleCommitReceipt(w.id)))(identity)
+        move(List(Command.LookupRescheduleCommitReceipt(w.id, w.replacementGeneration)))(identity)
       case (Phase.RescheduleSwapPending, Event.SwapLookupAbsent) =>
         w.pendingInterval.toRight(Error.InvalidTransition).flatMap { interval =>
-          move(List(Command.CommitRescheduledInterval(interval, w.generation + 1)))(identity)
+          move(List(Command.CommitRescheduledInterval(interval, w.replacementGeneration)))(identity)
         }
       case (Phase.RescheduleSwapPending, Event.SwapRejected | Event.SwapDeadlineElapsed) =>
-        move(List(Command.CancelCalendarSlot(InterviewWorkflow.cancellationKey(w.id, w.generation + 1))))(
+        move(List(Command.CancelCalendarSlot(InterviewWorkflow.cancellationKey(w.id, w.replacementGeneration))))(
           _.copy(phase = Phase.RescheduleCompensationPending)
         )
       case (Phase.RescheduleSwapPending, Event.RetryExhausted(step)) => repair("retry exhausted", step)
 
       case (Phase.RescheduleCancelOldPending, _) =>
         cancelOutcome(
-          InterviewWorkflow.cancellationKey(w.id, w.generation - 1),
-          _ => startRound(InterviewNotificationKind.Rescheduled, Phase.RescheduleNotificationsPending)(identity)
+          InterviewWorkflow.cancellationKey(w.id, w.retiredGeneration),
+          _ =>
+            startRound(InterviewNotificationKind.Rescheduled, Phase.RescheduleNotificationsPending)(
+              _.copy(skippedGenerations = 0)
+            )
         ).orElse(exhausted(event, "retry exhausted", repair))
       case (Phase.RescheduleCompensationPending, _) =>
         cancelOutcome(
-          InterviewWorkflow.cancellationKey(w.id, w.generation + 1),
+          InterviewWorkflow.cancellationKey(w.id, w.replacementGeneration),
           _ =>
+            // The cancelled replacement stays stored under its key, so the next attempt needs a fresh generation.
             move(inform(InterviewNotificationKind.RescheduleUnavailable, bothParticipants))(
-              _.copy(phase = Phase.Completed, pendingInterval = None)
+              _.copy(phase = Phase.Completed, pendingInterval = None, skippedGenerations = w.skippedGenerations + 1)
             )
         ).orElse(exhausted(event, "compensation failed", repair))
       case (Phase.RescheduleNotificationsPending, _) =>
@@ -350,6 +396,11 @@ object InterviewLifecyclePolicy {
       case InterviewWorkflowPhase.ProposalPending => Left(InterviewWorkflowError.ProposalAlreadyOpen)
       case other                                  => Left(unavailable(other))
     }
+
+  private def pendingProposal(w: InterviewWorkflow): Either[InterviewWorkflowError, InterviewRescheduleProposal] =
+    w.proposal
+      .filter(_ => w.phase == InterviewWorkflowPhase.ProposalPending)
+      .toRight(InterviewWorkflowError.NoOpenProposal)
 
   private def openProposal(
       w: InterviewWorkflow,

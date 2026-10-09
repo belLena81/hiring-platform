@@ -106,8 +106,9 @@ final class InterviewSchedulingWorkerIntegrationSpec extends KafkaIntegrationSui
       counters: Ref[IO, Map[String, Long]]
   ): Resource[IO, Unit] = {
     def count(key: String): IO[Unit] = counters.update(values => values.updated(key, values.getOrElse(key, 0L) + 1L))
-    val underlyingCalendar = calendarOverride.getOrElse(FakeInterviewCalendarProvider.durable(repository))
-    val underlyingNotifications = notificationOverride.getOrElse(FakeInterviewNotificationProvider.durable(repository))
+    val underlyingCalendar = calendarOverride.getOrElse(LedgerInterviewCalendarProvider.durable(repository))
+    val underlyingNotifications =
+      notificationOverride.getOrElse(LedgerInterviewNotificationProvider.durable(repository))
     val calendar = new InterviewCalendarProvider {
       override def reserve(
           id: InterviewWorkflowId,
@@ -127,10 +128,21 @@ final class InterviewSchedulingWorkerIntegrationSpec extends KafkaIntegrationSui
           at,
           execution
         )
-      override def lookup(id: InterviewWorkflowId): InterviewProviderIO[Option[InterviewCalendarReservation]] =
+      override def lookup(
+          id: InterviewWorkflowId,
+          lookupKey: String
+      ): InterviewProviderIO[Option[InterviewCalendarReservation]] =
         EitherT.liftF[IO, InterviewProviderError, Unit](count("calendarLookupRequests")) *> underlyingCalendar.lookup(
-          id
+          id,
+          lookupKey
         )
+      override def cancel(
+          id: InterviewWorkflowId,
+          key: String,
+          at: Instant,
+          execution: Option[ClaimedInterviewWorkflowCommand]
+      ): InterviewProviderIO[InterviewCalendarCancellation] =
+        underlyingCalendar.cancel(id, key, at, execution)
       override def release(
           key: String,
           at: Instant,
@@ -147,13 +159,14 @@ final class InterviewSchedulingWorkerIntegrationSpec extends KafkaIntegrationSui
           id: InterviewWorkflowId,
           recipient: UserId,
           participant: InterviewParticipant,
+          kind: InterviewNotificationKind,
           key: String,
           at: Instant,
           execution: Option[ClaimedInterviewWorkflowCommand]
       ): InterviewProviderIO[InterviewNotificationReceipt] =
         EitherT.liftF[IO, InterviewProviderError, Unit](
           count("notificationDeliveryRequests")
-        ) *> underlyingNotifications.notify(id, recipient, participant, key, at, execution)
+        ) *> underlyingNotifications.notify(id, recipient, participant, kind, key, at, execution)
       override def lookup(key: String): InterviewProviderIO[Option[InterviewNotificationReceipt]] =
         EitherT.liftF[IO, InterviewProviderError, Unit](count("notificationLookupRequests")) *> underlyingNotifications
           .lookup(key)
@@ -284,7 +297,7 @@ final class InterviewSchedulingWorkerIntegrationSpec extends KafkaIntegrationSui
             _ <- persist(workflows.take(16))
             _ <- persist(workflows.drop(16))
             reservedBeforeCrash <- Deferred[IO, InterviewCalendarReservation]
-            calendar = FakeInterviewCalendarProvider.durable(repository)
+            calendar = LedgerInterviewCalendarProvider.durable(repository)
             pausedCalendar = new InterviewCalendarProvider {
               override def reserve(
                   workflowId: InterviewWorkflowId,
@@ -300,8 +313,18 @@ final class InterviewSchedulingWorkerIntegrationSpec extends KafkaIntegrationSui
                   .semiflatMap(receipt =>
                     reservedBeforeCrash.complete(receipt).void *> IO.never[InterviewCalendarReservation]
                   )
-              override def lookup(id: InterviewWorkflowId): InterviewProviderIO[Option[InterviewCalendarReservation]] =
-                calendar.lookup(id)
+              override def lookup(
+                  id: InterviewWorkflowId,
+                  lookupKey: String
+              ): InterviewProviderIO[Option[InterviewCalendarReservation]] =
+                calendar.lookup(id, lookupKey)
+              override def cancel(
+                  id: InterviewWorkflowId,
+                  key: String,
+                  at: Instant,
+                  execution: Option[ClaimedInterviewWorkflowCommand]
+              ): InterviewProviderIO[InterviewCalendarCancellation] =
+                calendar.cancel(id, key, at, execution)
               override def release(
                   key: String,
                   at: Instant,
@@ -318,18 +341,19 @@ final class InterviewSchedulingWorkerIntegrationSpec extends KafkaIntegrationSui
                 )
             }
             deliveredBeforeCrash <- Deferred[IO, InterviewNotificationReceipt]
-            notifications = FakeInterviewNotificationProvider.durable(repository)
+            notifications = LedgerInterviewNotificationProvider.durable(repository)
             pausedNotifications = new InterviewNotificationProvider {
               override def notify(
                   id: InterviewWorkflowId,
                   recipient: UserId,
                   participant: InterviewParticipant,
+                  kind: InterviewNotificationKind,
                   key: String,
                   at: Instant,
                   execution: Option[ClaimedInterviewWorkflowCommand]
               ): InterviewProviderIO[InterviewNotificationReceipt] =
                 notifications
-                  .notify(id, recipient, participant, key, at, execution)
+                  .notify(id, recipient, participant, kind, key, at, execution)
                   .semiflatMap(receipt =>
                     deliveredBeforeCrash.complete(receipt).void *> IO.never[InterviewNotificationReceipt]
                   )
@@ -352,10 +376,10 @@ final class InterviewSchedulingWorkerIntegrationSpec extends KafkaIntegrationSui
               .use(_ => waitCompleted(repository, workflows, completed, start.toNanos, backlog))
             durations <- completed.get.map(_.values.toList.sorted)
             calendarCount <- Mongo4catsCollections
-              .documents(fixture.database, MongoCollections.FakeInterviewCalendarReservations)
+              .documents(fixture.database, MongoCollections.InterviewCalendarReservations)
               .flatMap(_.count)
             notificationCount <- Mongo4catsCollections
-              .documents(fixture.database, MongoCollections.FakeInterviewNotificationReceipts)
+              .documents(fixture.database, MongoCollections.InterviewNotificationReceipts)
               .flatMap(_.count)
             errors <- Mongo4catsCollections
               .documents(fixture.database, MongoCollections.InterviewWorkflows)

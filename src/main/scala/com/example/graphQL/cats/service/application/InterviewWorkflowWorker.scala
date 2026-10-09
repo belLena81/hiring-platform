@@ -233,6 +233,17 @@ final class InterviewWorkflowWorker(
             workflow <- repository.findForAdmin(InterviewWorkflowId(message.workflowId))
             command <- repository.findCommand(InterviewWorkflowId(message.workflowId), message.stepId)
           } yield (command, workflow)).value.flatMap {
+            case Right((command, workflow)) if command.exists(isLifecycle) =>
+              failLifecycleMessage(
+                message,
+                workflow,
+                command,
+                "replay_expired",
+                InterviewMessageRejection.Expired,
+                InterviewAdvanceCause.ReplayExpired(message.messageId),
+                now,
+                IO.pure(true)
+              )
             case Right((command, workflow)) =>
               InterviewMessagePolicy.expiredDecision(workflow, command, message) match {
                 case Right(InterviewWorkflowDecision(next, commands)) =>
@@ -262,7 +273,18 @@ final class InterviewWorkflowWorker(
       workflow <- repository.findForAdmin(InterviewWorkflowId(message.workflowId))
       command <- repository.findCommand(InterviewWorkflowId(message.workflowId), message.stepId)
     } yield (workflow, command)).value.flatMap {
-      case Left(_)                    => report("interviewWorkflow.futureReceipt").as(false)
+      case Left(_) => report("interviewWorkflow.futureReceipt").as(false)
+      case Right((workflow, command)) if command.exists(isLifecycle) =>
+        failLifecycleMessage(
+          message,
+          workflow,
+          command,
+          "future_message",
+          InterviewMessageRejection.Future,
+          InterviewAdvanceCause.FutureMessage(message.messageId),
+          now,
+          quarantineMessage(message, InterviewMessageRejection.Future)
+        )
       case Right((workflow, command)) =>
         InterviewMessagePolicy.futureDecision(workflow, command, message) match {
           case Left(_) => quarantineMessage(message, InterviewMessageRejection.Future)
@@ -276,6 +298,85 @@ final class InterviewWorkflowWorker(
               }
         }
     }
+
+  private def isLifecycle(record: InterviewWorkflowCommandRecord): Boolean = record.command match {
+    case _: InterviewLifecycleCommand => true
+    case _                            => false
+  }
+
+  private def deferExpiry(record: InterviewWorkflowCommandRecord, now: java.time.Instant): IO[Boolean] =
+    record.command match {
+      case InterviewLifecycleCommand.ExpireProposal(due) =>
+        val availableAt =
+          InterviewMessagePolicy.expiryDeferral(due, now, settings.initialBackoff, settings.maxBackoff)
+        repository.deferExpiry(record, availableAt).value.flatMap {
+          case Right(true)  => IO.pure(true)
+          case Right(false) =>
+            // Not requeued: acknowledge only if the row is settled elsewhere, otherwise redeliver the message.
+            repository.findCommand(record.workflowId, record.stepId).value.map {
+              case Right(Some(current)) => settledElsewhere(current)
+              case Right(None)          => true
+              case Left(_)              => false
+            }
+          case Left(_) => IO.pure(false)
+        }
+      case _ => IO.pure(false)
+    }
+
+  private def settledElsewhere(record: InterviewWorkflowCommandRecord): Boolean =
+    record.result.nonEmpty || Set(
+      InterviewWorkflowCommandState.Superseded,
+      InterviewWorkflowCommandState.RepairRequired,
+      InterviewWorkflowCommandState.ResultPending,
+      InterviewWorkflowCommandState.ResultPublished
+    )(record.state)
+
+  /** A cancel or reschedule message that is too old or too new fails its step through the lifecycle policy; an
+    * informational notification fails only its own command; an expiry that is too early is requeued for its due time
+    * and its message acknowledged. `acknowledge` runs once the failure is durable and decides how the message itself is
+    * settled, so a rejected message is quarantined exactly once.
+    */
+  private def failLifecycleMessage(
+      message: InterviewMessage,
+      workflow: Option[InterviewWorkflow],
+      command: Option[InterviewWorkflowCommandRecord],
+      step: String,
+      rejection: InterviewMessageRejection,
+      cause: InterviewAdvanceCause,
+      now: java.time.Instant,
+      acknowledge: IO[Boolean]
+  ): IO[Boolean] = {
+    def settled(durable: IO[Boolean]): IO[Boolean] = durable.flatMap(if (_) acknowledge else IO.pure(false))
+    InterviewMessagePolicy.lifecycleReplayFailure(workflow, command, message, step, rejection, now) match {
+      case Left(reason)                                               => quarantineMessage(message, reason)
+      case Right(InterviewMessagePolicy.LifecycleReplayFailure.Defer) =>
+        // The expiry is simply not due on this node's clock: requeue it, with a backoff so a skewed consumer does not
+        // receive it in a hot loop, and settle the message (without quarantining it) only when the row is requeued or
+        // is already settled by another path.
+        command.fold(IO.pure(false))(record => deferExpiry(record, now))
+      case Right(InterviewMessagePolicy.LifecycleReplayFailure.Notification) =>
+        settled(
+          command.fold(IO.pure(false))(record =>
+            repository
+              .settleNotificationResult(record, InterviewNotificationSettlement.Exhausted(step), now)
+              .value
+              .map(_.isRight)
+          )
+        )
+      case Right(InterviewMessagePolicy.LifecycleReplayFailure.Workflow(event)) =>
+        settled(
+          workflow.fold(IO.pure(false))(current =>
+            repository
+              .applyLifecycle(current.id, current.revision, event, InterviewLifecycleOrigin.Internal(cause), now, None)
+              .value
+              .map {
+                case Right(InterviewLifecycleOutcome.Applied(_) | InterviewLifecycleOutcome.Duplicate(_)) => true
+                case _                                                                                    => false
+              }
+          )
+        )
+    }
+  }
 
   def receiveCommand(message: InterviewMessage): IO[Boolean] = withinReplayWindow(message)(processCommand(message))
 
@@ -342,60 +443,230 @@ final class InterviewWorkflowWorker(
           case Right((workflow, command)) =>
             repository.attemptCount(workflow.id, command.command).value.flatMap {
               case Left(_)      => report("interviewWorkflow.receive").as(false)
-              case Right(count) => {
-                val selected = InterviewMessagePolicy.resultEvent(message, count, settings.maxAttempts)
-                selected.flatMap(ev => InterviewWorkflow.decide(workflow, workflow.revision, ev).toOption) match {
-                  case None => quarantineMessage(message, InterviewMessageRejection.InvalidTransition)
-                  case Some(InterviewWorkflowDecision(next, commands)) =>
-                    currentTime.flatMap { now =>
-                      val available = InterviewMessagePolicy.retryAvailableAt(
-                        message.result,
-                        count,
-                        now,
-                        settings.initialBackoff.toMillis,
-                        settings.maxBackoff.toMillis
-                      )
-                      repository
-                        .advance(
-                          next,
-                          workflow.revision,
-                          InterviewAdvanceCause.ResultReceipt(message.messageId.toString),
-                          commands,
-                          now,
-                          available
-                        )
-                        .value
-                        .map {
-                          case Right(InterviewWorkflowAdvanceResult.StaleRevision) => false
-                          case Right(_)                                            => true
-                          case Left(_)                                             => false
+              case Right(count) =>
+                command.command match {
+                  case lifecycle: InterviewLifecycleCommand =>
+                    applyLifecycleResult(workflow, command, lifecycle, message, count)
+                  case _: InterviewWorkflowCommand => {
+                    val selected = InterviewMessagePolicy.resultEvent(message, count, settings.maxAttempts)
+                    selected.flatMap(ev => InterviewWorkflow.decide(workflow, workflow.revision, ev).toOption) match {
+                      case None => quarantineMessage(message, InterviewMessageRejection.InvalidTransition)
+                      case Some(InterviewWorkflowDecision(next, commands)) =>
+                        currentTime.flatMap { now =>
+                          val available = InterviewMessagePolicy.retryAvailableAt(
+                            message.result,
+                            count,
+                            now,
+                            settings.initialBackoff.toMillis,
+                            settings.maxBackoff.toMillis
+                          )
+                          repository
+                            .advance(
+                              next,
+                              workflow.revision,
+                              InterviewAdvanceCause.ResultReceipt(message.messageId.toString),
+                              commands,
+                              now,
+                              available
+                            )
+                            .value
+                            .map {
+                              case Right(InterviewWorkflowAdvanceResult.StaleRevision) => false
+                              case Right(_)                                            => true
+                              case Left(_)                                             => false
+                            }
                         }
                     }
+                  }
                 }
-              }
             }
         }
       case Left(_) => report("interviewWorkflow.receive").as(false)
     }
 
+  /** Applies a recorded cancel or reschedule result. Round steps move the workflow through the lifecycle policy; an
+    * informational notification never does: a failure is retried or, once its budget is spent, repaired on its own.
+    */
+  private def applyLifecycleResult(
+      workflow: InterviewWorkflow,
+      record: InterviewWorkflowCommandRecord,
+      command: InterviewLifecycleCommand,
+      message: InterviewMessage,
+      attempts: Long
+  ): IO[Boolean] =
+    message.result.fold(quarantineMessage(message, InterviewMessageRejection.Inconsistent))(result =>
+      currentTime.flatMap { now =>
+        if (InterviewCommands.isInformational(command))
+          if (result == InterviewResult.Succeeded) IO.pure(true)
+          else {
+            val settlement =
+              if (attempts >= settings.maxAttempts)
+                InterviewNotificationSettlement.Exhausted("notification_exhausted")
+              else
+                InterviewNotificationSettlement.Retry(
+                  now.plusMillis(
+                    InterviewWorkflowPolicy
+                      .backoffMillis(attempts, settings.initialBackoff.toMillis, settings.maxBackoff.toMillis)
+                  )
+                )
+            repository.settleNotificationResult(record, settlement, now).value.flatMap {
+              case Right(_) => IO.pure(true)
+              case Left(_)  => report("interviewWorkflow.settleNotification").as(false)
+            }
+          }
+        else
+          InterviewMessagePolicy.lifecycleResultEvent(command, result, now, attempts, settings.maxAttempts) match {
+            case None        => quarantineMessage(message, InterviewMessageRejection.InvalidTransition)
+            case Some(event) =>
+              val available = InterviewMessagePolicy.retryAvailableAt(
+                message.result,
+                attempts,
+                now,
+                settings.initialBackoff.toMillis,
+                settings.maxBackoff.toMillis
+              )
+              repository
+                .applyLifecycle(
+                  workflow.id,
+                  workflow.revision,
+                  event,
+                  InterviewLifecycleOrigin.Internal(InterviewAdvanceCause.ResultReceipt(message.messageId.toString)),
+                  now,
+                  available
+                )
+                .value
+                .flatMap {
+                  case Right(InterviewLifecycleOutcome.Applied(_) | InterviewLifecycleOutcome.Duplicate(_)) =>
+                    IO.pure(true)
+                  case Right(InterviewLifecycleOutcome.Rejected(InterviewWorkflowError.StaleRevision)) =>
+                    IO.pure(false)
+                  case Right(_) => quarantineMessage(message, InterviewMessageRejection.InvalidTransition)
+                  case Left(_)  => report("interviewWorkflow.applyLifecycleResult").as(false)
+                }
+          }
+      }
+    )
+
+  private def provider[A](operation: InterviewProviderIO[A]): IO[InterviewResult] = operation.value.map {
+    case Right(_)                              => InterviewResult.Succeeded
+    case Left(InterviewProviderError.Conflict) => InterviewResult.Rejected
+    case Left(_)                               => InterviewResult.OutcomeUnknown
+  }
+
+  /** The one reading of a lookup: found, definitively absent, or unknown when the answer could not be read. */
+  private def lookedUp[E](answer: Either[E, Boolean]): InterviewResult = answer match {
+    case Right(true)  => InterviewResult.Found
+    case Right(false) => InterviewResult.Absent
+    case Left(_)      => InterviewResult.OutcomeUnknown
+  }
+
+  private def reservationLookup(workflowId: InterviewWorkflowId, key: String)(
+      found: InterviewCalendarReservation => Boolean
+  ): IO[InterviewResult] =
+    calendar.lookup(workflowId, key).value.map(answer => lookedUp(answer.map(_.exists(found))))
+
+  private def receiptLookup(key: String): IO[InterviewResult] =
+    notifications.lookup(key).value.map(answer => lookedUp(answer.map(_.nonEmpty)))
+
+  private def recipient(workflow: InterviewWorkflow, participant: InterviewParticipant) =
+    if (participant == InterviewParticipant.Candidate) workflow.candidateId else workflow.recruiterId
+
   private def execute(
+      workflow: InterviewWorkflow,
+      command: InterviewCommand,
+      claim: ClaimedInterviewWorkflowCommand
+  ): IO[InterviewResult] = command match {
+    case lifecycle: InterviewLifecycleCommand => currentTime.flatMap(executeLifecycle(workflow, lifecycle, claim, _))
+    case scheduling: InterviewWorkflowCommand => executeScheduling(workflow, scheduling, claim)
+  }
+
+  /** Cancel and reschedule intents. The provider is the authority: a cancel is confirmed only by the provider, and any
+    * unknown outcome is answered by a lookup by the same key, never by a local assumption.
+    */
+  private def executeLifecycle(
+      workflow: InterviewWorkflow,
+      command: InterviewLifecycleCommand,
+      claim: ClaimedInterviewWorkflowCommand,
+      now: java.time.Instant
+  ): IO[InterviewResult] = {
+    import InterviewLifecycleCommand as C
+    command match {
+      case C.CancelCalendarSlot(key) =>
+        calendar.cancel(workflow.id, key, now, Some(claim)).value.map {
+          case Right(InterviewCalendarCancellation.Cancelled(_) | InterviewCalendarCancellation.AlreadyCancelled(_)) =>
+            InterviewResult.Succeeded
+          // Definitive: the provider has no such reservation, so repeating the cancel or looking it up cannot help.
+          case Right(InterviewCalendarCancellation.UnknownReservation) => InterviewResult.Rejected
+          case _                                                       => InterviewResult.OutcomeUnknown
+        }
+      case C.LookupCalendarCancellation(key) =>
+        reservationLookup(workflow.id, key)(_.releasedAt.nonEmpty)
+      case C.HoldReplacementSlot(key, interval) =>
+        provider(
+          calendar.reserve(workflow.id, key, workflow.candidateId, workflow.recruiterId, interval, now, Some(claim))
+        ).flatMap {
+          // A refused hold may still be a replay of one that already succeeded.
+          case InterviewResult.Rejected =>
+            reservationLookup(workflow.id, key)(held => held.releasedAt.isEmpty && held.interval == interval).map {
+              case InterviewResult.Found  => InterviewResult.Succeeded
+              case InterviewResult.Absent => InterviewResult.Rejected
+              case unknown                => unknown
+            }
+          case result => IO.pure(result)
+        }
+      case C.LookupReplacementHold(key) =>
+        reservationLookup(workflow.id, key)(_.releasedAt.isEmpty)
+      case C.CommitRescheduledInterval(_, _) =>
+        if (!now.isBefore(InterviewCalendarFence.swapDeadline(workflow))) IO.pure(InterviewResult.Rejected)
+        else
+          repository.approveRescheduledInterval(workflow, now, claim).value.map {
+            case Right(_)                       => InterviewResult.Succeeded
+            case Left(RepositoryError.Conflict) => InterviewResult.Rejected
+            case Left(_)                        => InterviewResult.OutcomeUnknown
+          }
+      case C.LookupRescheduleCommitReceipt(id, generation) =>
+        repository.hasRescheduleApproval(id, generation).value.map(lookedUp)
+      // Due work: the command is only claimed once the proposal's expiry time has been reached.
+      case C.ExpireProposal(_)              => IO.pure(InterviewResult.Succeeded)
+      case C.Notify(kind, participant, key) =>
+        val send = provider(
+          notifications.notify(
+            workflow.id,
+            recipient(workflow, participant),
+            participant,
+            kind,
+            key,
+            now,
+            Some(claim)
+          )
+        )
+        // Informational messages are looked up first so a retry after a crash does not resend a recorded delivery.
+        if (!InterviewCommands.isInformational(command)) send
+        else
+          notifications.lookup(key).value.flatMap {
+            case Right(Some(_)) => IO.pure(InterviewResult.Succeeded)
+            case Right(None)    => send
+            case Left(_)        => IO.pure(InterviewResult.OutcomeUnknown)
+          }
+      case C.LookupNotificationReceipt(_, _, key) => receiptLookup(key)
+      case C.RequireRepair(_)                     => IO.pure(InterviewResult.Rejected)
+    }
+  }
+
+  private def executeScheduling(
       workflow: InterviewWorkflow,
       command: InterviewWorkflowCommand,
       claim: ClaimedInterviewWorkflowCommand
-  ): IO[InterviewResult] = {
-    def provider[A](operation: InterviewProviderIO[A]): IO[InterviewResult] = operation.value.map {
-      case Right(_)                              => InterviewResult.Succeeded
-      case Left(InterviewProviderError.Conflict) => InterviewResult.Rejected
-      case Left(_)                               => InterviewResult.OutcomeUnknown
-    }
+  ): IO[InterviewResult] =
     currentTime.flatMap { now =>
       command match {
         case InterviewWorkflowCommand.ReserveCalendarSlot(key) =>
-          def reconcile: IO[InterviewResult] = calendar.lookup(workflow.id).value.map {
-            case Right(Some(reservation)) if reservation.releasedAt.isEmpty => InterviewResult.Succeeded
-            case Right(_)                                                   => InterviewResult.Rejected
-            case Left(_)                                                    => InterviewResult.OutcomeUnknown
-          }
+          def reconcile: IO[InterviewResult] =
+            calendar.lookup(workflow.id, InterviewWorkflow.reservationKey(workflow.id, 0)).value.map {
+              case Right(Some(reservation)) if reservation.releasedAt.isEmpty => InterviewResult.Succeeded
+              case Right(_)                                                   => InterviewResult.Rejected
+              case Left(_)                                                    => InterviewResult.OutcomeUnknown
+            }
           if (!now.isBefore(workflow.preCommitDeadline)) reconcile
           else
             provider(
@@ -413,11 +684,7 @@ final class InterviewWorkflowWorker(
               case result                   => IO.pure(result)
             }
         case InterviewWorkflowCommand.LookupCalendarReservation(id) =>
-          calendar.lookup(id).value.map {
-            case Right(Some(value)) if value.releasedAt.isEmpty => InterviewResult.Found
-            case Right(_)                                       => InterviewResult.Absent
-            case Left(_)                                        => InterviewResult.OutcomeUnknown
-          }
+          reservationLookup(id, InterviewWorkflow.reservationKey(id, 0))(_.releasedAt.isEmpty)
         case InterviewWorkflowCommand.CommitAcceptedToInterview(_) =>
           repository.commitHiring(workflow, now, Some(claim)).value.map {
             case Right(_)                       => InterviewResult.Succeeded
@@ -425,11 +692,7 @@ final class InterviewWorkflowWorker(
             case Left(_)                        => InterviewResult.OutcomeUnknown
           }
         case InterviewWorkflowCommand.LookupStatusCommitReceipt(id) =>
-          repository.hasHiringReceipt(id).value.map {
-            case Right(true)  => InterviewResult.Found
-            case Right(false) => InterviewResult.Absent
-            case Left(_)      => InterviewResult.OutcomeUnknown
-          }
+          repository.hasHiringReceipt(id).value.map(lookedUp)
         case InterviewWorkflowCommand.ReleaseCalendarSlot(key) => provider(calendar.release(key, now, Some(claim)))
         case InterviewWorkflowCommand.Notify(participant, key) =>
           provider(
@@ -437,21 +700,16 @@ final class InterviewWorkflowWorker(
               workflow.id,
               if (participant == InterviewParticipant.Candidate) workflow.candidateId else workflow.recruiterId,
               participant,
+              InterviewNotificationKind.Scheduled,
               key,
               now,
               Some(claim)
             )
           )
-        case InterviewWorkflowCommand.LookupNotificationReceipt(_, key) =>
-          notifications.lookup(key).value.map {
-            case Right(Some(_)) => InterviewResult.Found
-            case Right(None)    => InterviewResult.Absent
-            case Left(_)        => InterviewResult.OutcomeUnknown
-          }
-        case InterviewWorkflowCommand.RequireRepair(_) =>
+        case InterviewWorkflowCommand.LookupNotificationReceipt(_, key) => receiptLookup(key)
+        case InterviewWorkflowCommand.RequireRepair(_)                  =>
           IO.pure(InterviewResult.Rejected)
       }
     }
-  }
 
 }

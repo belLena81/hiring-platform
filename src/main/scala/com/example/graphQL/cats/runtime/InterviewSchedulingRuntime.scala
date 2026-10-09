@@ -45,8 +45,8 @@ private[runtime] object InterviewSchedulingRuntime {
             ) =>
           val worker = new InterviewWorkflowWorker(
             repository,
-            FakeInterviewCalendarProvider.durable(repository),
-            FakeInterviewNotificationProvider.durable(repository),
+            LedgerInterviewCalendarProvider.durable(repository),
+            LedgerInterviewNotificationProvider.durable(repository),
             InterviewWorkerSettings(
               "interview-local",
               settings.publicationPollIntervalMs.millis,

@@ -292,6 +292,14 @@ type InteractionSuccess {
   recorded: Boolean!
 }
 
+input InterviewActionInput {
+  workflowId: UUID!
+  expectedRevision: Long!
+  idempotencyKey: UUID!
+}
+
+union InterviewActionResult = InterviewWorkflow | ValidationError | DomainError
+
 type InterviewWorkflow {
   id: UUID!
   applicationId: ApplicationID!
@@ -300,6 +308,13 @@ type InterviewWorkflow {
   revision: Long!
   progress: String!
   notifiedParticipants: [String!]!
+  pendingStartsAt: Instant
+  pendingEndsAt: Instant
+  cancelledAt: Instant
+  proposedStartsAt: Instant
+  proposedEndsAt: Instant
+  proposalExpiresAt: Instant
+  rescheduleRequested: Boolean!
 }
 
 type Job {
@@ -389,6 +404,13 @@ union MoveApplicationToInterviewResult = Application | ValidationError | DomainE
 type Mutation {
   scheduleInterview(input: ScheduleInterviewInput!): ScheduleInterviewResult!
   repairInterviewWorkflow(input: RepairInterviewInput!): RepairInterviewResult!
+  cancelInterview(input: InterviewActionInput!): InterviewActionResult!
+  requestInterviewReschedule(input: InterviewActionInput!): InterviewActionResult!
+  dismissInterviewRescheduleRequest(input: InterviewActionInput!): InterviewActionResult!
+  proposeInterviewReschedule(input: ProposeInterviewRescheduleInput!): InterviewActionResult!
+  withdrawInterviewReschedule(input: InterviewActionInput!): InterviewActionResult!
+  acceptInterviewReschedule(input: InterviewActionInput!): InterviewActionResult!
+  declineInterviewReschedule(input: InterviewActionInput!): InterviewActionResult!
   submitApplication(input: SubmitApplicationInput!): SubmitApplicationResult!
   createJob(input: CreateJobInput!): CreateJobResult!
   updateJob(input: UpdateJobInput!): UpdateJobResult!
@@ -427,6 +449,14 @@ input NearbyJobsFilter {
 type PageInfo {
   hasNextPage: Boolean!
   endCursor: String
+}
+
+input ProposeInterviewRescheduleInput {
+  workflowId: UUID!
+  expectedRevision: Long!
+  startsAt: Instant!
+  endsAt: Instant!
+  idempotencyKey: UUID!
 }
 
 union PublishJobResult = Job | ValidationError | DomainError

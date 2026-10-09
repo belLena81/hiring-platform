@@ -1,0 +1,65 @@
+mutation CancelInterview($input: InterviewActionInput!) {
+  cancelInterview(input: $input) {
+    ... on InterviewWorkflow { id revision progress cancelledAt }
+    ... on ValidationError { code message }
+    ... on DomainError { code message }
+  }
+}
+mutation RequestInterviewReschedule($input: InterviewActionInput!) {
+  requestInterviewReschedule(input: $input) {
+    ... on InterviewWorkflow { id revision progress rescheduleRequested }
+    ... on ValidationError { code message }
+    ... on DomainError { code message }
+  }
+}
+mutation DismissInterviewRescheduleRequest($input: InterviewActionInput!) {
+  dismissInterviewRescheduleRequest(input: $input) {
+    ... on InterviewWorkflow { id revision progress rescheduleRequested }
+    ... on ValidationError { code message }
+    ... on DomainError { code message }
+  }
+}
+mutation ProposeInterviewReschedule($input: ProposeInterviewRescheduleInput!) {
+  proposeInterviewReschedule(input: $input) {
+    ... on InterviewWorkflow { id revision progress proposedStartsAt proposedEndsAt proposalExpiresAt }
+    ... on ValidationError { code message }
+    ... on DomainError { code message }
+  }
+}
+mutation WithdrawInterviewReschedule($input: InterviewActionInput!) {
+  withdrawInterviewReschedule(input: $input) {
+    ... on InterviewWorkflow { id revision progress proposedStartsAt }
+    ... on ValidationError { code message }
+    ... on DomainError { code message }
+  }
+}
+mutation AcceptInterviewReschedule($input: InterviewActionInput!) {
+  acceptInterviewReschedule(input: $input) {
+    ... on InterviewWorkflow { id revision progress pendingStartsAt pendingEndsAt }
+    ... on ValidationError { code message }
+    ... on DomainError { code message }
+  }
+}
+mutation DeclineInterviewReschedule($input: InterviewActionInput!) {
+  declineInterviewReschedule(input: $input) {
+    ... on InterviewWorkflow { id revision progress proposedStartsAt }
+    ... on ValidationError { code message }
+    ... on DomainError { code message }
+  }
+}
+query InterviewLifecycle($workflowId: UUID!) {
+  interviewWorkflow(workflowId: $workflowId) {
+    id applicationId startsAt endsAt revision progress notifiedParticipants
+    pendingStartsAt pendingEndsAt cancelledAt
+    proposedStartsAt proposedEndsAt proposalExpiresAt rescheduleRequested
+  }
+}
+mutation InterviewActionOutcomes($action: InterviewActionInput!, $propose: ProposeInterviewRescheduleInput!) {
+  cancel: cancelInterview(input: $action) { ... on InterviewWorkflow { revision } ... on DomainError { code } }
+  request: requestInterviewReschedule(input: $action) { ... on InterviewWorkflow { revision } ... on DomainError { code } }
+  dismiss: dismissInterviewRescheduleRequest(input: $action) { ... on InterviewWorkflow { revision } ... on DomainError { code } }
+  propose: proposeInterviewReschedule(input: $propose) { ... on InterviewWorkflow { revision } ... on DomainError { code } }
+  withdraw: withdrawInterviewReschedule(input: $action) { ... on InterviewWorkflow { revision } ... on DomainError { code } }
+  accept: acceptInterviewReschedule(input: $action) { ... on InterviewWorkflow { revision } ... on DomainError { code } }
+  decline: declineInterviewReschedule(input: $action) { ... on InterviewWorkflow { revision } ... on DomainError { code } }
+}

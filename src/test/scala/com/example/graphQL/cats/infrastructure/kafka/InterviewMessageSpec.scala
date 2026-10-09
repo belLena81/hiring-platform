@@ -32,4 +32,41 @@ class InterviewMessageSpec extends FunSuite {
     assert(InterviewMessageCodec.parse(Array.fill[Byte](65537)(0)).isLeft)
     assert(InterviewMessageCodec.parse(InterviewMessageCodec.bytes(message.copy(revision = -1))).isLeft)
   }
+
+  test("DHW-28 every step, including the cancellation and rescheduling steps, travels in the same envelope") {
+    InterviewStep.values.foreach { step =>
+      val value = message.copy(step = step)
+      assertEquals(InterviewMessageCodec.parse(InterviewMessageCodec.bytes(value)), Right(value), step.toString)
+    }
+    List(
+      "CancelSlot",
+      "LookupCancellation",
+      "HoldReplacement",
+      "LookupReplacementHold",
+      "CommitReschedule",
+      "LookupRescheduleCommit",
+      "ExpireProposal"
+    ).foreach(name => assert(InterviewStep.values.exists(_.toString == name), name))
+  }
+  test("DHW-28 the envelope keeps the workflow-id key and the same field names") {
+    val json = new String(
+      InterviewMessageCodec.bytes(message.copy(step = InterviewStep.CancelSlot)),
+      java.nio.charset.StandardCharsets.UTF_8
+    )
+    val fields = io.circe.parser.parse(json).toOption.flatMap(_.asObject).map(_.keys.toSet)
+    assertEquals(
+      fields,
+      Some(
+        Set("messageId", "workflowId", "stepId", "step", "revision", "causationId", "deadline", "result", "occurredAt")
+      )
+    )
+  }
+  test("DHW-28 an unknown or malformed step is quarantined by the decoder, never executed") {
+    val json = new String(
+      InterviewMessageCodec.bytes(message.copy(step = InterviewStep.CancelSlot)),
+      java.nio.charset.StandardCharsets.UTF_8
+    )
+    assert(InterviewMessageCodec.parse(json.replace("CancelSlot", "CancelEverything").getBytes).isLeft)
+    assert(InterviewMessageCodec.parse(json.replace("CancelSlot", "").getBytes).isLeft)
+  }
 }

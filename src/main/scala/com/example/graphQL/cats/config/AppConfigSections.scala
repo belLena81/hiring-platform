@@ -19,5 +19,6 @@ private[config] final case class AuthSettings(
     jwt: JwtAuthConfig,
     passwordHash: PasswordHashConfig,
     rateLimit: AuthRateLimitConfig,
+    interviewActionRateLimit: InterviewActionRateLimitConfig,
     adminSeed: AdminSeedConfig
 )

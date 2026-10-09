@@ -24,6 +24,14 @@ private[graphql] object HiringGraphQLInputs {
     deriveInputObjectType[ScheduleInterviewGraphQLInput](InputObjectTypeName("ScheduleInterviewInput"))
   lazy val repairInterviewInputType =
     deriveInputObjectType[RepairInterviewGraphQLInput](InputObjectTypeName("RepairInterviewInput"))
+  lazy val interviewActionInputType =
+    deriveInputObjectType[InterviewActionGraphQLInput](InputObjectTypeName("InterviewActionInput"))
+  lazy val proposeInterviewRescheduleInputType =
+    deriveInputObjectType[ProposeInterviewRescheduleGraphQLInput](
+      InputObjectTypeName("ProposeInterviewRescheduleInput")
+    )
+  lazy val interviewActionInputArgument = Argument("input", interviewActionInputType)
+  lazy val proposeInterviewRescheduleInputArgument = Argument("input", proposeInterviewRescheduleInputType)
   lazy val scheduleInterviewInputArgument = Argument("input", scheduleInterviewInputType)
   lazy val repairInterviewInputArgument = Argument("input", repairInterviewInputType)
   lazy val workflowIdArgument = Argument("workflowId", uuidType)
@@ -53,12 +61,12 @@ private[graphql] object HiringGraphQLInputs {
 
   private def uuidScalar[A](
       name: String,
-      parse: String => Either[Throwable, A],
+      parse: String => Option[A],
       unwrap: A => UUID
   ): ScalarType[A] =
     stringScalar(
       name,
-      value => parse(value).left.map(_ => IdCoercionViolation(name)),
+      value => parse(value).toRight(IdCoercionViolation(name)),
       value => unwrap(value).toString
     )
 
@@ -72,7 +80,8 @@ private[graphql] object HiringGraphQLInputs {
   def instantField[A](name: String, resolve: A => Instant): Field[RequestContext, A] =
     Field(name, instantType, resolve = context => resolve(context.value))
 
-  lazy val uuidType: ScalarType[UUID] = uuidScalar[UUID]("UUID", Parsing.parseUuid, value => value)
+  lazy val uuidType: ScalarType[UUID] =
+    uuidScalar[UUID]("UUID", value => Parsing.parseUuid(value).toOption, value => value)
   lazy val userIdType: ScalarType[UserId] =
     uuidScalar("UserID", value => parseIdentifier(value)(UserId.apply), _.value)
   lazy val jobIdType: ScalarType[JobId] =

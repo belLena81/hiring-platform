@@ -10,7 +10,7 @@ import scala.jdk.CollectionConverters.*
 
 /** Explicit bounded, resumable semantic audit. Invalid rows retain the previous checkpoint for repair and rerun.
   *
-  * Its `audit_hiring_workflow_integrity` ledger row belongs to this operator tool, not to the 16 runner-owned migration
+  * Its `audit_hiring_workflow_integrity` ledger row belongs to this operator tool, not to the 18 runner-owned migration
   * steps: it is written without a `version` field and is never read by `MongoMigrationRunner`.
   */
 object MongoWorkflowIntegrityAudit extends IOApp {
@@ -45,7 +45,7 @@ object MongoWorkflowIntegrityAudit extends IOApp {
               rows.traverse_(row =>
                 IO.fromEither(
                   MongoInterviewWorkflowCommandCodec
-                    .decode(row)
+                    .decodeStored(row)
                     .left
                     .map(_ => MigrationError.StepFailed(Audit, "rejected a command"))
                 ).void

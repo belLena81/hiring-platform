@@ -77,7 +77,10 @@ final class MongoMigrationLedgerSpec extends FunSuite {
       "013_hiring_workflow_integrity",
       "014_deleted_account_embeddings",
       "015_interview_cleanup_integrity",
-      "016_candidate_residence_integrity"
+      "016_candidate_residence_integrity",
+      "017_interview_ledger_collections",
+      "018_interview_cancellation_reschedule",
+      "019_interview_request_receipt_index"
     )
     val actual = List(
       MigrationIds.UserJobRevisions,
@@ -95,7 +98,10 @@ final class MongoMigrationLedgerSpec extends FunSuite {
       MigrationIds.HiringWorkflowIntegrity,
       MigrationIds.DeletedAccountEmbeddings,
       MigrationIds.InterviewCleanupIntegrity,
-      MigrationIds.CandidateResidenceIntegrity
+      MigrationIds.CandidateResidenceIntegrity,
+      MigrationIds.InterviewLedgerCollections,
+      MigrationIds.InterviewCancellationReschedule,
+      MigrationIds.InterviewRequestReceiptIndex
     ).map(_.value)
     assertEquals(actual, expected)
     assertEquals(MongoDeletedAccountEmbeddingMigrations.MigrationId, MigrationIds.DeletedAccountEmbeddings.value)
@@ -104,6 +110,9 @@ final class MongoMigrationLedgerSpec extends FunSuite {
     assertEquals(MongoWorkflowIntegrityMigrations.MigrationId, MigrationIds.HiringWorkflowIntegrity.value)
     assertEquals(MongoInterviewCleanupIntegrityMigrations.MigrationId, MigrationIds.InterviewCleanupIntegrity.value)
     assertEquals(MongoCandidateResidenceIntegrityMigrations.MigrationId, MigrationIds.CandidateResidenceIntegrity.value)
+    assertEquals(MongoInterviewLedgerCollectionMigrations.MigrationId, MigrationIds.InterviewLedgerCollections.value)
+    assertEquals(MongoInterviewLifecycleMigrations.MigrationId, MigrationIds.InterviewCancellationReschedule.value)
+    assertEquals(MongoInterviewRequestReceiptMigrations.MigrationId, MigrationIds.InterviewRequestReceiptIndex.value)
   }
 
   test("typed migration errors are stack-free throwables whose messages carry identities only") {

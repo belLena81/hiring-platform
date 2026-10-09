@@ -23,7 +23,8 @@ final case class AppConfig(
     kafka: KafkaConfig,
     resetOnStart: Boolean = false,
     discovery: DiscoveryConfig = DiscoveryConfig(),
-    adminSeed: AdminSeedConfig = AdminSeedConfig()
+    adminSeed: AdminSeedConfig = AdminSeedConfig(),
+    interviewActionRateLimit: InterviewActionRateLimitConfig
 ) {
   override def toString: String = "AppConfig([REDACTED])"
 }

@@ -178,4 +178,167 @@ final class InterviewMessagePolicySpec extends FunSuite {
     )
     assertEquals(InterviewMessagePolicy.retryAvailableAt(Some(InterviewResult.Succeeded), 3L, now, 1000L, 30000L), None)
   }
+
+  private val lifecycleWorkflow = workflow.copy(phase = InterviewWorkflowPhase.CancelPending, revision = 4L)
+  private def lifecycleRecord(command: InterviewLifecycleCommand) =
+    InterviewWorkflowCommandRecord(
+      workflow.id,
+      "cancel-step",
+      4L,
+      command,
+      InterviewWorkflowCommandState.Published,
+      1,
+      now,
+      now
+    )
+
+  test("DHW-28 every lifecycle intent has exactly one step and notifications keep the participant steps") {
+    import InterviewLifecycleCommand as C
+    val cancelKey = InterviewWorkflow.cancellationKey(workflow.id, 0)
+    val holdKey = InterviewWorkflow.reservationKey(workflow.id, 1)
+    val samples: List[(InterviewLifecycleCommand, InterviewStep)] = List(
+      C.CancelCalendarSlot(cancelKey) -> InterviewStep.CancelSlot,
+      C.LookupCalendarCancellation(cancelKey) -> InterviewStep.LookupCancellation,
+      C.HoldReplacementSlot(holdKey, workflow.interval) -> InterviewStep.HoldReplacement,
+      C.LookupReplacementHold(holdKey) -> InterviewStep.LookupReplacementHold,
+      C.CommitRescheduledInterval(workflow.interval, 1) -> InterviewStep.CommitReschedule,
+      C.LookupRescheduleCommitReceipt(workflow.id, 1) -> InterviewStep.LookupRescheduleCommit,
+      C.ExpireProposal(now) -> InterviewStep.ExpireProposal,
+      C.Notify(
+        InterviewNotificationKind.Cancelled,
+        InterviewParticipant.Candidate,
+        "k"
+      ) -> InterviewStep.NotifyCandidate,
+      C.Notify(InterviewNotificationKind.RescheduleExpired, InterviewParticipant.Recruiter, "k") ->
+        InterviewStep.NotifyRecruiter,
+      C.LookupNotificationReceipt(InterviewNotificationKind.Rescheduled, InterviewParticipant.Candidate, "k") ->
+        InterviewStep.LookupNotifyCandidate,
+      C.LookupNotificationReceipt(InterviewNotificationKind.Cancelled, InterviewParticipant.Recruiter, "k") ->
+        InterviewStep.LookupNotifyRecruiter,
+      C.RequireRepair("x") -> InterviewStep.RequireRepair
+    )
+    samples.foreach((command, step) => assertEquals(InterviewMessagePolicy.step(command), step, command.toString))
+  }
+
+  test("DHW-18 a lifecycle command is admitted for execution only while the workflow still needs it") {
+    val command =
+      lifecycleRecord(InterviewLifecycleCommand.CancelCalendarSlot(InterviewWorkflow.cancellationKey(workflow.id, 0)))
+    val commandId = InterviewMessagePolicy.stableId(command.stepId)
+    val cancelMessage = message.copy(
+      messageId = commandId,
+      stepId = command.stepId,
+      step = InterviewStep.CancelSlot,
+      revision = 4L
+    )
+    assertEquals(
+      InterviewMessagePolicy.commandAdmission(Some(lifecycleWorkflow), Some(command), cancelMessage),
+      InterviewCommandAdmission.Execute(lifecycleWorkflow, command)
+    )
+    val moved = lifecycleWorkflow.copy(phase = InterviewWorkflowPhase.CancelNotificationsPending, revision = 5L)
+    assertEquals(
+      InterviewMessagePolicy.commandAdmission(Some(moved), Some(command), cancelMessage),
+      InterviewCommandAdmission.Quarantine(InterviewMessageRejection.Inconsistent)
+    )
+  }
+
+  test("DHW-18 a late lifecycle message fails its step through the policy, a late notification only its own command") {
+    val cancelKey = InterviewWorkflow.cancellationKey(workflow.id, 0)
+    val command = lifecycleRecord(InterviewLifecycleCommand.CancelCalendarSlot(cancelKey))
+    val cancelMessage = message.copy(
+      messageId = InterviewMessagePolicy.stableId(command.stepId),
+      stepId = command.stepId,
+      step = InterviewStep.CancelSlot,
+      revision = 4L
+    )
+    val failure = InterviewMessagePolicy.lifecycleReplayFailure(
+      Some(lifecycleWorkflow),
+      Some(command),
+      cancelMessage,
+      "replay_expired",
+      InterviewMessageRejection.Expired,
+      now
+    )
+    assertEquals(
+      failure,
+      Right(
+        InterviewMessagePolicy.LifecycleReplayFailure.Workflow(InterviewLifecycleEvent.RetryExhausted("replay_expired"))
+      )
+    )
+    val informational = lifecycleRecord(
+      InterviewLifecycleCommand.Notify(
+        InterviewNotificationKind.RescheduleDeclined,
+        InterviewParticipant.Recruiter,
+        s"${workflow.id.value}:rescheduleDeclined:r4:notify:Recruiter"
+      )
+    )
+    val informationalMessage = cancelMessage.copy(
+      messageId = InterviewMessagePolicy.stableId(informational.stepId),
+      step = InterviewStep.NotifyRecruiter
+    )
+    assertEquals(
+      InterviewMessagePolicy.lifecycleReplayFailure(
+        Some(workflow.copy(phase = InterviewWorkflowPhase.Completed, revision = 4L)),
+        Some(informational),
+        informationalMessage,
+        "replay_expired",
+        InterviewMessageRejection.Expired,
+        now
+      ),
+      Right(InterviewMessagePolicy.LifecycleReplayFailure.Notification)
+    )
+    assertEquals(
+      InterviewMessagePolicy
+        .lifecycleReplayFailure(None, Some(command), cancelMessage, "x", InterviewMessageRejection.Future, now),
+      Left(InterviewMessageRejection.Future)
+    )
+  }
+
+  test("DHW-20 a failed expiry expires the proposal instead of entering repair, and an early one is only deferred") {
+    val proposing = workflow.copy(
+      phase = InterviewWorkflowPhase.ProposalPending,
+      revision = 4L,
+      proposal = Some(InterviewRescheduleProposal(workflow.interval, workflow.recruiterId, now))
+    )
+    val expiry = lifecycleRecord(InterviewLifecycleCommand.ExpireProposal(now))
+    val expiryMessage = message.copy(
+      messageId = InterviewMessagePolicy.stableId(expiry.stepId),
+      stepId = expiry.stepId,
+      step = InterviewStep.ExpireProposal,
+      revision = 4L
+    )
+    def failure(rejection: InterviewMessageRejection, at: Instant) =
+      InterviewMessagePolicy.lifecycleReplayFailure(
+        Some(proposing),
+        Some(expiry),
+        expiryMessage,
+        "replay_expired",
+        rejection,
+        at
+      )
+    assertEquals(
+      failure(InterviewMessageRejection.Expired, now.plusSeconds(60)),
+      Right(
+        InterviewMessagePolicy.LifecycleReplayFailure.Workflow(
+          InterviewLifecycleEvent.ProposalExpired(now.plusSeconds(60))
+        )
+      )
+    )
+    assertEquals(
+      failure(InterviewMessageRejection.Future, now.plusSeconds(60)),
+      Right(InterviewMessagePolicy.LifecycleReplayFailure.Defer)
+    )
+    // The give-up event of every step except expiry is repair; expiry is expiry.
+    assertEquals(
+      InterviewCommands.giveUpEvent(expiry.command, "publication_exhausted", now),
+      InterviewLifecycleEvent.ProposalExpired(now)
+    )
+    assertEquals(
+      InterviewCommands.giveUpEvent(
+        InterviewLifecycleCommand.CancelCalendarSlot(InterviewWorkflow.cancellationKey(workflow.id, 0)),
+        "publication_exhausted",
+        now
+      ),
+      InterviewLifecycleEvent.RetryExhausted("publication_exhausted")
+    )
+  }
 }

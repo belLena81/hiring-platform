@@ -467,7 +467,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
         )
         _ <- MongoRepositoryTestSupport.insertOne(
           fixture.database,
-          MongoCollections.FakeInterviewCalendarReservations,
+          MongoCollections.InterviewCalendarReservations,
           new Document("_id", workflowId)
             .append("workflowId", workflowId)
             .append("releaseKey", workflowId + ":release")
@@ -477,7 +477,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
         )
         _ <- MongoRepositoryTestSupport.insertOne(
           fixture.database,
-          MongoCollections.FakeInterviewNotificationReceipts,
+          MongoCollections.InterviewNotificationReceipts,
           new Document("_id", workflowId + ":notify:Recruiter")
             .append("workflowId", workflowId)
             .append("recipientId", other)
@@ -488,10 +488,10 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
         beforePurge <- cleanup.find(subject).value
         _ = assertEquals(beforePurge.toOption.flatten.map(_.state), Some(InterviewCleanupState.ProducersFenced))
         _ <- step(cleanup)
-        purged <- MongoRepositoryTestSupport.count(fixture.database, MongoCollections.FakeInterviewCalendarReservations)
+        purged <- MongoRepositoryTestSupport.count(fixture.database, MongoCollections.InterviewCalendarReservations)
         notifications <- MongoRepositoryTestSupport.count(
           fixture.database,
-          MongoCollections.FakeInterviewNotificationReceipts
+          MongoCollections.InterviewNotificationReceipts
         )
         _ <- step(cleanup)
         pending <- cleanup.complete(subject)
@@ -538,7 +538,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
         _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
         _ <- MongoRepositoryTestSupport.insertOne(
           fixture.database,
-          MongoCollections.FakeInterviewCalendarReservations,
+          MongoCollections.InterviewCalendarReservations,
           new Document("_id", id)
             .append("workflowId", id)
             .append("releaseKey", id + ":release")
@@ -552,7 +552,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
         _ <- step(cleanup)
         reservations <- MongoRepositoryTestSupport.count(
           fixture.database,
-          MongoCollections.FakeInterviewCalendarReservations
+          MongoCollections.InterviewCalendarReservations
         )
       } yield {
         assert(!pending)
@@ -660,7 +660,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
         _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
         _ <- MongoRepositoryTestSupport.insertOne(
           fixture.database,
-          MongoCollections.FakeInterviewCalendarParticipantLocks,
+          MongoCollections.InterviewCalendarParticipantLocks,
           new Document("_id", subject.value.toString).append("fence", Long.box(1L))
         )
         _ <- cleanup.enqueue(subject, at, None).value.flatMap(result => IO(assert(result.isRight)))
@@ -767,8 +767,8 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
     MongoCollections.InterviewWorkflows,
     MongoCollections.InterviewWorkflowCommands,
     MongoCollections.InterviewWorkflowInbox,
-    MongoCollections.FakeInterviewCalendarReservations,
-    MongoCollections.FakeInterviewNotificationReceipts
+    MongoCollections.InterviewCalendarReservations,
+    MongoCollections.InterviewNotificationReceipts
   )
 
   private def seedCleanupData(
@@ -785,12 +785,12 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
             .append("documentType", "requestReceipt")
             .append("requestWorkflowId", id)
         case CleanupAttribution.CalendarReservation =>
-          MongoCollections.FakeInterviewCalendarReservations -> new Document("_id", id)
+          MongoCollections.InterviewCalendarReservations -> new Document("_id", id)
             .append("workflowId", id)
             .append("participants", java.util.List.of(subject.value.toString))
             .append("releaseKey", s"$id:release")
         case CleanupAttribution.NotificationReceipt =>
-          MongoCollections.FakeInterviewNotificationReceipts -> new Document("_id", s"$id:notify:Candidate")
+          MongoCollections.InterviewNotificationReceipts -> new Document("_id", s"$id:notify:Candidate")
             .append("workflowId", id)
             .append("recipientId", subject.value.toString)
         case CleanupAttribution.Workflow =>
@@ -871,7 +871,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
         // The surviving participant's receipt is attributable through the reservation, not its own recipient.
         _ <- MongoRepositoryTestSupport.insertOne(
           fixture.database,
-          MongoCollections.FakeInterviewNotificationReceipts,
+          MongoCollections.InterviewNotificationReceipts,
           new Document("_id", s"$firstCalendar:notify:Recruiter")
             .append("workflowId", firstCalendar)
             .append("recipientId", other.value.toString)
@@ -920,7 +920,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
         receipts <- MongoRepositoryTestSupport.count(fixture.database, MongoCollections.InterviewWorkflowInbox)
         providers <- MongoRepositoryTestSupport.count(
           fixture.database,
-          MongoCollections.FakeInterviewCalendarReservations
+          MongoCollections.InterviewCalendarReservations
         )
         absent <- cleanup.absent(subject).value
         _ = assert(interrupted.toOption.exists(_.firstFailure.nonEmpty))

@@ -48,6 +48,28 @@ final class HiringGraphQLContractSpec extends CatsEffectSuite {
     }
   }
 
+  test("interview cancellation operations match the active public schema, including every action's DomainError") {
+    fixture("interview-cancellation.graphql").map { operation =>
+      val document = sangria.parser.QueryParser.parse(operation).get
+      val violations =
+        sangria.validation.QueryValidator.default.validateQuery(HiringGraphQLSchema.schema, document, Map.empty, None)
+      assertEquals(violations.toList, Nil)
+      val actions = List(
+        "cancelInterview",
+        "requestInterviewReschedule",
+        "dismissInterviewRescheduleRequest",
+        "proposeInterviewReschedule",
+        "withdrawInterviewReschedule",
+        "acceptInterviewReschedule",
+        "declineInterviewReschedule"
+      )
+      val outcomes = document.operations.values.find(_.name.contains("InterviewActionOutcomes")).get
+      val selected = outcomes.selections.collect { case field: sangria.ast.Field => field.name }
+      assertEquals(selected.toList, actions)
+      actions.foreach(action => assert(operation.contains(s"$action(input:"), action))
+    }
+  }
+
   test("embedding coverage operation matches the active public schema") {
     fixture("embedding-coverage.graphql").map { operation =>
       val document = sangria.parser.QueryParser.parse(operation).get

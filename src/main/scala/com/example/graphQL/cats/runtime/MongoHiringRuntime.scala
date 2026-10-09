@@ -3,6 +3,7 @@ package com.example.graphQL.cats.runtime
 import cats.effect.{Clock, Deferred, IO, Resource, Ref}
 import cats.effect.std.{Semaphore, UUIDGen}
 import cats.syntax.all.*
+import com.example.graphQL.cats.domain.workflow.InterviewProposalTtl
 import com.example.graphQL.cats.api.graphql.{CursorCodec, HiringGraphQLServices}
 import com.example.graphQL.cats.service.port.EmbeddingService
 import com.example.graphQL.cats.service.{
@@ -340,6 +341,7 @@ object MongoHiringRuntime {
     val cursorKey = CursorCodec.keyFromSecret(jwtAuth.hmacSecret, jwtAuth.cursorTtlSeconds)
 
     def assemble(
+        proposalTtl: InterviewProposalTtl,
         jobService: JobUseCases,
         accountService: AccountUseCases,
         coverageService: EmbeddingCoverageUseCases,
@@ -362,20 +364,33 @@ object MongoHiringRuntime {
             jobs,
             applications,
             interviewRepository,
-            kafka.interview.preCommitDeadlineSeconds.seconds
+            kafka.interview.preCommitDeadlineSeconds.seconds,
+            proposalTtl = proposalTtl
           )
         ),
         coverageService
       )
 
-    Argon2PasswordHasher
-      .resource(
-        passwordHash.iterations,
-        passwordHash.memoryKilobytes,
-        passwordHash.parallelism,
-        passwordHashPermits
+    // Fail closed: a lifetime the domain rejects stops startup instead of silently becoming the default.
+    Resource
+      .eval(
+        IO.fromEither(
+          InterviewProposalTtl
+            .from(kafka.interview.proposalTtl)
+            .leftMap(error => new IllegalStateException(s"Invalid interview proposal lifetime: $error"))
+        )
       )
-      .flatMap { hasher =>
+      .flatMap(proposalTtl =>
+        Argon2PasswordHasher
+          .resource(
+            passwordHash.iterations,
+            passwordHash.memoryKilobytes,
+            passwordHash.parallelism,
+            passwordHashPermits
+          )
+          .map(hasher => (proposalTtl, hasher))
+      )
+      .flatMap { (proposalTtl, hasher) =>
         SearchSessionHandoff.resource(searchSessionWork, SearchSessionHandoffConfig(), diagnostics, Clock[IO]).map {
           searchSessionHandoff =>
             capability match {
@@ -394,6 +409,7 @@ object MongoHiringRuntime {
                   )
                 val jobService = JobService.live(users, jobs, disabledEmbeddingPublisher, idempotent, diagnostics)
                 assemble(
+                  proposalTtl,
                   jobService,
                   account,
                   EmbeddingCoverageService.vectorSearchDisabled(users),
@@ -421,6 +437,7 @@ object MongoHiringRuntime {
                   model
                 )
                 assemble(
+                  proposalTtl,
                   jobService,
                   accountService,
                   EmbeddingCoverageService.live(users, embeddingCoverage, durableRetryCap, clock = Clock[IO]),

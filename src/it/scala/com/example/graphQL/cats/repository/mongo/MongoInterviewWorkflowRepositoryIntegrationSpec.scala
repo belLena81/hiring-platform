@@ -259,14 +259,14 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
     }
   }
 
-  test("fake calendar reservations serialize overlaps, allow adjacency, and release idempotently") {
+  test("calendar ledger reservations serialize overlaps, allow adjacency, and release idempotently") {
     mongoResource.use { fixture =>
       val workflowRepository = new MongoInterviewWorkflowRepository(
         fixture.database,
         MongoTransactionRunner.sessions(fixture.client, RepositoryError.Conflict, diagnostics = Diagnostics.noop),
         Diagnostics.noop
       )
-      val calendar = FakeInterviewCalendarProvider.durable(workflowRepository)
+      val calendar = LedgerInterviewCalendarProvider.durable(workflowRepository)
       val candidate = UserId(UUID.randomUUID())
       val first = workflow(UUID.randomUUID(), UUID.randomUUID(), candidate, UserId(UUID.randomUUID()))
       val second = workflow(UUID.randomUUID(), UUID.randomUUID(), candidate, UserId(UUID.randomUUID()))
@@ -330,7 +330,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         _ = assertEquals(List(outcomes._1, outcomes._2).count(_ == Left(InterviewProviderError.Conflict)), 1)
         winner = if (outcomes._1.isRight) first else second
         loser = if (outcomes._1.isLeft) first else second
-        winnerReservation <- providerSuccess(calendar.lookup(winner.id))
+        winnerReservation <- providerSuccess(calendar.lookup(winner.id, InterviewWorkflow.reservationKey(winner.id, 0)))
           .flatMap(IO.fromOption(_)(new AssertionError("Missing reservation")))
         _ = assertEquals(winnerReservation.releasedAt, None)
         _ <- Mongo4catsCollections
@@ -379,7 +379,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         MongoTransactionRunner.sessions(fixture.client, RepositoryError.Conflict, diagnostics = Diagnostics.noop),
         Diagnostics.noop
       )
-      val notification = FakeInterviewNotificationProvider.durable(workflowRepository)
+      val notification = LedgerInterviewNotificationProvider.durable(workflowRepository)
       val value = workflow(UUID.randomUUID(), UUID.randomUUID(), UserId(UUID.randomUUID()), UserId(UUID.randomUUID()))
       val claimAt = now.plusSeconds(10)
       val leaseUntil = claimAt.plusSeconds(30)
@@ -387,6 +387,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         value.id,
         value.candidateId,
         InterviewParticipant.Candidate,
+        InterviewNotificationKind.Scheduled,
         s"${value.id.value}:notify:Candidate",
         now.plusSeconds(5)
       )
@@ -409,7 +410,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
           .flatMap(claims => IO.fromOption(claims.headOption)(new AssertionError("Expected reclaimed command")))
         published <- workflowRepository.markPublished(current, leaseUntil.plusSeconds(1)).value
         _ <- providerSuccess(
-          FakeInterviewCalendarProvider
+          LedgerInterviewCalendarProvider
             .durable(workflowRepository)
             .reserve(
               value.id,
@@ -438,6 +439,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
             value.id,
             value.candidateId,
             InterviewParticipant.Candidate,
+            InterviewNotificationKind.Scheduled,
             receipt.idempotencyKey,
             receipt.deliveredAt
           )
@@ -447,6 +449,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
             value.id,
             value.candidateId,
             InterviewParticipant.Candidate,
+            InterviewNotificationKind.Scheduled,
             receipt.idempotencyKey,
             receipt.deliveredAt.plusSeconds(1)
           )
@@ -556,7 +559,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
       val initiated = target.copy(initiatedBy = admin.id)
       val eventId =
         UUID.nameUUIDFromBytes(s"${initiated.id.value}:status".getBytes(java.nio.charset.StandardCharsets.UTF_8))
-      val calendar = FakeInterviewCalendarProvider.durable(repository)
+      val calendar = LedgerInterviewCalendarProvider.durable(repository)
       for {
         _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
         _ <- seedSubjects(fixture.database, target)
@@ -668,8 +671,8 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
     mongoResource.use { fixture =>
       val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
       val value = workflow(UUID.randomUUID(), UUID.randomUUID(), UserId(UUID.randomUUID()), UserId(UUID.randomUUID()))
-      val calendar = FakeInterviewCalendarProvider.durable(repository)
-      val notifications = FakeInterviewNotificationProvider.durable(repository)
+      val calendar = LedgerInterviewCalendarProvider.durable(repository)
+      val notifications = LedgerInterviewNotificationProvider.durable(repository)
       val worker = new com.example.graphQL.cats.service.application.InterviewWorkflowWorker(
         repository,
         calendar,
@@ -764,6 +767,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
             value.id,
             value.candidateId,
             InterviewParticipant.Candidate,
+            InterviewNotificationKind.Scheduled,
             s"${value.id.value}:notify:Candidate",
             claimedAt,
             Some(notificationExecution)
@@ -804,7 +808,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
   test("expired execution tokens cannot reserve and stale release cannot remove a committed reservation") {
     mongoResource.use { fixture =>
       val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
-      val calendar = FakeInterviewCalendarProvider.durable(repository)
+      val calendar = LedgerInterviewCalendarProvider.durable(repository)
       val value = workflow(UUID.randomUUID(), UUID.randomUUID(), UserId(UUID.randomUUID()), UserId(UUID.randomUUID()))
       val key = s"${value.id.value}:reserve"
       for {
@@ -855,7 +859,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         reserveAfterCommit <- calendar
           .reserve(value.id, key, value.candidateId, value.recruiterId, value.interval, currentAt)
           .value
-        kept <- providerSuccess(calendar.lookup(value.id))
+        kept <- providerSuccess(calendar.lookup(value.id, InterviewWorkflow.reservationKey(value.id, 0)))
         staleResult <- repository.recordResult(first, InterviewCommandResult.Succeeded, currentAt).value
       } yield {
         assert(staleReserve.isLeft)
@@ -897,8 +901,8 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         now,
         adminSingleton = true
       )
-      val calendar = FakeInterviewCalendarProvider.durable(repository)
-      val notifications = FakeInterviewNotificationProvider.durable(repository)
+      val calendar = LedgerInterviewCalendarProvider.durable(repository)
+      val notifications = LedgerInterviewNotificationProvider.durable(repository)
       val repairKey = UUID.randomUUID()
       for {
         _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
@@ -946,6 +950,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
             value.id,
             value.candidateId,
             InterviewParticipant.Candidate,
+            InterviewNotificationKind.Scheduled,
             s"${value.id.value}:notify:Candidate",
             now
           )
@@ -994,6 +999,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
             value.id,
             value.recruiterId,
             InterviewParticipant.Recruiter,
+            InterviewNotificationKind.Scheduled,
             s"${value.id.value}:notify:Recruiter",
             now
           )
@@ -1021,7 +1027,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         )
         reservation <- MongoRepositoryTestSupport.findOne(
           fixture.database,
-          MongoCollections.FakeInterviewCalendarReservations,
+          MongoCollections.InterviewCalendarReservations,
           MongoFilter.eq(MongoFields.Id, value.id.value.toString).bson
         )
         repairAudit <- MongoRepositoryTestSupport.findOne(
@@ -1052,7 +1058,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
   test("obsolete hiring results terminalize without repair or reservation release") {
     mongoResource.use { fixture =>
       val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
-      val calendar = FakeInterviewCalendarProvider.durable(repository)
+      val calendar = LedgerInterviewCalendarProvider.durable(repository)
       val value = workflow(UUID.randomUUID(), UUID.randomUUID(), UserId(UUID.randomUUID()), UserId(UUID.randomUUID()))
       for {
         _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
@@ -1104,7 +1110,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         resolution <- success(repository.requireRepair(result, now, "publication_exhausted"))
         after <- success(repository.findForAdmin(value.id))
         command <- success(repository.findCommand(value.id, commit.record.stepId))
-        reservation <- providerSuccess(calendar.lookup(value.id))
+        reservation <- providerSuccess(calendar.lookup(value.id, InterviewWorkflow.reservationKey(value.id, 0)))
       } yield {
         assertEquals(resolution, InterviewPublicationResolution.Superseded)
         assertEquals(after.map(_.phase), Some(InterviewWorkflowPhase.NotificationsPending))
@@ -1142,8 +1148,8 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         }
         worker = new com.example.graphQL.cats.service.application.InterviewWorkflowWorker(
           repository,
-          FakeInterviewCalendarProvider.durable(repository),
-          FakeInterviewNotificationProvider.durable(repository),
+          LedgerInterviewCalendarProvider.durable(repository),
+          LedgerInterviewNotificationProvider.durable(repository),
           com.example.graphQL.cats.service.application
             .InterviewWorkerSettings("budget", 1.second, 60.seconds, 10.seconds, 1, 1.second, 30.seconds),
           Diagnostics.noop,

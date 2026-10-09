@@ -57,6 +57,11 @@ class AppConfigSpec extends FunSuite {
       |  attempts = 20
       |  max-buckets = 10000
       |}
+      |auth.interview-action-rate-limit {
+      |  window-seconds = 60
+      |  attempts = 30
+      |  max-buckets = 10000
+      |}
       |kafka {
       |  enabled = false
       |  bootstrap-servers = "127.0.0.1:9092"
@@ -238,6 +243,11 @@ class AppConfigSpec extends FunSuite {
         |  attempts = 10
         |  max-buckets = 500
         |}
+        |auth.interview-action-rate-limit {
+        |  window-seconds = 60
+        |  attempts = 30
+        |  max-buckets = 10000
+        |}
         |kafka {
         |  enabled = false
         |  bootstrap-servers = "127.0.0.1:9092"
@@ -314,7 +324,8 @@ class AppConfigSpec extends FunSuite {
           defaultPasswordHash,
           AuthRateLimitConfig(30, 10, 500),
           defaultVectorSearch,
-          defaultKafka
+          defaultKafka,
+          interviewActionRateLimit = InterviewActionRateLimitConfig(60, 30, 10000)
         )
       )
     )
@@ -474,6 +485,11 @@ class AppConfigSpec extends FunSuite {
         |auth.rate-limit {
         |  window-seconds = 60
         |  attempts = 20
+        |  max-buckets = 10000
+        |}
+        |auth.interview-action-rate-limit {
+        |  window-seconds = 60
+        |  attempts = 30
         |  max-buckets = 10000
         |}
         |kafka {
@@ -660,7 +676,8 @@ class AppConfigSpec extends FunSuite {
           defaultPasswordHash,
           defaultAuthRateLimit,
           defaultVectorSearch.copy(enabled = false),
-          defaultKafka
+          defaultKafka,
+          interviewActionRateLimit = InterviewActionRateLimitConfig(60, 30, 10000)
         )
       )
     )
@@ -759,6 +776,52 @@ class AppConfigSpec extends FunSuite {
       AppConfigFixtures.fromConfig(defaultConfig + "auth.rate-limit.max-buckets = 0\n", Map.empty),
       ConfigError.InvalidAuthRateLimitBuckets
     )
+  }
+
+  test("DHW-34 the per-actor interview action limit is required, bounded and accumulates invalid settings") {
+    def block(window: Int = 30, attempts: Int = 5, buckets: Int = 200): String =
+      s"""auth.interview-action-rate-limit {
+         |  window-seconds = $window
+         |  attempts = $attempts
+         |  max-buckets = $buckets
+         |}
+         |""".stripMargin
+    assertEquals(
+      AppConfigFixtures.fromConfig(defaultConfig, Map.empty).map(_.interviewActionRateLimit),
+      Right(InterviewActionRateLimitConfig(60, 30, 10000))
+    )
+    // The section is required: removing it fails closed instead of falling back to a built-in value.
+    val without = defaultConfig.replace(block(60, 30, 10000), "")
+    assertNotEquals(without, defaultConfig)
+    assertContainsError(AppConfigFixtures.fromConfig(without, Map.empty), ConfigError.InvalidConfigFile)
+    assertEquals(
+      AppConfigFixtures.fromConfig(defaultConfig + block(), Map.empty).map(_.interviewActionRateLimit),
+      Right(InterviewActionRateLimitConfig(30, 5, 200))
+    )
+    assertContainsError(
+      AppConfigFixtures.fromConfig(defaultConfig + block(window = 0), Map.empty),
+      ConfigError.InvalidInterviewActionRateLimitWindow
+    )
+    assertContainsError(
+      AppConfigFixtures.fromConfig(defaultConfig + block(window = 3601), Map.empty),
+      ConfigError.InvalidInterviewActionRateLimitWindow
+    )
+    assertContainsError(
+      AppConfigFixtures.fromConfig(defaultConfig + block(attempts = 0), Map.empty),
+      ConfigError.InvalidInterviewActionRateLimitAttempts
+    )
+    assertContainsError(
+      AppConfigFixtures.fromConfig(defaultConfig + block(buckets = 0), Map.empty),
+      ConfigError.InvalidInterviewActionRateLimitBuckets
+    )
+    // Independent invalid settings accumulate rather than hiding each other.
+    val accumulated =
+      AppConfigFixtures.fromConfig(defaultConfig + block(window = 0, attempts = 0, buckets = 0), Map.empty)
+    List(
+      ConfigError.InvalidInterviewActionRateLimitWindow,
+      ConfigError.InvalidInterviewActionRateLimitAttempts,
+      ConfigError.InvalidInterviewActionRateLimitBuckets
+    ).foreach(error => assertContainsError(accumulated, error))
   }
 
   test("password hash cost is explicit and bounded") {

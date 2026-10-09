@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.service.application
 
-import com.example.graphQL.cats.domain.workflow.InterviewWorkflow
+import com.example.graphQL.cats.domain.workflow.{InterviewCommands, InterviewWorkflow}
 import com.example.graphQL.cats.service.port.{InterviewWorkflowCommandRecord, InterviewWorkflowCommandState}
 import java.time.Instant
 import java.util.UUID
@@ -49,5 +49,5 @@ object InterviewExecutionPolicy {
 
   private def applicable(workflow: InterviewWorkflow, command: InterviewWorkflowCommandRecord): Boolean =
     command.state != InterviewWorkflowCommandState.Superseded &&
-      InterviewWorkflow.commandIsApplicable(workflow, command.revision, command.command)
+      InterviewCommands.isApplicable(workflow, command.revision, command.command)
 }

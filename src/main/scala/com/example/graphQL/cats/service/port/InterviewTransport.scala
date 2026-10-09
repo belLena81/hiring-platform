@@ -7,6 +7,10 @@ import java.util.UUID
 enum InterviewStep {
   case Reserve, LookupReservation, CommitHiring, LookupCommit, Release
   case NotifyCandidate, NotifyRecruiter, LookupNotifyCandidate, LookupNotifyRecruiter, RequireRepair
+
+  /** Cancellation and rescheduling coordination. Notification kinds ride on the stored command, not on the step. */
+  case CancelSlot, LookupCancellation, HoldReplacement, LookupReplacementHold, CommitReschedule, LookupRescheduleCommit,
+    ExpireProposal
 }
 enum InterviewResult {
   case Succeeded, Rejected, OutcomeUnknown, Found, Absent

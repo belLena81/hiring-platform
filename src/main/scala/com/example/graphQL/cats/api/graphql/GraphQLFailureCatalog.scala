@@ -3,6 +3,7 @@ package com.example.graphQL.cats.api.graphql
 import cats.data.NonEmptyList
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.GraphQLFailure
 import com.example.graphQL.cats.domain.error.{DomainError, DomainValidationError}
+import com.example.graphQL.cats.domain.workflow.InterviewWorkflowError
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.{
   AccountError,
@@ -56,6 +57,17 @@ private[graphql] object GraphQLFailureCatalog {
     case InvalidCursor extends FailureMetadata("INVALID_CURSOR", exceptional = false)
     case WrongCursorKind extends FailureMetadata("WRONG_CURSOR_KIND", exceptional = false)
     case InvalidFilter extends FailureMetadata("INVALID_FILTER", exceptional = false)
+    case RateLimited extends FailureMetadata("RATE_LIMITED", exceptional = false)
+    case StaleRevision extends FailureMetadata("STALE_REVISION", exceptional = false)
+    case InterviewAlreadyStarted extends FailureMetadata("INTERVIEW_ALREADY_STARTED", exceptional = false)
+    case InterviewAlreadyCancelled extends FailureMetadata("INTERVIEW_ALREADY_CANCELLED", exceptional = false)
+    case InterviewNotSettled extends FailureMetadata("INTERVIEW_NOT_SETTLED", exceptional = false)
+    case InvalidInterviewInterval extends FailureMetadata("INVALID_INTERVIEW_INTERVAL", exceptional = false)
+    case RescheduleIntervalUnchanged extends FailureMetadata("RESCHEDULE_INTERVAL_UNCHANGED", exceptional = false)
+    case ProposalAlreadyOpen extends FailureMetadata("PROPOSAL_ALREADY_OPEN", exceptional = false)
+    case NoOpenProposal extends FailureMetadata("NO_OPEN_PROPOSAL", exceptional = false)
+    case ProposalExpired extends FailureMetadata("PROPOSAL_EXPIRED", exceptional = false)
+    case NoRescheduleRequest extends FailureMetadata("NO_RESCHEDULE_REQUEST", exceptional = false)
   }
 
   def classify(error: UseCaseError): GraphQLFailure =
@@ -78,6 +90,52 @@ private[graphql] object GraphQLFailureCatalog {
         failure(FailureMetadata.WrongCursorKind, "Cursor belongs to a different connection")
       case CursorCodec.CursorError.CriteriaMismatch =>
         failure(FailureMetadata.InvalidCursor, "Nearby cursor does not match criteria")
+    }
+
+  /** An interview action refused by the per-actor allowance; it carries no limit, window or counter. */
+  def interviewActionRateLimited: GraphQLFailure =
+    failure(FailureMetadata.RateLimited, "Too many interview actions; retry later")
+
+  /** A role or ownership refusal of a mutation is a typed payload for interview actions, so one refused alias does not
+    * discard the results of the others in a batched request.
+    */
+  def isAuthorizationRefusal(error: UseCaseError): Boolean =
+    error match {
+      case UseCaseError.Domain(DomainError.Forbidden) | UseCaseError.Repository(RepositoryError.AuthorityRevoked) =>
+        true
+      case _ => false
+    }
+
+  /** The interview rules refuse with stable codes that name no workflow, user, time or text. */
+  def classifyInterviewRule(error: InterviewWorkflowError): GraphQLFailure =
+    error match {
+      case InterviewWorkflowError.StaleRevision => failure(FailureMetadata.StaleRevision, "Stale revision")
+      case InterviewWorkflowError.InvalidTransition | InterviewWorkflowError.ApplicationMustBeAccepted =>
+        failure(FailureMetadata.InvalidStatusTransition, "This action is not allowed in the current state")
+      case InterviewWorkflowError.InterviewAlreadyStarted =>
+        failure(FailureMetadata.InterviewAlreadyStarted, "The interview has already started")
+      case InterviewWorkflowError.InterviewAlreadyCancelled =>
+        failure(FailureMetadata.InterviewAlreadyCancelled, "The interview is already cancelled")
+      case InterviewWorkflowError.InterviewNotSettled =>
+        failure(FailureMetadata.InterviewNotSettled, "The interview is still being updated; retry later")
+      case InterviewWorkflowError.StartMustBeInFuture | InterviewWorkflowError.EndMustFollowStart =>
+        failure(
+          FailureMetadata.InvalidInterviewInterval,
+          "The interval must start in the future and end after it starts"
+        )
+      case InterviewWorkflowError.RescheduleIntervalUnchanged =>
+        failure(FailureMetadata.RescheduleIntervalUnchanged, "The proposed time equals the current interview time")
+      case InterviewWorkflowError.ProposalAlreadyOpen =>
+        failure(FailureMetadata.ProposalAlreadyOpen, "A reschedule proposal is already open")
+      case InterviewWorkflowError.NoOpenProposal =>
+        failure(FailureMetadata.NoOpenProposal, "There is no open reschedule proposal")
+      case InterviewWorkflowError.ProposalExpired =>
+        failure(FailureMetadata.ProposalExpired, "The reschedule proposal has expired")
+      case InterviewWorkflowError.NoRescheduleRequest =>
+        failure(FailureMetadata.NoRescheduleRequest, "There is no reschedule request")
+      // A proposal lifetime outside its bounds is rejected when the service starts; it cannot be caused by a caller.
+      case InterviewWorkflowError.ProposalTtlOutOfRange =>
+        failure(FailureMetadata.RepositoryUnavailable, "Service unavailable")
     }
 
   /** Request arguments that are individually valid but inconsistent together. */

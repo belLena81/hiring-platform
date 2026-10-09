@@ -100,7 +100,8 @@ private[http] final class GraphQLHttpRoutes(
                     Some(requestId),
                     dependencies.clientAddressResolver.resolve(request),
                     key => dependencies.rateLimiter.permit(key),
-                    dependencies.discoveryMaxRoots
+                    dependencies.discoveryMaxRoots,
+                    actorId => dependencies.interviewActionLimiter.permit(actorId)
                   )
                 )
                 context

@@ -20,9 +20,12 @@ private[mongo] object InterviewSchedulingFixtures {
       User(id, None, s"Interview-${id.value}", role, Some(profile), now)
     }
     users.traverse_(user =>
-      Mongo4catsCollections
-        .documents(database, MongoCollections.Users)
-        .flatMap(_.insertOne(MongoHiringCodecs.user(user)))
+      Mongo4catsCollections.documents(database, MongoCollections.Users).flatMap { collection =>
+        collection
+          .find(com.mongodb.client.model.Filters.eq(MongoFields.Id, user.id.value.toString))
+          .first
+          .flatMap(found => IO.whenA(found.isEmpty)(collection.insertOne(MongoHiringCodecs.user(user)).void))
+      }
     ) *>
       workflows.traverse_ { workflow =>
         val job = Job(

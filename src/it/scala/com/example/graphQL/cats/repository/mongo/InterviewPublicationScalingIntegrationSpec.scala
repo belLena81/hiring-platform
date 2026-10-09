@@ -135,8 +135,8 @@ final class InterviewPublicationScalingIntegrationSpec extends KafkaIntegrationS
   private def worker(repository: MongoInterviewWorkflowRepository): InterviewWorkflowWorker =
     new InterviewWorkflowWorker(
       repository,
-      FakeInterviewCalendarProvider.durable(repository),
-      FakeInterviewNotificationProvider.durable(repository),
+      LedgerInterviewCalendarProvider.durable(repository),
+      LedgerInterviewNotificationProvider.durable(repository),
       InterviewWorkerSettings("publication-measurement", 1.second, 60.seconds, 10.seconds, 5, 1.second, 30.seconds),
       Diagnostics.noop
     )

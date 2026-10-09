@@ -11,7 +11,11 @@ import scala.util.control.NoStackTrace
 /** Persisted identity of one migration step: the literal is the `hiring_migration_ledger` `_id`. */
 final case class MigrationId(value: String) extends AnyVal
 
-/** Every applied migration identity, in application order. The literals are ledger history and never change. */
+/** Every applied migration identity, in numeric order. The literals are ledger history and never change. Application
+  * order differs in one place: `017_interview_ledger_collections` runs immediately after
+  * `007_interview_workflow_storage`, because 007 now creates the business-named ledger collections and 017 only has to
+  * rename collections that an earlier release created under their original names.
+  */
 private[mongo] object MigrationIds {
   val UserJobRevisions = MigrationId("001_user_job_revisions")
   val CandidateSearchProfileVerification = MigrationId("002_candidate_search_profile_verification")
@@ -29,6 +33,9 @@ private[mongo] object MigrationIds {
   val DeletedAccountEmbeddings = MigrationId("014_deleted_account_embeddings")
   val InterviewCleanupIntegrity = MigrationId("015_interview_cleanup_integrity")
   val CandidateResidenceIntegrity = MigrationId("016_candidate_residence_integrity")
+  val InterviewLedgerCollections = MigrationId("017_interview_ledger_collections")
+  val InterviewCancellationReschedule = MigrationId("018_interview_cancellation_reschedule")
+  val InterviewRequestReceiptIndex = MigrationId("019_interview_request_receipt_index")
 }
 
 /** Typed setup failures. They remain Throwables so the setup lifecycle boundary keeps one failure channel, while
@@ -46,6 +53,10 @@ object MigrationError {
       extends MigrationError(s"Migration ${id.value} failed: $detail")
   final case class ValidatorMismatch(collection: String)
       extends MigrationError(s"Collection '$collection' validator changed; explicit maintenance repair required")
+  final case class CollectionRenameConflict(oldName: String, newName: String)
+      extends MigrationError(
+        s"Collections '$oldName' and '$newName' both exist; explicit maintenance repair required before startup"
+      )
   final case class IndexMismatch(collection: String, index: String, reason: String)
       extends MigrationError(s"Mongo index definition mismatch for collection '$collection' index '$index': $reason")
 }

@@ -20,7 +20,24 @@ import sangria.schema.*
 
 private[graphql] object HiringGraphQLSchemaAssembly {
   private val MaxQueryDepth = 16
+
   private val MaxQueryComplexity = 1000d
+
+  // Each interview action weighs this much, so one request (complexity limit 1000) carries at most a handful of them
+  // however they are aliased; the per-actor allowance then counts each of those actions individually.
+  private val InterviewActionComplexity = 100d
+
+  private def interviewActionField[In](name: String, input: Argument[In])(
+      resolve: Context[RequestContext, Unit] => HiringGraphQLResult[
+        HiringGraphQLModel.MutationOutcome[com.example.graphQL.cats.domain.workflow.InterviewWorkflow]
+      ]
+  ): Field[RequestContext, Unit] =
+    resultField(
+      name,
+      interviewActionResultType,
+      input :: Nil,
+      complexity = Some((_, _, child) => InterviewActionComplexity + child)
+    )(resolve)
   private val connectionComplexity: (RequestContext, Args, Double) => Double =
     (_, args, child) => 1d + args.arg(firstArgument) * child
   private val expensivePageComplexity: (RequestContext, Args, Double) => Double =
@@ -173,6 +190,17 @@ private[graphql] object HiringGraphQLSchemaAssembly {
       resultField("repairInterviewWorkflow", repairInterviewResultType, repairInterviewInputArgument :: Nil)(
         repairInterviewWorkflow
       ),
+      interviewActionField("cancelInterview", interviewActionInputArgument)(cancelInterview),
+      interviewActionField("requestInterviewReschedule", interviewActionInputArgument)(requestInterviewReschedule),
+      interviewActionField("dismissInterviewRescheduleRequest", interviewActionInputArgument)(
+        dismissInterviewRescheduleRequest
+      ),
+      interviewActionField("proposeInterviewReschedule", proposeInterviewRescheduleInputArgument)(
+        proposeInterviewReschedule
+      ),
+      interviewActionField("withdrawInterviewReschedule", interviewActionInputArgument)(withdrawInterviewReschedule),
+      interviewActionField("acceptInterviewReschedule", interviewActionInputArgument)(acceptInterviewReschedule),
+      interviewActionField("declineInterviewReschedule", interviewActionInputArgument)(declineInterviewReschedule),
       resultField("submitApplication", submitApplicationResultType, submitApplicationInputArgument :: Nil)(
         submitApplication
       ),

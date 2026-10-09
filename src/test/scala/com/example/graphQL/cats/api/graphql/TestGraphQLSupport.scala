@@ -2,10 +2,10 @@ package com.example.graphQL.cats.api.graphql
 
 import cats.data.Kleisli
 import cats.effect.{IO, Resource}
-import com.example.graphQL.cats.api.admission.AuthRateLimiter
+import com.example.graphQL.cats.api.admission.{AuthRateLimiter, FixedWindowRateLimiter, InterviewActionRateLimiter}
 import com.example.graphQL.cats.api.auth.AuthFailure
 import com.example.graphQL.cats.api.http.{ClientAddressResolver, HiringApiRoutes}
-import com.example.graphQL.cats.config.{AuthRateLimitConfig, TrustedProxyConfig}
+import com.example.graphQL.cats.config.{AuthRateLimitConfig, InterviewActionRateLimitConfig, TrustedProxyConfig}
 import com.example.graphQL.cats.domain.model.{AccountDeletionStatus, ApplicationStatus, UserPageRequest}
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.service.{ActorContext, Diagnostics, ProbeResult}
@@ -122,11 +122,20 @@ object TestGraphQLSupport {
       hiring: HiringGraphQLServices = emptyServices,
       hiringReady: IO[ProbeResult] = IO.pure(ProbeResult.Ready),
       diagnostics: Diagnostics = Diagnostics.noop,
-      requestId: Option[String] = None
+      requestId: Option[String] = None,
+      interviewActionRateLimit: UserId => IO[Either[FixedWindowRateLimiter.RateLimited, Unit]] = _ => IO.pure(Right(()))
   ): Resource[IO, RequestContext] =
     RequestContextFactory.resource.flatMap(
       _.resource(
-        RequestContextParameters(probe, actor, hiring, hiringReady, diagnostics = diagnostics, requestId = requestId)
+        RequestContextParameters(
+          probe,
+          actor,
+          hiring,
+          hiringReady,
+          diagnostics = diagnostics,
+          requestId = requestId,
+          interviewActionRateLimit = interviewActionRateLimit
+        )
       )
     )
 
@@ -141,12 +150,14 @@ object TestGraphQLSupport {
       authenticate: Request[IO] => IO[Either[AuthFailure, Option[ActorContext]]] = _ => IO.pure(Right(None)),
       hiringReady: IO[ProbeResult] = IO.pure(ProbeResult.Ready),
       authRateLimit: AuthRateLimitConfig = AuthRateLimitConfig(60, 100, 1000),
-      trustedProxy: TrustedProxyConfig = TrustedProxyConfig(Nil)
+      trustedProxy: TrustedProxyConfig = TrustedProxyConfig(Nil),
+      interviewActionRateLimit: InterviewActionRateLimitConfig = InterviewActionRateLimitConfig(60, 1000, 1000)
   ): Resource[IO, HiringApiRoutes.Dependencies] =
     for {
       factory <- RequestContextFactory.resource
       documentCache <- GraphQLDocumentCache.resource
       limiter <- Resource.eval(AuthRateLimiter.create(authRateLimit))
+      interviewActionLimiter <- Resource.eval(InterviewActionRateLimiter.create(interviewActionRateLimit))
     } yield HiringApiRoutes.Dependencies(
       hiring,
       Kleisli(authenticate),
@@ -154,6 +165,7 @@ object TestGraphQLSupport {
       factory,
       documentCache,
       limiter,
+      interviewActionLimiter,
       ClientAddressResolver(trustedProxy)
     )
 }

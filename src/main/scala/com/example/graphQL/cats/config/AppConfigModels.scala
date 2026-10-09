@@ -47,6 +47,15 @@ enum ConfigError(val key: String, val paths: Set[String] = Set.empty) {
       extends ConfigError("AUTH_RATE_LIMIT_WINDOW_SECONDS", Set("auth.rate-limit.window-seconds"))
   case InvalidAuthRateLimitAttempts extends ConfigError("AUTH_RATE_LIMIT_ATTEMPTS", Set("auth.rate-limit.attempts"))
   case InvalidAuthRateLimitBuckets extends ConfigError("AUTH_RATE_LIMIT_BUCKETS", Set("auth.rate-limit.max-buckets"))
+  case InvalidInterviewActionRateLimitWindow
+      extends ConfigError(
+        "INTERVIEW_ACTION_RATE_LIMIT_WINDOW_SECONDS",
+        Set("auth.interview-action-rate-limit.window-seconds")
+      )
+  case InvalidInterviewActionRateLimitAttempts
+      extends ConfigError("INTERVIEW_ACTION_RATE_LIMIT_ATTEMPTS", Set("auth.interview-action-rate-limit.attempts"))
+  case InvalidInterviewActionRateLimitBuckets
+      extends ConfigError("INTERVIEW_ACTION_RATE_LIMIT_BUCKETS", Set("auth.interview-action-rate-limit.max-buckets"))
   case InvalidVectorSearchEnabled extends ConfigError("VECTOR_SEARCH_ENABLED", Set("vector-search.enabled"))
   case InvalidVoyageApiKey extends ConfigError("VOYAGE_API_KEY", Set("vector-search.voyage.api-key"))
   case InvalidVoyageEndpoint extends ConfigError("VOYAGE_ENDPOINT", Set("vector-search.voyage.endpoint"))
@@ -233,6 +242,9 @@ final case class JwtAuthConfig(
 }
 final case class PasswordHashConfig(iterations: Int, memoryKilobytes: Int, parallelism: Int)
 final case class AuthRateLimitConfig(windowSeconds: Int, attempts: Int, maxBuckets: Int)
+
+/** Per-actor allowance for interview cancel and reschedule actions: `attempts` actions per `windowSeconds`. */
+final case class InterviewActionRateLimitConfig(windowSeconds: Int, attempts: Int, maxBuckets: Int)
 final case class TrustedProxyConfig(cidrs: List[Cidr[IpAddress]])
 final case class KafkaPublisherConfig(
     workerId: String,

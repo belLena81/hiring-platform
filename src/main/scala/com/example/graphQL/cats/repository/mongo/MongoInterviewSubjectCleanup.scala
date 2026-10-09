@@ -4,12 +4,17 @@ import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.domain.workflow.{
+  InterviewCalendarKeys,
   InterviewSubjectCleanup,
   InterviewCleanupState,
   InterviewRetentionBarrier,
-  InterviewTopicPair
+  InterviewTopicPair,
+  InterviewWorkflowId
 }
 import com.example.graphQL.cats.service.port.{
+  InterviewCalendarCancellation,
+  InterviewHoldCanceller,
+  InterviewLiveHold,
   InterviewSubjectCleanupRepository,
   InterviewCleanupUpdate,
   InterviewCleanupCursor,
@@ -25,11 +30,16 @@ import java.time.Instant
 import java.util.{Date, UUID}
 import scala.jdk.CollectionConverters.*
 
-/** Durable deletion evidence. Broker fencing precedes barrier capture in the application worker. */
+/** Durable deletion evidence. Broker fencing precedes barrier capture in the application worker. Purging removes every
+  * workflow, command, inbox entry, reservation and receipt attributable to the subject, including cancel and reschedule
+  * state; a hold that is still live is cancelled with the provider's confirmation first, so no slot leaks. Nothing is
+  * sent to anyone: a purged workflow has no notification left to deliver.
+  */
 final class MongoInterviewSubjectCleanup(
     database: MongoDatabase[IO],
     diagnostics: Diagnostics = Diagnostics.noop,
-    topics: InterviewTopicPair = InterviewTopicPair.Default
+    topics: InterviewTopicPair = InterviewTopicPair.Default,
+    holds: InterviewHoldCanceller = InterviewHoldCanceller.ledgerOwned
 ) extends InterviewSubjectCleanupRepository {
   private val queue = Mongo4catsCollections.documents(database, MongoCollections.InterviewSubjectCleanup)
   private val workflows = Mongo4catsCollections.documents(database, MongoCollections.InterviewWorkflows)
@@ -37,8 +47,8 @@ final class MongoInterviewSubjectCleanup(
     MongoCollections.InterviewWorkflows,
     MongoCollections.InterviewWorkflowCommands,
     MongoCollections.InterviewWorkflowInbox,
-    MongoCollections.FakeInterviewCalendarReservations,
-    MongoCollections.FakeInterviewNotificationReceipts
+    MongoCollections.InterviewCalendarReservations,
+    MongoCollections.InterviewNotificationReceipts
   )
   private val ProducerIdsField = "interviewTransactionalIds"
 
@@ -100,7 +110,7 @@ final class MongoInterviewSubjectCleanup(
           RepositoryIO
             .lift(
               MongoSessionOperations.findOne(
-                Mongo4catsCollections.documents(database, MongoCollections.FakeInterviewCalendarParticipantLocks),
+                Mongo4catsCollections.documents(database, MongoCollections.InterviewCalendarParticipantLocks),
                 session,
                 MongoFilter.eq(MongoFields.Id, subject.value.toString)
               )
@@ -256,7 +266,7 @@ final class MongoInterviewSubjectCleanup(
   }
 
   override def purge(subject: UserId): RepositoryIO[Unit] = guard("interviewCleanup.purge") {
-    RepositoryIO.lift(purgeData(subject.value.toString))
+    purgeData(subject.value.toString)
   }
 
   private def subjectFilter(subject: String): MongoFilter = MongoFilter.or(
@@ -273,64 +283,154 @@ final class MongoInterviewSubjectCleanup(
     )
   )
 
-  private def purgeData(subject: String): IO[Unit] = {
+  private val ReleasedAtField = "releasedAt"
+  private val ReserveKeyField = "reserveKey"
+  private val HoldPageSize = 128
+  private val reservations = Mongo4catsCollections.documents(database, MongoCollections.InterviewCalendarReservations)
+
+  /** Workflow-linked children go before their workflows, so an interrupted purge keeps the attribution that finds them
+    * again. Live holds are confirm-cancelled before any local evidence of them is removed.
+    */
+  private def purgeData(subject: String): RepositoryIO[Unit] = {
     val subjectPredicate = subjectFilter(subject)
-    def batch: IO[Unit] = List(
-      MongoCollections.InterviewWorkflows,
-      MongoCollections.FakeInterviewCalendarReservations,
-      MongoCollections.FakeInterviewNotificationReceipts
-    ).traverse(name =>
-      Mongo4catsCollections
-        .documents(database, name)
-        .flatMap(_.find(subjectPredicate.bson).limit(128).all)
-        .map(_.toList)
-    ).map(_.flatten)
-      .flatMap { found =>
-        val ids = found.toList
-          .flatMap(row =>
-            Option(row.getString("workflowId"))
-              .orElse(Option(row.getString("requestWorkflowId")))
-              .orElse(Option(row.getString("_id")))
+    def deleteLinked(ids: List[String]): IO[Unit] = {
+      // Retain unselected attribution until its linked children have been purged.
+      val byWorkflow = MongoFilter.in("workflowId", ids)
+      List(
+        MongoCollections.InterviewWorkflowCommands,
+        MongoCollections.InterviewWorkflowInbox,
+        MongoCollections.InterviewCalendarReservations,
+        MongoCollections.InterviewNotificationReceipts
+      )
+        .traverse_(name =>
+          Mongo4catsCollections.documents(database, name).flatMap(_.deleteMany(byWorkflow.bson)).void
+        ) *>
+        workflows
+          .flatMap(
+            _.deleteMany(
+              MongoFilter
+                .or(MongoFilter.in("_id", ids), MongoFilter.in("requestWorkflowId", ids))
+                .bson
+            )
           )
-          .distinct
-        if (ids.isEmpty) IO.unit
-        else {
-          // Retain unselected attribution until its linked children have been purged.
-          val byWorkflow = MongoFilter.in("workflowId", ids)
+          .void
+    }
+    def batch: RepositoryIO[Unit] =
+      RepositoryIO
+        .lift(
           List(
-            MongoCollections.InterviewWorkflowCommands,
-            MongoCollections.InterviewWorkflowInbox,
-            MongoCollections.FakeInterviewCalendarReservations,
-            MongoCollections.FakeInterviewNotificationReceipts
-          )
-            .traverse_(name =>
-              Mongo4catsCollections.documents(database, name).flatMap(_.deleteMany(byWorkflow.bson)).void
-            ) *>
-            workflows
-              .flatMap(
-                _.deleteMany(
-                  MongoFilter
-                    .or(MongoFilter.in("_id", ids), MongoFilter.in("requestWorkflowId", ids))
-                    .bson
-                )
-              )
-              .void *> batch
+            MongoCollections.InterviewWorkflows,
+            MongoCollections.InterviewCalendarReservations,
+            MongoCollections.InterviewNotificationReceipts
+          ).traverse(name =>
+            Mongo4catsCollections
+              .documents(database, name)
+              .flatMap(_.find(subjectPredicate.bson).limit(128).all)
+              .map(_.toList)
+          ).map(_.flatten)
+        )
+        .flatMap { found =>
+          val ids = found
+            .flatMap(row =>
+              Option(row.getString("workflowId"))
+                .orElse(Option(row.getString("requestWorkflowId")))
+                .orElse(Option(row.getString("_id")))
+            )
+            .distinct
+          if (ids.isEmpty) RepositoryIO.fromEither(Right(()))
+          else releaseLiveHolds(ids) *> RepositoryIO.lift(deleteLinked(ids)) *> batch
         }
-      }
-    batch *> List(
-      MongoCollections.InterviewWorkflowCommands,
-      MongoCollections.InterviewWorkflowInbox,
-      MongoCollections.FakeInterviewCalendarReservations,
-      MongoCollections.FakeInterviewNotificationReceipts
+    batch *> RepositoryIO.lift(
+      List(
+        MongoCollections.InterviewWorkflowCommands,
+        MongoCollections.InterviewWorkflowInbox,
+        MongoCollections.InterviewCalendarReservations,
+        MongoCollections.InterviewNotificationReceipts
+      )
+        .traverse_(name =>
+          Mongo4catsCollections.documents(database, name).flatMap(_.deleteMany(subjectPredicate.bson)).void
+        ) *>
+        Mongo4catsCollections
+          .documents(database, MongoCollections.InterviewCalendarParticipantLocks)
+          .flatMap(_.deleteMany(MongoFilter.eq("_id", subject).bson))
+          .void
     )
-      .traverse_(name =>
-        Mongo4catsCollections.documents(database, name).flatMap(_.deleteMany(subjectPredicate.bson)).void
-      ) *>
-      Mongo4catsCollections
-        .documents(database, MongoCollections.FakeInterviewCalendarParticipantLocks)
-        .flatMap(_.deleteMany(MongoFilter.eq("_id", subject).bson))
-        .void
   }
+
+  /** Every unreleased reservation of the workflows is cancelled with confirmation, in bounded identity order. A
+    * failure, or a provider that does not know the reservation, stops the purge before anything is removed, so the
+    * cleanup is retried by the next sweep and a slot is never reported released without the provider's answer.
+    */
+  private def releaseLiveHolds(ids: List[String]): RepositoryIO[Unit] = {
+    def page(after: Option[AnyRef]): RepositoryIO[Unit] =
+      RepositoryIO
+        .lift(
+          MongoSessionOperations.findManyById(
+            reservations,
+            None,
+            MongoFilter.and(
+              List(
+                Some(MongoFilter.in("workflowId", ids)),
+                Some(MongoFilter.exists(ReleasedAtField, false)),
+                after.map(id => MongoFilter.gt(MongoFields.Id, id))
+              ).flatten*
+            ),
+            HoldPageSize
+          )
+        )
+        .flatMap { rows =>
+          rows.traverse_(releaseHold) *>
+            Option
+              .when(rows.size == HoldPageSize)(rows.lastOption.flatMap(row => Option(row.get(MongoFields.Id))))
+              .flatten
+              .traverse_(last => page(Some(last)))
+        }
+    page(None)
+  }
+
+  /** A row without a canonical provider identity was never created by a provider call and holds no external slot. */
+  private def liveHold(row: Document): Option[InterviewLiveHold] =
+    for {
+      workflow <- Option(row.get("workflowId")).collect { case value: String => value }
+      id <- Either.catchNonFatal(UUID.fromString(workflow)).toOption.filter(_.toString == workflow)
+      reserveKey <- Option(row.get(ReserveKeyField)).collect { case value: String => value }
+      workflowId = InterviewWorkflowId(id)
+      cancelKey <- InterviewCalendarKeys.cancellationKeyFor(workflowId, reserveKey)
+    } yield InterviewLiveHold(workflowId, reserveKey, cancelKey)
+
+  private def releaseHold(row: Document): RepositoryIO[Unit] =
+    liveHold(row).fold(RepositoryIO.fromEither[Unit](Right(()))) { hold =>
+      RepositoryIO
+        .lift(IO.realTimeInstant)
+        .flatMap { now =>
+          RepositoryIO.fromIOEither(holds.cancel(hold, now).value.map {
+            case Right(InterviewCalendarCancellation.Cancelled(at))        => Right(at)
+            case Right(InterviewCalendarCancellation.AlreadyCancelled(at)) => Right(at)
+            case Right(InterviewCalendarCancellation.UnknownReservation)   => Left(RepositoryError.Conflict)
+            case Left(_)                                                   => Left(RepositoryError.Unavailable)
+          })
+        }
+        .flatMap(at =>
+          // Mirrors the confirmed release locally; only a still-held row changes, so a replay is a no-op.
+          RepositoryIO
+            .lift(
+              MongoSessionOperations.updateOne(
+                reservations,
+                None,
+                MongoFilter.and(
+                  MongoFilter.eq("workflowId", hold.workflowId.value.toString),
+                  MongoFilter.eq(ReserveKeyField, hold.reserveKey),
+                  MongoFilter.exists(ReleasedAtField, false)
+                ),
+                MongoUpdate.set(ReleasedAtField, Date.from(at))
+              )
+            )
+            .subflatMap {
+              case Some(result) if result.wasAcknowledged() => Right(())
+              case _                                        => Left(RepositoryError.MissingWriteResult)
+            }
+        )
+    }
 
 }
 

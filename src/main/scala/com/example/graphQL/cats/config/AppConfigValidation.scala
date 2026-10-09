@@ -43,7 +43,8 @@ private[config] object AppConfigValidation {
         kafkaSettings,
         transport.resetOnStart,
         transport.discovery,
-        authSettings.adminSeed
+        authSettings.adminSeed,
+        authSettings.interviewActionRateLimit
       )
     }.toEither
 

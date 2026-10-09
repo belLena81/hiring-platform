@@ -3,53 +3,22 @@ package com.example.graphQL.cats.api.admission
 import cats.effect.{IO, Resource}
 import com.comcast.ip4s.{Cidr, IpAddress}
 import com.example.graphQL.cats.config.AuthRateLimitConfig
-import com.github.benmanes.caffeine.cache.{Cache, Caffeine, Expiry, Ticker}
-import scala.concurrent.duration.*
+import com.github.benmanes.caffeine.cache.Ticker
 
-final class AuthRateLimiter private (
-    cache: Cache[AuthRateLimiter.Key, AuthRateLimiter.Bucket],
-    config: AuthRateLimitConfig,
-    ticker: Ticker
-) {
+/** Login and sign-up attempts per client network and operation. */
+final class AuthRateLimiter private (underlying: FixedWindowRateLimiter[AuthRateLimiter.Key]) {
   import AuthRateLimiter.*
 
-  def permit(key: Key): IO[Either[RateLimited, Unit]] =
-    IO.delay {
-      val normalized = normalize(key)
-      val now = ticker.read()
-      val bucket = cache
-        .asMap()
-        .compute(
-          normalized,
-          (_, existing) =>
-            Option(existing)
-              .filter(_.expiresAtNanos - now > 0L)
-              .fold(Bucket(1, now + config.windowSeconds.toLong * NanosPerSecond))(bucket =>
-                bucket.copy(hits = bucket.hits + 1)
-              )
-        )
-      if (bucket.hits <= config.attempts) Right(())
-      else Left(RateLimited(config.windowSeconds.seconds))
-    }
+  def permit(key: Key): IO[Either[RateLimited, Unit]] = underlying.permit(key)
 
-  private def normalize(key: Key): Key =
-    key.copy(remoteAddress = key.remoteAddress.map(_.fold(ipv4 => ipv4, ipv6 => Cidr(ipv6, 64).prefix)))
-
-  private[admission] def cleanUpAndSize: IO[Long] = IO.delay {
-    cache.cleanUp()
-    cache.estimatedSize()
-  }
+  private[admission] def cleanUpAndSize: IO[Long] = underlying.cleanUpAndSize
 }
 
 object AuthRateLimiter {
   final case class Key(remoteAddress: Option[IpAddress], operation: Operation)
-  final case class RateLimited(retryAfter: FiniteDuration) {
-    def retryAfterSeconds: Long = math.max(1L, (retryAfter + 999.millis).toSeconds)
-  }
+  type RateLimited = FixedWindowRateLimiter.RateLimited
+  val RateLimited: FixedWindowRateLimiter.RateLimited.type = FixedWindowRateLimiter.RateLimited
   enum Operation { case Login, SignUp }
-
-  private final case class Bucket(hits: Int, expiresAtNanos: Long)
-  private val NanosPerSecond = 1000000000L
 
   /** Preferred constructor for composition roots: the limiter is process-local and holds no releasable resources. */
   def resource(config: AuthRateLimitConfig): Resource[IO, AuthRateLimiter] =
@@ -59,25 +28,11 @@ object AuthRateLimiter {
     create(config, Ticker.systemTicker())
 
   private[admission] def create(config: AuthRateLimitConfig, ticker: Ticker): IO[AuthRateLimiter] =
-    IO.delay(new AuthRateLimiter(buildCache(config, ticker), config, ticker))
+    FixedWindowRateLimiter
+      .create[Key](config.windowSeconds, config.attempts, config.maxBuckets, ticker, normalize)
+      .map(new AuthRateLimiter(_))
 
-  private def buildCache(config: AuthRateLimitConfig, ticker: Ticker): Cache[Key, Bucket] =
-    Caffeine
-      .newBuilder()
-      .maximumSize(config.maxBuckets.toLong)
-      .ticker(ticker)
-      .expireAfter(new Expiry[Key, Bucket] {
-        override def expireAfterCreate(key: Key, value: Bucket, currentTime: Long): Long =
-          remaining(value, currentTime)
-
-        override def expireAfterUpdate(key: Key, value: Bucket, currentTime: Long, currentDuration: Long): Long =
-          remaining(value, currentTime)
-
-        override def expireAfterRead(key: Key, value: Bucket, currentTime: Long, currentDuration: Long): Long =
-          currentDuration
-
-        private def remaining(bucket: Bucket, currentTime: Long): Long =
-          math.max(0L, bucket.expiresAtNanos - currentTime)
-      })
-      .build[Key, Bucket]()
+  // IPv6 clients are limited per /64 so one host cannot multiply its allowance across addresses.
+  private def normalize(key: Key): Key =
+    key.copy(remoteAddress = key.remoteAddress.map(_.fold(ipv4 => ipv4, ipv6 => Cidr(ipv6, 64).prefix)))
 }

@@ -4,7 +4,7 @@ import cats.effect.{Deferred, IO, Ref, Resource}
 import cats.effect.std.Dispatcher
 import cats.syntax.all.*
 import com.comcast.ip4s.IpAddress
-import com.example.graphQL.cats.api.admission.AuthRateLimiter
+import com.example.graphQL.cats.api.admission.{AuthRateLimiter, FixedWindowRateLimiter}
 import com.example.graphQL.cats.service.{
   ActorContext,
   AuthenticatedActor,
@@ -58,7 +58,8 @@ final case class RequestContextParameters(
     requestId: Option[String] = None,
     clientAddress: Option[IpAddress] = None,
     rateLimit: AuthRateLimiter.Key => IO[Either[AuthRateLimiter.RateLimited, Unit]] = _ => IO.pure(Right(())),
-    discoveryMaxRoots: Int = 4
+    discoveryMaxRoots: Int = 4,
+    interviewActionRateLimit: UserId => IO[Either[FixedWindowRateLimiter.RateLimited, Unit]] = _ => IO.pure(Right(()))
 )
 
 final class RequestContext private (
@@ -103,6 +104,17 @@ final class RequestContext private (
         .rateLimit(AuthRateLimiter.Key(parameters.clientAddress, operation))
         .map(_.leftMap(rejection => HiringGraphQLFailure.RateLimited(rejection.retryAfterSeconds)))
     )
+
+  /** Takes one unit of the authenticated actor's interview-action allowance; the inner `Left` is a refusal. The actor
+    * id comes from the verified token claims, so the decision needs no storage read, and every action in a batched
+    * request takes its own unit.
+    */
+  private[graphql] def takeInterviewActionAllowance
+      : HiringGraphQLResult[Either[FixedWindowRateLimiter.RateLimited, Unit]] =
+    cats.data.EitherT(parameters.actor match {
+      case None        => IO.pure(Left(unauthorizedFailure))
+      case Some(actor) => parameters.interviewActionRateLimit(actor.userId).map(Right(_))
+    })
 
   private[graphql] def requestScoped[A](action: HiringGraphQLResult[A]): HiringGraphQLResult[A] =
     cats.data.EitherT(

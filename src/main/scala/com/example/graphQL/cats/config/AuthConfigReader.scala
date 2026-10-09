@@ -10,6 +10,7 @@ private[config] final case class RawAuthConfig(
     jwt: RawJwtAuthConfig,
     passwordHash: Option[RawPasswordHashConfig],
     rateLimit: RawAuthRateLimitConfig,
+    interviewActionRateLimit: RawInterviewActionRateLimitConfig,
     adminSeed: Option[RawAdminSeedConfig]
 ) derives ConfigReader
 private[config] final case class RawJwtAuthConfig(
@@ -32,6 +33,11 @@ private[config] object RawJwtAuthConfig {
     )(RawJwtAuthConfig.apply)
 }
 private[config] final case class RawAuthRateLimitConfig(
+    windowSeconds: AuthRateWindowSeconds,
+    attempts: AuthRateAttempts,
+    maxBuckets: AuthRateBuckets
+) derives ConfigReader
+private[config] final case class RawInterviewActionRateLimitConfig(
     windowSeconds: AuthRateWindowSeconds,
     attempts: AuthRateAttempts,
     maxBuckets: AuthRateBuckets

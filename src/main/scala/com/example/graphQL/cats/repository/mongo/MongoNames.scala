@@ -27,9 +27,9 @@ private[mongo] object MongoCollections {
   val InterviewWorkflows = "interview_workflows"
   val InterviewWorkflowCommands = "interview_workflow_commands"
   val InterviewWorkflowInbox = "interview_workflow_inbox"
-  val FakeInterviewCalendarReservations = "fake_interview_calendar_reservations"
-  val FakeInterviewCalendarParticipantLocks = "fake_interview_calendar_participant_locks"
-  val FakeInterviewNotificationReceipts = "fake_interview_notification_receipts"
+  val InterviewCalendarReservations = "interview_calendar_reservations"
+  val InterviewCalendarParticipantLocks = "interview_calendar_participant_locks"
+  val InterviewNotificationReceipts = "interview_notification_receipts"
 }
 
 /** Persisted ordinary index names; every index is created and verified by `MongoHiringIndexSetup`. */
@@ -82,12 +82,14 @@ private[mongo] object MongoIndexNames {
   val InterviewSubjectCleanupDue = "interview_subject_cleanup_due"
   val InterviewWorkflowCandidate = "interview_workflows_candidate_id"
   val InterviewWorkflowRecruiter = "interview_workflows_recruiter_id"
+  val InterviewWorkflowRequestReceipt = "interview_workflows_request_workflow"
   val InterviewWorkflowCommandDue = "interview_workflow_commands_due"
   val InterviewWorkflowCommandLease = "interview_workflow_commands_lease"
   val InterviewWorkflowInboxIdentity = "interview_workflow_inbox_identity_unique"
-  val FakeInterviewCalendarParticipants = "fake_interview_calendar_participants_active"
-  val FakeInterviewCalendarRelease = "fake_interview_calendar_release_unique"
-  val FakeInterviewNotificationRecipient = "fake_interview_notification_recipient"
+  val InterviewCalendarParticipants = "interview_calendar_participants_active"
+  val InterviewCalendarRelease = "interview_calendar_release_unique"
+  val InterviewCalendarReservationIdentity = "interview_calendar_reservation_identity_unique"
+  val InterviewNotificationRecipient = "interview_notification_recipient"
   def completedEvidenceExpiry(collection: String): String = s"${collection}_completed_evidence_expiry"
   def workflowIdentity(collection: String): String = s"${collection}_workflow_identity"
 }

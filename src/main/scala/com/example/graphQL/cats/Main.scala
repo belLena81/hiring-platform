@@ -4,7 +4,7 @@ import cats.data.NonEmptyList
 import cats.effect.{ExitCode, IO, IOApp, Resource}
 import cats.data.Kleisli
 import cats.syntax.all.*
-import com.example.graphQL.cats.api.admission.AuthRateLimiter
+import com.example.graphQL.cats.api.admission.{AuthRateLimiter, InterviewActionRateLimiter}
 import com.example.graphQL.cats.api.auth.JwtActorAuthenticator
 import com.example.graphQL.cats.api.graphql.{GraphQLDocumentCache, RequestContextFactory}
 import com.example.graphQL.cats.api.http.{ClientAddressResolver, HiringApiRoutes}
@@ -54,6 +54,7 @@ object Main extends IOApp {
     contextFactory <- RequestContextFactory.resource
     documentCache <- GraphQLDocumentCache.resource
     rateLimiter <- Resource.eval(AuthRateLimiter.create(config.authRateLimit))
+    interviewActionLimiter <- Resource.eval(InterviewActionRateLimiter.create(config.interviewActionRateLimit))
     authenticator = new JwtActorAuthenticator(config.jwtAuth, runtime.userAuthenticator, cats.effect.Clock[IO])
     authenticate = Kleisli(authenticator.authenticate)
     routeBuilder = new HiringApiRoutes(
@@ -66,6 +67,7 @@ object Main extends IOApp {
         contextFactory,
         documentCache,
         rateLimiter,
+        interviewActionLimiter,
         ClientAddressResolver(config.trustedProxy),
         config.discovery.maxRoots
       ),

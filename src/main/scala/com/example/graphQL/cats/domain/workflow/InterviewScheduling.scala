@@ -33,6 +33,7 @@ enum InterviewWorkflowError {
   case NoOpenProposal
   case ProposalExpired
   case ProposalTtlOutOfRange
+  case NoRescheduleRequest
 }
 
 enum InterviewWorkflowPhase {
@@ -104,8 +105,24 @@ final case class InterviewWorkflow(
     pendingInterval: Option[InterviewInterval] = None,
     cancelledAt: Option[Instant] = None,
     proposal: Option[InterviewRescheduleProposal] = None,
-    rescheduleRequestedAt: Option[Instant] = None
-)
+    rescheduleRequestedAt: Option[Instant] = None,
+    /** The cancel or reschedule phase that exhausted its retries; present only while `RepairRequired` after such a
+      * failure, so Admin repair can resume that step by lookup. Scheduling failures leave it empty.
+      */
+    repairOrigin: Option[InterviewWorkflowPhase] = None,
+    /** Reservation generations consumed by failed replacement attempts above the live one. A compensated attempt leaves
+      * its (cancelled) reservation stored under its key, so the next attempt must use a fresh generation. Between a
+      * committed swap and the old slot's cancellation it is the gap that locates the old reservation.
+      */
+    skippedGenerations: Int = 0
+) {
+
+  /** Generation of the replacement hold the workflow is attempting (hold, swap and compensation phases). */
+  def replacementGeneration: Int = generation + 1 + skippedGenerations
+
+  /** Generation of the reservation a committed swap retired (valid while the old slot is being cancelled). */
+  def retiredGeneration: Int = generation - 1 - skippedGenerations
+}
 
 final case class InterviewWorkflowDecision(workflow: InterviewWorkflow, commands: List[InterviewWorkflowCommand])
 

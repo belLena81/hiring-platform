@@ -92,6 +92,21 @@ private[graphql] object HiringGraphQLModel {
       idempotencyKey: UUID
   ) derives Decoder,
         Encoder
+
+  /** The shared input of every interview cancel and reschedule action. It names the workflow and the revision the
+    * caller saw; the actor and its role come only from the authenticated request, never from input.
+    */
+  final case class InterviewActionGraphQLInput(workflowId: UUID, expectedRevision: Long, idempotencyKey: UUID)
+      derives Decoder,
+        Encoder
+  final case class ProposeInterviewRescheduleGraphQLInput(
+      workflowId: UUID,
+      expectedRevision: Long,
+      startsAt: Instant,
+      endsAt: Instant,
+      idempotencyKey: UUID
+  ) derives Decoder,
+        Encoder
   final case class RepairInterviewGraphQLInput(workflowId: UUID, expectedRevision: Long, idempotencyKey: UUID)
       derives Decoder,
         Encoder

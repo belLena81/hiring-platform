@@ -40,16 +40,16 @@ The decisive sources are [index definitions](../../src/main/scala/com/example/gr
 
 ### Interview scheduling and cleanup
 
-These collections implement the [geographic discovery and scheduled interview extension](../use-cases.md#geographic-discovery-and-scheduled-interviews) alongside application lifecycle UC09. The fake-provider collections are durable local adapters, not evidence of a live external calendar/email integration.
+These collections implement the [geographic discovery and scheduled interview extension](../use-cases.md#geographic-discovery-and-scheduled-interviews) alongside application lifecycle UC09. The interview calendar and notification ledger collections are the platform's own durable adapters, not evidence of a live external calendar/email integration.
 
 | Collection | Purpose and relationships | Integrity and lifetime |
 |---|---|---|
 | `interview_workflows` | Durable scheduling state tied to application, candidate and recruiter; revision and pending workflow decisions | Candidate/ID and recruiter/ID indexes; guarded state transitions; completed evidence may receive retention expiry. |
 | `interview_workflow_commands` | Durable commands to reserve/release calendar capacity or deliver notifications | Due and claim-expiry indexes plus workflow-ID lookup; claimed publication and retries survive restarts; completed-evidence TTL. |
 | `interview_workflow_inbox` | Durable incoming message receipts and related workflow processing/quarantine evidence | Partial unique `(workflowId, messageId)` for `inboxReceipt` documents; other document types do not collide on absent identity. Workflow-ID lookup; completed-evidence TTL. |
-| `fake_interview_calendar_reservations` | Local persisted reservation with participants, time interval and release key | Participant/interval index; unique release key supports repeatable release; completed-evidence TTL. |
-| `fake_interview_calendar_participant_locks` | Participant guard documents used by the local calendar to serialize conflicting reservation attempts | `_id` guards participate in transaction coordination; no general TTL index. |
-| `fake_interview_notification_receipts` | Durable local notification outcomes by recipient/workflow | Recipient/delivery-time and workflow indexes; deduplication plus completed-evidence TTL. |
+| `interview_calendar_reservations` | Local persisted reservation with participants, time interval and release key | Participant/interval index; unique release key supports repeatable release; completed-evidence TTL. |
+| `interview_calendar_participant_locks` | Participant guard documents used by the local calendar to serialize conflicting reservation attempts | `_id` guards participate in transaction coordination; no general TTL index. |
+| `interview_notification_receipts` | Durable local notification outcomes by recipient/workflow | Recipient/delivery-time and workflow indexes; deduplication plus completed-evidence TTL. |
 | `interview_subject_cleanup` | Per-deleted-subject cleanup state and Kafka retention barriers | Active-state partial ordered index and state/request-time index support bounded sweeps. Cleanup retains attribution until linked records are removed; per-record failure does not abandon the sweep. |
 
 See [interview storage and recovery contracts](../mongodb-design.md#local-geographic-and-interview-storage), [workflow migrations](../../src/main/scala/com/example/graphQL/cats/repository/mongo/MongoInterviewWorkflowMigrations.scala), and [cleanup integrity migrations](../../src/main/scala/com/example/graphQL/cats/repository/mongo/MongoInterviewCleanupIntegrityMigrations.scala).

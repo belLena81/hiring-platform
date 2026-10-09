@@ -7,7 +7,7 @@ import com.example.graphQL.cats.service.port.*
 import java.time.Instant
 import java.util.UUID
 
-private[application] class TestInterviewWorkflowRepository extends InterviewWorkflowRepository {
+private[cats] class TestInterviewWorkflowRepository extends InterviewWorkflowRepository {
   private def unexpected[A]: RepositoryIO[A] =
     RepositoryIO.lift(IO.raiseError(new AssertionError("Unexpected repository operation")))
   override def claimDueCommands(workerId: String, now: Instant, leaseUntil: Instant, limit: Int) =
@@ -27,14 +27,38 @@ private[application] class TestInterviewWorkflowRepository extends InterviewWork
   ) = unexpected[Boolean]
   override def renewPublication(claim: ClaimedInterviewWorkflowCommand, now: Instant, leaseUntil: Instant) =
     unexpected[Boolean]
-  override def attemptCount(workflowId: InterviewWorkflowId, command: InterviewWorkflowCommand) = unexpected[Long]
+  override def attemptCount(workflowId: InterviewWorkflowId, command: InterviewCommand) = unexpected[Long]
   override def quarantine(identity: String, now: Instant) = unexpected[Unit]
   override def recordResult(claim: ClaimedInterviewWorkflowCommand, result: InterviewCommandResult, now: Instant) =
     unexpected[Unit]
-  override def findRequest(recruiterId: UserId, requestKey: UUID, fingerprint: MutationReceiptFingerprint) =
+  override def findRequest(actorId: UserId, requestKey: UUID, fingerprint: MutationReceiptFingerprint) =
     unexpected[Option[InterviewWorkflow]]
   override def findCommand(workflowId: InterviewWorkflowId, stepId: String) =
     unexpected[Option[InterviewWorkflowCommandRecord]]
+  override def applyLifecycle(
+      workflowId: InterviewWorkflowId,
+      expectedRevision: Long,
+      event: InterviewLifecycleEvent,
+      origin: InterviewLifecycleOrigin,
+      now: Instant,
+      availableAt: Option[Instant]
+  ) = unexpected[InterviewLifecycleOutcome]
+  override def approveRescheduledInterval(
+      workflow: InterviewWorkflow,
+      now: Instant,
+      execution: ClaimedInterviewWorkflowCommand
+  ) = unexpected[Unit]
+  override def hasRescheduleApproval(workflowId: InterviewWorkflowId, generation: Int) = unexpected[Boolean]
+  override def settleNotificationResult(
+      record: InterviewWorkflowCommandRecord,
+      settlement: InterviewNotificationSettlement,
+      now: Instant
+  ) = unexpected[Boolean]
+  override def deferExpiry(record: InterviewWorkflowCommandRecord, availableAt: Instant) = unexpected[Boolean]
+  override def findNotificationRepairs(workflowId: InterviewWorkflowId) =
+    unexpected[List[InterviewWorkflowCommandRecord]]
+  override def repairNotifications(workflowId: InterviewWorkflowId, requestKey: UUID, now: Instant, actorId: UserId) =
+    unexpected[Int]
   override def repair(
       workflow: InterviewWorkflow,
       expectedRevision: Long,

@@ -17,7 +17,13 @@ private[mongo] object MongoWorkflowIntegrityMigrations {
   private val BatchSize = 500
   private val CoveredProofs = List(MigrationIds.EventOutboxSubjectReferences, MigrationIds.InterviewWorkflowAttempts)
 
-  def commandValidator: Document = {
+  /** The definition this migration installed and audited; later cutovers extend it and are accepted by its proof. */
+  def baselineCommandValidator: Document = commandValidatorFor(cancellation = false)
+
+  /** The active definition, including the cancellation and reschedule intents added by the later interview cutover. */
+  def commandValidator: Document = commandValidatorFor(cancellation = true)
+
+  private def commandValidatorFor(cancellation: Boolean): Document = {
     import MongoValidatorSchemas.{enumSchema, objectSchema, shortText as text, stringUuid}
     def kind(name: String, fields: (String, Document)*) = objectSchema(
       MongoFields.Kind :: fields.toList.map(_._1),
@@ -38,7 +44,7 @@ private[mongo] object MongoWorkflowIntegrityMigrations {
         MongoFields.IdempotencyKey -> text
       ),
       kind("requireRepair", MongoFields.Reason -> text)
-    )
+    ) ++ (if (cancellation) MongoInterviewLifecycleValidator.commandKinds else Nil)
     val states = List(
       "Pending",
       "Claimed",
@@ -116,32 +122,32 @@ private[mongo] object MongoWorkflowIntegrityMigrations {
     def branch(names: List[String], expression: Document) =
       new Document("case", new Document("$in", List("$command.kind", names.asJava).asJava))
         .append("then", expression)
+    val baselineBranches = List(
+      branch(
+        List("reserveCalendar"),
+        eq(safeString("$command.idempotencyKey"), concat(safeString("$workflowId"), ":reserve"))
+      ),
+      branch(
+        List("releaseCalendar"),
+        eq(safeString("$command.idempotencyKey"), concat(safeString("$workflowId"), ":release"))
+      ),
+      branch(
+        List("lookupCalendar", "lookupStatusCommit"),
+        eq(safeString("$command.workflowId"), safeString("$workflowId"))
+      ),
+      branch(
+        List("notify", "lookupNotification"),
+        eq(
+          safeString("$command.idempotencyKey"),
+          concat(safeString("$workflowId"), ":notify:", safeString("$command.participant"))
+        )
+      )
+    )
+    val lifecycleBranches =
+      if (cancellation) MongoInterviewLifecycleValidator.ownershipBranches else Nil
     val ownership = new Document(
       "$switch",
-      new Document(
-        "branches",
-        List(
-          branch(
-            List("reserveCalendar"),
-            eq(safeString("$command.idempotencyKey"), concat(safeString("$workflowId"), ":reserve"))
-          ),
-          branch(
-            List("releaseCalendar"),
-            eq(safeString("$command.idempotencyKey"), concat(safeString("$workflowId"), ":release"))
-          ),
-          branch(
-            List("lookupCalendar", "lookupStatusCommit"),
-            eq(safeString("$command.workflowId"), safeString("$workflowId"))
-          ),
-          branch(
-            List("notify", "lookupNotification"),
-            eq(
-              safeString("$command.idempotencyKey"),
-              concat(safeString("$workflowId"), ":notify:", safeString("$command.participant"))
-            )
-          )
-        ).asJava
-      ).append("default", true)
+      new Document("branches", (baselineBranches ++ lifecycleBranches).asJava).append("default", true)
     )
     new Document(
       "$and",
@@ -161,14 +167,29 @@ private[mongo] object MongoWorkflowIntegrityMigrations {
     )
   }
 
+  /** What this cutover installs; the interview cancellation cutover later replaces the command validator. */
   private val validators: List[(String, Document)] = List(
+    MongoCollections.InterviewWorkflowCommands -> baselineCommandValidator,
+    MongoCollections.EventOutbox -> MongoHiringValidators.outboxValidator
+  )
+
+  private val successorValidators: List[(String, Document)] = List(
     MongoCollections.InterviewWorkflowCommands -> commandValidator,
     MongoCollections.EventOutbox -> MongoHiringValidators.outboxValidator
   )
 
-  /** Exact installed validators plus the covered 003/010 proofs are required before their old scans are skipped. */
+  /** Exact installed validators plus the covered 003/010 proofs are required before their old scans are skipped. The
+    * installed command validator is either the one this cutover installed or its documented successor; anything else is
+    * drift and fails closed.
+    */
   private def verifyCompleted(database: MongoHiringSetup.SetupDatabase): IO[CompletedProof] =
-    MongoHiringValidators.assertStrictValidators(database, validators) *>
+    MongoHiringValidators
+      .assertStrictValidators(database, validators)
+      .handleErrorWith {
+        case _: MigrationError.ValidatorMismatch =>
+          MongoHiringValidators.assertStrictValidators(database, successorValidators)
+        case error => IO.raiseError(error)
+      } *>
       MongoMigrationLedger.requireComplete(database, CoveredProofs).as(CompletedProof.Trusted)
 
   private def cutover(run: MigrationRun): IO[Unit] = {
@@ -185,7 +206,7 @@ private[mongo] object MongoWorkflowIntegrityMigrations {
           rows.traverse_(row =>
             IO.fromEither(
               MongoInterviewWorkflowCommandCodec
-                .decode(row)
+                .decodeStored(row)
                 .leftMap(_ => MigrationError.StepFailed(run.id, "cutover rejected a command"))
             ).void
           ) *>

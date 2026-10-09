@@ -77,8 +77,8 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
   test("a reserved slot surviving a provider crash is released after the precommit deadline") {
     mongoResource.use { fixture =>
       val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
-      val calendar = FakeInterviewCalendarProvider.durable(repository)
-      val notification = FakeInterviewNotificationProvider.durable(repository)
+      val calendar = LedgerInterviewCalendarProvider.durable(repository)
+      val notification = LedgerInterviewNotificationProvider.durable(repository)
       val worker = new InterviewWorkflowWorker(repository, calendar, notification, settings, Diagnostics.noop)
       for {
         now <- IO.realTimeInstant
@@ -111,7 +111,7 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
           IO.sleep(java.time.Duration.between(current, value.preCommitDeadline).toMillis.max(0L).millis + 200.millis)
         )
         repair <- drive(repository, worker, value.id, Set(InterviewWorkflowPhase.RepairRequired))
-        finalReservation <- calendar.lookup(value.id).value
+        finalReservation <- calendar.lookup(value.id, InterviewWorkflow.reservationKey(value.id, 0)).value
         committed <- success(repository.hasHiringReceipt(value.id))
         application <- MongoRepositoryTestSupport.findOne(
           fixture.database,
@@ -130,7 +130,7 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
   test("Admin repair reconciles a released reservation without reopening it or extending its deadline") {
     mongoResource.use { fixture =>
       val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
-      val calendar = FakeInterviewCalendarProvider.durable(repository)
+      val calendar = LedgerInterviewCalendarProvider.durable(repository)
       for {
         now <- IO.realTimeInstant.map(_.truncatedTo(java.time.temporal.ChronoUnit.MILLIS))
         value = workflow(now)
@@ -139,7 +139,7 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
         worker = new InterviewWorkflowWorker(
           repository,
           calendar,
-          FakeInterviewNotificationProvider.durable(repository),
+          LedgerInterviewNotificationProvider.durable(repository),
           settings,
           Diagnostics.noop,
           currentTime = clock.getAndUpdate(_.plusSeconds(1))
@@ -160,7 +160,7 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
           .value
         _ = assert(reservation.isRight)
         compensated <- drive(repository, worker, value.id, Set(InterviewWorkflowPhase.RepairRequired), remaining = 50)
-        released <- calendar.lookup(value.id).value
+        released <- calendar.lookup(value.id, InterviewWorkflow.reservationKey(value.id, 0)).value
         _ = assert(released.toOption.flatten.flatMap(_.releasedAt).nonEmpty)
         repaired <- success(
           repository.repair(
@@ -172,11 +172,11 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
           )
         )
         finalState <- drive(repository, worker, value.id, Set(InterviewWorkflowPhase.RepairRequired), remaining = 50)
-        retained <- calendar.lookup(value.id).value
+        retained <- calendar.lookup(value.id, InterviewWorkflow.reservationKey(value.id, 0)).value
         committed <- success(repository.hasHiringReceipt(value.id))
         reservationCount <- MongoRepositoryTestSupport.count(
           fixture.database,
-          MongoCollections.FakeInterviewCalendarReservations
+          MongoCollections.InterviewCalendarReservations
         )
         historyCount <- MongoRepositoryTestSupport.count(fixture.database, MongoCollections.ApplicationEvents)
         outboxCount <- MongoRepositoryTestSupport.count(fixture.database, MongoCollections.EventOutbox)
@@ -204,7 +204,7 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
   test("compensation exhausts five durable attempts and retains uncertain reservation for visible repair") {
     mongoResource.use { fixture =>
       val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
-      val calendar = FakeInterviewCalendarProvider.durable(repository)
+      val calendar = LedgerInterviewCalendarProvider.durable(repository)
       val failedRelease = new InterviewCalendarProvider {
         override def reserve(
             id: InterviewWorkflowId,
@@ -216,8 +216,18 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
             execution: Option[ClaimedInterviewWorkflowCommand]
         ): InterviewProviderIO[InterviewCalendarReservation] =
           calendar.reserve(id, key, candidate, recruiter, interval, at, execution)
-        override def lookup(id: InterviewWorkflowId): InterviewProviderIO[Option[InterviewCalendarReservation]] =
-          calendar.lookup(id)
+        override def lookup(
+            id: InterviewWorkflowId,
+            lookupKey: String
+        ): InterviewProviderIO[Option[InterviewCalendarReservation]] =
+          calendar.lookup(id, lookupKey)
+        override def cancel(
+            id: InterviewWorkflowId,
+            key: String,
+            at: Instant,
+            execution: Option[ClaimedInterviewWorkflowCommand]
+        ): InterviewProviderIO[InterviewCalendarCancellation] =
+          calendar.cancel(id, key, at, execution)
         override def release(
             key: String,
             at: Instant,
@@ -228,7 +238,7 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
       val worker = new InterviewWorkflowWorker(
         repository,
         failedRelease,
-        FakeInterviewNotificationProvider.durable(repository),
+        LedgerInterviewNotificationProvider.durable(repository),
         settings,
         Diagnostics.noop
       )
@@ -262,7 +272,7 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
         attempts <- success(
           repository.attemptCount(value.id, InterviewWorkflowCommand.ReleaseCalendarSlot(s"${value.id.value}:release"))
         )
-        reservation <- calendar.lookup(value.id).value
+        reservation <- calendar.lookup(value.id, InterviewWorkflow.reservationKey(value.id, 0)).value
         committed <- success(repository.hasHiringReceipt(value.id))
       } yield {
         assertEquals(repair.phase, InterviewWorkflowPhase.RepairRequired)
@@ -277,20 +287,21 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
   test("notification exhaustion retains committed hiring and Admin repair resets the bounded attempt generation") {
     mongoResource.use { fixture =>
       val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
-      val calendar = FakeInterviewCalendarProvider.durable(repository)
-      val notification = FakeInterviewNotificationProvider.durable(repository)
+      val calendar = LedgerInterviewCalendarProvider.durable(repository)
+      val notification = LedgerInterviewNotificationProvider.durable(repository)
       val failedNotification = new InterviewNotificationProvider {
         override def notify(
             id: InterviewWorkflowId,
             recipient: UserId,
             participant: InterviewParticipant,
+            kind: InterviewNotificationKind,
             key: String,
             at: Instant,
             execution: Option[ClaimedInterviewWorkflowCommand]
         ): InterviewProviderIO[InterviewNotificationReceipt] =
           if (participant == InterviewParticipant.Candidate)
             EitherT.leftT[IO, InterviewNotificationReceipt](InterviewProviderError.Unavailable)
-          else notification.notify(id, recipient, participant, key, at, execution)
+          else notification.notify(id, recipient, participant, kind, key, at, execution)
         override def lookup(key: String): InterviewProviderIO[Option[InterviewNotificationReceipt]] =
           if (key.endsWith(":Candidate"))
             EitherT.leftT[IO, Option[InterviewNotificationReceipt]](InterviewProviderError.Unavailable)
@@ -334,7 +345,7 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
           )
         )
         committed <- success(repository.hasHiringReceipt(value.id))
-        kept <- calendar.lookup(value.id).value
+        kept <- calendar.lookup(value.id, InterviewWorkflow.reservationKey(value.id, 0)).value
         storedRepair <- MongoRepositoryTestSupport.findOne(
           fixture.database,
           MongoCollections.InterviewWorkflows,
@@ -365,11 +376,11 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
   test("actual account deletion fences original command and result replay before and after workflow purge") {
     mongoResource.use { fixture =>
       val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
-      val calendar = FakeInterviewCalendarProvider.durable(repository)
+      val calendar = LedgerInterviewCalendarProvider.durable(repository)
       val worker = new InterviewWorkflowWorker(
         repository,
         calendar,
-        FakeInterviewNotificationProvider.durable(repository),
+        LedgerInterviewNotificationProvider.durable(repository),
         settings,
         Diagnostics.noop
       )
@@ -447,11 +458,11 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
         workflowCount <- MongoRepositoryTestSupport.count(fixture.database, MongoCollections.InterviewWorkflows)
         reservationCount <- MongoRepositoryTestSupport.count(
           fixture.database,
-          MongoCollections.FakeInterviewCalendarReservations
+          MongoCollections.InterviewCalendarReservations
         )
         notificationCount <- MongoRepositoryTestSupport.count(
           fixture.database,
-          MongoCollections.FakeInterviewNotificationReceipts
+          MongoCollections.InterviewNotificationReceipts
         )
         commandCount <- MongoRepositoryTestSupport.count(fixture.database, MongoCollections.InterviewWorkflowCommands)
       } yield {

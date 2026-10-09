@@ -102,4 +102,35 @@ final class InterviewSubjectCleanupSpec extends FunSuite {
       Left(InterviewCleanupError.InvalidBarriers)
     )
   }
+
+  test("a live hold is cancelled under the cancel key of its own generation and nothing else is addressable") {
+    val id = InterviewWorkflowId(UUID.fromString("00000000-0000-0000-0000-0000000000a1"))
+    val other = InterviewWorkflowId(UUID.fromString("00000000-0000-0000-0000-0000000000a2"))
+    List(0, 1, 2, 7).foreach { generation =>
+      assertEquals(
+        InterviewCalendarKeys.cancellationKeyFor(id, InterviewWorkflow.reservationKey(id, generation)),
+        Some(InterviewWorkflow.cancellationKey(id, generation))
+      )
+    }
+    // A cancel key, another workflow's key, a non-canonical generation and free text address no reservation.
+    assertEquals(InterviewCalendarKeys.cancellationKeyFor(id, InterviewWorkflow.cancellationKey(id, 1)), None)
+    assertEquals(InterviewCalendarKeys.cancellationKeyFor(id, InterviewWorkflow.reservationKey(other, 1)), None)
+    assertEquals(InterviewCalendarKeys.cancellationKeyFor(id, s"${id.value}:reserve:g01"), None)
+    assertEquals(InterviewCalendarKeys.cancellationKeyFor(id, s"${id.value}:reserve:g0"), None)
+    assertEquals(InterviewCalendarKeys.cancellationKeyFor(id, ""), None)
+  }
+
+  test("confirming holds is part of the purge step: the cleanup states and their order are unchanged") {
+    val fenced = initial.copy(state = InterviewCleanupState.ProducersFenced)
+    assertEquals(InterviewSubjectCleanup.command(fenced), InterviewCleanupCommand.PurgeMongo)
+    assertEquals(
+      InterviewSubjectCleanup.decide(fenced, InterviewCleanupObservation.MongoPurged, now).map(_.state),
+      Right(InterviewCleanupState.MongoPurged)
+    )
+    assertEquals(
+      InterviewSubjectCleanup.decide(initial, InterviewCleanupObservation.MongoPurged, now),
+      Left(InterviewCleanupError.InvalidTransition),
+      "a purge can never be observed before the producers are fenced"
+    )
+  }
 }

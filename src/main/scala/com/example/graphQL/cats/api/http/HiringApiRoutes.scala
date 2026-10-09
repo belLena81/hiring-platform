@@ -2,7 +2,7 @@ package com.example.graphQL.cats.api.http
 
 import cats.data.{Kleisli, OptionT}
 import cats.effect.IO
-import com.example.graphQL.cats.api.admission.AuthRateLimiter
+import com.example.graphQL.cats.api.admission.{AuthRateLimiter, InterviewActionRateLimiter}
 import com.example.graphQL.cats.api.auth.AuthFailure
 import com.example.graphQL.cats.api.graphql.{GraphQLDocumentCache, HiringGraphQLServices, RequestContextFactory}
 import com.example.graphQL.cats.shared.HiringHttpPaths
@@ -80,6 +80,7 @@ object HiringApiRoutes {
       contextFactory: RequestContextFactory,
       documentCache: GraphQLDocumentCache,
       rateLimiter: AuthRateLimiter,
+      interviewActionLimiter: InterviewActionRateLimiter.Limiter,
       clientAddressResolver: ClientAddressResolver,
       discoveryMaxRoots: Int = 4
   )

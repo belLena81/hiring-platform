@@ -61,8 +61,8 @@ final class InterviewBrokerOutageIntegrationSpec extends MongoIntegrationSuite {
         val scheduling = new InterviewSchedulingService(users, jobs, applications, repository, 3.minutes)
         val worker = new InterviewWorkflowWorker(
           repository,
-          FakeInterviewCalendarProvider.durable(repository),
-          FakeInterviewNotificationProvider.durable(repository),
+          LedgerInterviewCalendarProvider.durable(repository),
+          LedgerInterviewNotificationProvider.durable(repository),
           InterviewWorkerSettings("broker-outage-worker", 100.millis, 30.seconds, 5.seconds, 5, 100.millis, 1.second),
           Diagnostics.noop
         )
@@ -158,11 +158,11 @@ final class InterviewBrokerOutageIntegrationSpec extends MongoIntegrationSuite {
                 _ = assertEquals(pending.map(_.phase), Some(InterviewWorkflowPhase.ReservationPending))
                 reservationsBefore <- MongoRepositoryTestSupport.count(
                   fixture.database,
-                  MongoCollections.FakeInterviewCalendarReservations
+                  MongoCollections.InterviewCalendarReservations
                 )
                 notificationsBefore <- MongoRepositoryTestSupport.count(
                   fixture.database,
-                  MongoCollections.FakeInterviewNotificationReceipts
+                  MongoCollections.InterviewNotificationReceipts
                 )
                 _ = assertEquals(reservationsBefore, 0L)
                 _ = assertEquals(notificationsBefore, 0L)
@@ -194,11 +194,11 @@ final class InterviewBrokerOutageIntegrationSpec extends MongoIntegrationSuite {
           finalState <- success(repository.findForAdmin(scheduled.id).value)
           reservations <- MongoRepositoryTestSupport.count(
             fixture.database,
-            MongoCollections.FakeInterviewCalendarReservations
+            MongoCollections.InterviewCalendarReservations
           )
           notifications <- MongoRepositoryTestSupport.count(
             fixture.database,
-            MongoCollections.FakeInterviewNotificationReceipts
+            MongoCollections.InterviewNotificationReceipts
           )
           history <- MongoRepositoryTestSupport.count(
             fixture.database,

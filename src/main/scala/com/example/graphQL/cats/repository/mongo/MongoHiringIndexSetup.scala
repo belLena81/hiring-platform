@@ -33,6 +33,30 @@ private[mongo] object MongoHiringIndexSetup {
     receiptUniqueIndex(MongoCollections.AnalyticsErasureCompletions, AnalyticsErasureCompletionReceipt)
   )
 
+  /** One reservation per workflow and reserve key; introduced by `018_interview_cancellation_reschedule`. */
+  val interviewReservationIdentityIndex: IndexSpec = IndexSpec(
+    MongoCollections.InterviewCalendarReservations,
+    Indexes.ascending(MongoFields.WorkflowId, "reserveKey"),
+    new IndexOptions().name(InterviewCalendarReservationIdentity).unique(true)
+  )
+
+  /** Due work, including proposal expiry (`availableAt` of an `expireProposal` intent), is claimed through this index.
+    */
+  val interviewCommandDueIndex: IndexSpec = IndexSpec(
+    MongoCollections.InterviewWorkflowCommands,
+    Indexes.ascending("commandState", MongoFields.AvailableAt, MongoFields.Id),
+    new IndexOptions().name(InterviewWorkflowCommandDue)
+  )
+
+  /** Request receipts live beside their workflow and name it in `requestWorkflowId`; retention and cleanup find them
+    * through this sparse index instead of scanning the collection. Introduced by `019_interview_request_receipt_index`.
+    */
+  val interviewRequestReceiptIndex: IndexSpec = IndexSpec(
+    MongoCollections.InterviewWorkflows,
+    Indexes.ascending("requestWorkflowId"),
+    new IndexOptions().name(InterviewWorkflowRequestReceipt).sparse(true)
+  )
+
   private val indexSpecs: List[IndexSpec] = List(
     IndexSpec(
       MongoCollections.InterviewSubjectCleanup,
@@ -326,11 +350,8 @@ private[mongo] object MongoHiringIndexSetup {
       Indexes.ascending(MongoFields.RecruiterId, MongoFields.Id),
       new IndexOptions().name(InterviewWorkflowRecruiter)
     ),
-    IndexSpec(
-      MongoCollections.InterviewWorkflowCommands,
-      Indexes.ascending("commandState", MongoFields.AvailableAt, MongoFields.Id),
-      new IndexOptions().name(InterviewWorkflowCommandDue)
-    ),
+    interviewCommandDueIndex,
+    interviewRequestReceiptIndex,
     IndexSpec(
       MongoCollections.InterviewWorkflowCommands,
       Indexes.ascending("commandState", "claimUntil", MongoFields.Id),
@@ -345,20 +366,21 @@ private[mongo] object MongoHiringIndexSetup {
         .partialFilterExpression(Filters.eq(MongoFields.DocumentType, "inboxReceipt"))
     ),
     IndexSpec(
-      MongoCollections.FakeInterviewCalendarReservations,
+      MongoCollections.InterviewCalendarReservations,
       Indexes.ascending("participants", "startsAt", "endsAt"),
       new IndexOptions()
-        .name(FakeInterviewCalendarParticipants)
+        .name(InterviewCalendarParticipants)
     ),
     IndexSpec(
-      MongoCollections.FakeInterviewCalendarReservations,
+      MongoCollections.InterviewCalendarReservations,
       Indexes.ascending("releaseKey"),
-      new IndexOptions().name(FakeInterviewCalendarRelease).unique(true)
+      new IndexOptions().name(InterviewCalendarRelease).unique(true)
     ),
+    interviewReservationIdentityIndex,
     IndexSpec(
-      MongoCollections.FakeInterviewNotificationReceipts,
+      MongoCollections.InterviewNotificationReceipts,
       Indexes.ascending("recipientId", "deliveredAt"),
-      new IndexOptions().name(FakeInterviewNotificationRecipient)
+      new IndexOptions().name(InterviewNotificationRecipient)
     )
   )
 
@@ -366,8 +388,8 @@ private[mongo] object MongoHiringIndexSetup {
     MongoCollections.InterviewWorkflows,
     MongoCollections.InterviewWorkflowCommands,
     MongoCollections.InterviewWorkflowInbox,
-    MongoCollections.FakeInterviewCalendarReservations,
-    MongoCollections.FakeInterviewNotificationReceipts
+    MongoCollections.InterviewCalendarReservations,
+    MongoCollections.InterviewNotificationReceipts
   ).map(name =>
     IndexSpec(
       name,
@@ -379,7 +401,7 @@ private[mongo] object MongoHiringIndexSetup {
   private val interviewSubjectSpecs: List[IndexSpec] = List(
     MongoCollections.InterviewWorkflowCommands,
     MongoCollections.InterviewWorkflowInbox,
-    MongoCollections.FakeInterviewNotificationReceipts
+    MongoCollections.InterviewNotificationReceipts
   ).map(name =>
     IndexSpec(name, Indexes.ascending(MongoFields.WorkflowId), new IndexOptions().name(workflowIdentity(name)))
   )

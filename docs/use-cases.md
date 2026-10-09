@@ -847,6 +847,18 @@ stage duration
 p95 < 200 ms
 ```
 
+### Interview cancellation and rescheduling
+
+Contract, authorization matrix and error codes: [API reference](api.md#interview-scheduling-cancellation-and-rescheduling). Behavior and decisions: [durable hiring workflows](specs/durable-hiring-workflows.md).
+
+- **Cancel is a rejection.** `cancelInterview` by the application's candidate, the owning recruiter or Admin moves the application `Interview → Rejected` through the existing permitted transition (no new transition) in one transaction with its history entry, the existing `statusChanged` event and the durable provider-cancel intent. The rejection feedback is system-generated per initiator (for example "Interview cancelled by the candidate."); no text is accepted. The calendar slot counts as released only after the provider confirms the cancel, and both participants are notified after that. A candidate can cancel only through this mutation; they still cannot use `rejectApplication`.
+- **Candidate request.** `requestInterviewReschedule` is a bare flag with a timestamp that notifies the recruiter; it changes no slot or status. The owning recruiter or Admin clears it with `dismissInterviewRescheduleRequest`, or by proposing.
+- **Proposal flow.** The owning recruiter or Admin calls `proposeInterviewReschedule` with a new UTC interval. Nothing is held yet: the old slot is the only reservation. The candidate then accepts or declines; the recruiter or Admin may withdraw. The proposal also expires at the earliest of `now + proposal-ttl-seconds` (72 hours by default), the current interview start and the proposed start. Decline, withdrawal and expiry return the workflow to `Completed` with the old slot intact and notify the other party. On acceptance the replacement is held first, the live interval swaps once, the old slot is confirm-cancelled and both participants are notified; if the replacement conflicts, the old slot stays and both are told. One proposal may be open at a time.
+- **Races and retries.** Every action is a revision compare-and-set plus an idempotent request key: of competing cancel, propose, accept, decline, withdraw and expiry exactly one wins; the others get a typed outcome and no provider effect.
+- **Delivery guarantee.** Notifications are at-least-once on a non-local provider (duplicates possible, never silently lost); the local ledger keeps one receipt per key.
+- **Abuse limit.** Interview actions are rate-limited per authenticated actor, counting each aliased action.
+- **Known gap.** `rejectApplication` and `hireApplication` do not touch a live interview slot.
+
 ---
 
 # UC10 — Semantic Candidate Search
