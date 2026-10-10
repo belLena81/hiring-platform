@@ -51,6 +51,7 @@ No author approves their own work. Security and QA require separate verdicts eve
 
 ## Specification and context
 
+- `docs/domain-language.md` is the shared glossary, bounded-context map and aggregate/invariant list. Specs, tests, code and handoffs use its terms; add a new or ambiguous term in the same change. Acceptance scenarios are concrete examples tagged with their criterion ID (`AC-03.2`); when a spec exists, the tag appears in the test name.
 - Follow `docs/spec-driven-development.md` for substantial features, cross-layer fixes, migrations, and performance work. Keep one current spec in `docs/specs/` with stable acceptance IDs, contracts/non-goals, source facts, explicit unknowns, and criterion-to-test evidence; small tasks may use a brief in the conversation.
 - Product Manager makes the spec ready within the user's existing authorization; readiness is not a new approval gate. Ask only for material missing decisions or authorization, continuing independent work.
 - Give agents focused context: selected skill, relevant spec criteria, verified source pointers, allowed write paths, dependencies, and expected evidence. Retrieve missing facts instead of loading all documents or inventing them.

@@ -52,6 +52,7 @@ Task / use case / phase:
 User outcome and non-goals:
 Current implementation and decision sources:
 Acceptance criteria, including forbidden/failure paths:
+Domain: context, aggregate/invariant touched; glossary terms used or added; tagged examples:
 Workload / SLO / freshness / cost ceiling (or explicit assumptions):
 Owner / allowed write paths / input paths:
 Dependencies and specialist handoffs:

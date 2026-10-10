@@ -27,9 +27,21 @@ Describe actors and ownership, input/output/error semantics, validation, state t
 
 Separate pure domain decisions from effectful orchestration and external adapters. For data/API/event changes, apply [schema evolution](../schema-evolution.md): record the single active pre-MVP API/analytics shape and update consumers/fixtures directly; do not add legacy compatibility or backfills for those contracts. For operational MongoDB changes, or after full MVP, record the applicable migration/concurrent-write/recovery and compatibility checks. Mark not applicable with a reason when no contract changes.
 
+## Domain language and examples
+
+- Context, aggregate and invariant touched (see [domain language](../domain-language.md)):
+- Glossary terms used, and terms added or changed:
+- Rules and concrete examples: for each rule, list a few scenarios (typical, boundary, forbidden, failure) with real values. Tag each `AC-nn.m`. Open questions found while writing examples go to Open questions above.
+
+| Rule | Example tag | Scenario (Given / When / Then, domain words and concrete values) |
+|---|---|---|
+| Duplicate applications are forbidden | AC-01.1 | Given Ana already applied to Job J, when she submits again, then the second submission fails with a duplicate error and history is unchanged |
+
 ## Acceptance and evidence
 
 Keep criterion IDs stable. Add separate rows for relevant forbidden, invalid, concurrent, and failure/recovery cases. Fill evidence only after observing it.
+
+Example tags roll up under their criterion (`AC-01.1` and `AC-01.2` belong to `AC-01`); list the tags in the criterion's row. The test name starts with the tag, for example `AC-01.1 rejects a duplicate application from the same candidate`.
 
 | ID | Given / When / Then | Implementation and test paths | Verification command or method | Actual outcome |
 |---|---|---|---|---|
