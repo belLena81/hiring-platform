@@ -6,6 +6,7 @@ import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.domain.workflow.*
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField}
 import com.example.graphQL.cats.service.port.*
+import com.example.graphQL.cats.service.RepositoryError
 import java.time.Instant
 import java.util.UUID
 import munit.CatsEffectSuite
@@ -275,7 +276,8 @@ final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
         Diagnostics.noop,
         IO.pure(observedAt)
       )
-      acknowledged <- if (resultDelivery) worker.receiveResult(delivery) else worker.receiveCommand(delivery)
+      acknowledged <-
+        if (resultDelivery) worker.receiveResult(delivery).committed else worker.receiveCommand(delivery).committed
       quarantines <- quarantined.get
       claimCount <- claims.get
       advances <- advanced.get
@@ -350,7 +352,7 @@ final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
             value: ClaimedInterviewWorkflowCommand,
             now: Instant,
             availableAt: Instant,
-            failureCode: String
+            failureCode: InterviewFailureCode
         ) = RepositoryIO.lift(retries.update(_ + 1))
       }
       sender = new InterviewTransport {
@@ -395,8 +397,8 @@ final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
               value: ClaimedInterviewWorkflowCommand,
               now: Instant,
               availableAt: Instant,
-              failureCode: String
-          ) = RepositoryIO.lift(retried.update(_ + 1) *> failures.update(_ :+ failureCode))
+              failureCode: InterviewFailureCode
+          ) = RepositoryIO.lift(retried.update(_ + 1) *> failures.update(_ :+ failureCode.wire))
         }
         sender = new InterviewTransport {
           def generationFor(value: InterviewMessage) =
@@ -474,7 +476,7 @@ final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
   test("a timely command with a stored result acknowledges before identity validation") {
     observeDelivery(
       message.copy(messageId = new UUID(0L, 99L)),
-      stored = Some(command.copy(result = Some(InterviewCommandResult.Succeeded)))
+      stored = Some(command.copy(result = Some(InterviewResult.Succeeded)))
     )
       .map(result => assertEquals(result, DeliveryObservation(true, Vector.empty, 0, Vector.empty)))
   }
@@ -490,7 +492,7 @@ final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
   test("future commands quarantine before the stored-result acknowledgment shortcut") {
     observeDelivery(
       message.copy(occurredAt = observedAt.plusSeconds(6)),
-      stored = Some(command.copy(result = Some(InterviewCommandResult.Succeeded)))
+      stored = Some(command.copy(result = Some(InterviewResult.Succeeded)))
     )
       .map { result =>
         assert(result.acknowledged)
@@ -513,7 +515,7 @@ final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
   test("an expired matching command requires repair even when its stored result exists") {
     val expired = command.copy(
       occurredAt = observedAt.minusSeconds(8.days.toSeconds),
-      result = Some(InterviewCommandResult.Succeeded)
+      result = Some(InterviewResult.Succeeded)
     )
     observeDelivery(messageFor(expired, workflow, InterviewStep.Reserve, None), stored = Some(expired)).map { result =>
       assert(result.acknowledged)
@@ -531,7 +533,7 @@ final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
   }
 
   test("a matching stored reservation result advances the pure workflow") {
-    val completed = command.copy(result = Some(InterviewCommandResult.Succeeded))
+    val completed = command.copy(result = Some(InterviewResult.Succeeded))
     observeDelivery(
       messageFor(completed, workflow, InterviewStep.Reserve, Some(InterviewResult.Succeeded)),
       true,
@@ -544,7 +546,7 @@ final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
   }
 
   test("a result differing from the stored receipt is quarantined without advancement") {
-    val completed = command.copy(result = Some(InterviewCommandResult.Succeeded))
+    val completed = command.copy(result = Some(InterviewResult.Succeeded))
     observeDelivery(
       messageFor(completed, workflow, InterviewStep.Reserve, Some(InterviewResult.Rejected)),
       true,
@@ -560,7 +562,7 @@ final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
     val notification = command.copy(
       revision = 2L,
       command = InterviewWorkflowCommand.Notify(InterviewParticipant.Candidate, "candidate-notification"),
-      result = Some(InterviewCommandResult.Succeeded)
+      result = Some(InterviewResult.Succeeded)
     )
     observeDelivery(
       messageFor(notification, notifying, InterviewStep.NotifyCandidate, Some(InterviewResult.Succeeded)),
@@ -578,7 +580,7 @@ final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
     val notification = command.copy(
       revision = 4L,
       command = InterviewWorkflowCommand.Notify(InterviewParticipant.Candidate, "candidate-notification"),
-      result = Some(InterviewCommandResult.Succeeded)
+      result = Some(InterviewResult.Succeeded)
     )
     observeDelivery(
       messageFor(notification, notifying, InterviewStep.NotifyCandidate, Some(InterviewResult.Succeeded)),

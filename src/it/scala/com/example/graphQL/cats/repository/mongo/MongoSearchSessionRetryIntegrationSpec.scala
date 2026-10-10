@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.service.events.OperationalEventPayload.SearchKind
 import cats.effect.{Deferred, IO, Ref}
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.service.{Diagnostics, RepositoryError}
@@ -18,7 +19,7 @@ class MongoSearchSessionRetryIntegrationSpec extends MongoIntegrationSuite {
       val session = SearchSession(
         UUID.randomUUID(),
         UserId(UUID.randomUUID()),
-        "jobs",
+        SearchKind.Jobs,
         None,
         Json.obj(),
         None,
@@ -74,7 +75,7 @@ class MongoSearchSessionRetryIntegrationSpec extends MongoIntegrationSuite {
       val session = SearchSession(
         UUID.randomUUID(),
         UserId(UUID.randomUUID()),
-        "jobs",
+        SearchKind.Jobs,
         None,
         Json.obj(),
         None,
@@ -125,7 +126,7 @@ class MongoSearchSessionRetryIntegrationSpec extends MongoIntegrationSuite {
       val session = SearchSession(
         UUID.randomUUID(),
         UserId(UUID.randomUUID()),
-        "jobs",
+        SearchKind.Jobs,
         None,
         Json.obj(),
         None,

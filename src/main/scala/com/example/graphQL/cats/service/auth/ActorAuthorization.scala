@@ -55,8 +55,3 @@ final class ActorAuthorization(users: UserRepository) {
       .repository(users.find(actor.userId))
       .subflatMap(_.toRight(UseCaseError.Authentication(AuthenticationError.Unauthorized)))
 }
-
-object ActorAuthorization {
-  def apply(users: UserRepository): ActorAuthorization =
-    new ActorAuthorization(users)
-}

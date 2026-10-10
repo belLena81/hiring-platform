@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.service.application.committed
 import cats.effect.{IO, Ref, Deferred}
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.{ApplicationEvent, ApplicationStatus, UserRole, User}
@@ -12,6 +13,7 @@ import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.service.application.InterviewSchedulingService
 import com.example.graphQL.cats.service.events.OperationalEvents
 import com.example.graphQL.cats.service.port.*
+import com.example.graphQL.cats.service.RepositoryError
 import java.time.Instant
 import java.util.UUID
 import scala.concurrent.duration.*
@@ -147,7 +149,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
 
   test("workflow create and advance are atomic, replayable, and guarded by revision and inbox identity") {
     mongoResource.use { fixture =>
-      val workflowRepository = new MongoInterviewWorkflowRepository(
+      val workflowRepository = MongoInterviewWorkflowRepository(
         fixture.database,
         MongoTransactionRunner.sessions(fixture.client, RepositoryError.Conflict, diagnostics = Diagnostics.noop),
         Diagnostics.noop
@@ -261,7 +263,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
 
   test("calendar ledger reservations serialize overlaps, allow adjacency, and release idempotently") {
     mongoResource.use { fixture =>
-      val workflowRepository = new MongoInterviewWorkflowRepository(
+      val workflowRepository = MongoInterviewWorkflowRepository(
         fixture.database,
         MongoTransactionRunner.sessions(fixture.client, RepositoryError.Conflict, diagnostics = Diagnostics.noop),
         Diagnostics.noop
@@ -374,7 +376,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
 
   test("expired command claims cannot publish and notification receipts are idempotent") {
     mongoResource.use { fixture =>
-      val workflowRepository = new MongoInterviewWorkflowRepository(
+      val workflowRepository = MongoInterviewWorkflowRepository(
         fixture.database,
         MongoTransactionRunner.sessions(fixture.client, RepositoryError.Conflict, diagnostics = Diagnostics.noop),
         Diagnostics.noop
@@ -727,7 +729,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
             Some(reserveExecution)
           )
         )
-        _ <- success(repository.recordResult(reserveExecution, InterviewCommandResult.Succeeded, claimedAt))
+        _ <- success(repository.recordResult(reserveExecution, InterviewResult.Succeeded, claimedAt))
         reservationResult = InterviewMessage(
           stableId(s"${stableId(reserveExecution.record.stepId)}:result"),
           value.id.value,
@@ -739,7 +741,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
           Some(InterviewResult.Succeeded),
           reserveExecution.record.occurredAt
         )
-        _ <- worker.receiveResult(reservationResult).map(assert(_))
+        _ <- worker.receiveResult(reservationResult).committed.map(assert(_))
         statusPending <- success(repository.findForAdmin(value.id)).flatMap(value =>
           IO.fromOption(value)(new AssertionError("Missing status-commit workflow"))
         )
@@ -777,7 +779,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
           IO.fromOption(value)(new AssertionError("Missing notification workflow"))
         )
         failed = InterviewWorkflow
-          .decide(notifying, notifying.revision, InterviewWorkflowEvent.RetryExhausted("notification"))
+          .decide(notifying, notifying.revision, InterviewWorkflowEvent.RetryExhausted(InterviewFailureCode.Provider))
           .fold(error => fail(s"Transition: $error"), identity)
         _ <- success(
           repository.advance(
@@ -791,7 +793,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         repaired <- success(
           repository.repair(failed.workflow, failed.workflow.revision, UUID.randomUUID(), claimedAt, value.recruiterId)
         )
-        lateResult <- repository.recordResult(notificationExecution, InterviewCommandResult.Succeeded, claimedAt).value
+        lateResult <- repository.recordResult(notificationExecution, InterviewResult.Succeeded, claimedAt).value
         command <- success(repository.findCommand(value.id, notificationExecution.record.stepId))
         repairedStored <- success(repository.findForAdmin(value.id))
       } yield {
@@ -860,7 +862,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
           .reserve(value.id, key, value.candidateId, value.recruiterId, value.interval, currentAt)
           .value
         kept <- providerSuccess(calendar.lookup(value.id, InterviewWorkflow.reservationKey(value.id, 0)))
-        staleResult <- repository.recordResult(first, InterviewCommandResult.Succeeded, currentAt).value
+        staleResult <- repository.recordResult(first, InterviewResult.Succeeded, currentAt).value
       } yield {
         assert(staleReserve.isLeft)
         assert(receipt)
@@ -956,7 +958,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
           )
         )
         failed = InterviewWorkflow
-          .decide(notifying, notifying.revision, InterviewWorkflowEvent.RetryExhausted("notification"))
+          .decide(notifying, notifying.revision, InterviewWorkflowEvent.RetryExhausted(InterviewFailureCode.Provider))
           .fold(error => fail(s"Transition: $error"), identity)
         _ <- success(
           repository.advance(
@@ -1103,11 +1105,11 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         executing <- success(repository.claimExecution(commit.record, "worker", now, now.plusSeconds(3600), 5))
           .flatMap(executionClaim)
         _ <- success(repository.commitHiring(pending.workflow, now, Some(executing)))
-        _ <- success(repository.recordResult(executing, InterviewCommandResult.Succeeded, now))
+        _ <- success(repository.recordResult(executing, InterviewResult.Succeeded, now))
         result <- success(repository.claimDueCommands("publisher", now, now.plusSeconds(3600), 16)).flatMap(claims =>
           IO.fromOption(claims.find(_.record.stepId == commit.record.stepId))(new AssertionError("Missing result"))
         )
-        resolution <- success(repository.requireRepair(result, now, "publication_exhausted"))
+        resolution <- success(repository.requireRepair(result, now, InterviewFailureCode.PublicationExhausted))
         after <- success(repository.findForAdmin(value.id))
         command <- success(repository.findCommand(value.id, commit.record.stepId))
         reservation <- providerSuccess(calendar.lookup(value.id, InterviewWorkflow.reservationKey(value.id, 0)))
@@ -1115,7 +1117,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         assertEquals(resolution, InterviewPublicationResolution.Superseded)
         assertEquals(after.map(_.phase), Some(InterviewWorkflowPhase.NotificationsPending))
         assertEquals(command.map(_.state), Some(InterviewWorkflowCommandState.Superseded))
-        assertEquals(command.flatMap(_.result), Some(InterviewCommandResult.Succeeded))
+        assertEquals(command.flatMap(_.result), Some(InterviewResult.Succeeded))
         assertEquals(reservation.flatMap(_.releasedAt), None)
       }
     }
@@ -1208,7 +1210,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         assertEquals(count, 1L)
         assertEquals(after, 1L)
         assertEquals(expired, InterviewExecutionClaimOutcome.ReconciliationQueued)
-        assertEquals(stored.flatMap(_.result), Some(InterviewCommandResult.OutcomeUnknown))
+        assertEquals(stored.flatMap(_.result), Some(InterviewResult.OutcomeUnknown))
       }
     }
   }
@@ -1403,15 +1405,15 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         claim <- executionClaim(outcome)
         count <- success(repository.attemptCount(value.id, charged.command))
         _ = assertEquals(count, 1L, "a conservatively charged queued command reuses its only slot")
-        _ <- success(repository.recordResult(claim, InterviewCommandResult.OutcomeUnknown, now))
+        _ <- success(repository.recordResult(claim, InterviewResult.OutcomeUnknown, now))
         resultClaim <- success(repository.claimDueCommands("required-result", now, now.plusSeconds(600), 1)).map(_.head)
-        repaired <- success(repository.requireRepair(resultClaim, now, "PublicationBudgetExhausted"))
+        repaired <- success(repository.requireRepair(resultClaim, now, InterviewFailureCode.Provider))
         state <- success(repository.findForAdmin(value.id))
         result <- success(repository.findCommand(value.id, resultClaim.record.stepId))
       } yield {
         assertEquals(repaired, InterviewPublicationResolution.Repaired)
         assertEquals(state.map(_.phase), Some(InterviewWorkflowPhase.RepairRequired))
-        assertEquals(result.flatMap(_.result), Some(InterviewCommandResult.OutcomeUnknown))
+        assertEquals(result.flatMap(_.result), Some(InterviewResult.OutcomeUnknown))
         assertEquals(result.map(_.state), Some(InterviewWorkflowCommandState.RepairRequired))
         assertEquals(result.map(_.executionAttempts), Some(1))
       }

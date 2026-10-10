@@ -5,7 +5,7 @@ import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.domain.workflow.*
 import com.example.graphQL.cats.service.RepositoryError
 import org.bson.Document
-import com.example.graphQL.cats.repository.mongo.MongoDocumentFields.Repository.{instant, optionalInstant}
+import com.example.graphQL.cats.repository.mongo.MongoDocumentFields.Repository.{instant, optionalInstant, uuid}
 import java.time.Instant
 import java.util.{Date, UUID}
 
@@ -158,11 +158,7 @@ private[mongo] object MongoInterviewWorkflowLifecycleCodec {
       starts <- instant(document, StartField)
       ends <- instant(document, EndField)
       _ <- Either.cond(ends.isAfter(starts), (), RepositoryError.InvalidStoredData)
-      proposer <- Option(document.get(ProposedByField))
-        .collect { case value: String => value }
-        .flatMap(value => Either.catchNonFatal(UUID.fromString(value)).toOption)
-        .map(UserId.apply)
-        .toRight(RepositoryError.InvalidStoredData)
+      proposer <- uuid(document, ProposedByField).map(UserId.apply)
       expiresAt <- instant(document, ExpiresAtField)
     } yield InterviewRescheduleProposal(InterviewInterval(starts, ends), proposer, expiresAt)
 

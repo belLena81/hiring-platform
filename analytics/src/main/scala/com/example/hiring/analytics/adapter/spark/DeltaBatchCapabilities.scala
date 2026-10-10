@@ -54,7 +54,7 @@ private[analytics] final class DeltaBatchWriter[F[_]](
   override def withExpiry(frame: DataFrame, now: Instant, days: Int): DataFrame =
     frame
       .withColumn(Columns.IngestedAt, lit(Timestamp.from(now)))
-      .withColumn(Columns.ExpiresAt, lit(Timestamp.from(now.plus(java.time.Duration.ofDays(days.toLong)))))
+      .withColumn(Columns.ExpiresAt, AnalyticsTableSchemas.expiryAt(now, days.toLong))
 }
 
 /** Reads an existing Delta table or creates an empty frame with the caller's expected schema. */

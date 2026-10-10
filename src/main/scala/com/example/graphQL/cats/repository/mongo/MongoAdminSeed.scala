@@ -6,7 +6,8 @@ import com.example.graphQL.cats.config.AdminSeedConfig
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.service.auth.PasswordHasher
-import com.example.graphQL.cats.service.port.{MutationWriteContext, RepositoryError, UserAccountRepository}
+import com.example.graphQL.cats.service.port.{MutationWriteContext, UserAccountRepository}
+import com.example.graphQL.cats.service.RepositoryError
 import mongo4cats.database.MongoDatabase
 import java.text.Normalizer
 import java.util.UUID

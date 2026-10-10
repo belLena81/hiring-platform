@@ -5,11 +5,11 @@ import com.example.graphQL.cats.api.graphql.HiringGraphQLInterviewResolvers.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLInputs.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLAccountResolvers.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLApplicationResolvers.*
-import com.example.graphQL.cats.api.graphql.HiringGraphQLAnalyticsResolvers.*
-import com.example.graphQL.cats.api.graphql.HiringGraphQLEmbeddingCoverageResolvers.*
+import com.example.graphQL.cats.api.graphql.HiringGraphQLReportingResolvers.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLInteractionResolvers.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLJobResolvers.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLSearchResolvers.*
+import com.example.graphQL.cats.api.graphql.HiringGraphQLReportingTypes.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLTypes.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLDsl.{ioField, resultField}
 import com.example.graphQL.cats.domain.model.ApplicationStatus

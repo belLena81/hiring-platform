@@ -41,7 +41,7 @@ final class MongoAnalyticsErasureBarrier[F[_]: Async] private (
           .asJava
       )
     )
-    matchedUpdate(requests, ownedClaim(claim, now), update).map(toErasureUpdate)
+    matchedUpdate(requests, ownedClaimFilter(claim, now), update).map(toErasureUpdate)
   }
 
   def readBarrier(requestId: AccountSubjectId): F[Option[KafkaRetentionBarrier]] = mongo {

@@ -9,6 +9,7 @@ import com.example.graphQL.cats.domain.workflow.{
   InterviewTopicPair
 }
 import com.example.graphQL.cats.service.port.*
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFields}
 import com.example.graphQL.cats.service.Diagnostics.*
 import java.time.Instant

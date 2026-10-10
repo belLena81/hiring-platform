@@ -120,6 +120,7 @@ final class AnalyticsErasureWorker[F[_]: Async](
   /** Emits a stable, non-sensitive error code without logging exception messages or payloads. */
   private def failureCode(error: Throwable): String = error match {
     case _: AnalyticsError.InvalidConfiguration       => "INVALID_CONFIGURATION"
+    case _: AnalyticsError.DataIntegrityViolation     => "DATA_INTEGRITY_VIOLATION"
     case AnalyticsError.MalformedMarker               => "MALFORMED_MARKER"
     case AnalyticsError.InvalidSilverSchema           => "INVALID_SILVER_SCHEMA"
     case AnalyticsError.InvalidGoldSchema             => "INVALID_GOLD_SCHEMA"
@@ -152,9 +153,6 @@ final class AnalyticsErasureWorker[F[_]: Async](
   private def lift[A](effect: F[A]): ClaimFlow[A] = EitherT.liftF(effect)
 
   private def stop[A](outcome: ErasureClaimOutcome): ClaimFlow[A] = EitherT.leftT(outcome)
-
-  private def fromEither[A](result: Either[AnalyticsError, A]): ClaimFlow[A] =
-    lift(Async[F].fromEither(result))
 
   private def nextPhase(claim: ErasureClaim, phase: ErasurePhase): ClaimFlow[ErasureClaim] =
     claim.advanceTo(phase) match {
@@ -190,16 +188,16 @@ final class AnalyticsErasureWorker[F[_]: Async](
           purged <- lift(queue.purgeOutbox(claim.requestId, current, deliveryTimeout))
           _ <- if (purged) EitherT.rightT(()) else defer(claim, pollInterval)
           maybeBarrier <- lift(barriers.readBarrier(claim.requestId))
-          barrier <- maybeBarrier match {
-            case Some(value) => fromEither(KafkaRetentionBarrier.validate(value))
-            case None        =>
-              lift(kafka.retention.capture()).flatTap(value =>
+          // Both the stored and the captured barrier are validated when they are built.
+          _ <- maybeBarrier match {
+            case Some(_) => EitherT.rightT[F, ErasureClaimOutcome](())
+            case None    =>
+              lift(kafka.retention.capture()).flatMap(value =>
                 lift(now)
                   .flatMap(current => lift(barriers.persistBarrier(claim, value, current)))
                   .flatMap(requireApplied)
               )
           }
-          _ <- fromEither(KafkaRetentionBarrier.validate(barrier))
           _ <- advance(claim, ErasurePhase.OutboxPurged)
         } yield Left(next)
 
@@ -248,36 +246,20 @@ final class AnalyticsErasureWorker[F[_]: Async](
 
   private def purgeAndRecordDelta(claim: ErasureClaim, generation: Long): ClaimFlow[Unit] =
     for {
-      lockedUpdates <- lift(lakehouseLock.resource(paths.root).use { _ =>
-        for {
-          markerTokens <- markers.activeSubjectTokens
-          affectedRows <- lakehouse.countMarkedRows(markerTokens)
-          affectedFiles <- lakehouse.captureMarkedFiles(markerTokens)
-          countedAt <- now
-          counted <- progress.persistAffectedRows(claim, affectedRows, countedAt)
-          result <- counted match {
-            case ErasureUpdate.LeaseLost => Async[F].pure(Left(ErasureClaimOutcome.ReleasedForOthers))
-            case ErasureUpdate.Applied   =>
-              for {
-                filesSaved <- progress.persistDeltaFiles(claim, affectedFiles, countedAt)
-                next <- filesSaved match {
-                  case ErasureUpdate.LeaseLost => Async[F].pure(Left(ErasureClaimOutcome.ReleasedForOthers))
-                  case ErasureUpdate.Applied   =>
-                    for {
-                      _ <- lakehouse.applyDeletionMarkers(markerTokens)
-                      retiredLogs <- lakehouse.checkpointPurgedRawLogs
-                      checkpointedAt <- now
-                      logsSaved <- progress.persistDeltaFiles(claim, retiredLogs, checkpointedAt)
-                    } yield logsSaved match {
-                      case ErasureUpdate.Applied   => Right(())
-                      case ErasureUpdate.LeaseLost => Left(ErasureClaimOutcome.ReleasedForOthers)
-                    }
-                }
-              } yield next
-          }
-        } yield result
+      _ <- EitherT(lakehouseLock.resource(paths.root).use { _ =>
+        (for {
+          markerTokens <- lift(markers.activeSubjectTokens)
+          affectedRows <- lift(lakehouse.countMarkedRows(markerTokens))
+          affectedFiles <- lift(lakehouse.captureMarkedFiles(markerTokens))
+          countedAt <- lift(now)
+          _ <- lift(progress.persistAffectedRows(claim, affectedRows, countedAt)).flatMap(requireApplied)
+          _ <- lift(progress.persistDeltaFiles(claim, affectedFiles, countedAt)).flatMap(requireApplied)
+          _ <- lift(lakehouse.applyDeletionMarkers(markerTokens))
+          retiredLogs <- lift(lakehouse.checkpointPurgedRawLogs)
+          checkpointedAt <- lift(now)
+          _ <- lift(progress.persistDeltaFiles(claim, retiredLogs, checkpointedAt)).flatMap(requireApplied)
+        } yield ()).value
       })
-      _ <- lockedUpdates.fold(stop, _ => EitherT.rightT(()))
       purgedAt <- lift(now)
       savedAt <- lift(progress.persistDeltaPurgedAt(claim, purgedAt, purgedAt))
       _ <- requireApplied(savedAt)
@@ -339,10 +321,7 @@ final class AnalyticsErasureWorker[F[_]: Async](
     }
 
   private def advance(claim: ErasureClaim, phase: ErasurePhase): ClaimFlow[Unit] =
-    lift(now).flatMap(current => lift(progress.advance(claim, phase, 0, current))).flatMap {
-      case ErasureUpdate.Applied   => EitherT.rightT(())
-      case ErasureUpdate.LeaseLost => stop(ErasureClaimOutcome.ReleasedForOthers)
-    }
+    lift(now).flatMap(current => lift(progress.advance(claim, phase, 0, current))).flatMap(requireApplied)
 
   private def requireApplied(result: ErasureUpdate): ClaimFlow[Unit] = result match {
     case ErasureUpdate.Applied   => EitherT.rightT(())

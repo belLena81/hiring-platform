@@ -33,7 +33,7 @@ object MongoEmbeddingWorkEnqueuer {
         _session: Option[ClientSession[IO]],
         _key: EmbeddingWorkKey,
         _now: Instant
-    ): RepositoryIO[Unit] = RepositoryIO.fromEither(Right(()))
+    ): RepositoryIO[Unit] = ().pure[RepositoryIO]
   }
 }
 

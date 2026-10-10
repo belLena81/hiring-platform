@@ -18,15 +18,16 @@ object InterviewActorPolicy {
     case _ => false
   }
 
+  /** Admission to the guarded write: a person (`actor`) only drives the user events their role allows, and the system
+    * (no actor) only drives the others.
+    */
+  def admits(actor: Option[(UserRole, UserId)], event: InterviewLifecycleEvent): Boolean =
+    actor.fold(!isUserEvent(event))((role, id) => permits(role, id, event))
+
   /** Whether `actor` with `role` may drive `event`. A proposal always names its trusted proposer. */
   def permits(role: UserRole, actor: UserId, event: InterviewLifecycleEvent): Boolean = event match {
     case InterviewLifecycleEvent.Cancel(initiator, _) =>
-      (initiator, role) match {
-        case (InterviewCancellationInitiator.Candidate, UserRole.Candidate) => true
-        case (InterviewCancellationInitiator.Recruiter, UserRole.Recruiter) => true
-        case (InterviewCancellationInitiator.Admin, UserRole.Admin)         => true
-        case _                                                              => false
-      }
+      InterviewCancellationInitiator.of(role) == initiator
     case InterviewLifecycleEvent.RequestReschedule(_) | InterviewLifecycleEvent.AcceptProposal(_) |
         InterviewLifecycleEvent.DeclineProposal(_) =>
       role == UserRole.Candidate

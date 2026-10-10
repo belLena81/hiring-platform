@@ -4,21 +4,15 @@ import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.ApplicationStatus
 import com.example.graphQL.cats.domain.workflow.*
 import com.example.graphQL.cats.service.port.*
+import com.example.graphQL.cats.service.RepositoryError
 import org.bson.Document
-import com.example.graphQL.cats.repository.mongo.MongoDocumentFields.Repository.{instant, int32, int64}
+import com.example.graphQL.cats.repository.mongo.MongoDocumentFields.Repository.{instant, int32, int64, named, uuid}
 import java.time.Instant
 import java.util.UUID
 
 /** Canonical current stored command contract shared by transactional reads and startup verification. */
 private[mongo] object MongoInterviewWorkflowCommandCodec {
-  private val WorkflowIdField = "workflowId"
-  private val RevisionField = "revision"
-  private val StepIdField = "stepId"
-  private val CommandField = "command"
-  private val CommandStateField = "commandState"
-  private val IdempotencyKeyField = "idempotencyKey"
-  private val StartField = "startsAt"
-  private val EndField = "endsAt"
+  import MongoInterviewFields.*
 
   /** Stored command kinds introduced for cancellation and rescheduling. */
   object LifecycleKinds {
@@ -54,7 +48,7 @@ private[mongo] object MongoInterviewWorkflowCommandCodec {
       executionAttempts: Int,
       availableAt: Instant,
       occurredAt: Instant,
-      result: Option[InterviewCommandResult]
+      result: Option[InterviewResult]
   )
 
   /** Any stored row: scheduling and lifecycle intents share one record, claim path and executor. */
@@ -86,7 +80,7 @@ private[mongo] object MongoInterviewWorkflowCommandCodec {
 
   private def envelope(document: Document): Either[RepositoryError, Envelope] =
     for {
-      workflowId <- string(document, WorkflowIdField).flatMap(uuid).map(InterviewWorkflowId.apply)
+      workflowId <- uuid(document, WorkflowIdField).map(InterviewWorkflowId.apply)
       step <- string(document, StepIdField)
       revision <- int64(document, RevisionField)
       id <- string(document, MongoFields.Id)
@@ -95,9 +89,7 @@ private[mongo] object MongoInterviewWorkflowCommandCodec {
         .collect { case value: Document => value }
         .toRight(RepositoryError.InvalidStoredData)
       stateName <- string(document, CommandStateField)
-      state <- InterviewWorkflowCommandState.values
-        .find(_.toString == stateName)
-        .toRight(RepositoryError.InvalidStoredData)
+      state <- named(InterviewWorkflowCommandState.values)(stateName)
       attempts <- int32(document, MongoFields.Attempts)
       executionAttempts <- int32(document, "executionAttempts")
       _ <- Either.cond(revision >= 0L && attempts >= 0 && executionAttempts >= 0, (), RepositoryError.InvalidStoredData)
@@ -106,7 +98,7 @@ private[mongo] object MongoInterviewWorkflowCommandCodec {
       result <- Option(document.get("result")) match {
         case None               => Right(None)
         case Some(name: String) =>
-          InterviewCommandResult.values.find(_.toString == name).map(Some(_)).toRight(RepositoryError.InvalidStoredData)
+          named(InterviewResult.values)(name).map(Some(_))
         case _ => Left(RepositoryError.InvalidStoredData)
       }
       _ <- Either.cond(
@@ -118,9 +110,9 @@ private[mongo] object MongoInterviewWorkflowCommandCodec {
       )
       _ <-
         if (Set(InterviewWorkflowCommandState.Claimed, InterviewWorkflowCommandState.Executing)(state)) for {
-          _ <- string(document, "claimOwner")
-          _ <- string(document, "claimToken").flatMap(uuid)
-          _ <- instant(document, "claimUntil")
+          _ <- string(document, Lease.owner)
+          _ <- uuid(document, Lease.token)
+          _ <- instant(document, Lease.until)
         } yield ()
         else Right(())
     } yield Envelope(
@@ -165,7 +157,7 @@ private[mongo] object MongoInterviewWorkflowCommandCodec {
           .append("notificationKind", kind.toString)
           .append("participant", participant.toString)
           .append(IdempotencyKeyField, key)
-      case C.RequireRepair(reason) => new Document("kind", "requireRepair").append("reason", reason)
+      case C.RequireRepair(reason) => new Document("kind", "requireRepair").append("reason", reason.text)
     }
   }
 
@@ -194,13 +186,11 @@ private[mongo] object MongoInterviewWorkflowCommandCodec {
           } yield InterviewInterval(starts, ends)
         }
     def participant: Either[RepositoryError, InterviewParticipant] =
-      string(document, "participant").flatMap(name =>
-        InterviewParticipant.values.find(_.toString == name).toRight(RepositoryError.InvalidStoredData)
-      )
+      string(document, "participant").flatMap(name => named(InterviewParticipant.values)(name))
     def kindAndKey: Either[RepositoryError, (InterviewNotificationKind, InterviewParticipant, String)] =
       for {
         kindName <- string(document, "notificationKind")
-        kind <- InterviewNotificationKind.values.find(_.toString == kindName).toRight(RepositoryError.InvalidStoredData)
+        kind <- named(InterviewNotificationKind.values)(kindName)
         who <- participant
         key <- keyed(value =>
           value.startsWith(s"${workflowId.value}:${kind.keyName}:") && value.endsWith(s":notify:$who")
@@ -216,8 +206,7 @@ private[mongo] object MongoInterviewWorkflowCommandCodec {
           .mapN(C.CommitRescheduledInterval.apply)
       case K.LookupRescheduleCommit =>
         (
-          string(document, WorkflowIdField)
-            .flatMap(uuid)
+          uuid(document, WorkflowIdField)
             .map(InterviewWorkflowId.apply)
             .filterOrElse(_ == workflowId, RepositoryError.InvalidStoredData),
           int32(document, "generation").filterOrElse(_ > 0, RepositoryError.InvalidStoredData)
@@ -228,9 +217,30 @@ private[mongo] object MongoInterviewWorkflowCommandCodec {
           .map(C.ExpireProposal.apply)
       case K.NotifyKind             => kindAndKey.map((kind, who, key) => C.Notify(kind, who, key))
       case K.LookupNotificationKind => kindAndKey.map((kind, who, key) => C.LookupNotificationReceipt(kind, who, key))
-      case "requireRepair"          => string(document, "reason").map(C.RequireRepair.apply)
+      case "requireRepair"          => repairReason(document).map(C.RequireRepair.apply)
       case _                        => Left(RepositoryError.InvalidStoredData)
     }
+  }
+
+  def encodeCommand(command: InterviewWorkflowCommand): Document = command match {
+    case InterviewWorkflowCommand.ReserveCalendarSlot(key) =>
+      new Document("kind", "reserveCalendar").append(IdempotencyKeyField, key)
+    case InterviewWorkflowCommand.LookupCalendarReservation(id) =>
+      new Document("kind", "lookupCalendar").append(WorkflowIdField, id.value.toString)
+    case InterviewWorkflowCommand.CommitAcceptedToInterview(status) =>
+      new Document("kind", "commitInterview").append("expectedStatus", status.toString)
+    case InterviewWorkflowCommand.LookupStatusCommitReceipt(id) =>
+      new Document("kind", "lookupStatusCommit").append(WorkflowIdField, id.value.toString)
+    case InterviewWorkflowCommand.ReleaseCalendarSlot(key) =>
+      new Document("kind", "releaseCalendar").append(IdempotencyKeyField, key)
+    case InterviewWorkflowCommand.Notify(participant, key) =>
+      new Document("kind", "notify").append("participant", participant.toString).append(IdempotencyKeyField, key)
+    case InterviewWorkflowCommand.LookupNotificationReceipt(participant, key) =>
+      new Document("kind", "lookupNotification")
+        .append("participant", participant.toString)
+        .append(IdempotencyKeyField, key)
+    case InterviewWorkflowCommand.RequireRepair(reason) =>
+      new Document("kind", "requireRepair").append("reason", reason.text)
   }
 
   private def decodeCommand(
@@ -262,43 +272,38 @@ private[mongo] object MongoInterviewWorkflowCommandCodec {
       case "reserveCalendar" =>
         string(document, IdempotencyKeyField).map(InterviewWorkflowCommand.ReserveCalendarSlot.apply)
       case "lookupCalendar" =>
-        string(document, WorkflowIdField)
-          .flatMap(uuid)
+        uuid(document, WorkflowIdField)
           .map(id => InterviewWorkflowCommand.LookupCalendarReservation(InterviewWorkflowId(id)))
       case "commitInterview" =>
         string(document, "expectedStatus")
-          .flatMap(enumStatus)
+          .flatMap(named(ApplicationStatus.values))
           .map(InterviewWorkflowCommand.CommitAcceptedToInterview.apply)
       case "lookupStatusCommit" =>
-        string(document, WorkflowIdField)
-          .flatMap(uuid)
+        uuid(document, WorkflowIdField)
           .map(id => InterviewWorkflowCommand.LookupStatusCommitReceipt(InterviewWorkflowId(id)))
       case "releaseCalendar" =>
         string(document, IdempotencyKeyField).map(InterviewWorkflowCommand.ReleaseCalendarSlot.apply)
       case "notify" =>
         for {
           participantName <- string(document, "participant")
-          participant <- InterviewParticipant.values
-            .find(_.toString == participantName)
-            .toRight(RepositoryError.InvalidStoredData)
+          participant <- named(InterviewParticipant.values)(participantName)
           key <- string(document, IdempotencyKeyField)
         } yield InterviewWorkflowCommand.Notify(participant, key)
       case "lookupNotification" =>
         for {
           name <- string(document, "participant")
-          participant <- InterviewParticipant.values.find(_.toString == name).toRight(RepositoryError.InvalidStoredData)
+          participant <- named(InterviewParticipant.values)(name)
           key <- string(document, IdempotencyKeyField)
         } yield InterviewWorkflowCommand.LookupNotificationReceipt(participant, key)
-      case "requireRepair" => string(document, "reason").map(InterviewWorkflowCommand.RequireRepair.apply)
+      case "requireRepair" => repairReason(document).map(InterviewWorkflowCommand.RequireRepair.apply)
       case _               => Left(RepositoryError.InvalidStoredData)
     }
+
+  private def repairReason(document: Document): Either[RepositoryError, InterviewRepairReason] =
+    string(document, "reason").flatMap(InterviewRepairReason.parse(_).toRight(RepositoryError.InvalidStoredData))
 
   private def string(document: Document, field: String): Either[RepositoryError, String] =
     Option(document.get(field))
       .collect { case value: String if value.nonEmpty && value.length <= 256 => value }
       .toRight(RepositoryError.InvalidStoredData)
-  private def uuid(value: String): Either[RepositoryError, UUID] =
-    Either.catchNonFatal(UUID.fromString(value)).leftMap(_ => RepositoryError.InvalidStoredData)
-  private def enumStatus(value: String): Either[RepositoryError, ApplicationStatus] =
-    ApplicationStatus.values.find(_.toString == value).toRight(RepositoryError.InvalidStoredData)
 }

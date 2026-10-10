@@ -7,6 +7,7 @@ import mongo4cats.client.MongoClient
 import mongo4cats.database.MongoDatabase
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.service.port.*
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.Diagnostics
 import com.example.graphQL.cats.service.events.OperationalEventJson
 import com.mongodb.client.model.{Sorts, UpdateOptions}

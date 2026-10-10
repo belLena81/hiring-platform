@@ -57,7 +57,7 @@ class InterviewCancellationSpec extends FunSuite {
       Event.NotificationOutcomeUnknown(InterviewParticipant.Candidate),
       Event.NotificationLookupFound(InterviewParticipant.Candidate),
       Event.NotificationLookupAbsent(InterviewParticipant.Candidate),
-      Event.RetryExhausted("provider"),
+      Event.RetryExhausted(InterviewFailureCode.Provider),
       Event.Repair
     )
   }
@@ -163,7 +163,7 @@ class InterviewCancellationSpec extends FunSuite {
       StatusLookupAbsent,
       ReservationReleased,
       ReservationReleaseOutcomeUnknown,
-      RetryExhausted("x")
+      RetryExhausted(InterviewFailureCode.Provider)
     ) ++ participants.flatMap(p =>
       List(
         NotificationDelivered(p),
@@ -273,7 +273,7 @@ class InterviewCancellationSpec extends FunSuite {
 
   test("DHW-14 exhausted retries require repair from every pending phase and never reopen a slot") {
     permitted.filter(_._2.contains("RetryExhausted")).keys.foreach { phase =>
-      val decision = decided(inPhase(phase), Event.RetryExhausted("provider"))
+      val decision = decided(inPhase(phase), Event.RetryExhausted(InterviewFailureCode.Provider))
       assertEquals(decision.workflow.phase, Phase.RepairRequired, clues(phase))
       assertEquals(decision.commands.map(_.productPrefix), List("RequireRepair"), clues(phase))
     }
@@ -390,11 +390,15 @@ class InterviewCancellationSpec extends FunSuite {
   }
 
   test("DHW-22 failed compensation is visible repair that keeps both holds in the workflow") {
-    val failed = decided(withHold(Phase.RescheduleCompensationPending), Event.RetryExhausted("provider"))
+    val failed =
+      decided(withHold(Phase.RescheduleCompensationPending), Event.RetryExhausted(InterviewFailureCode.Provider))
     assertEquals(failed.workflow.phase, Phase.RepairRequired)
     assertEquals(failed.workflow.interval, interval)
     assertEquals(failed.workflow.pendingInterval, Some(replacement))
-    assertEquals(failed.commands, List(Command.RequireRepair("compensation failed: provider")))
+    assertEquals(
+      failed.commands,
+      List(Command.RequireRepair(InterviewRepairReason.CompensationFailed(InterviewFailureCode.Provider)))
+    )
   }
 
   test("DHW-19 an interval that has started cannot be cancelled, requested or rescheduled") {

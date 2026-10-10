@@ -2,7 +2,7 @@ package com.example.graphQL.cats.repository.mongo
 
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.service.ServiceFixtures.*
-import com.example.graphQL.cats.service.port.RepositoryError
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.search.*
 import com.example.graphQL.cats.shared.crypto.SourceHash
 import munit.FunSuite

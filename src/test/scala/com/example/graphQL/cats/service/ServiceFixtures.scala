@@ -195,9 +195,6 @@ private[cats] object ServiceFixtures {
       com.example.graphQL.cats.service.port.RepositoryIO
         .fromIOEither(findOne(id).map(value => Right(value.map(Versioned(_, 0L)))))
 
-    override def findMany(ids: List[UserId]): RepositoryIO[List[User]] =
-      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(findAll(ids).map(Right(_)))
-
     override def updateEmbedding(id: UserId, embedding: EntityEmbedding): RepositoryIO[Unit] =
       com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(ref.modify { users =>
         users.get(id) match {
@@ -242,9 +239,6 @@ private[cats] object ServiceFixtures {
 
     override def findSubmissionSnapshot(id: JobId): RepositoryIO[Option[JobSubmissionSnapshot]] =
       findVersioned(id).map(_.map(job => JobSubmissionSnapshot(job.value.id, job.value.status, job.version)))
-
-    override def findMany(ids: List[JobId]): RepositoryIO[List[Job]] =
-      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(findAll(ids).map(Right(_)))
 
     override def findOpen(filter: JobSearchFilter, page: JobPageRequest): RepositoryIO[List[Job]] =
       com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
@@ -553,7 +547,7 @@ private[cats] object ServiceFixtures {
           }
       )
 
-    override def createForOpenJob(
+    private def createForOpenJob(
         observedJob: JobSubmissionSnapshot,
         application: Application,
         initialEvent: ApplicationEvent
@@ -583,7 +577,7 @@ private[cats] object ServiceFixtures {
           }
       })
 
-    override def updateStatus(
+    private def updateStatus(
         application: Application,
         event: ApplicationEvent
     ): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(

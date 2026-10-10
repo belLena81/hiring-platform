@@ -53,7 +53,7 @@ final class InterviewKafkaProducerResourceSpec extends CatsEffectSuite {
 
   test("failed transactional initialization closes the allocated producer") {
     IO(new Client(true)).flatMap { client =>
-      InterviewKafkaRuntime.initializedProducer(settings, factory(client)).use(_ => IO.unit).attempt.map { result =>
+      GuardedTransactionalProducer.resource(settings, factory(client)).use(_ => IO.unit).attempt.map { result =>
         assert(result.isLeft)
         assert(client.closed())
         assertEquals(client.closes.get(), 1)
@@ -63,8 +63,8 @@ final class InterviewKafkaProducerResourceSpec extends CatsEffectSuite {
 
   test("successful acquisition transfers closing ownership to the transactional resource") {
     IO(new Client(false)).flatMap { client =>
-      InterviewKafkaRuntime
-        .initializedProducer(settings, factory(client))
+      GuardedTransactionalProducer
+        .resource(settings, factory(client))
         .use { _ =>
           IO(assertEquals(client.closes.get(), 0))
         }
@@ -106,8 +106,8 @@ final class InterviewKafkaProducerResourceSpec extends CatsEffectSuite {
     for {
       client <- IO(new Client(false))
       acquired <- Deferred[IO, Unit]
-      fiber <- InterviewKafkaRuntime
-        .initializedProducer(settings, factory(client))
+      fiber <- GuardedTransactionalProducer
+        .resource(settings, factory(client))
         .use(_ => acquired.complete(()).void *> IO.never)
         .start
       _ <- acquired.get

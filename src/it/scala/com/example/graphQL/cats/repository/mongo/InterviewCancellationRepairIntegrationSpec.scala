@@ -65,7 +65,7 @@ final class InterviewCancellationRepairIntegrationSpec extends MongoIntegrationS
     )
 
   private def exhaust(s: InterviewLifecycleScenario, w: InterviewWorkflow) =
-    internal(s, InterviewLifecycleEvent.RetryExhausted("test"), w)
+    internal(s, InterviewLifecycleEvent.RetryExhausted(InterviewFailureCode.Provider), w)
 
   private def repair(s: InterviewLifecycleScenario, w: InterviewWorkflow, key: UUID = UUID.randomUUID()) =
     success(s.repository.repair(w, w.revision, key, now, admin))
@@ -325,7 +325,9 @@ final class InterviewCancellationRepairIntegrationSpec extends MongoIntegrationS
         claim <- IO.fromOption(claims.find(_.record.stepId.endsWith(s":${cancelling.revision}:0")))(
           new AssertionError("cancel intent not claimable")
         )
-        resolution <- success(s.repository.requireRepair(claim, now.plusSeconds(2), "publication_exhausted"))
+        resolution <- success(
+          s.repository.requireRepair(claim, now.plusSeconds(2), InterviewFailureCode.PublicationExhausted)
+        )
         after <- s.current
       } yield {
         assertEquals(resolution, InterviewPublicationResolution.Repaired)
@@ -339,7 +341,9 @@ final class InterviewCancellationRepairIntegrationSpec extends MongoIntegrationS
         claim <- IO.fromOption(claims.find(_.record.command.isInstanceOf[InterviewLifecycleCommand.Notify]))(
           new AssertionError("notification not claimable")
         )
-        resolution <- success(s.repository.requireRepair(claim, now.plusSeconds(2), "publication_exhausted"))
+        resolution <- success(
+          s.repository.requireRepair(claim, now.plusSeconds(2), InterviewFailureCode.PublicationExhausted)
+        )
         after <- s.current
         repairs <- success(s.repository.findNotificationRepairs(s.id))
       } yield {

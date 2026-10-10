@@ -167,7 +167,7 @@ final case class SearchSessionResult(
 final case class SearchSession(
     id: UUID,
     actorId: UserId,
-    searchKind: String,
+    searchKind: OperationalEventPayload.SearchKind,
     query: Option[String],
     filter: Json,
     model: Option[String],
@@ -183,17 +183,15 @@ object OperationalEvents {
     JobSnapshot(job.id.value, job.skills.toList.sorted, job.status)
 
   def jobEvent(
-      eventType: OperationalEventType,
+      kind: JobKind,
       eventId: UUID,
       job: Job,
       actorId: UserId,
       occurredAt: Instant
   ): Either[OperationalEventContractError, OperationalEventEnvelope] =
-    JobKind.values
-      .find(_.eventType == eventType)
-      .toRight(OperationalEventContractError.InvalidPayload)
-      .map(kind => OperationalEventEnvelope.fromPayload(eventId, occurredAt, actorId, JobFact(kind, snapshot(job))))
-      .flatMap(OperationalEventJson.validate)
+    OperationalEventJson.validate(
+      OperationalEventEnvelope.fromPayload(eventId, occurredAt, actorId, JobFact(kind, snapshot(job)))
+    )
 
   def applicationCreated(
       eventId: UUID,
@@ -244,14 +242,14 @@ object OperationalEvents {
       eventId: UUID,
       session: SearchSession
   ): Either[OperationalEventContractError, OperationalEventEnvelope] =
-    SearchKind.values
-      .find(_.wire == session.searchKind)
-      .toRight(OperationalEventContractError.InvalidPayload)
-      .map(kind =>
-        OperationalEventEnvelope
-          .fromPayload(eventId, session.occurredAt, session.actorId, SearchPerformed(session.id, kind, session.results))
+    OperationalEventJson.validate(
+      OperationalEventEnvelope.fromPayload(
+        eventId,
+        session.occurredAt,
+        session.actorId,
+        SearchPerformed(session.id, session.searchKind, session.results)
       )
-      .flatMap(OperationalEventJson.validate)
+    )
 
   def jobViewed(
       eventId: UUID,
@@ -267,20 +265,19 @@ object OperationalEvents {
       eventId: UUID,
       searchId: UUID,
       resultId: String,
-      searchKind: String,
+      searchKind: SearchKind,
       actorId: UserId,
       rank: Int,
       occurredAt: Instant
   ): Either[OperationalEventContractError, OperationalEventEnvelope] =
     for {
       id <- OperationalEventPayload.fullUuid(resultId).leftMap(_ => OperationalEventContractError.InvalidPayload)
-      kind <- SearchKind.values.find(_.wire == searchKind).toRight(OperationalEventContractError.InvalidPayload)
       event <- OperationalEventJson.validate(
         OperationalEventEnvelope.fromPayload(
           eventId,
           occurredAt,
           actorId,
-          SearchResultClicked(searchId, id, kind, rank)
+          SearchResultClicked(searchId, id, searchKind, rank)
         )
       )
     } yield event

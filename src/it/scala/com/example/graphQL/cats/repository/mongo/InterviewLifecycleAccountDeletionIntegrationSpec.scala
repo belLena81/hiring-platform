@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.service.application.committed
 import cats.data.EitherT
 import cats.effect.{IO, Ref}
 import cats.syntax.all.*
@@ -334,12 +335,12 @@ final class InterviewLifecycleAccountDeletionIntegrationSpec extends MongoIntegr
             open.revision,
             now
           )
-          deniedExpiry <- lateWorker.receiveCommand(message)
+          deniedExpiry <- lateWorker.receiveCommand(message).committed
           _ <- s.round(lateWorker).replicateA_(3)
           unchanged <- s.current
           _ <- finish(cleanupOf(s, recorder), subject)
           gone <- remaining(s)
-          redelivered <- lateWorker.receiveCommand(message)
+          redelivered <- lateWorker.receiveCommand(message).committed
           lateAccept <- s.apply(
             InterviewLifecycleEvent.AcceptProposal(now),
             s.actor(UserRole.Candidate, s.workflow.candidateId, input = "accept-after-purge"),
@@ -446,7 +447,7 @@ final class InterviewLifecycleAccountDeletionIntegrationSpec extends MongoIntegr
         )
         cancelling <- cancelBy(s, UserRole.Recruiter, s.workflow.recruiterId, withdrawn.revision)
         failed <- s.applied(
-          InterviewLifecycleEvent.RetryExhausted("provider"),
+          InterviewLifecycleEvent.RetryExhausted(InterviewFailureCode.Provider),
           InterviewLifecycleOrigin.Internal(InterviewAdvanceCause.ResultReceipt(s"exhausted-${UUID.randomUUID()}")),
           cancelling.revision,
           now
@@ -492,17 +493,17 @@ final class InterviewLifecycleAccountDeletionIntegrationSpec extends MongoIntegr
         _ <- cancelBy(s, UserRole.Candidate, s.workflow.candidateId)
         _ <- worker.publishDue(transport)
         command <- sink.getAndSet(Vector.empty).map(_.head)
-        executed <- worker.receiveCommand(command)
+        executed <- worker.receiveCommand(command).committed
         _ <- worker.publishDue(transport)
         result <- sink.getAndSet(Vector.empty).map(_.head)
         confirmed <- s.faults.confirmedCancels.get
         _ <- delete(s, s.workflow.candidateId)
-        beforePurge <- worker.receiveResult(result)
+        beforePurge <- worker.receiveResult(result).committed
         stillPending <- s.current
         _ <- finish(cleanupOf(s, recorder), s.workflow.candidateId)
         gone <- remaining(s)
-        commandAgain <- worker.receiveCommand(command)
-        resultAgain <- worker.receiveResult(result)
+        commandAgain <- worker.receiveCommand(command).committed
+        resultAgain <- worker.receiveResult(result).committed
         again <- remaining(s)
         calls <- recorder.calls.get
         providerCancels <- s.faults.confirmedCancels.get
@@ -536,10 +537,10 @@ final class InterviewLifecycleAccountDeletionIntegrationSpec extends MongoIntegr
         _ <- worker.publishDue(captureTransport(sink))
         command <- sink.get.map(_.head)
         _ <- delete(s, s.workflow.recruiterId)
-        refused <- worker.receiveCommand(command)
+        refused <- worker.receiveCommand(command).committed
         calledBefore <- activity(s)
         _ <- finish(cleanupOf(s, recorder), s.workflow.recruiterId)
-        settled <- worker.receiveCommand(command)
+        settled <- worker.receiveCommand(command).committed
         gone <- remaining(s)
         calledAfter <- activity(s)
         calls <- recorder.keys

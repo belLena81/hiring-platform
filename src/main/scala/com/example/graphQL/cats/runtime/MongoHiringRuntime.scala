@@ -230,11 +230,11 @@ object MongoHiringRuntime {
       )
       services = HiringGraphQLServices(
         HiringReadService(users, jobs, applications),
-        JobService.live(users, jobs, publisher, idempotent, diagnostics),
-        ApplicationService.live(users, jobs, applications, idempotent),
+        new JobService(users, jobs, publisher, idempotent, diagnostics),
+        new ApplicationService(users, jobs, applications, idempotent),
         CursorCodec.keyFromSecret(config.jwtAuth.hmacSecret, config.jwtAuth.cursorTtlSeconds),
         accountService,
-        OperationalTelemetryService.live(users, jobs, searchSessions, searchSessionWork, idempotent),
+        new OperationalTelemetryService(users, jobs, searchSessions, searchSessionWork, idempotent),
         SearchSessionRecording(searchSessionHandoff),
         semanticSearch,
         AnalyticsReportingService(users, analyticsReports),

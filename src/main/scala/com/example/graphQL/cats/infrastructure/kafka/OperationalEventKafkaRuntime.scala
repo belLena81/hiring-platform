@@ -4,7 +4,6 @@ import cats.effect.{Clock, IO, Resource}
 import cats.effect.std.UUIDGen
 import cats.syntax.all.*
 import com.example.graphQL.cats.config.KafkaConfig
-import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.port.{
   ClaimedOperationalEvent,
   ConsumerReceiptRepository,
@@ -14,18 +13,14 @@ import com.example.graphQL.cats.service.port.{
   OperationalEventOutboxRepository,
   RepositoryIO
 }
-import com.example.graphQL.cats.service.{BackgroundWorker, Diagnostics, LogEvent, LogFields, LogField}
+import com.example.graphQL.cats.service.{BackgroundWorker, Diagnostics, LogEvent, LogFields}
 import com.example.graphQL.cats.service.Diagnostics.*
 import com.example.graphQL.cats.service.events.OperationalEventJson
 import com.example.graphQL.cats.shared.CauseChain
 import fs2.Stream
 import fs2.kafka.*
 import fs2.kafka.producer.MkProducer
-import org.apache.kafka.common.errors.{InvalidProducerEpochException, ProducerFencedException}
-import org.apache.kafka.clients.consumer.ConsumerConfig
-import retry.{HandlerDecision, RetryPolicies, retryingOnErrors}
 
-import java.time.Instant
 import scala.concurrent.duration.*
 import scala.util.control.NoStackTrace
 
@@ -73,19 +68,19 @@ object OperationalEventKafkaRuntime {
         val transactionalId = KafkaProducerGenerationRetirement.PublisherPrefix + id.toString
         Stream
           .resource(
-            observedGeneration(transactionalId, diagnostics)(
+            KafkaRuntimeSupport.observedGeneration(transactionalId, diagnostics)(
               GuardedTransactionalProducer
                 .resource(TransactionalProducerSettings(transactionalId, settings), MkProducer.mkProducerForSync[IO])
             )
           )
           .flatMap { producer =>
-            resilientStream(
+            KafkaRuntimeSupport.resilientStream(
               diagnostics,
               Stream
                 .awakeEvery[IO](config.publisher.pollIntervalMillis.millis)
                 .evalMap(_ => publishBatch(config, outbox, diagnostics, transactionalId, producer, clock)),
               config.publisher.retryDelaySeconds.seconds,
-              stopRetrying = isProducerFenced,
+              stopRetrying = KafkaRuntimeSupport.isProducerFenced,
               maxDelay = config.restartMaxDelaySeconds.seconds
             )
           }
@@ -99,25 +94,6 @@ object OperationalEventKafkaRuntime {
 
     BackgroundWorker.resource(PublisherWorker, diagnostics)(Stream.suspend(generation).repeat.compile.drain)
   }
-
-  /** The outer finalizer reports release only after the acquired producer has actually closed. */
-  private[kafka] def observedGeneration[A](
-      transactionalId: String,
-      diagnostics: Diagnostics
-  )(producer: Resource[IO, A]): Resource[IO, A] =
-    Resource
-      .makeFull[IO, (A, IO[Unit])](poll =>
-        poll(producer.allocated).flatTap(_ =>
-          diagnostics
-            .emit(LogEvent.ProducerGenerationStarted, fields = Map(LogField.TransactionalId -> transactionalId))
-        )
-      ) { case (_, release) =>
-        release *> diagnostics.emit(
-          LogEvent.ProducerGenerationClosed,
-          fields = Map(LogField.TransactionalId -> transactionalId)
-        )
-      }
-      .map(_._1)
 
   private def publishBatch(
       config: KafkaConfig,
@@ -199,8 +175,9 @@ object OperationalEventKafkaRuntime {
               outbox.markPublished(claim.event.eventId, claim.leaseToken, done, done.plusSeconds(7.days.toSeconds))
             )
           )
-        case Left(error) if isProducerFenced(error) => IO.raiseError(ProducerGenerationFenced(error))
-        case Left(error)                            =>
+        case Left(error) if KafkaRuntimeSupport.isProducerFenced(error) =>
+          IO.raiseError(ProducerGenerationFenced(error))
+        case Left(error) =>
           diagnostics.emit(LogEvent.RuntimeFailed, fields = LogFields.failure(error)) *> clock.realTimeInstant
             .flatMap { failedAt =>
               if (claim.attempts >= config.publisher.maxAttempts)
@@ -236,42 +213,41 @@ object OperationalEventKafkaRuntime {
       diagnostics: Diagnostics,
       clock: Clock[IO] = Clock[IO]
   ): Resource[IO, Unit] = {
-    val settings = KafkaClientSettings
-      .consumer(
-        config.bootstrapServers,
-        config.consumer.saslUsername,
-        config.consumer.saslPassword,
-        config.saslSecurityProtocol
-      )
-      .withGroupId(config.consumerGroup)
-      .withAutoOffsetReset(AutoOffsetReset.Earliest)
-      .withEnableAutoCommit(false)
-      .withProperty(ConsumerConfig.ISOLATION_LEVEL_CONFIG, "read_committed")
+    val settings = KafkaClientSettings.committedConsumer(
+      config.bootstrapServers,
+      config.consumer.saslUsername,
+      config.consumer.saslPassword,
+      config.saslSecurityProtocol,
+      config.consumerGroup
+    )
 
     BackgroundWorker.resource(ConsumerWorker, diagnostics)(
-      resilientStream(
-        diagnostics,
-        KafkaPartitionProcessing(
-          KafkaConsumer.stream(settings).subscribeTo(config.topic).partitionedRecords,
-          config.consumer.partitionConcurrency
-        ) { message =>
-          val record = message.record
-          processRecord(record.topic, record.partition, record.offset)(
-            recordDurably(
-              config,
-              receipts,
-              quarantine,
-              record.topic,
-              record.partition,
-              record.offset,
-              Option(record.value),
-              clock
-            )
-          )(message.offset.commit)
-        },
-        1.second,
-        maxDelay = config.restartMaxDelaySeconds.seconds
-      ).compile.drain
+      KafkaRuntimeSupport
+        .resilientStream(
+          diagnostics,
+          KafkaPartitionProcessing(
+            KafkaConsumer.stream(settings).subscribeTo(config.topic).partitionedRecords,
+            config.consumer.partitionConcurrency
+          ) { message =>
+            val record = message.record
+            KafkaRuntimeSupport.processRecord(record.topic, record.partition, record.offset)(
+              recordDurably(
+                config,
+                receipts,
+                quarantine,
+                record.topic,
+                record.partition,
+                record.offset,
+                Option(record.value),
+                clock
+              )
+            )(message.offset.commit)
+          },
+          1.second,
+          maxDelay = config.restartMaxDelaySeconds.seconds
+        )
+        .compile
+        .drain
     )
   }
 
@@ -289,16 +265,17 @@ object OperationalEventKafkaRuntime {
     RepositoryIO.lift(clock.realTimeInstant).flatMap { now =>
       bytes.toRight("MalformedEnvelope").flatMap(OperationalEventJson.decode) match {
         case Left(_) =>
-          quarantineRecord(
-            config,
-            quarantine,
-            topic,
-            partition,
-            offset,
-            OperationalEventFailureCategory.MalformedEnvelope,
-            bytes.fold("null event envelope")(_ => "malformed event envelope"),
-            bytes.getOrElse(Array.emptyByteArray),
-            now
+          quarantine.save(
+            EventQuarantineRecord(
+              topic,
+              partition,
+              offset,
+              OperationalEventFailureCategory.MalformedEnvelope,
+              bytes.fold("null event envelope")(_ => "malformed event envelope"),
+              bytes.getOrElse(Array.emptyByteArray),
+              now,
+              now.plusSeconds(config.consumer.quarantineTtlDays.days.toSeconds)
+            )
           )
         case Right(event) =>
           receipts
@@ -312,62 +289,6 @@ object OperationalEventKafkaRuntime {
       }
     }
 
-  private[kafka] def processRecord(
-      topic: String,
-      partition: Int,
-      offset: Long
-  )(process: RepositoryIO[Unit])(commit: IO[Unit]): IO[Unit] =
-    process.value.flatMap {
-      case Right(()) => commit
-      // Stop this stream before reading a later offset. Continuing here could
-      // commit N+1 and make the undurable record at N unrecoverable for this group.
-      case Left(error) => IO.raiseError(RecordNotDurable(topic, partition, offset, error))
-    }
-
-  private def quarantineRecord(
-      config: KafkaConfig,
-      quarantine: EventQuarantineRepository,
-      topic: String,
-      partition: Int,
-      offset: Long,
-      category: OperationalEventFailureCategory,
-      reason: String,
-      bytes: Array[Byte],
-      now: Instant
-  ): RepositoryIO[Unit] =
-    quarantine.save(
-      EventQuarantineRecord(
-        topic,
-        partition,
-        offset,
-        category,
-        reason,
-        Option(bytes).getOrElse(Array.emptyByteArray),
-        now,
-        now.plusSeconds(config.consumer.quarantineTtlDays.days.toSeconds)
-      )
-    )
-
-  private[kafka] def resilientStream(
-      diagnostics: Diagnostics,
-      stream: Stream[IO, Unit],
-      baseDelay: FiniteDuration,
-      stopRetrying: Throwable => Boolean = _ => false,
-      maxDelay: FiniteDuration
-  ): Stream[IO, Unit] =
-    Stream.eval(
-      retryingOnErrors(stream.compile.drain)(
-        policy = restartPolicy(baseDelay, maxDelay),
-        errorHandler = (error, _) =>
-          diagnostics
-            .emit(LogEvent.RuntimeFailed, fields = LogFields.failure(error))
-            .as(if (stopRetrying(error)) HandlerDecision.Stop else HandlerDecision.Continue)
-      )
-    )
-
-  private[kafka] def restartPolicy(baseDelay: FiniteDuration, maxDelay: FiniteDuration): retry.RetryPolicy[IO, Any] =
-    RetryPolicies.capDelay(maxDelay, RetryPolicies.fullJitter[IO](baseDelay))
-
   /** Client exception messages can embed rejected configuration values, so only class names reach the outbox. */
   private[kafka] def sanitized(error: Throwable): String =
     CauseChain(error)
@@ -376,16 +297,9 @@ object OperationalEventKafkaRuntime {
       .mkString(" <- ")
       .take(512)
 
-  private final case class RecordNotDurable(topic: String, partition: Int, offset: Long, cause: RepositoryError)
-      extends RuntimeException(s"Kafka record could not be durably processed: $topic-$partition@$offset ($cause)")
-
   private final case class OutboxOperationFailed(reason: String)
       extends RuntimeException(s"outbox operation failed: $reason")
       with NoStackTrace
-
-  private[kafka] def isProducerFenced(error: Throwable): Boolean =
-    CauseChain(error)
-      .exists(value => value.isInstanceOf[ProducerFencedException] || value.isInstanceOf[InvalidProducerEpochException])
 
   private final case class ProducerGenerationFenced(cause: Throwable)
       extends RuntimeException("transactional producer generation was fenced", cause)

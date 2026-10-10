@@ -4,7 +4,8 @@ import cats.effect.{IO, Ref}
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.service.Diagnostics
-import com.example.graphQL.cats.service.port.{RepositoryIO, RepositoryError}
+import com.example.graphQL.cats.service.port.{RepositoryIO}
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.events.*
 import org.bson.Document
 import com.mongodb.client.model.Filters

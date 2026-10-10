@@ -2,7 +2,7 @@ package com.example.graphQL.cats.api.admission
 
 import cats.effect.IO
 import cats.syntax.all.*
-import com.example.graphQL.cats.config.InterviewActionRateLimitConfig
+import com.example.graphQL.cats.config.RateLimitConfig
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.github.benmanes.caffeine.cache.Ticker
 import java.util.UUID
@@ -23,7 +23,7 @@ final class InterviewActionRateLimiterSpec extends CatsEffectSuite {
   private def actor(n: Long) = UserId(new UUID(0L, n))
 
   test("an actor gets exactly the configured number of actions per window, then a typed refusal") {
-    val config = InterviewActionRateLimitConfig(windowSeconds = 60, attempts = 3, maxBuckets = 10)
+    val config = RateLimitConfig(windowSeconds = 60, attempts = 3, maxBuckets = 10)
     for {
       limiter <- InterviewActionRateLimiter.create(config)
       results <- List.fill(5)(limiter.permit(actor(1))).sequence
@@ -34,7 +34,7 @@ final class InterviewActionRateLimiterSpec extends CatsEffectSuite {
   }
 
   test("one actor cannot consume another actor's allowance") {
-    val config = InterviewActionRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 10)
+    val config = RateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 10)
     for {
       limiter <- InterviewActionRateLimiter.create(config)
       first <- limiter.permit(actor(1))
@@ -50,7 +50,7 @@ final class InterviewActionRateLimiterSpec extends CatsEffectSuite {
   }
 
   test("the allowance resets when its window ends and not before") {
-    val config = InterviewActionRateLimitConfig(windowSeconds = 10, attempts = 1, maxBuckets = 10)
+    val config = RateLimitConfig(windowSeconds = 10, attempts = 1, maxBuckets = 10)
     for {
       (ticker, advance) <- testTicker
       limiter <- InterviewActionRateLimiter.create(config, ticker)
@@ -67,7 +67,7 @@ final class InterviewActionRateLimiterSpec extends CatsEffectSuite {
   }
 
   test("the refusal reports only a retry delay, never a limit or a count") {
-    val config = InterviewActionRateLimitConfig(windowSeconds = 30, attempts = 1, maxBuckets = 10)
+    val config = RateLimitConfig(windowSeconds = 30, attempts = 1, maxBuckets = 10)
     for {
       limiter <- InterviewActionRateLimiter.create(config)
       _ <- limiter.permit(actor(1))
@@ -76,7 +76,7 @@ final class InterviewActionRateLimiterSpec extends CatsEffectSuite {
   }
 
   test("a full cache refuses unseen actors instead of evicting a counted one, and admits them once windows expire") {
-    val config = InterviewActionRateLimitConfig(windowSeconds = 10, attempts = 1, maxBuckets = 3)
+    val config = RateLimitConfig(windowSeconds = 10, attempts = 1, maxBuckets = 3)
     for {
       (ticker, advance) <- testTicker
       limiter <- InterviewActionRateLimiter.create(config, ticker)
@@ -96,7 +96,7 @@ final class InterviewActionRateLimiterSpec extends CatsEffectSuite {
   }
 
   test("memory is bounded by the configured number of buckets") {
-    val config = InterviewActionRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 5)
+    val config = RateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 5)
     for {
       limiter <- InterviewActionRateLimiter.create(config)
       _ <- (1L to 50L).toList.traverse_(n => limiter.permit(actor(n)))

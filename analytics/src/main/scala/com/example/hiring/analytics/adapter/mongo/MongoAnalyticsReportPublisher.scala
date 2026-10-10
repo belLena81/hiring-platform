@@ -1,5 +1,10 @@
 package com.example.hiring.analytics.adapter.mongo
 
+import com.example.hiring.analytics.adapter.mongo.MongoAnalyticsErasureStoreSupport.{
+  nonReadyOtherRequests,
+  ownedClaimFilter
+}
+import com.example.hiring.analytics.adapter.mongo.MongoAnalyticsReportRecords.ReportState
 import com.example.hiring.analytics.config.AnalyticsOperationalSettings
 import com.example.hiring.analytics.domain.AnalyticsReportOutput
 import com.example.hiring.analytics.domain.RangeFingerprint
@@ -34,6 +39,7 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
     database: MongoDatabase[F],
     operational: AnalyticsOperationalSettings
 ) extends AnalyticsReportPublisher[F] {
+  private def inStates(states: Set[ReportState], stored: String): Boolean = states.exists(_.persisted == stored)
   private val receiptPageSize = 500
   private val receiptDeletionLimit = 1000L
   private val clock = Clock[F]
@@ -104,11 +110,11 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
   private def withCollections[A](work: Collections => Result[A]): Result[A] =
     lift(collections).flatMap(work)
   private def transactional[A](work: ClientSession[F] => Result[A]): Result[A] =
-    EitherT(MongoSession.resource(client).use(session => streams.transaction(session)(work(session))(Clock[F]).value))
+    EitherT(client.startSession.use(session => streams.transaction(session)(work(session))(Clock[F]).value))
 
   private def rethrow[A](result: Result[A]): F[A] =
     result.rethrowT.translatingWith { case _: MongoJsonParsingException =>
-      AnalyticsError.InvalidConfiguration("analytics report record is malformed")
+      AnalyticsError.DataIntegrityViolation("analytics report record is malformed")
     }(AnalyticsError.MongoConnectionFailure(_))
 
   private def allocateRevision(session: ClientSession[F], collections: Collections): Result[(Long, Long)] =
@@ -117,28 +123,23 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
         casUpdate(
           session,
           collections.control,
-          Filters.eq(AnalyticsCollections.Fields.Id, "analytics-report"),
+          Filters.eq(AnalyticsCollections.Fields.Id, ReportState.ControlId),
           Updates.inc(AnalyticsCollections.Fields.NextRevision, 1L)
         )
       )
       _ <- result(
-        Either.cond(changed, (), AnalyticsError.InvalidConfiguration("analytics report control is unavailable"))
+        Either.cond(changed, (), AnalyticsError.DataIntegrityViolation("analytics report control is unavailable"))
       )
       updated <- lift(
-        streams.optional(
-          collections.control.underlying
-            .find(session.underlying, Filters.eq(AnalyticsCollections.Fields.Id, "analytics-report"))
-            .projection(controlProjection)
-            .first
-        )
+        readControl(session, collections.control)
       )
       updatedControl <- result(
-        updated.toRight(AnalyticsError.InvalidConfiguration("analytics report control is unavailable"))
+        updated.toRight(AnalyticsError.DataIntegrityViolation("analytics report control is unavailable"))
       )
       updatedValue <- result(MongoAnalyticsReportRecords.decodeControl(updatedControl))
       revision <- result(
         updatedValue.nextRevision.toRight(
-          AnalyticsError.InvalidConfiguration("analytics report control is unavailable")
+          AnalyticsError.DataIntegrityViolation("analytics report control is unavailable")
         )
       )
     } yield updatedValue.generation -> revision
@@ -173,21 +174,16 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
               reject(AnalyticsError.RunIdRangeConflict(runId.value))
             else if (!refresh && previous.expiresAt.nonEmpty)
               reject(AnalyticsError.InvalidConfiguration("pinned publication reservation has an unsafe expiry"))
-            else if (!refresh || previous.expiresAt.isEmpty || record.state != "Reserved")
+            else if (!refresh || previous.expiresAt.isEmpty || record.state != ReportState.Reserved.persisted)
               EitherT.pure[F, AnalyticsError](existing)
             else
               transactional { session =>
                 for {
                   current <- lift(
-                    streams.optional(
-                      collections.control.underlying
-                        .find(session.underlying, Filters.eq(AnalyticsCollections.Fields.Id, "analytics-report"))
-                        .projection(controlProjection)
-                        .first
-                    )
+                    readControl(session, collections.control)
                   )
                   controlRecord <- result(
-                    current.toRight(AnalyticsError.InvalidConfiguration("analytics report control is unavailable"))
+                    current.toRight(AnalyticsError.DataIntegrityViolation("analytics report control is unavailable"))
                   )
                   decoded <- result(MongoAnalyticsReportRecords.decodeControl(controlRecord))
                   refreshed <-
@@ -203,7 +199,7 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
                             collections.reservations,
                             Filters.and(
                               Filters.eq(AnalyticsCollections.Fields.Id, runId.value),
-                              Filters.eq(AnalyticsCollections.Fields.State, "Reserved")
+                              Filters.eq(AnalyticsCollections.Fields.State, ReportState.Reserved.persisted)
                             ),
                             Updates.combine(
                               Updates.set(AnalyticsCollections.Fields.Generation, value.generation),
@@ -225,16 +221,11 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
           transactional { session =>
             for {
               current <- lift(
-                streams.optional(
-                  collections.control.underlying
-                    .find(session.underlying, Filters.eq(AnalyticsCollections.Fields.Id, "analytics-report"))
-                    .projection(controlProjection)
-                    .first
-                )
+                readControl(session, collections.control)
               )
               _ <- result(
                 current.toRight(
-                  AnalyticsError.InvalidConfiguration("analytics report control is not initialized")
+                  AnalyticsError.DataIntegrityViolation("analytics report control is not initialized")
                 )
               )
               allocated <- allocateRevision(session, collections)
@@ -248,7 +239,7 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
                       rangeFingerprint.value,
                       value.generation,
                       value.revision,
-                      "Reserved",
+                      ReportState.Reserved.persisted,
                       Some(now),
                       if (refresh) Some(now.plusMillis(operational.reportReservationTtl.toMillis)) else None
                     )
@@ -278,12 +269,7 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
     transactional { session =>
       for {
         runRecord <- lift(
-          streams.optional(
-            collections.reservations.underlying
-              .find(session.underlying, Filters.eq(AnalyticsCollections.Fields.Id, reservation.runId.value))
-              .projection(reservationProjection)
-              .first
-          )
+          readReservation(session, collections.reservations, reservation.runId.value)
         )
         receipt <- runRecord match {
           case None         => EitherT.pure[F, AnalyticsError](AnalyticsReportPublicationReceipt.Absent)
@@ -294,12 +280,7 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
               else
                 for {
                   controlRecord <- lift(
-                    streams.optional(
-                      collections.control.underlying
-                        .find(session.underlying, Filters.eq(AnalyticsCollections.Fields.Id, "analytics-report"))
-                        .projection(controlProjection)
-                        .first
-                    )
+                    readControl(session, collections.control)
                   )
                   control <- result(
                     controlRecord.traverse(MongoAnalyticsReportRecords.decodeControl)
@@ -309,18 +290,20 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
                   now <- lift(clock.realTimeInstant)
                   isCurrent = control.exists(value =>
                     value.generation == reservation.generation &&
-                      value.state == "Published" &&
+                      value.state == ReportState.Published.persisted &&
                       value.lastPublishedRevision == reservation.revision &&
                       value.lastRunId.contains(reservation.runId.value)
                   ) && snapshot.exists(value => value.matches(reservation) && value.expiresAt.exists(_.isAfter(now)))
                   superseded = control.forall(value =>
                     value.generation != reservation.generation ||
                       value.lastPublishedRevision >= reservation.revision ||
-                      !Set("Published", "Unpublished").contains(value.state)
+                      !inStates(ReportState.PublishableFromControl, value.state)
                   )
                 } yield
-                  if (decoded.state == "Published" && isCurrent) AnalyticsReportPublicationReceipt.CurrentGeneration
-                  else if (decoded.state == "Published" || superseded) AnalyticsReportPublicationReceipt.Superseded
+                  if (decoded.state == ReportState.Published.persisted && isCurrent)
+                    AnalyticsReportPublicationReceipt.CurrentGeneration
+                  else if (decoded.state == ReportState.Published.persisted || superseded)
+                    AnalyticsReportPublicationReceipt.Superseded
                   else AnalyticsReportPublicationReceipt.Absent
             }
         }
@@ -339,12 +322,7 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
       transactional { session =>
         for {
           reserved <- lift(
-            streams.optional(
-              collections.reservations.underlying
-                .find(session.underlying, Filters.eq(AnalyticsCollections.Fields.Id, reservation.runId.value))
-                .projection(reservationProjection)
-                .first
-            )
+            readReservation(session, collections.reservations, reservation.runId.value)
           )
           reservedRecord <- result(
             reserved.toRight(AnalyticsError.RunIdRangeConflict(reservation.runId.value))
@@ -358,19 +336,14 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
             )
           )
           state <- lift(
-            streams.optional(
-              collections.control.underlying
-                .find(session.underlying, Filters.eq(AnalyticsCollections.Fields.Id, "analytics-report"))
-                .projection(controlProjection)
-                .first
-            )
+            readControl(session, collections.control)
           )
           stateRecord <- result(state.toRight(AnalyticsError.RunIdRangeConflict(reservation.runId.value)))
           decodedState <- result(MongoAnalyticsReportRecords.decodeControl(stateRecord))
           _ <- result(
             Either.cond(
               decodedState.generation == reservation.generation &&
-                Set("Published", "Unpublished").contains(decodedState.state),
+                inStates(ReportState.PublishableFromControl, decodedState.state),
               (),
               AnalyticsError.GuardedErasurePublicationRejected
             )
@@ -382,7 +355,7 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
             decodedState.lastRunId.getOrElse("") == reservation.runId.value
           _ <- result(
             Either.cond(
-              decoded.state == "Reserved" || (decoded.state == "Published" && alreadyPublished),
+              decoded.state == ReportState.Reserved.persisted || (decoded.state == ReportState.Published.persisted && alreadyPublished),
               (),
               AnalyticsError.RunIdRangeConflict(reservation.runId.value)
             )
@@ -397,57 +370,20 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
               reject(AnalyticsError.RunIdRangeConflict(reservation.runId.value))
             else if (alreadyPublished)
               lift(
-                streams.one(
-                  collections.snapshots.underlying.updateOne(
-                    session.underlying,
-                    Filters.eq(AnalyticsCollections.Fields.Id, "current"),
-                    reportUpdate(reservation, report, expiresAt),
-                    new UpdateOptions().upsert(true)
-                  )
-                )
+                upsertSnapshot(session, collections.snapshots, reservation, report, expiresAt)
               ).void
             else if (reservation.revision <= decodedState.lastPublishedRevision)
               reject(AnalyticsError.RunIdRangeConflict(reservation.runId.value))
             else
               for {
                 changed <- lift(
-                  casUpdate(
-                    session,
-                    collections.control,
-                    Filters.and(
-                      Filters.eq(AnalyticsCollections.Fields.Id, "analytics-report"),
-                      Filters.eq(AnalyticsCollections.Fields.Generation, reservation.generation),
-                      Filters.lt(AnalyticsCollections.Fields.LastPublishedRevision, reservation.revision),
-                      Filters.in(AnalyticsCollections.Fields.State, Set("Published", "Unpublished").asJava)
-                    ),
-                    Updates.combine(
-                      Updates.set(AnalyticsCollections.Fields.State, "Published"),
-                      Updates.set(AnalyticsCollections.Fields.LastPublishedRevision, reservation.revision),
-                      Updates.set(AnalyticsCollections.Fields.LastRunId, reservation.runId.value),
-                      Updates.unset(AnalyticsCollections.Fields.HiddenAt)
-                    )
-                  )
+                  markControlPublished(session, collections.control, reservation, ReportState.PublishableFromControl)
                 )
                 _ <- result(Either.cond(changed, (), AnalyticsError.RunIdRangeConflict(reservation.runId.value)))
                 _ <- lift(
-                  streams.one(
-                    collections.snapshots.underlying.updateOne(
-                      session.underlying,
-                      Filters.eq(AnalyticsCollections.Fields.Id, "current"),
-                      reportUpdate(reservation, report, expiresAt),
-                      new UpdateOptions().upsert(true)
-                    )
-                  )
+                  upsertSnapshot(session, collections.snapshots, reservation, report, expiresAt)
                 )
-                _ <- lift(
-                  streams.one(
-                    collections.reservations.underlying.updateOne(
-                      session.underlying,
-                      Filters.eq(AnalyticsCollections.Fields.Id, reservation.runId.value),
-                      Updates.set(AnalyticsCollections.Fields.State, "Published")
-                    )
-                  )
-                )
+                _ <- lift(markReservationPublished(session, collections.reservations, reservation.runId.value))
               } yield ()
         } yield ()
       }
@@ -475,20 +411,8 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
     else
       transactional { session =>
         val requestFilter = Filters.and(
-          Filters.eq(AnalyticsCollections.Fields.Id, claim.requestId.value),
-          Filters.eq(AnalyticsCollections.Fields.State, ErasureRequestState.Processing.persistedName),
-          Filters.eq(AnalyticsCollections.Fields.LeaseToken, claim.leaseToken),
-          Filters.gt(AnalyticsCollections.Fields.LeaseUntil, Date.from(completedAt)),
+          ownedClaimFilter(claim, completedAt),
           Filters.eq(AnalyticsCollections.Fields.Phase, ErasurePhase.ReadyToPublish.persistedName)
-        )
-        val nonReadyOther = Filters.and(
-          Filters.ne(AnalyticsCollections.Fields.Id, claim.requestId.value),
-          Filters.in(
-            AnalyticsCollections.Fields.State,
-            ErasureRequestState.Pending.persistedName,
-            ErasureRequestState.Processing.persistedName
-          ),
-          Filters.ne(AnalyticsCollections.Fields.Phase, ErasurePhase.ReadyToPublish.persistedName)
         )
         for {
           request <- lift(
@@ -537,40 +461,33 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
           )
           _ <- result(Either.cond(fence.nonEmpty, (), AnalyticsError.GuardedErasurePublicationRejected))
           nonReadyCount <- lift(
-            streams.one(collections.requests.underlying.countDocuments(session.underlying, nonReadyOther))
+            streams.one(
+              collections.requests.underlying
+                .countDocuments(session.underlying, nonReadyOtherRequests(claim.requestId.value))
+            )
           )
           _ <- result(Either.cond(nonReadyCount == 0L, (), AnalyticsError.GuardedErasurePublicationRejected))
           reserved <- lift(
-            streams.optional(
-              collections.reservations.underlying
-                .find(session.underlying, Filters.eq(AnalyticsCollections.Fields.Id, reservation.runId.value))
-                .projection(reservationProjection)
-                .first
-            )
+            readReservation(session, collections.reservations, reservation.runId.value)
           )
           reservedRecord <- result(reserved.toRight(AnalyticsError.RunIdRangeConflict(reservation.runId.value)))
           reservedValue <- result(MongoAnalyticsReportRecords.decodeRun(reservedRecord))
           _ <- result(
             Either.cond(
-              reservedValue.reservation == reservation && reservedValue.state == "Reserved",
+              reservedValue.reservation == reservation && reservedValue.state == ReportState.Reserved.persisted,
               (),
               AnalyticsError.RunIdRangeConflict(reservation.runId.value)
             )
           )
           state <- lift(
-            streams.optional(
-              collections.control.underlying
-                .find(session.underlying, Filters.eq(AnalyticsCollections.Fields.Id, "analytics-report"))
-                .projection(controlProjection)
-                .first
-            )
+            readControl(session, collections.control)
           )
           stateRecord <- result(state.toRight(AnalyticsError.RunIdRangeConflict(reservation.runId.value)))
           decodedState <- result(MongoAnalyticsReportRecords.decodeControl(stateRecord))
           _ <- result(
             Either.cond(
-              decodedState.generation == reservation.generation && Set("Hidden", "Published")
-                .contains(decodedState.state),
+              decodedState.generation == reservation.generation &&
+                inStates(ReportState.ErasurePublishableFromControl, decodedState.state),
               (),
               AnalyticsError.RunIdRangeConflict(reservation.runId.value)
             )
@@ -583,46 +500,13 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
             )
           )
           changed <- lift(
-            casUpdate(
-              session,
-              collections.control,
-              Filters.and(
-                Filters.eq(AnalyticsCollections.Fields.Id, "analytics-report"),
-                Filters.eq(AnalyticsCollections.Fields.Generation, reservation.generation),
-                Filters.in(AnalyticsCollections.Fields.State, Set("Hidden", "Published").asJava),
-                Filters.lt(AnalyticsCollections.Fields.LastPublishedRevision, reservation.revision)
-              ),
-              Updates.combine(
-                Updates.set(AnalyticsCollections.Fields.State, "Published"),
-                Updates.set(AnalyticsCollections.Fields.LastPublishedRevision, reservation.revision),
-                Updates.set(AnalyticsCollections.Fields.LastRunId, reservation.runId.value),
-                Updates.unset(AnalyticsCollections.Fields.HiddenAt)
-              )
-            )
+            markControlPublished(session, collections.control, reservation, ReportState.ErasurePublishableFromControl)
           )
           _ <- result(Either.cond(changed, (), AnalyticsError.RunIdRangeConflict(reservation.runId.value)))
           _ <- lift(
-            streams.one(
-              collections.snapshots.underlying.updateOne(
-                session.underlying,
-                Filters.eq(AnalyticsCollections.Fields.Id, "current"),
-                reportUpdate(reservation, report, expiresAt),
-                new UpdateOptions().upsert(true)
-              )
-            )
+            upsertSnapshot(session, collections.snapshots, reservation, report, expiresAt)
           )
-          _ <- lift(
-            streams.one(
-              collections.reservations.underlying.updateOne(
-                session.underlying,
-                Filters.and(
-                  Filters.eq(AnalyticsCollections.Fields.Id, reservation.runId.value),
-                  Filters.eq(AnalyticsCollections.Fields.State, "Reserved")
-                ),
-                Updates.set(AnalyticsCollections.Fields.State, "Published")
-              )
-            )
-          )
+          _ <- lift(markReservationPublished(session, collections.reservations, reservation.runId.value))
           completed <- lift(
             casUpdate(
               session,
@@ -702,9 +586,9 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
     val cutoff = operational.retention.deletionMarkerCutoff(observedAt)
     val eligible = Filters.and(
       Filters.or(
-        Filters.eq(AnalyticsCollections.Fields.State, "Published"),
+        Filters.eq(AnalyticsCollections.Fields.State, ReportState.Published.persisted),
         Filters.and(
-          Filters.eq(AnalyticsCollections.Fields.State, "Reserved"),
+          Filters.eq(AnalyticsCollections.Fields.State, ReportState.Reserved.persisted),
           Filters.regex(AnalyticsCollections.Fields.Id, "^stream-maintenance-")
         )
       ),
@@ -734,16 +618,11 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
     def remove(candidates: Vector[String], requiredRunIds: Set[RunId], remaining: Int) = transactional { session =>
       for {
         rawControl <- lift(
-          streams.optional(
-            collections.control.underlying
-              .find(session.underlying, Filters.eq(AnalyticsCollections.Fields.Id, "analytics-report"))
-              .projection(controlProjection)
-              .first
-          )
+          readControl(session, collections.control)
         )
         control <- result(
           rawControl
-            .toRight(AnalyticsError.InvalidConfiguration("analytics report control is unavailable"))
+            .toRight(AnalyticsError.DataIntegrityViolation("analytics report control is unavailable"))
             .flatMap(MongoAnalyticsReportRecords.decodeControl)
         )
         snapshot <- lift(readSnapshot(session, collections.snapshots))
@@ -820,8 +699,90 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
       collection: MongoCollection[F, ?],
       filter: Bson,
       update: Bson
+  ): F[Boolean] = MongoAnalyticsErasureStoreSupport.matchedUpdate(streams, session, collection, filter, update)
+
+  private def readControl(
+      session: ClientSession[F],
+      control: MongoCollection[F, AnalyticsMongoRecords.ReportControl]
+  ): F[Option[AnalyticsMongoRecords.ReportControl]] =
+    streams.optional(
+      control.underlying
+        .find(session.underlying, Filters.eq(AnalyticsCollections.Fields.Id, ReportState.ControlId))
+        .projection(controlProjection)
+        .first
+    )
+
+  private def readReservation(
+      session: ClientSession[F],
+      reservations: MongoCollection[F, AnalyticsMongoRecords.ReportRun],
+      runId: String
+  ): F[Option[AnalyticsMongoRecords.ReportRun]] =
+    streams.optional(
+      reservations.underlying
+        .find(session.underlying, Filters.eq(AnalyticsCollections.Fields.Id, runId))
+        .projection(reservationProjection)
+        .first
+    )
+
+  private def upsertSnapshot(
+      session: ClientSession[F],
+      snapshots: MongoCollection[F, AnalyticsMongoRecords.ReportSnapshotMetadata],
+      reservation: AnalyticsReportReservation,
+      report: AnalyticsReportOutput,
+      expiresAt: Instant
+  ): F[Unit] =
+    streams
+      .one(
+        snapshots.underlying.updateOne(
+          session.underlying,
+          Filters.eq(AnalyticsCollections.Fields.Id, ReportState.CurrentSnapshotId),
+          reportUpdate(reservation, report, expiresAt),
+          new UpdateOptions().upsert(true)
+        )
+      )
+      .void
+
+  /** Moves the control record to Published for a newer revision of the same generation. */
+  private def markControlPublished(
+      session: ClientSession[F],
+      control: MongoCollection[F, AnalyticsMongoRecords.ReportControl],
+      reservation: AnalyticsReportReservation,
+      from: Set[ReportState]
   ): F[Boolean] =
-    streams.one(collection.underlying.updateOne(session.underlying, filter, update)).map(_.getMatchedCount == 1L)
+    casUpdate(
+      session,
+      control,
+      Filters.and(
+        Filters.eq(AnalyticsCollections.Fields.Id, ReportState.ControlId),
+        Filters.eq(AnalyticsCollections.Fields.Generation, reservation.generation),
+        Filters.in(AnalyticsCollections.Fields.State, ReportState.persisted(from)),
+        Filters.lt(AnalyticsCollections.Fields.LastPublishedRevision, reservation.revision)
+      ),
+      Updates.combine(
+        Updates.set(AnalyticsCollections.Fields.State, ReportState.Published.persisted),
+        Updates.set(AnalyticsCollections.Fields.LastPublishedRevision, reservation.revision),
+        Updates.set(AnalyticsCollections.Fields.LastRunId, reservation.runId.value),
+        Updates.unset(AnalyticsCollections.Fields.HiddenAt)
+      )
+    )
+
+  private def markReservationPublished(
+      session: ClientSession[F],
+      reservations: MongoCollection[F, AnalyticsMongoRecords.ReportRun],
+      runId: String
+  ): F[Unit] =
+    streams
+      .one(
+        reservations.underlying.updateOne(
+          session.underlying,
+          Filters.and(
+            Filters.eq(AnalyticsCollections.Fields.Id, runId),
+            Filters.eq(AnalyticsCollections.Fields.State, ReportState.Reserved.persisted)
+          ),
+          Updates.set(AnalyticsCollections.Fields.State, ReportState.Published.persisted)
+        )
+      )
+      .void
 
   private def readSnapshot(
       session: ClientSession[F],
@@ -829,7 +790,7 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
   ): F[Option[AnalyticsMongoRecords.ReportSnapshotMetadata]] =
     streams.optional(
       snapshots.underlying
-        .find(session.underlying, Filters.eq(AnalyticsCollections.Fields.Id, "current"))
+        .find(session.underlying, Filters.eq(AnalyticsCollections.Fields.Id, ReportState.CurrentSnapshotId))
         .projection(
           Projections.include(
             AnalyticsCollections.Fields.Id,
@@ -848,8 +809,8 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
       expiresAt: Instant
   ): Bson = {
     val sets = Vector[Bson](
-      Updates.set(AnalyticsCollections.Fields.Id, "current"),
-      Updates.set(AnalyticsCollections.Fields.State, "Published"),
+      Updates.set(AnalyticsCollections.Fields.Id, ReportState.CurrentSnapshotId),
+      Updates.set(AnalyticsCollections.Fields.State, ReportState.Published.persisted),
       Updates.set(AnalyticsCollections.Fields.Generation, reservation.generation),
       Updates.set(AnalyticsCollections.Fields.Revision, reservation.revision),
       Updates.set(AnalyticsCollections.Fields.RunId, reservation.runId.value),

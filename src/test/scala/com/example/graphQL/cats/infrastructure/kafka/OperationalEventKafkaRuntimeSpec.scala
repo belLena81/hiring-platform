@@ -244,7 +244,7 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
       processed <- cats.effect.Ref.of[IO, Vector[Long]](Vector.empty)
       committed <- cats.effect.Ref.of[IO, Vector[Long]](Vector.empty)
       result <- List(10L, 11L).traverse_ { offset =>
-        OperationalEventKafkaRuntime.processRecord("hiring.events", 0, offset)(
+        KafkaRuntimeSupport.processRecord("hiring.events", 0, offset)(
           RepositoryIO
             .lift(processed.update(_ :+ offset))
             .flatMap(_ => RepositoryIO.fromEither(Either.cond(offset != 10L, (), RepositoryError.Unavailable)))
@@ -519,7 +519,7 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
   }
 
   test("restart delay remains bounded without giving up during a prolonged outage") {
-    val policy = OperationalEventKafkaRuntime.restartPolicy(1.second, 30.seconds)
+    val policy = KafkaRuntimeSupport.restartPolicy(1.second, 30.seconds)
     (0 to 1000).toList.traverse_ { count =>
       policy.decideNextRetry((), retry.RetryStatus(count, 1.day, Some(30.seconds))).map {
         case retry.PolicyDecision.DelayAndRetry(delay) =>
@@ -532,7 +532,7 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
   test("resilient stream retries failed effects until they recover") {
     for {
       attempts <- Ref.of[IO, Int](0)
-      stream = OperationalEventKafkaRuntime.resilientStream(
+      stream = KafkaRuntimeSupport.resilientStream(
         Diagnostics.noop,
         fs2.Stream.eval {
           attempts.updateAndGet(_ + 1).flatMap { count =>
@@ -550,11 +550,11 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
 
   test("producer fencing is detected through wrapped Kafka errors") {
     assert(
-      OperationalEventKafkaRuntime.isProducerFenced(
+      KafkaRuntimeSupport.isProducerFenced(
         new IllegalStateException("send failed", new ProducerFencedException("producer fenced"))
       )
     )
-    assert(!OperationalEventKafkaRuntime.isProducerFenced(new IllegalStateException("ordinary send failure")))
+    assert(!KafkaRuntimeSupport.isProducerFenced(new IllegalStateException("ordinary send failure")))
   }
 
   test("a fenced producer generation is released before the next generation starts") {
@@ -581,17 +581,17 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
       }
       supervised = Stream
         .suspend(
-          OperationalEventKafkaRuntime
+          KafkaRuntimeSupport
             .resilientStream(
               Diagnostics.noop,
               generation,
               1.millis,
-              OperationalEventKafkaRuntime.isProducerFenced,
+              KafkaRuntimeSupport.isProducerFenced,
               maxDelay = 30.seconds
             )
             .handleErrorWith {
-              case error if OperationalEventKafkaRuntime.isProducerFenced(error) => Stream.empty
-              case error                                                         => Stream.raiseError[IO](error)
+              case error if KafkaRuntimeSupport.isProducerFenced(error) => Stream.empty
+              case error                                                => Stream.raiseError[IO](error)
             }
         )
         .repeat
@@ -617,7 +617,7 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
         override def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]): IO[Unit] =
           records.update(_ :+ (event -> fields))
       }
-      _ <- OperationalEventKafkaRuntime
+      _ <- KafkaRuntimeSupport
         .resilientStream(
           diagnostics,
           fs2.Stream.eval {
@@ -641,7 +641,7 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
   test("resilient stream cancellation interrupts retry backoff") {
     for {
       attempted <- Deferred[IO, Unit]
-      fiber <- OperationalEventKafkaRuntime
+      fiber <- KafkaRuntimeSupport
         .resilientStream(
           Diagnostics.noop,
           fs2.Stream.eval(

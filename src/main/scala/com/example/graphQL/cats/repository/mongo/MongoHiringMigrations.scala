@@ -6,6 +6,7 @@ import io.circe.Json
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.workflow.InterviewTopicPair
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogFields}
+import com.example.graphQL.cats.service.events.OperationalEventPayload
 import com.example.graphQL.cats.service.Diagnostics.*
 import com.example.graphQL.cats.shared.*
 import com.mongodb.*
@@ -19,14 +20,6 @@ private[mongo] object MongoHiringMigrations {
   import MongoHiringSetup.{SetupCollection, SetupDatabase}
 
   private val BatchSize = 500
-  private val InterviewWorkflowCollections = List(
-    MongoCollections.InterviewWorkflows,
-    MongoCollections.InterviewWorkflowCommands,
-    MongoCollections.InterviewWorkflowInbox,
-    MongoCollections.InterviewCalendarReservations,
-    MongoCollections.InterviewCalendarParticipantLocks,
-    MongoCollections.InterviewNotificationReceipts
-  )
 
   val ownedCollections: Set[String] = Set(
     MongoCollections.Users,
@@ -61,17 +54,15 @@ private[mongo] object MongoHiringMigrations {
     MongoCollections.InterviewNotificationReceipts
   )
 
-  private def collectWithin[A](run: MigrationRun, values: fs2.Stream[IO, A], maximum: Int): IO[List[A]] =
-    values.take(maximum.toLong + 1L).compile.toList.flatMap { found =>
-      if (found.size > maximum) run.fail(s"setup read exceeded its maximum of $maximum elements")
-      else IO.pure(found)
-    }
-
   private def countDocuments(collection: SetupCollection, filter: Bson): IO[Long] =
     collection.count(filter, new CountOptions())
 
-  private def boundedBatch(collection: SetupCollection, filter: Bson) =
-    collection.find(filter).sort(Indexes.ascending(MongoFields.Id)).limit(BatchSize).boundedStream(32)
+  private def boundedBatch(run: MigrationRun, collection: SetupCollection, filter: Bson): IO[List[Document]] =
+    MongoBoundedResults.collect(
+      collection.find(filter).sort(Indexes.ascending(MongoFields.Id)).limit(BatchSize).boundedStream(32),
+      BatchSize,
+      MigrationError.StepFailed(run.id, s"setup read exceeded its maximum of $BatchSize elements")
+    )
 
   /** The ledger plan in application order. Completed 013/015 proofs retire the 003/010 and 011 scans they cover. */
   def initialize(
@@ -96,8 +87,7 @@ private[mongo] object MongoHiringMigrations {
           run(MongoInterviewLedgerCollectionMigrations.step),
           run(interviewSubjectCleanup),
           run(interviewInboxIdentity),
-          // TODO(RF-06): 010 keeps its own ledger handling until the interview workflow session releases the file.
-          IO.unlessA(workflowTrusted)(MongoInterviewWorkflowMigrations.initialize(database)),
+          IO.unlessA(workflowTrusted)(run(MongoInterviewWorkflowMigrations.step)),
           IO.unlessA(cleanupTrusted)(run(MongoInterviewCleanupMigrations.step)),
           run(MongoProducerRegistrationMigrations.step),
           run(MongoWorkflowIntegrityMigrations.step),
@@ -153,7 +143,7 @@ private[mongo] object MongoHiringMigrations {
     */
   private val interviewWorkflowStorage = MongoMigrationStep(
     MigrationIds.InterviewWorkflowStorage,
-    run => InterviewWorkflowCollections.traverse_(run.database.ensureCollection)
+    run => MongoInterviewFields.StoredCollections.traverse_(run.database.ensureCollection)
   )
 
   /** Verifies existing optional GeoJSON points after the strict collection validator is installed. Missing points are
@@ -168,25 +158,24 @@ private[mongo] object MongoHiringMigrations {
     run => {
       val jobs = run.database.getCollection(MongoCollections.Jobs)
       val pointExists = Filters.exists(MongoFields.LocationPoint, true)
-      def scan(checkpoint: Option[String]): IO[Unit] = {
-        val afterCheckpoint =
+      run.scanByStringId(BatchSize, "invalid job key")(checkpoint =>
+        boundedBatch(
+          run,
+          jobs,
           checkpoint.fold(pointExists)(id => Filters.and(pointExists, Filters.gt(MongoFields.Id, id)))
-        collectWithin(run, boundedBatch(jobs, afterCheckpoint), BatchSize).flatMap { batch =>
-          batch.traverse_ { job =>
-            val id = Option(job.getString(MongoFields.Id))
-            val point = Option(job.get(MongoFields.Location, classOf[Document]))
-              .flatMap(location => Option(location.get(MongoFields.Point, classOf[Document])))
-            (id, point) match {
-              case (Some(_), Some(value)) if isValidJobGeoPoint(value) => IO.unit
-              case (Some(jobId), _) => run.fail(s"found an invalid point at job $jobId")
-              case _                => run.fail("found an invalid job key")
-            }
-          } *> batch.lastOption.traverse_ { last =>
-            Option(last.getString(MongoFields.Id)).fold(run.fail[Unit]("invalid job key"))(run.advance)
-          } *> (if (batch.size == BatchSize) scan(batch.lastOption.map(_.getString(MongoFields.Id))) else IO.unit)
+        )
+      ) {
+        _.traverse_ { job =>
+          val id = Option(job.getString(MongoFields.Id))
+          val point = Option(job.get(MongoFields.Location, classOf[Document]))
+            .flatMap(location => Option(location.get(MongoFields.Point, classOf[Document])))
+          (id, point) match {
+            case (Some(_), Some(value)) if isValidJobGeoPoint(value) => IO.unit
+            case (Some(jobId), _) => run.fail(s"found an invalid point at job $jobId")
+            case _                => run.fail("found an invalid job key")
+          }
         }
       }
-      run.textCheckpoint.flatMap(scan)
     }
   )
 
@@ -215,7 +204,7 @@ private[mongo] object MongoHiringMigrations {
 
   private val candidateSearchProfiles = MongoMigrationStep(
     MigrationIds.CandidateSearchProfileVerification,
-    run => run.textCheckpoint.flatMap(verifyCandidateProfileBatches(run, _))
+    verifyCandidateProfileBatches
   )
 
   /** Backfills the internal subject index needed to fence/purge events without changing the Kafka envelope. A completed
@@ -225,7 +214,7 @@ private[mongo] object MongoHiringMigrations {
     val unverifiedSubjects = Filters.ne(MongoFields.SubjectRefsVersion, 1)
     def outbox(database: SetupDatabase) = database.getCollection(MongoCollections.EventOutbox)
     def backfill(run: MigrationRun): IO[Unit] =
-      collectWithin(run, boundedBatch(outbox(run.database), unverifiedSubjects), BatchSize).flatMap { batch =>
+      boundedBatch(run, outbox(run.database), unverifiedSubjects).flatMap { batch =>
         batch.traverse_(backfillOutboxSubjectReferences(run, _, diagnostics)) *>
           (if (batch.size == BatchSize) backfill(run)
            else
@@ -450,17 +439,12 @@ private[mongo] object MongoHiringMigrations {
                   case session if session.actorId != event.actorId => Left("a search click with a mismatched actor")
                   case session if !session.results.exists(_.resultId == result) =>
                     Left("a search click without a matching result")
-                  case session if session.searchKind == "candidateMatches" =>
+                  case session if session.searchKind == OperationalEventPayload.SearchKind.CandidateMatches =>
                     Parsing
                       .parseUuid(result)
                       .leftMap(_ => "a candidate search click with an invalid resultId")
                       .map(value => List(value.toString))
-                  case session
-                      if Set("semanticJobSearch", "recommendedJobs", MongoCollections.Jobs).contains(
-                        session.searchKind
-                      ) =>
-                    Right(Nil)
-                  case _ => Left("a search click with an unknown searchKind")
+                  case _ => Right(Nil)
                 }
           }
           .handleErrorWith(error =>
@@ -472,17 +456,11 @@ private[mongo] object MongoHiringMigrations {
     }
   }
 
-  private def verifyCandidateProfileBatches(run: MigrationRun, checkpoint: Option[String]): IO[Unit] = {
+  private def verifyCandidateProfileBatches(run: MigrationRun): IO[Unit] = {
     val users = run.database.getCollection(MongoCollections.Users)
-    val cursor = checkpoint.fold(Filters.empty())(id => Filters.gt(MongoFields.Id, id))
-    collectWithin(run, boundedBatch(users, cursor), BatchSize).flatMap { batch =>
-      batch.traverse_(user => validateCandidateSearchProfile(run, user) *> ensureCanonicalCandidateSkills(run, user)) *>
-        batch.lastOption.traverse_ { last =>
-          Option(last.getString(MongoFields.Id)).fold(run.fail[Unit]("invalid user key"))(run.advance)
-        } *> (if (batch.size == BatchSize)
-                verifyCandidateProfileBatches(run, batch.lastOption.map(_.getString(MongoFields.Id)))
-              else IO.unit)
-    }
+    run.scanByStringId(BatchSize, "invalid user key")(checkpoint =>
+      boundedBatch(run, users, checkpoint.fold(Filters.empty())(id => Filters.gt(MongoFields.Id, id)))
+    )(_.traverse_(user => validateCandidateSearchProfile(run, user) *> ensureCanonicalCandidateSkills(run, user)))
   }
 
   private def validateCandidateSearchProfile(run: MigrationRun, user: Document): IO[Unit] = {
@@ -584,7 +562,7 @@ private[mongo] object MongoHiringMigrations {
   private def backfillVersions(run: MigrationRun, collection: SetupCollection): IO[Unit] = {
     val missingVersion = Filters.exists(MongoFields.Version, false)
     def nextBatch: IO[Unit] =
-      collectWithin(run, boundedBatch(collection, missingVersion), BatchSize).flatMap { documents =>
+      boundedBatch(run, collection, missingVersion).flatMap { documents =>
         val ids = documents.flatMap(document => Option(document.getString(MongoFields.Id)))
         if (documents.isEmpty) IO.unit
         else if (ids.size != documents.size) run.fail("revision backfill found a document without a string _id")

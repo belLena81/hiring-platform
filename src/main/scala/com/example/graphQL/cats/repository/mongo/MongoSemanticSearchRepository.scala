@@ -6,7 +6,8 @@ import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.Identifiers.parse as parseIdentifier
 import com.example.graphQL.cats.domain.search.SearchFusionStrategy
-import com.example.graphQL.cats.service.port.{RepositoryError, RepositoryIO, SemanticSearchRepository}
+import com.example.graphQL.cats.service.port.{RepositoryIO, SemanticSearchRepository}
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.search.*
 import com.example.graphQL.cats.service.read.HiringReadScope
 import com.example.graphQL.cats.service.Diagnostics
@@ -149,37 +150,6 @@ final class MongoSemanticSearchRepository(
         RepositoryIO
           .lift(Mongo4catsCollections.documents(database, parentCollection).flatMap { collection =>
             collectWithin(aggregate(collection, pipeline), selected.size)
-          })
-          .subflatMap(_.traverse(decode))
-      }
-  }
-
-  override def jobEligibility(ids: List[JobId]): RepositoryIO[List[JobSearchEligibility]] =
-    eligibility(MongoCollections.Jobs, ids.map(_.value.toString), MongoSearchEligibilityCodecs.jobFields)(
-      MongoSearchEligibilityCodecs.job
-    )
-
-  override def candidateEligibility(ids: List[UserId]): RepositoryIO[List[CandidateSearchEligibility]] =
-    eligibility(MongoCollections.Users, ids.map(_.value.toString), MongoSearchEligibilityCodecs.candidateFields)(
-      MongoSearchEligibilityCodecs.candidate
-    )
-
-  private def eligibility[A](collection: String, ids: List[String], fields: List[String])(
-      decode: Document => Either[RepositoryError, A]
-  ): RepositoryIO[List[A]] = {
-    val selected = ids.distinct
-    if (selected.size > branchLimit) RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
-    else if (selected.isEmpty) RepositoryIO.fromEither(Right(Nil))
-    else
-      MongoRepositorySupport.repositoryGuard(diagnostics, "semanticSearch.eligibility") {
-        RepositoryIO
-          .lift(Mongo4catsCollections.documents(database, collection).flatMap { source =>
-            val pipeline = List(
-              new Document("$match", new Document(MongoFields.Id, new Document("$in", selected.asJava))),
-              new Document("$limit", selected.size),
-              new Document("$project", MongoSearchEligibilityCodecs.projection(fields))
-            )
-            collectWithin(aggregate(source, pipeline), selected.size)
           })
           .subflatMap(_.traverse(decode))
       }

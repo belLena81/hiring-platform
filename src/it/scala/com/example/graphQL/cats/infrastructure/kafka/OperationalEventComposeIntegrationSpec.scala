@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.service.events.OperationalEventPayload
 import cats.effect.{IO, Ref}
 import com.example.hiring.testing.LocalTestServices
 import cats.syntax.all.*
@@ -14,7 +15,7 @@ import com.example.graphQL.cats.domain.model.{Job, JobStatus, Location}
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.infrastructure.kafka.OperationalEventKafkaRuntime
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField}
-import com.example.graphQL.cats.service.events.{OperationalEventType, OperationalEvents}
+import com.example.graphQL.cats.service.events.OperationalEvents
 import com.mongodb.client.model.Filters
 import org.apache.kafka.clients.consumer.KafkaConsumer
 import org.apache.kafka.common.TopicPartition
@@ -127,7 +128,7 @@ class OperationalEventComposeIntegrationSpec extends KafkaIntegrationSuite {
     val skills = (0 until 100).map(index => "\u0001" * 197 + index.toString).toSet
     val value = job(JobId(UUID.randomUUID()), Instant.now(), actors.head).copy(skills = skills)
     val event = OperationalEvents
-      .jobEvent(OperationalEventType.JOB_CREATED, UUID.randomUUID(), value, actors.head, value.createdAt)
+      .jobEvent(OperationalEventPayload.JobKind.Created, UUID.randomUUID(), value, actors.head, value.createdAt)
       .fold(error => fail(error.toString), identity)
     val bytes = com.example.graphQL.cats.service.events.OperationalEventJson.bytes(event)
     assert(bytes.length > 65536)
@@ -215,7 +216,7 @@ class OperationalEventComposeIntegrationSpec extends KafkaIntegrationSuite {
                 val jobValue = job(JobId(UUID.randomUUID()), createdAt, owner)
                 val event = OperationalEvents
                   .jobEvent(
-                    OperationalEventType.JOB_CREATED,
+                    OperationalEventPayload.JobKind.Created,
                     UUID.randomUUID(),
                     jobValue,
                     owner,

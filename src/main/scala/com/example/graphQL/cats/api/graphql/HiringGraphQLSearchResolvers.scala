@@ -98,7 +98,7 @@ private[graphql] object HiringGraphQLSearchResolvers {
         )
       )
       .toEither
-      .leftMap(errors => toGraphQLFailure(UseCaseError.Search(SearchError.accumulated(errors))))
+      .leftMap(errors => GraphQLFailureCatalog.classify(UseCaseError.Search(SearchError.accumulated(errors))))
 
   def semanticJobSearch(context: Context[RequestContext, Unit]): HiringGraphQLResult[RankedJobResults] =
     authenticatedSearch(context).flatMap { case (actor, hiring, service) =>

@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.service.events.OperationalEventPayload.SearchKind
 import com.example.graphQL.cats.AccountValueFixtures.email
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId}
@@ -22,7 +23,8 @@ import com.example.graphQL.cats.domain.model.{
   UserProfile,
   UserRole
 }
-import com.example.graphQL.cats.service.port.{RepositoryError, Versioned}
+import com.example.graphQL.cats.service.port.{Versioned}
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.events.{
   OperationalAggregateType,
   OperationalEventEnvelope,
@@ -393,7 +395,7 @@ class MongoHiringCodecsSpec extends FunSuite {
     val search = SearchSession(
       UUID.fromString("00000000-0000-0000-0000-000000000208"),
       candidateId,
-      "semanticJobSearch",
+      SearchKind.SemanticJobSearch,
       Some("Scala"),
       Json.obj("city" -> Json.fromString("Nicosia")),
       Some("test-model"),

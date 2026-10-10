@@ -138,16 +138,6 @@ private[mongo] object MongoHiringPersistenceCodecs {
       expiresAt: Date
   )
 
-  final case class StoredAnalyticsReportRun(
-      _id: String,
-      rangeFingerprint: String,
-      generation: Long,
-      revision: Long,
-      state: Option[String],
-      createdAt: Option[Date],
-      expiresAt: Option[Date]
-  )
-
   final case class StoredAnalyticsReportControl(
       _id: String,
       generation: Long,
@@ -174,7 +164,6 @@ private[mongo] object MongoHiringPersistenceCodecs {
     ScalaMacros.createCodecProvider[StoredOutboxRecord](),
     ScalaMacros.createCodecProviderIgnoreNone[StoredSearchSessionResult](),
     ScalaMacros.createCodecProvider[StoredSearchSession](),
-    ScalaMacros.createCodecProviderIgnoreNone[StoredAnalyticsReportRun](),
     ScalaMacros.createCodecProviderIgnoreNone[StoredAnalyticsReportControl]()
   )
 
@@ -191,7 +180,6 @@ private[mongo] object MongoHiringPersistenceCodecs {
   private val operationalEventCodec = ScalaMacros.createCodecIgnoreNone[StoredOperationalEvent](registry)
   private val outboxCodec = ScalaMacros.createCodec[StoredOutboxRecord](registry)
   private val searchSessionCodec = ScalaMacros.createCodec[StoredSearchSession](registry)
-  private val analyticsReportRunCodec = ScalaMacros.createCodecIgnoreNone[StoredAnalyticsReportRun](registry)
   private val analyticsReportControlCodec = ScalaMacros.createCodecIgnoreNone[StoredAnalyticsReportControl](registry)
 
   def location(value: StoredLocation): Document = encode(value, locationCodec)
@@ -204,7 +192,6 @@ private[mongo] object MongoHiringPersistenceCodecs {
   def operationalEvent(value: StoredOperationalEvent): Document = encode(value, operationalEventCodec)
   def outbox(value: StoredOutboxRecord): Document = encode(value, outboxCodec)
   def searchSession(value: StoredSearchSession): Document = encode(value, searchSessionCodec)
-  def analyticsReportRun(value: StoredAnalyticsReportRun): Document = encode(value, analyticsReportRunCodec)
 
   private[mongo] def decodeUser(document: Document): Either[Throwable, StoredUser] = decode(document, userCodec)
   private[mongo] def decodeJob(document: Document): Either[Throwable, StoredJob] = decode(document, jobCodec)
@@ -216,8 +203,6 @@ private[mongo] object MongoHiringPersistenceCodecs {
     decode(document, operationalEventCodec)
   private[mongo] def decodeSearchSession(document: Document): Either[Throwable, StoredSearchSession] =
     decode(document, searchSessionCodec)
-  private[mongo] def decodeAnalyticsReportRun(document: Document): Either[Throwable, StoredAnalyticsReportRun] =
-    decode(document, analyticsReportRunCodec)
   private[mongo] def decodeAnalyticsReportControl(document: Document): Either[Throwable, StoredAnalyticsReportControl] =
     decode(document, analyticsReportControlCodec)
 

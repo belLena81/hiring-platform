@@ -5,7 +5,7 @@ import com.example.graphQL.cats.domain.policy.RetryBackoff
 import com.example.graphQL.cats.domain.workflow.*
 import cats.syntax.all.*
 import com.example.graphQL.cats.service.port.*
-import java.nio.charset.StandardCharsets
+import com.example.graphQL.cats.shared.StableIds
 import java.time.Instant
 import java.util.UUID
 import scala.concurrent.duration.FiniteDuration
@@ -30,7 +30,7 @@ enum InterviewCommandAdmission {
 
 /** Pure application policy over service-owned observations; the worker interprets its decisions. */
 object InterviewMessagePolicy {
-  def stableId(value: String): UUID = UUID.nameUUIDFromBytes(value.getBytes(StandardCharsets.UTF_8))
+  def stableId(value: String): UUID = StableIds.uuid(value)
 
   def replayDisposition(
       message: InterviewMessage,
@@ -83,45 +83,48 @@ object InterviewMessagePolicy {
       case (None, _) => Left(InterviewMessageRejection.Unknown)
       case (Some(current), Some(stored))
           if applicable(current, stored) && identityMatches(current, stored, message) && message.result.nonEmpty &&
-            stored.result == message.result.map(InterviewCommandResult.fromTransportResult) =>
+            stored.result == message.result =>
         Right((current, stored))
       case _ => Left(InterviewMessageRejection.Inconsistent)
     }
 
+  // Expired admission intentionally does not use the timely acknowledgment or result-equality shortcuts.
   def expiredDecision(
       workflow: Option[InterviewWorkflow],
       command: Option[InterviewWorkflowCommandRecord],
       message: InterviewMessage
   ): Either[InterviewMessageRejection, InterviewWorkflowDecision] =
-    (workflow, command) match {
-      // Expired admission intentionally does not use the timely acknowledgment or result-equality shortcuts.
-      case (Some(current), Some(stored)) if applicable(current, stored) && identityMatches(current, stored, message) =>
-        InterviewWorkflow
-          .decide(current, current.revision, InterviewWorkflowEvent.RetryExhausted("replay_expired"))
-          .left
-          .map(_ => InterviewMessageRejection.Expired)
-      case _ => Left(InterviewMessageRejection.Expired)
-    }
+    giveUp(workflow, command, message, InterviewFailureCode.ReplayExpired, InterviewMessageRejection.Expired)
 
   def futureDecision(
       workflow: Option[InterviewWorkflow],
       command: Option[InterviewWorkflowCommandRecord],
       message: InterviewMessage
   ): Either[InterviewMessageRejection, InterviewWorkflowDecision] =
+    giveUp(workflow, command, message, InterviewFailureCode.FutureMessage, InterviewMessageRejection.Future)
+
+  private def giveUp(
+      workflow: Option[InterviewWorkflow],
+      command: Option[InterviewWorkflowCommandRecord],
+      message: InterviewMessage,
+      step: InterviewFailureCode,
+      rejection: InterviewMessageRejection
+  ): Either[InterviewMessageRejection, InterviewWorkflowDecision] =
     (workflow, command) match {
       case (Some(current), Some(stored)) if applicable(current, stored) && identityMatches(current, stored, message) =>
         InterviewWorkflow
-          .decide(current, current.revision, InterviewWorkflowEvent.RetryExhausted("future_message"))
+          .decide(current, current.revision, InterviewWorkflowEvent.RetryExhausted(step))
           .left
-          .map(_ => InterviewMessageRejection.Future)
-      case _ => Left(InterviewMessageRejection.Future)
+          .map(_ => rejection)
+      case _ => Left(rejection)
     }
 
+  private def retryable(result: InterviewResult): Boolean =
+    result == InterviewResult.OutcomeUnknown || result == InterviewResult.Absent
+
   def resultEvent(message: InterviewMessage, attempts: Long, maxAttempts: Int): Option[InterviewWorkflowEvent] =
-    if (
-      attempts >= maxAttempts &&
-      (message.result.contains(InterviewResult.OutcomeUnknown) || message.result.contains(InterviewResult.Absent))
-    ) Some(InterviewWorkflowEvent.RetryExhausted("provider"))
+    if (attempts >= maxAttempts && message.result.exists(retryable))
+      Some(InterviewWorkflowEvent.RetryExhausted(InterviewFailureCode.Provider))
     else event(message)
 
   def retryAvailableAt(
@@ -131,7 +134,7 @@ object InterviewMessagePolicy {
       initialMillis: Long,
       maximumMillis: Long
   ): Option[Instant] =
-    Option.when(result.contains(InterviewResult.OutcomeUnknown) || result.contains(InterviewResult.Absent))(
+    Option.when(result.exists(retryable))(
       now.plusMillis(RetryBackoff.exponentialMillis(attempts, initialMillis, maximumMillis))
     )
 
@@ -193,7 +196,7 @@ object InterviewMessagePolicy {
       case (LookupNotifyRecruiter, Absent) => Some(NotificationLookupAbsent(InterviewParticipant.Recruiter))
       case (LookupNotifyCandidate, _)      => Some(NotificationOutcomeUnknown(InterviewParticipant.Candidate))
       case (LookupNotifyRecruiter, _)      => Some(NotificationOutcomeUnknown(InterviewParticipant.Recruiter))
-      case _                               => Some(RetryExhausted("provider"))
+      case _                               => Some(RetryExhausted(InterviewFailureCode.Provider))
     }
   }
 
@@ -211,7 +214,7 @@ object InterviewMessagePolicy {
         Some(result match {
           case Succeeded => E.CancelConfirmed(at)
           // The provider says there is no such reservation: definitive, so repair instead of a lookup loop.
-          case Rejected => E.RetryExhausted("unknown_reservation")
+          case Rejected => E.RetryExhausted(InterviewFailureCode.UnknownReservation)
           case _        => E.CancelOutcomeUnknown
         })
       case C.LookupCalendarCancellation(_) =>
@@ -269,13 +272,10 @@ object InterviewMessagePolicy {
       attempts: Long,
       maxAttempts: Int
   ): Option[InterviewLifecycleEvent] =
-    if (attempts >= maxAttempts && (result == InterviewResult.OutcomeUnknown || result == InterviewResult.Absent))
-      Some(InterviewLifecycleEvent.RetryExhausted("provider"))
+    if (attempts >= maxAttempts && retryable(result))
+      Some(InterviewLifecycleEvent.RetryExhausted(InterviewFailureCode.Provider))
     else lifecycleEvent(command, result, at)
 
-  /** How a late or out-of-order cancel or reschedule message is failed: through the workflow, or for an informational
-    * notification through its own command only.
-    */
   /** When a too-early proposal expiry becomes available again: after its due time, plus the distance the consumer's
     * clock is behind clamped to the worker's backoff bounds, so a skewed consumer does not receive it in a hot loop.
     */
@@ -301,7 +301,7 @@ object InterviewMessagePolicy {
       workflow: Option[InterviewWorkflow],
       command: Option[InterviewWorkflowCommandRecord],
       message: InterviewMessage,
-      step: String,
+      step: InterviewFailureCode,
       rejection: InterviewMessageRejection,
       now: Instant
   ): Either[InterviewMessageRejection, LifecycleReplayFailure] =

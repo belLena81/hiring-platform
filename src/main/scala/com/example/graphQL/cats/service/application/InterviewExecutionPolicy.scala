@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.service.application
 
-import com.example.graphQL.cats.domain.workflow.{InterviewCommands, InterviewWorkflow}
+import com.example.graphQL.cats.domain.workflow.InterviewWorkflow
 import com.example.graphQL.cats.service.port.{InterviewWorkflowCommandRecord, InterviewWorkflowCommandState}
 import java.time.Instant
 import java.util.UUID
@@ -23,7 +23,8 @@ enum InterviewExecutionBudgetDisposition {
 /** Pure staged decisions preserve which observations persistence needs to decode and read. */
 object InterviewExecutionPolicy {
   def admission(workflow: InterviewWorkflow, stored: InterviewWorkflowCommandRecord): InterviewExecutionAdmission =
-    if (stored.result.nonEmpty || !applicable(workflow, stored)) InterviewExecutionAdmission.AlreadyHandled
+    if (stored.result.nonEmpty || !InterviewMessagePolicy.applicable(workflow, stored))
+      InterviewExecutionAdmission.AlreadyHandled
     else
       stored.state match {
         case InterviewWorkflowCommandState.Executing => InterviewExecutionAdmission.InspectLease
@@ -46,8 +47,4 @@ object InterviewExecutionPolicy {
     if (consumed + additional.toLong > maxAttempts.toLong) InterviewExecutionBudgetDisposition.RequireRepair
     else InterviewExecutionBudgetDisposition.Acquire(additional)
   }
-
-  private def applicable(workflow: InterviewWorkflow, command: InterviewWorkflowCommandRecord): Boolean =
-    command.state != InterviewWorkflowCommandState.Superseded &&
-      InterviewCommands.isApplicable(workflow, command.revision, command.command)
 }

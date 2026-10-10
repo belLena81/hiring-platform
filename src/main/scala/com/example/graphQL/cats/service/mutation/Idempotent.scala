@@ -3,6 +3,7 @@ package com.example.graphQL.cats.service.mutation
 import cats.data.EitherT
 import cats.effect.{Clock, IO}
 import com.example.graphQL.cats.service.port.*
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
 import com.example.graphQL.cats.service.protocol.{IdempotencyRequest, UseCaseIO}
 

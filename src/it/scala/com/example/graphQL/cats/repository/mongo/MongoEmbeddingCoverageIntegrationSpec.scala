@@ -7,6 +7,7 @@ import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.service.Diagnostics
 import com.example.graphQL.cats.service.port.*
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.search.*
 import com.example.graphQL.cats.shared.crypto.SourceHash
 import io.circe.Json

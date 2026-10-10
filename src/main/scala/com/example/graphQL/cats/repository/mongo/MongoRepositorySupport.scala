@@ -18,7 +18,8 @@ import com.mongodb.client.model.{
 }
 import com.mongodb.client.result.{DeleteResult, InsertOneResult, UpdateResult}
 import com.example.graphQL.cats.domain.model.ApplicationEvent
-import com.example.graphQL.cats.service.port.{RepositoryError, RepositoryIO}
+import com.example.graphQL.cats.service.port.{RepositoryIO}
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.events.OperationalEventEnvelope
 import com.example.graphQL.cats.domain.pagination.PageSize
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFields}
@@ -223,21 +224,34 @@ private[mongo] object MongoSessionOperations {
   * fields plus `updatedAt`. State names and sort orders stay repository-owned because stored values differ per queue.
   */
 private[mongo] object MongoLeaseQueue {
-  def leaseHeld(now: Instant): MongoFilter = MongoFilter.gt(MongoFields.LeaseUntil, now.toDate)
 
-  def leaseExpired(now: Instant): MongoFilter = MongoFilter.lte(MongoFields.LeaseUntil, now.toDate)
+  /** Stored names of a queue's lease: most queues use `leaseOwner`/`leaseToken`/`leaseUntil`. */
+  final case class LeaseFields(owner: String, token: String, until: String) {
+    def held(now: Instant): MongoFilter = MongoFilter.gt(until, now.toDate)
+
+    def expired(now: Instant): MongoFilter = MongoFilter.lte(until, now.toDate)
+
+    /** Clears the lease so the work is claimable again; combined with the queue's own state change. */
+    val release: MongoUpdate =
+      MongoUpdate.combine(MongoUpdate.unset(owner), MongoUpdate.unset(token), MongoUpdate.unset(until))
+
+    def stamp(workerId: String, leaseToken: String, leaseUntil: Instant): MongoUpdate =
+      MongoUpdate.combine(
+        MongoUpdate.set(owner, workerId),
+        MongoUpdate.set(token, leaseToken),
+        MongoUpdate.set(until, leaseUntil.toDate)
+      )
+  }
+
+  val Standard: LeaseFields = LeaseFields(MongoFields.LeaseOwner, MongoFields.LeaseToken, MongoFields.LeaseUntil)
+
+  def leaseHeld(now: Instant): MongoFilter = Standard.held(now)
 
   /** Work is claimable when it is available or when its in-progress lease has expired at `now`. */
   def claimable(available: MongoFilter, inProgress: MongoFilter, now: Instant): MongoFilter =
-    MongoFilter.or(available, MongoFilter.and(inProgress, leaseExpired(now)))
+    MongoFilter.or(available, MongoFilter.and(inProgress, Standard.expired(now)))
 
-  /** Clears the lease so the work is claimable again; combined with the queue's own state change. */
-  val releaseLease: MongoUpdate =
-    MongoUpdate.combine(
-      MongoUpdate.unset(MongoFields.LeaseOwner),
-      MongoUpdate.unset(MongoFields.LeaseToken),
-      MongoUpdate.unset(MongoFields.LeaseUntil)
-    )
+  val releaseLease: MongoUpdate = Standard.release
 
   def leaseStamp(
       inProgressState: String,
@@ -248,9 +262,7 @@ private[mongo] object MongoLeaseQueue {
   ): MongoUpdate =
     MongoUpdate.combine(
       MongoUpdate.set(MongoFields.State, inProgressState),
-      MongoUpdate.set(MongoFields.LeaseOwner, workerId),
-      MongoUpdate.set(MongoFields.LeaseToken, leaseToken),
-      MongoUpdate.set(MongoFields.LeaseUntil, leaseUntil.toDate),
+      Standard.stamp(workerId, leaseToken, leaseUntil),
       MongoUpdate.set(MongoFields.UpdatedAt, now.toDate)
     )
 
@@ -467,26 +479,6 @@ private[mongo] object MongoStoredDocumentDecoding {
 }
 
 private[mongo] object MongoKeysetPaging {
-  def byId[A](collection: IO[MongoCollection[IO, Document]], ids: List[String])(
-      read: Document => ValidatedNel[MongoHiringCodecs.StoredDocumentError, A]
-  )(diagnostics: Diagnostics): RepositoryIO[List[A]] =
-    if (ids.isEmpty) RepositoryIO.fromEither(Right(Nil))
-    else
-      MongoRepositorySupport
-        .repositoryGuard(diagnostics, "repository.findMany")(
-          RepositoryIO
-            .lift(
-              collection
-                .flatMap(
-                  _.find(MongoFilter.in(MongoFields.Id, ids.distinct).bson)
-                    .boundedStream(ids.distinct.size)
-                    .compile
-                    .toList
-                )
-            )
-            .subflatMap(documents => MongoStoredDocumentDecoding.values(documents.map(read)))
-        )
-
   def page[A](
       collection: IO[MongoCollection[IO, Document]],
       filter: MongoFilter,

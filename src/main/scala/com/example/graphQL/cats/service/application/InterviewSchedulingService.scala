@@ -7,10 +7,11 @@ import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.{ApplicationStatus, User, UserRole}
 import com.example.graphQL.cats.domain.model.Identifiers.ApplicationId
 import com.example.graphQL.cats.domain.workflow.*
-import com.example.graphQL.cats.service.{ActorContext, SearchError, UseCaseError}
+import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
 import com.example.graphQL.cats.service.auth.ActorAuthorization
 import com.example.graphQL.cats.service.port.*
-import com.example.graphQL.cats.service.protocol.{UseCaseIO, UseCaseIO as UseCase}
+import com.example.graphQL.cats.service.RepositoryError
+import com.example.graphQL.cats.service.protocol.{UseCaseIO}
 import java.time.Instant
 import java.util.UUID
 import scala.concurrent.duration.FiniteDuration
@@ -36,15 +37,15 @@ final class InterviewSchedulingService(
   ): UseCaseIO[InterviewWorkflow] =
     for {
       user <- authorization.resolve(actor)
-      application <- UseCase.found(applications.find(applicationId), "application")
-      job <- UseCase.found(jobs.find(application.jobId), "job")
-      _ <- UseCase.ensure(authorization.canManage(user, job), UseCaseError.Domain(DomainError.Forbidden))
-      canonicalStart = startsAt.truncatedTo(java.time.temporal.ChronoUnit.MILLIS)
-      canonicalEnd = endsAt.truncatedTo(java.time.temporal.ChronoUnit.MILLIS)
+      application <- UseCaseIO.found(applications.find(applicationId), "application")
+      job <- UseCaseIO.found(jobs.find(application.jobId), "job")
+      _ <- UseCaseIO.ensure(authorization.canManage(user, job), UseCaseError.Domain(DomainError.Forbidden))
+      canonicalStart = InterviewInterval.canonical(startsAt)
+      canonicalEnd = InterviewInterval.canonical(endsAt)
       fingerprint = MutationReceiptFingerprint.fromCanonicalInput(
         s"${applicationId.value}|$canonicalStart|$canonicalEnd"
       )
-      replay <- UseCase.repository(workflows.findRequest(user.id, idempotencyKey, fingerprint))
+      replay <- UseCaseIO.repository(workflows.findRequest(user.id, idempotencyKey, fingerprint))
       saved <- replay match {
         case Some(existing) => EitherT.rightT[IO, UseCaseError](existing)
         case None           =>
@@ -53,7 +54,7 @@ final class InterviewSchedulingService(
             interval <- EitherT.fromEither[IO](
               InterviewInterval
                 .validate(startsAt, endsAt, now)
-                .leftMap(_ => UseCaseError.Search(SearchError.InvalidFilter("interviewInterval")))
+                .leftMap(UseCaseError.InterviewRule(_))
             )
             id <- EitherT.liftF(nextWorkflowId)
             acceptedDeadline = now.plusMillis(preCommitWindow.toMillis)
@@ -77,7 +78,7 @@ final class InterviewSchedulingService(
                   )
                 )
             )
-            result <- UseCase.repository(
+            result <- UseCaseIO.repository(
               workflows.create(workflow, InterviewWorkflow.initialCommand(workflow), idempotencyKey, fingerprint, now)
             )
             saved <- result match {
@@ -91,14 +92,16 @@ final class InterviewSchedulingService(
     } yield saved
 
   def inspect(actor: ActorContext, id: InterviewWorkflowId): UseCaseIO[InterviewWorkflow] =
-    for {
-      user <- authorization.resolve(actor)
-      value <- UseCase.repository(
+    authorization.resolve(actor).flatMap(visibleTo(_, id))
+
+  /** Admin sees every workflow; others only those they participate in, and a hidden one is simply not found. */
+  private def visibleTo(user: User, id: InterviewWorkflowId): UseCaseIO[InterviewWorkflow] =
+    UseCaseIO
+      .repository(
         if (user.role == UserRole.Admin) workflows.findForAdmin(id)
         else workflows.findForActor(id, InterviewWorkflowAccess(user.id, user.role))
       )
-      workflow <- EitherT.fromEither[IO](value.toRight(UseCaseError.Domain(DomainError.NotFound("interviewWorkflow"))))
-    } yield workflow
+      .subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("interviewWorkflow"))))
 
   def repair(
       actor: ActorContext,
@@ -110,7 +113,7 @@ final class InterviewSchedulingService(
       admin <- authorization.requireAdmin(actor)
       workflow <- inspect(actor, id)
       now <- EitherT.liftF(currentTime)
-      repaired <- UseCase.repository(workflows.repair(workflow, expectedRevision, idempotencyKey, now, admin.id))
+      repaired <- UseCaseIO.repository(workflows.repair(workflow, expectedRevision, idempotencyKey, now, admin.id))
     } yield repaired
 
   /** Cancelling is a rejection of the application (`Interview -> Rejected`, system-generated feedback): the candidate,
@@ -123,7 +126,7 @@ final class InterviewSchedulingService(
       idempotencyKey: UUID
   ): InterviewActionIO[InterviewWorkflow] =
     act(actor, id, expectedRevision, idempotencyKey, InterviewAction.Cancel, "") { (user, now) =>
-      Right(InterviewLifecycleEvent.Cancel(initiatorOf(user.role), now))
+      InterviewLifecycleEvent.Cancel(InterviewCancellationInitiator.of(user.role), now)
     }
 
   /** The candidate flags that a different time is wanted; no slot changes. */
@@ -134,7 +137,7 @@ final class InterviewSchedulingService(
       idempotencyKey: UUID
   ): InterviewActionIO[InterviewWorkflow] =
     act(actor, id, expectedRevision, idempotencyKey, InterviewAction.RequestReschedule, "") { (_, now) =>
-      Right(InterviewLifecycleEvent.RequestReschedule(now))
+      InterviewLifecycleEvent.RequestReschedule(now)
     }
 
   def dismissRescheduleRequest(
@@ -144,7 +147,7 @@ final class InterviewSchedulingService(
       idempotencyKey: UUID
   ): InterviewActionIO[InterviewWorkflow] =
     act(actor, id, expectedRevision, idempotencyKey, InterviewAction.DismissRequest, "") { (_, _) =>
-      Right(InterviewLifecycleEvent.DismissRescheduleRequest)
+      InterviewLifecycleEvent.DismissRescheduleRequest
     }
 
   /** A recruiter or Admin proposes another time; it only takes effect if the candidate accepts it in time. */
@@ -156,10 +159,10 @@ final class InterviewSchedulingService(
       endsAt: Instant,
       idempotencyKey: UUID
   ): InterviewActionIO[InterviewWorkflow] = {
-    val canonicalStart = startsAt.truncatedTo(java.time.temporal.ChronoUnit.MILLIS)
-    val canonicalEnd = endsAt.truncatedTo(java.time.temporal.ChronoUnit.MILLIS)
+    val canonicalStart = InterviewInterval.canonical(startsAt)
+    val canonicalEnd = InterviewInterval.canonical(endsAt)
     act(actor, id, expectedRevision, idempotencyKey, InterviewAction.Propose, s"$canonicalStart|$canonicalEnd") {
-      (user, now) => Right(InterviewLifecycleEvent.Propose(startsAt, endsAt, user.id, now, proposalTtl))
+      (user, now) => InterviewLifecycleEvent.Propose(startsAt, endsAt, user.id, now, proposalTtl)
     }
   }
 
@@ -170,7 +173,7 @@ final class InterviewSchedulingService(
       idempotencyKey: UUID
   ): InterviewActionIO[InterviewWorkflow] =
     act(actor, id, expectedRevision, idempotencyKey, InterviewAction.Withdraw, "") { (_, now) =>
-      Right(InterviewLifecycleEvent.WithdrawProposal(now))
+      InterviewLifecycleEvent.WithdrawProposal(now)
     }
 
   /** Only the candidate consents: acceptance holds the replacement first, then swaps and cancels the old slot. */
@@ -181,7 +184,7 @@ final class InterviewSchedulingService(
       idempotencyKey: UUID
   ): InterviewActionIO[InterviewWorkflow] =
     act(actor, id, expectedRevision, idempotencyKey, InterviewAction.Accept, "") { (_, now) =>
-      Right(InterviewLifecycleEvent.AcceptProposal(now))
+      InterviewLifecycleEvent.AcceptProposal(now)
     }
 
   def declineReschedule(
@@ -191,7 +194,7 @@ final class InterviewSchedulingService(
       idempotencyKey: UUID
   ): InterviewActionIO[InterviewWorkflow] =
     act(actor, id, expectedRevision, idempotencyKey, InterviewAction.Decline, "") { (_, now) =>
-      Right(InterviewLifecycleEvent.DeclineProposal(now))
+      InterviewLifecycleEvent.DeclineProposal(now)
     }
 
   /** Admin only: informational notifications whose delivery budget is spent, awaiting repair. */
@@ -201,7 +204,7 @@ final class InterviewSchedulingService(
   ): UseCaseIO[List[InterviewWorkflowCommandRecord]] =
     for {
       _ <- authorization.requireAdmin(actor)
-      records <- UseCase.repository(workflows.findNotificationRepairs(id))
+      records <- UseCaseIO.repository(workflows.findNotificationRepairs(id))
     } yield records
 
   /** Admin only: requeues every spent informational notification of the workflow with a fresh budget. */
@@ -213,14 +216,8 @@ final class InterviewSchedulingService(
     for {
       admin <- authorization.requireAdmin(actor)
       now <- EitherT.liftF(currentTime)
-      repaired <- UseCase.repository(workflows.repairNotifications(id, idempotencyKey, now, admin.id))
+      repaired <- UseCaseIO.repository(workflows.repairNotifications(id, idempotencyKey, now, admin.id))
     } yield repaired
-
-  private def initiatorOf(role: UserRole): InterviewCancellationInitiator = role match {
-    case UserRole.Candidate => InterviewCancellationInitiator.Candidate
-    case UserRole.Recruiter => InterviewCancellationInitiator.Recruiter
-    case UserRole.Admin     => InterviewCancellationInitiator.Admin
-  }
 
   private def useCase[A](value: UseCaseIO[A]): InterviewActionIO[A] = value.leftMap(InterviewActionError.UseCase.apply)
 
@@ -236,21 +233,13 @@ final class InterviewSchedulingService(
       action: InterviewAction,
       canonicalInput: String
   )(
-      event: (User, Instant) => Either[InterviewWorkflowError, InterviewLifecycleEvent]
+      event: (User, Instant) => InterviewLifecycleEvent
   ): InterviewActionIO[InterviewWorkflow] =
     for {
       user <- useCase(authorization.resolve(actor))
-      visible <- useCase(
-        UseCase.repository(
-          if (user.role == UserRole.Admin) workflows.findForAdmin(id)
-          else workflows.findForActor(id, InterviewWorkflowAccess(user.id, user.role))
-        )
-      )
-      _ <- EitherT.fromEither[IO](
-        visible.toRight(InterviewActionError.UseCase(UseCaseError.Domain(DomainError.NotFound("interviewWorkflow"))))
-      )
+      _ <- useCase(visibleTo(user, id))
       now <- EitherT.liftF[IO, InterviewActionError, Instant](currentTime)
-      decided <- EitherT.fromEither[IO](event(user, now).leftMap(InterviewActionError.Workflow.apply))
+      decided = event(user, now)
       _ <- EitherT.cond[IO](
         InterviewActorPolicy.permits(user.role, user.id, decided),
         (),
@@ -264,7 +253,7 @@ final class InterviewSchedulingService(
         )
       )
       outcome <- useCase(
-        UseCase.repository(workflows.applyLifecycle(id, expectedRevision, decided, origin, now, None))
+        UseCaseIO.repository(workflows.applyLifecycle(id, expectedRevision, decided, origin, now, None))
       )
       workflow <- EitherT.fromEither[IO](outcomeToWorkflow(action, outcome))
     } yield workflow

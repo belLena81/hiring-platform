@@ -1,5 +1,5 @@
 package com.example.hiring.analytics
-import com.example.hiring.analytics.app.AppModule
+import com.example.hiring.analytics.adapter.spark.SparkRuntime
 import com.example.hiring.analytics.errors.*
 
 import cats.effect.{Deferred, IO, Resource}
@@ -158,7 +158,7 @@ class AnalyticsBatchResourceSpec extends FunSuite {
     val acquired = new AtomicReference[
       Option[(SparkSession, MongoClient[IO], com.example.hiring.analytics.adapter.spark.SparkBlockingExecution[IO])]
     ](None)
-    val resources = AppModule.managedSparkMongo[IO](
+    val resources = SparkRuntime.managedSparkMongo[IO](
       execution =>
         execution {
           org.apache.spark.sql.classic.SparkSession
@@ -194,7 +194,7 @@ class AnalyticsBatchResourceSpec extends FunSuite {
   test("Spark driver execution context is released when Spark startup fails") {
     val acquired =
       new AtomicReference[Option[com.example.hiring.analytics.adapter.spark.SparkBlockingExecution[IO]]](None)
-    val resources = AppModule.managedSparkMongo[IO](
+    val resources = SparkRuntime.managedSparkMongo[IO](
       execution =>
         IO.delay(acquired.set(Some(execution))) *> IO.raiseError(new IllegalStateException("startup failed")),
       MongoClient.fromConnectionString[IO]("mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=200")

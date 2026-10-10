@@ -161,7 +161,12 @@ final class InterviewCancellationRaceIntegrationSpec extends MongoIntegrationSui
             None
           )
           written <- applications
-            .updateStatusWithEvents(stored.copy(status = ApplicationStatus.Hired, updatedAt = now), event, Nil)
+            .updateStatusWithEvents(
+              stored.copy(status = ApplicationStatus.Hired, updatedAt = now),
+              event,
+              Nil,
+              MutationWriteContext.directWrite
+            )
             .value
         } yield written.isRight
         for {

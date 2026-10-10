@@ -14,6 +14,7 @@ import com.example.graphQL.cats.infrastructure.kafka.{
 }
 import com.example.graphQL.cats.service.Diagnostics
 import com.example.graphQL.cats.service.port.*
+import com.example.graphQL.cats.service.RepositoryError
 import org.apache.kafka.clients.admin.Admin
 import org.apache.kafka.clients.consumer.{CloseOptions, ConsumerConfig, KafkaConsumer}
 import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig, ProducerRecord, RecordMetadata}
@@ -167,7 +168,7 @@ final class InterviewPublicationFencingIntegrationSpec extends KafkaIntegrationS
               case InterviewExecutionClaimOutcome.Acquired(value) => IO.pure(value)
               case other => IO.raiseError(new AssertionError(s"Missing execution claim: $other"))
             }
-            _ <- success(repository.recordResult(executing, InterviewCommandResult.Succeeded, now))
+            _ <- success(repository.recordResult(executing, InterviewResult.Succeeded, now))
             results <- success(repository.claimDueCommands("result-fencing-proof", now, now.plusSeconds(600), 1))
             publishing <- IO.fromOption(results.headOption)(new AssertionError("missing result claim"))
           } yield publishing
@@ -179,7 +180,7 @@ final class InterviewPublicationFencingIntegrationSpec extends KafkaIntegrationS
         0L,
         value.id.value,
         value.preCommitDeadline,
-        claim.record.result.map(InterviewResult.fromCommandResult),
+        claim.record.result,
         claim.record.occurredAt
       )
     } yield Scheduled(value, claim, message)
@@ -227,7 +228,7 @@ final class InterviewPublicationFencingIntegrationSpec extends KafkaIntegrationS
                     repository.authorizePublication(item.claim, transport.generationFor(item.message), at)
                   )
                   _ = assert(firstPermission)
-                  _ <- success(repository.retry(item.claim, at, at, "publication_unavailable"))
+                  _ <- success(repository.retry(item.claim, at, at, InterviewFailureCode.PublicationUnavailable))
                   nextClaims <- success(repository.claimDueCommands("fencing-proof-retry", at, at.plusSeconds(600), 1))
                   nextClaim <- IO.fromOption(nextClaims.headOption)(new AssertionError("missing retry claim"))
                   _ = assert(

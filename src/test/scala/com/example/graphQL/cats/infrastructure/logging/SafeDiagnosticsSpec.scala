@@ -2,7 +2,7 @@ package com.example.graphQL.cats.infrastructure.logging
 
 import cats.effect.{Deferred, IO, Ref, Resource}
 import cats.syntax.all.*
-import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFields}
+import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFields, LogOutcome, PublicLogValues}
 import com.example.graphQL.cats.service.Diagnostics.*
 import com.example.graphQL.cats.config.AppConfigFixtures
 import io.circe.parser.parse
@@ -24,7 +24,7 @@ class SafeDiagnosticsSpec extends CatsEffectSuite {
         previous
       })(previous => IO(logger.setLevel(previous)))
       .use { _ =>
-        SafeDiagnostics()
+        SafeDiagnostics(maskSensitive = true, PublicLogValues.none)
           .event(
             LogEvent.Started,
             fields = {
@@ -53,7 +53,9 @@ class SafeDiagnosticsSpec extends CatsEffectSuite {
       )
       .use { appender =>
         val events = List(LogEvent.Started, LogEvent.RequestRejected, LogEvent.RuntimeFailed)
-        events.traverse_(event => SafeDiagnostics().event(event, Some(requestId))) *> IO {
+        events.traverse_(event =>
+          SafeDiagnostics(maskSensitive = true, PublicLogValues.none).event(event, Some(requestId))
+        ) *> IO {
           val captured = appender.list.asScala.toList.filter(_.getFormattedMessage.contains(requestId))
           assertEquals(captured.size, events.size)
           captured.zip(events).foreach { case (record, event) =>
@@ -239,6 +241,25 @@ class SafeDiagnosticsSpec extends CatsEffectSuite {
     assert(!LogFields.validPublic(LogField.ErrorLocation, "ResolverFile.scala:1000000"))
   }
 
+  test("LOG-01 every LogOutcome value is a valid public outcome field") {
+    LogOutcome.values.foreach(outcome => assert(LogFields.validPublic(LogField.Outcome, outcome.wire), outcome.wire))
+    assert(!LogFields.validPublic(LogField.Outcome, "UNLISTED"))
+  }
+
+  test("LOG-01 adapter failure types and configuration keys are public only when startup allow-lists them") {
+    val setup = new com.example.graphQL.cats.repository.mongo.MongoSetupError("fixed")
+    val typeName = setup.getClass.getName
+    assertEquals(LogFields.failure(setup).get(LogField.ErrorType), Some(typeName))
+    assert(!LogFields.validPublic(LogField.ErrorType, typeName))
+    assert(!LogFields.validPublic(LogField.ConfigKey, "HTTP_HOST"))
+    assert(
+      LogFields.validPublic(LogField.ErrorType, typeName, com.example.graphQL.cats.runtime.HiringLogValues.allowed)
+    )
+    assert(
+      LogFields.validPublic(LogField.ConfigKey, "HTTP_HOST", com.example.graphQL.cats.runtime.HiringLogValues.allowed)
+    )
+  }
+
   test("LOG-01 records have bounded details and cannot inject additional log lines") {
     for {
       emitted <- Ref.of[IO, Vector[String]](Vector.empty)
@@ -295,7 +316,7 @@ class SafeDiagnosticsSpec extends CatsEffectSuite {
   }
 
   test("P1-AC09 backend suppresses raw framework and driver emitters at every app level") {
-    SafeDiagnostics.configure().flatMap { _ =>
+    SafeDiagnostics.configure(maskSensitive = true, PublicLogValues.none).flatMap { _ =>
       IO {
         List("ROOT", "org.mongodb.driver", "org.http4s", "org.typelevel", "com.mongodb.ConnectionString").foreach {
           name =>

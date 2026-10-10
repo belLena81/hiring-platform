@@ -11,9 +11,9 @@ import com.example.graphQL.cats.service.port.{
   RepositoryIO,
   InterviewCleanupUpdate,
   InterviewCleanupCursor,
-  InterviewCleanupPage,
-  RepositoryError
+  InterviewCleanupPage
 }
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.domain.workflow.{
   InterviewCleanupObservation,
   InterviewCleanupState,
@@ -741,7 +741,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
             .append("commandState", "Pending")
             .append("availableAt", java.util.Date.from(Instant.now()))
             .append("occurredAt", java.util.Date.from(Instant.now()))
-            .append("command", new Document("kind", "requireRepair").append("reason", "Orphan command cleanup"))
+            .append("command", new Document("kind", "requireRepair").append("reason", "retry exhausted: provider"))
         )
         _ <- cleanup.enqueue(subject, Instant.now(), None).value.flatMap(result => IO(assert(result.isRight)))
         absentBefore <- cleanup.absent(subject).value
@@ -807,7 +807,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
           .append("commandState", "Pending")
           .append("availableAt", at)
           .append("occurredAt", at)
-          .append("command", new Document("kind", "requireRepair").append("reason", "Cleanup verification")),
+          .append("command", new Document("kind", "requireRepair").append("reason", "retry exhausted: provider")),
         MongoCollections.InterviewWorkflowInbox -> new Document("_id", s"$id:receipt")
           .append("workflowId", id)
       )

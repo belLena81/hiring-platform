@@ -1437,10 +1437,6 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     override def find(id: UserId): RepositoryIO[Option[User]] =
       com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(ref.get.map(_.get(id)).map(Right(_)))
 
-    override def findMany(ids: List[UserId]): RepositoryIO[List[User]] =
-      com.example.graphQL.cats.service.port.RepositoryIO
-        .fromIOEither(batches.update(_ :+ ids) *> ref.get.map(users => Right(ids.distinct.flatMap(users.get))))
-
     override def updateEmbedding(
         id: UserId,
         embedding: com.example.graphQL.cats.domain.model.EntityEmbedding
@@ -1474,7 +1470,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       com.example.graphQL.cats.service.port.RepositoryIO
         .fromEither(Right(List.empty[com.example.graphQL.cats.service.search.CandidateSearchEligibility]))
 
-    override def jobEligibility(ids: List[com.example.graphQL.cats.domain.model.Identifiers.JobId]) =
+    private def jobEligibility(ids: List[com.example.graphQL.cats.domain.model.Identifiers.JobId]) =
       com.example.graphQL.cats.service.port.RepositoryIO.fromEither(
         Right(
           jobs
@@ -1482,10 +1478,6 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
             .map(hit => com.example.graphQL.cats.service.search.JobSearchEligibility.fromJob(hit.job))
         )
       )
-    override def candidateEligibility(ids: List[com.example.graphQL.cats.domain.model.Identifiers.UserId]) =
-      com.example.graphQL.cats.service.port.RepositoryIO
-        .fromEither(Right(List.empty[com.example.graphQL.cats.service.search.CandidateSearchEligibility]))
-
     override def searchJobs(query: VectorSearchQuery): RepositoryIO[List[JobRetrievalHit]] =
       com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Right(jobs.map(_.retrieval))))
 

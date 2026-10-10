@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.service.application.committed
 import cats.data.EitherT
 import cats.effect.{IO, Ref, Resource}
 import cats.syntax.all.*
@@ -310,7 +311,8 @@ private[mongo] final case class InterviewLifecycleScenario(
       _ <- worker.publishDue(transport)
       pending <- inFlight.getAndSet(Vector.empty)
       outcomes <- pending.toList.traverse { message =>
-        (if (message.result.isEmpty) worker.receiveCommand(message) else worker.receiveResult(message)).attempt
+        (if (message.result.isEmpty) worker.receiveCommand(message).committed
+         else worker.receiveResult(message).committed).attempt
           .map(message -> _)
       }
       _ <- inFlight.update(kept =>

@@ -194,7 +194,7 @@ private[mongo] object MongoWorkflowIntegrityMigrations {
 
   private def cutover(run: MigrationRun): IO[Unit] = {
     val commands = run.database.getCollection(MongoCollections.InterviewWorkflowCommands)
-    def scan(after: Option[String]): IO[Unit] =
+    MongoBatchScan.byId(BatchSize, Option.empty[String])(after =>
       commands
         .find(after.fold(Filters.empty())(id => Filters.gt(MongoFields.Id, id)))
         .sort(Sorts.ascending(MongoFields.Id))
@@ -202,17 +202,15 @@ private[mongo] object MongoWorkflowIntegrityMigrations {
         .boundedStream(32)
         .compile
         .toList
-        .flatMap { rows =>
-          rows.traverse_(row =>
-            IO.fromEither(
-              MongoInterviewWorkflowCommandCodec
-                .decodeStored(row)
-                .leftMap(_ => MigrationError.StepFailed(run.id, "cutover rejected a command"))
-            ).void
-          ) *>
-            (if (rows.size == BatchSize) scan(rows.lastOption.map(_.getString(MongoFields.Id))) else IO.unit)
-        }
-    scan(None) *>
+    )(row => IO.delay(row.getString(MongoFields.Id)))(
+      _.traverse_(row =>
+        IO.fromEither(
+          MongoInterviewWorkflowCommandCodec
+            .decodeStored(row)
+            .leftMap(_ => MigrationError.StepFailed(run.id, "cutover rejected a command"))
+        ).void
+      )
+    ) *>
       validators.traverse_ { case (name, validator) => MongoHiringValidators.install(run.database, name, validator) } *>
       verifyStored(run) *> MongoMigrationLedger.requireComplete(run.database, CoveredProofs)
   }

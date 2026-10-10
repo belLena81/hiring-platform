@@ -43,7 +43,7 @@ class InterviewLifecycleRepairSpec extends FunSuite {
 
   repairable.foreach { case (workflow, lookups) =>
     test(s"DHW-29 a retry-exhausted ${workflow.phase} records its origin and repair resumes it by lookup") {
-      val failed = decided(workflow, Event.RetryExhausted("provider")).workflow
+      val failed = decided(workflow, Event.RetryExhausted(InterviewFailureCode.Provider)).workflow
       assertEquals(failed.phase, Phase.RepairRequired)
       assertEquals(failed.repairOrigin, Some(workflow.phase))
       val repaired = decided(failed, Event.Repair)
@@ -67,7 +67,7 @@ class InterviewLifecycleRepairSpec extends FunSuite {
   test("DHW-29 repair needs a recorded origin, the failed state and the current revision") {
     val noOrigin = workflowIn(Phase.RepairRequired)
     assertEquals(decide(noOrigin, Event.Repair), Left(InterviewWorkflowError.InvalidTransition))
-    val failed = decided(workflowIn(Phase.CancelPending), Event.RetryExhausted("provider")).workflow
+    val failed = decided(workflowIn(Phase.CancelPending), Event.RetryExhausted(InterviewFailureCode.Provider)).workflow
     assertEquals(
       InterviewLifecyclePolicy.decide(failed, failed.revision - 1, Event.Repair),
       Left(InterviewWorkflowError.StaleRevision)
@@ -88,8 +88,9 @@ class InterviewLifecycleRepairSpec extends FunSuite {
 
   test("DHW-29 a repaired step that fails again records the same origin once more") {
     val workflow = workflowIn(Phase.CancelPending)
-    val repaired = decided(decided(workflow, Event.RetryExhausted("provider")).workflow, Event.Repair).workflow
-    val failedAgain = decided(repaired, Event.RetryExhausted("provider")).workflow
+    val repaired =
+      decided(decided(workflow, Event.RetryExhausted(InterviewFailureCode.Provider)).workflow, Event.Repair).workflow
+    val failedAgain = decided(repaired, Event.RetryExhausted(InterviewFailureCode.Provider)).workflow
     assertEquals(failedAgain.repairOrigin, Some(Phase.CancelPending))
   }
 }

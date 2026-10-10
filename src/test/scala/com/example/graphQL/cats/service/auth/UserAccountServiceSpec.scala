@@ -648,8 +648,6 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
     val ref: IO[Map[UserId, User]] = IO.pure(values)
     override def find(id: UserId): RepositoryIO[Option[User]] =
       com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Right(values.get(id))))
-    override def findMany(ids: List[UserId]): RepositoryIO[List[User]] =
-      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Right(ids.flatMap(values.get))))
     override def updateEmbedding(id: UserId, embedding: EntityEmbedding): RepositoryIO[Unit] =
       com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Right(())))
   }

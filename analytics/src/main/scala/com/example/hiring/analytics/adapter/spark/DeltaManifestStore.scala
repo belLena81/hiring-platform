@@ -15,12 +15,14 @@ private[analytics] final class DeltaManifestStore[F[_]: Async](
     paths: AnalyticsLakehousePaths,
     sparkExecution: SparkExecution[F]
 ) extends AnalyticsRunManifestStore[F] {
+  private val lakehouse = new LakehouseOperation[F](sparkExecution)
+
   override def persist(
       manifest: AnalyticsRunManifest,
       status: AnalyticsManifestStatus,
       updatedAt: java.time.Instant
   ): F[Unit] =
-    LakehouseErrors.adapt(sparkExecution {
+    lakehouse {
       val rows = manifest.offsetRanges.map(range =>
         Row(
           manifest.runId.value,
@@ -42,5 +44,5 @@ private[analytics] final class DeltaManifestStore[F[_]: Async](
         .insertAll()
         .execute()
       ()
-    })
+    }
 }

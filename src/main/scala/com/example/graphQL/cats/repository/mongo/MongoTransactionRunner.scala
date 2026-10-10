@@ -1,7 +1,8 @@
 package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.{IO, Resource}
-import com.example.graphQL.cats.service.port.{RepositoryError, RepositoryIO}
+import com.example.graphQL.cats.service.port.{RepositoryIO}
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.Diagnostics
 import cats.syntax.all.*
 import mongo4cats.client.{ClientSession, MongoClient}

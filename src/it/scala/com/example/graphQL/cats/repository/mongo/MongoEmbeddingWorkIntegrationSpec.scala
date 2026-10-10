@@ -7,6 +7,7 @@ import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.AccountValueFixtures.email
 import com.example.graphQL.cats.service.port.*
+import com.example.graphQL.cats.service.RepositoryError
 import com.mongodb.client.model.Filters
 import mongo4cats.database.MongoDatabase
 import org.bson.Document
@@ -195,7 +196,7 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
             if (candidateWork)
               com.example.graphQL.cats.service.search.EmbeddingWork.CandidateProfileChanged(candidateId)
             else com.example.graphQL.cats.service.search.EmbeddingWork.JobChanged(application.jobId)
-          key = com.example.graphQL.cats.service.search.DurableEmbeddingWorkPublisher.keyFor(changed)
+          key = com.example.graphQL.cats.service.search.EmbeddingWorkKeys.keyFor(changed)
           _ <- successful(work.enqueue(key, at))
           _ <- com.example.graphQL.cats.service.search.EmbeddingPipeline
             .resource(

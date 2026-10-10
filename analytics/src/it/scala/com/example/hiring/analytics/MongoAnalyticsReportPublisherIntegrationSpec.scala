@@ -167,7 +167,7 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends AnalyticsMongoIntegra
         )
       val malformed =
         publisher.reserve(asRunId("malformed"), asFingerprint("range-malformed"), now).attempt.unsafeRunSync()
-      assert(malformed.left.exists(_.isInstanceOf[AnalyticsError.InvalidConfiguration]))
+      assert(malformed.left.exists(_.isInstanceOf[AnalyticsError.DataIntegrityViolation]))
       val invalidStateRun = publisher
         .reserve(asRunId("invalid-state"), asFingerprint("range-invalid-state"), now)
         .unsafeRunSync()
@@ -176,7 +176,7 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends AnalyticsMongoIntegra
         .updateOne(new Document("_id", "invalid-state"), Updates.set("state", "Unexpected"))
       val invalidState =
         publisher.publish(invalidStateRun, report, expiry).attempt.unsafeRunSync()
-      assert(invalidState.left.exists(_.isInstanceOf[AnalyticsError.InvalidConfiguration]))
+      assert(invalidState.left.exists(_.isInstanceOf[AnalyticsError.DataIntegrityViolation]))
     } finally {
       client.close()
       AnalyticsMongo4catsTestSupport.close(reactiveClient)

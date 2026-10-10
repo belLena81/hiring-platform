@@ -1,7 +1,7 @@
 package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.{IO, Resource}
-import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFields, ProbeResult}
+import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFields, LogOutcome, ProbeResult}
 import com.example.graphQL.cats.service.port.DatabaseProbe
 import com.example.graphQL.cats.service.Diagnostics.*
 import com.mongodb.{MongoClientSettings, MongoSecurityException, MongoSocketException, MongoTimeoutException}
@@ -78,7 +78,7 @@ object MongoDatabaseProbe {
         .flatMap { case (elapsed, (result, failure)) =>
           val fields = metadata ++ failure ++ Map(
             LogField.DurationMs -> elapsed.toMillis.toString,
-            LogField.Outcome -> "NOT_READY"
+            LogField.Outcome -> LogOutcome.NotReady.wire
           )
           (if (result == ProbeResult.Ready) IO.unit
            else diagnostics.emit(LogEvent.MongoProbeFailed, requestId, fields = fields)).as(result)

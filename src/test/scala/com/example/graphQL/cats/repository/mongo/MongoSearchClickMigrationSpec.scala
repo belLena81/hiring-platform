@@ -3,7 +3,7 @@ package com.example.graphQL.cats.repository.mongo
 import cats.effect.{IO, Ref}
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFields}
-import com.example.graphQL.cats.service.events.OperationalEvents
+import com.example.graphQL.cats.service.events.{OperationalEventPayload, OperationalEvents}
 import munit.CatsEffectSuite
 import org.bson.Document
 
@@ -20,7 +20,7 @@ final class MongoSearchClickMigrationSpec extends CatsEffectSuite {
         UUID.fromString("00000000-0000-0000-0000-000000000004"),
         searchId,
         resultId,
-        "candidateMatches",
+        OperationalEventPayload.SearchKind.CandidateMatches,
         actor,
         1,
         Instant.parse("2026-09-22T12:00:00Z")

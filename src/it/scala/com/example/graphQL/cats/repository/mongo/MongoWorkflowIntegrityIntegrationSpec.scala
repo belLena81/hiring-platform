@@ -22,7 +22,7 @@ final class MongoWorkflowIntegrityIntegrationSpec extends MongoIntegrationSuite 
       .append("commandState", "Pending")
       .append("availableAt", now)
       .append("occurredAt", now)
-      .append("command", new Document("kind", "requireRepair").append("reason", "Manual repair"))
+      .append("command", new Document("kind", "requireRepair").append("reason", "retry exhausted: provider"))
   }
 
   test("strict command validation rejects malformed claims and completed cutover fails closed on validator drift") {

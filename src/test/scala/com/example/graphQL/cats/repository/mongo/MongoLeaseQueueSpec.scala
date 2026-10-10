@@ -25,7 +25,7 @@ final class MongoLeaseQueueSpec extends FunSuite {
   test("a lease is held strictly after its expiry instant and reclaimable at or before it") {
     assertEquals(document(MongoLeaseQueue.leaseHeld(now).bson), document(Filters.gt("leaseUntil", Date.from(now))))
     assertEquals(
-      document(MongoLeaseQueue.leaseExpired(now).bson),
+      document(MongoLeaseQueue.Standard.expired(now).bson),
       document(Filters.lte("leaseUntil", Date.from(now)))
     )
   }
@@ -62,5 +62,24 @@ final class MongoLeaseQueueSpec extends FunSuite {
         .set("leaseUntil", Date.from(leaseUntil))
         .set("updatedAt", Date.from(now))
     )
+  }
+
+  test("a lease stored under other field names stamps, holds and releases exactly those names") {
+    val fields = MongoLeaseQueue.LeaseFields("claimOwner", "claimToken", "claimUntil")
+    val stamp = Updates.combine(
+      Updates.set("claimOwner", "worker-1"),
+      Updates.set("claimToken", "token-1"),
+      Updates.set("claimUntil", Date.from(leaseUntil))
+    )
+    assertEquals(
+      document(fields.stamp("worker-1", "token-1", leaseUntil).bson),
+      document(stamp)
+    )
+    assertEquals(
+      document(fields.release.bson),
+      document(Updates.combine(Updates.unset("claimOwner"), Updates.unset("claimToken"), Updates.unset("claimUntil")))
+    )
+    assertEquals(document(fields.held(now).bson), document(Filters.gt("claimUntil", Date.from(now))))
+    assertEquals(document(fields.expired(now).bson), document(Filters.lte("claimUntil", Date.from(now))))
   }
 }

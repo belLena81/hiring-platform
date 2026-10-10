@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
-import cats.effect.IO
+import cats.effect.{Clock, IO}
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.domain.workflow.{
@@ -25,7 +25,13 @@ import com.example.graphQL.cats.service.{RepositoryError, Diagnostics}
 import mongo4cats.client.ClientSession
 import mongo4cats.database.MongoDatabase
 import org.bson.Document
-import com.example.graphQL.cats.repository.mongo.MongoDocumentFields.Repository.{instant, int64, string, stringVector}
+import com.example.graphQL.cats.repository.mongo.MongoDocumentFields.Repository.{
+  instant,
+  int64,
+  string,
+  stringVector,
+  uuid
+}
 import com.mongodb.client.model.{Sorts, UpdateOptions}
 import java.time.Instant
 import java.util.UUID
@@ -40,17 +46,11 @@ final class MongoInterviewSubjectCleanup(
     database: MongoDatabase[IO],
     diagnostics: Diagnostics = Diagnostics.noop,
     topics: InterviewTopicPair = InterviewTopicPair.Default,
-    holds: InterviewHoldCanceller = InterviewHoldCanceller.ledgerOwned
+    holds: InterviewHoldCanceller = InterviewHoldCanceller.ledgerOwned,
+    clock: Clock[IO] = Clock[IO]
 ) extends InterviewSubjectCleanupRepository {
   private val queue = Mongo4catsCollections.documents(database, MongoCollections.InterviewSubjectCleanup)
   private val workflows = Mongo4catsCollections.documents(database, MongoCollections.InterviewWorkflows)
-  private val RelatedCollections = List(
-    MongoCollections.InterviewWorkflows,
-    MongoCollections.InterviewWorkflowCommands,
-    MongoCollections.InterviewWorkflowInbox,
-    MongoCollections.InterviewCalendarReservations,
-    MongoCollections.InterviewNotificationReceipts
-  )
   private val ProducerIdsField = "interviewTransactionalIds"
 
   /** Called within account deletion after its permanent subject fence is marked deleted. */
@@ -59,7 +59,7 @@ final class MongoInterviewSubjectCleanup(
       ids <- MongoProducerRegistrations.batch(database, subject.value.toString, "Interview")
       attributable <- hasAttributableData(subject, session)
       _ <-
-        if (!attributable && ids.isEmpty) RepositoryIO.fromEither(Right(()))
+        if (!attributable && ids.isEmpty) ().pure[RepositoryIO]
         else
           RepositoryIO
             .lift(
@@ -92,7 +92,7 @@ final class MongoInterviewSubjectCleanup(
   private def hasAttributableData(subject: UserId, session: Option[ClientSession[IO]]): RepositoryIO[Boolean] =
     RepositoryIO
       .lift(
-        RelatedCollections
+        MongoInterviewFields.EvidenceCollections
           .traverse(name =>
             MongoSessionOperations.findOne(
               Mongo4catsCollections.documents(database, name),
@@ -332,7 +332,7 @@ final class MongoInterviewSubjectCleanup(
                 .orElse(Option(row.getString("_id")))
             )
             .distinct
-          if (ids.isEmpty) RepositoryIO.fromEither(Right(()))
+          if (ids.isEmpty) ().pure[RepositoryIO]
           else releaseLiveHolds(ids) *> RepositoryIO.lift(deleteLinked(ids)) *> batch
         }
     batch *> RepositoryIO.lift(
@@ -386,17 +386,15 @@ final class MongoInterviewSubjectCleanup(
   /** A row without a canonical provider identity was never created by a provider call and holds no external slot. */
   private def liveHold(row: Document): Option[InterviewLiveHold] =
     for {
-      workflow <- Option(row.get("workflowId")).collect { case value: String => value }
-      id <- Either.catchNonFatal(UUID.fromString(workflow)).toOption.filter(_.toString == workflow)
-      reserveKey <- Option(row.get(ReserveKeyField)).collect { case value: String => value }
-      workflowId = InterviewWorkflowId(id)
+      workflowId <- uuid(row, "workflowId").toOption.map(InterviewWorkflowId.apply)
+      reserveKey <- string(row, ReserveKeyField).toOption
       cancelKey <- InterviewCalendarKeys.cancellationKeyFor(workflowId, reserveKey)
     } yield InterviewLiveHold(workflowId, reserveKey, cancelKey)
 
   private def releaseHold(row: Document): RepositoryIO[Unit] =
-    liveHold(row).fold(RepositoryIO.fromEither[Unit](Right(()))) { hold =>
+    liveHold(row).fold(().pure[RepositoryIO]) { hold =>
       RepositoryIO
-        .lift(IO.realTimeInstant)
+        .lift(clock.realTimeInstant)
         .flatMap { now =>
           RepositoryIO.fromIOEither(holds.cancel(hold, now).value.map {
             case Right(InterviewCalendarCancellation.Cancelled(at))        => Right(at)
@@ -441,12 +439,7 @@ private[mongo] object MongoInterviewCleanupCodec {
       row: Document,
       topics: InterviewTopicPair = InterviewTopicPair.Default
   ): Either[RepositoryError, InterviewSubjectCleanup] = for {
-    id <- string(row, MongoFields.Id).flatMap(value =>
-      Either
-        .catchNonFatal(UUID.fromString(value))
-        .leftMap(_ => RepositoryError.InvalidStoredData)
-        .flatMap(id => Either.cond(id.toString == value, id, RepositoryError.InvalidStoredData))
-    )
+    id <- uuid(row, MongoFields.Id)
     revision <- int64(row, "revision")
     requested <- instant(row, "requestedAt")
     ids <- stringVector(row, ProducerIdsField)

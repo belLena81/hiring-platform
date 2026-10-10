@@ -26,7 +26,7 @@ private[analytics] object HmacKeyRetirementAuthorization {
         value.evidenceFacts.nonEmpty && value.evidenceFacts.length <= 8192 &&
         value.evidenceDigest == digest(value.evidenceFacts),
       value,
-      AnalyticsError.InvalidConfiguration("HMAC key retirement authorization is malformed")
+      AnalyticsError.DataIntegrityViolation("HMAC key retirement authorization is malformed")
     )
 }
 

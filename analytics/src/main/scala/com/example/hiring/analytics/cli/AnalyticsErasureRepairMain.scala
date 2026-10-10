@@ -58,7 +58,7 @@ object AnalyticsErasureRepairMain
           .flatMap { requests =>
             requests.traverse_(request =>
               IO.println(
-                s"request=${request.requestId.value} phase=${request.phase} attempts=${request.attemptCount} category=${request.failureCategory}"
+                s"request=${request.requestId.value} phase=${request.phase.persistedName} attempts=${request.attemptCount} category=${request.failureCategory.persistedName}"
               )
             )
           }

@@ -23,7 +23,7 @@ import com.example.graphQL.cats.service.{
 }
 import com.example.graphQL.cats.service.auth.UserAuthenticationService
 import com.example.graphQL.cats.service.ServiceFixtures
-import com.example.graphQL.cats.config.{AuthRateLimitConfig, JwtAuthConfig, TrustedProxyConfig}
+import com.example.graphQL.cats.config.{RateLimitConfig, JwtAuthConfig, TrustedProxyConfig}
 import com.comcast.ip4s.{Cidr, SocketAddress}
 import com.example.graphQL.cats.domain.model.UserRole
 import io.circe.Json
@@ -56,10 +56,10 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         Either[com.example.graphQL.cats.api.auth.AuthFailure, Option[com.example.graphQL.cats.service.ActorContext]]
       ] = _ => IO.pure(Right(None)),
       hiringReady: IO[ProbeResult] = IO.pure(ProbeResult.Ready),
-      authRateLimit: AuthRateLimitConfig = AuthRateLimitConfig(60, 100, 1000),
+      authRateLimit: RateLimitConfig = RateLimitConfig(60, 100, 1000),
       trustedProxy: TrustedProxyConfig = TrustedProxyConfig(Nil),
-      interviewActionRateLimit: com.example.graphQL.cats.config.InterviewActionRateLimitConfig =
-        com.example.graphQL.cats.config.InterviewActionRateLimitConfig(60, 1000, 1000)
+      interviewActionRateLimit: com.example.graphQL.cats.config.RateLimitConfig =
+        com.example.graphQL.cats.config.RateLimitConfig(60, 1000, 1000)
   ): IO[HiringApiRoutes] =
     TestGraphQLSupport
       .dependencies(hiring, authenticate, hiringReady, authRateLimit, trustedProxy, interviewActionRateLimit)
@@ -419,7 +419,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       http <- buildRoutes(
         new HealthService(probe, diagnostics),
         diagnostics,
-        authRateLimit = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100)
+        authRateLimit = RateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100)
       ).flatMap(defaultApp)
       firstLogin <- http(request(login))
       limitedLogin <- http(request(login))
@@ -534,7 +534,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
           IO.pure(
             Right(Some(com.example.graphQL.cats.service.ActorContext(ServiceFixtures.candidateId, UserRole.Candidate)))
           ),
-        interviewActionRateLimit = com.example.graphQL.cats.config.InterviewActionRateLimitConfig(60, 1, 100)
+        interviewActionRateLimit = com.example.graphQL.cats.config.RateLimitConfig(60, 1, 100)
       ).flatMap(defaultApp)
       response <- http(request(mutation))
       body <- response.as[Json]
@@ -593,7 +593,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       http <- buildRoutes(
         new HealthService(probe, Diagnostics.noop),
         Diagnostics.noop,
-        authRateLimit = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100)
+        authRateLimit = RateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100)
       ).flatMap(defaultApp)
       aliasResponse <- http(request(repeatedAliases))
       mixedResponse <- http(request(mixedOperations))
@@ -635,7 +635,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       http <- buildRoutes(
         new HealthService(probe, Diagnostics.noop),
         Diagnostics.noop,
-        authRateLimit = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100)
+        authRateLimit = RateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100)
       ).flatMap(defaultApp)
       harmlessFirst <- http(request(document, "Harmless"))
       harmlessSecond <- http(request(document, "Harmless"))
@@ -687,7 +687,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       http <- buildRoutes(
         new HealthService(probe, Diagnostics.noop),
         Diagnostics.noop,
-        authRateLimit = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100)
+        authRateLimit = RateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100)
       ).flatMap(defaultApp)
       firstNamedLogin <- http(request(namedLogin))
       limitedNamedLogin <- http(request(namedLogin))
@@ -746,7 +746,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       http <- buildRoutes(
         new HealthService(probe, Diagnostics.noop),
         Diagnostics.noop,
-        authRateLimit = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100)
+        authRateLimit = RateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100)
       ).flatMap(defaultApp)
       firstCreate <- http(request(createJob))
       secondCreate <- http(request(createJob))
@@ -776,7 +776,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       http <- buildRoutes(
         new HealthService(probe, Diagnostics.noop),
         Diagnostics.noop,
-        authRateLimit = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100),
+        authRateLimit = RateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100),
         trustedProxy = trustedProxy
       ).flatMap(defaultApp)
       firstClientLogin <- http(proxiedRequest(login, "10.0.0.5", "for=203.0.113.10"))
@@ -816,7 +816,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       http <- buildRoutes(
         new HealthService(probe, Diagnostics.noop),
         Diagnostics.noop,
-        authRateLimit = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100)
+        authRateLimit = RateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100)
       ).flatMap(defaultApp)
       first <- http(proxiedRequest(login, "198.51.100.10", "for=203.0.113.10"))
       limited <- http(proxiedRequest(login, "198.51.100.10", "for=203.0.113.11"))
@@ -843,7 +843,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       http <- buildRoutes(
         new HealthService(probe, Diagnostics.noop),
         Diagnostics.noop,
-        authRateLimit = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100),
+        authRateLimit = RateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100),
         trustedProxy = trustedProxy
       ).flatMap(defaultApp)
       first <- http(proxiedHeaderRequest(login, "10.0.0.5", "X-Forwarded-For", "203.0.113.10"))

@@ -5,7 +5,7 @@ import cats.syntax.all.*
 import com.example.graphQL.cats.config.KafkaConfig
 import com.example.graphQL.cats.infrastructure.kafka.*
 import com.example.graphQL.cats.repository.mongo.{MongoInterviewSubjectCleanup, MongoInterviewWorkflowRepository}
-import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogFields}
+import com.example.graphQL.cats.service.{BackgroundWorker, Diagnostics, LogEvent, LogFields}
 import com.example.graphQL.cats.service.Diagnostics.*
 import com.example.graphQL.cats.service.application.{
   InterviewWorkflowWorker,
@@ -18,6 +18,8 @@ import scala.concurrent.duration.*
 
 /** Each publisher generation owns its initialized producers; consumers retain independent offset lifetimes. */
 private[runtime] object InterviewSchedulingRuntime {
+  private val PublicationWorker = "interview-publication"
+
   def resource(
       config: KafkaConfig,
       repository: MongoInterviewWorkflowRepository,
@@ -85,9 +87,11 @@ private[runtime] object InterviewSchedulingRuntime {
             orchestratorGroup = settings.orchestratorGroup,
             restartMaxDelaySeconds = config.restartMaxDelaySeconds
           )
-          def receive(handler: InterviewMessage => IO[Boolean])(value: Either[String, InterviewMessage]): IO[Boolean] =
+          def receive(
+              handler: InterviewMessage => RepositoryIO[Unit]
+          )(value: Either[String, InterviewMessage]): RepositoryIO[Unit] =
             value.fold(
-              identity => IO.realTimeInstant.flatMap(at => repository.quarantine(identity, at).value.map(_.isRight)),
+              identity => RepositoryIO.lift(IO.realTimeInstant).flatMap(repository.quarantine(identity, _)),
               handler
             )
           def generation: Stream[IO, Unit] = Stream
@@ -114,7 +118,7 @@ private[runtime] object InterviewSchedulingRuntime {
           for {
             _ <- InterviewKafkaRuntime.consumerResource(commandConfig, diagnostics)(receive(worker.receiveResult))
             _ <- InterviewKafkaRuntime.consumerResource(resultConfig, diagnostics)(receive(worker.receiveCommand))
-            retention <- InterviewKafkaRetention.resource(
+            retention = InterviewKafkaRetention(
               config.bootstrapServers,
               orchestratorUsername,
               orchestratorPassword,
@@ -128,7 +132,9 @@ private[runtime] object InterviewSchedulingRuntime {
               config.saslSecurityProtocol,
               diagnostics
             )
-            _ <- Resource.make(Stream.suspend(generation).repeat.compile.drain.start)(_.cancel)
+            _ <- BackgroundWorker.resource(PublicationWorker, diagnostics)(
+              Stream.suspend(generation).repeat.compile.drain
+            )
             _ <- new InterviewSubjectCleanupWorker(
               cleanup,
               fencer,

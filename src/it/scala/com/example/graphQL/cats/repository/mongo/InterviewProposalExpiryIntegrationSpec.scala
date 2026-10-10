@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.service.application.committed
 import cats.effect.IO
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.workflow.*
@@ -59,7 +60,9 @@ final class InterviewProposalExpiryIntegrationSpec extends MongoIntegrationSuite
         claim <- IO.fromOption(claims.find(_.record.command.isInstanceOf[InterviewLifecycleCommand.ExpireProposal]))(
           new AssertionError("the expiry was not claimable once due")
         )
-        resolution <- success(s.repository.requireRepair(claim, due.plusSeconds(2), "publication_exhausted"))
+        resolution <- success(
+          s.repository.requireRepair(claim, due.plusSeconds(2), InterviewFailureCode.PublicationExhausted)
+        )
         after <- s.current
         again <- success(s.repository.claimDueCommands("publisher", due.plusSeconds(3), due.plusSeconds(60), 8))
         row <- expiryRow(s)
@@ -85,7 +88,7 @@ final class InterviewProposalExpiryIntegrationSpec extends MongoIntegrationSuite
         claim <- IO.fromOption(claims.find(_.record.command.isInstanceOf[InterviewLifecycleCommand.ExpireProposal]))(
           new AssertionError("the expiry was not claimable once due")
         )
-        _ <- success(s.repository.requireRepair(claim, due.plusSeconds(2), "publication_exhausted"))
+        _ <- success(s.repository.requireRepair(claim, due.plusSeconds(2), InterviewFailureCode.PublicationExhausted))
         row <- expiryRow(s)
       } yield assertEquals(row.state, InterviewWorkflowCommandState.Superseded)
     }
@@ -98,7 +101,7 @@ final class InterviewProposalExpiryIntegrationSpec extends MongoIntegrationSuite
         due = open.proposal.map(_.expiresAt).getOrElse(fail("no proposal"))
         row <- expiryRow(s)
         late = s.worker("late-worker", clock = IO.pure(due.plus(java.time.Duration.ofDays(8))))
-        durable <- late.receiveCommand(messageFor(open, row))
+        durable <- late.receiveCommand(messageFor(open, row)).committed
         after <- s.current
         quarantined <- s.count(
           MongoCollections.InterviewWorkflowInbox,
@@ -120,14 +123,17 @@ final class InterviewProposalExpiryIntegrationSpec extends MongoIntegrationSuite
         due = open.proposal.map(_.expiresAt).getOrElse(fail("no proposal"))
         row <- expiryRow(s)
         early = s.worker("early-worker", clock = IO.pure(due.minusSeconds(3600)))
-        durable <- early.receiveCommand(messageFor(open, row))
+        durable <- early.receiveCommand(messageFor(open, row)).committed
         after <- s.current
         quarantined <- s.count(
           MongoCollections.InterviewWorkflowInbox,
           com.mongodb.client.model.Filters.eq("documentType", "quarantine")
         )
         requeued <- expiryRow(s)
-        onTime <- s.worker("on-time-worker", clock = IO.pure(due.plusSeconds(1))).receiveCommand(messageFor(open, row))
+        onTime <- s
+          .worker("on-time-worker", clock = IO.pure(due.plusSeconds(1)))
+          .receiveCommand(messageFor(open, row))
+          .committed
       } yield {
         assert(durable, "an early message is acknowledged so the partition does not restart-loop")
         assertEquals(after.phase, InterviewWorkflowPhase.ProposalPending)
@@ -157,6 +163,7 @@ final class InterviewProposalExpiryIntegrationSpec extends MongoIntegrationSuite
         expired <- s
           .worker("late-worker", clock = IO.pure(availableAt.plusSeconds(2)))
           .receiveCommand(messageFor(open, afterDefer))
+          .committed
         afterExpiry <- expiryRow(s)
       } yield {
         assert(requeued)
@@ -167,7 +174,7 @@ final class InterviewProposalExpiryIntegrationSpec extends MongoIntegrationSuite
         assert(!early.exists(_.record.command.isInstanceOf[InterviewLifecycleCommand.ExpireProposal]))
         assert(expired)
         // Once the clock caught up the expiry executed: its result is recorded for the result consumer to apply.
-        assertEquals(afterExpiry.result, Some(InterviewCommandResult.Succeeded))
+        assertEquals(afterExpiry.result, Some(InterviewResult.Succeeded))
       }
     }
   }

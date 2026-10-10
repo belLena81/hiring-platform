@@ -5,6 +5,7 @@ import com.example.graphQL.cats.domain.model.ApplicationStatus
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.domain.workflow.*
 import com.example.graphQL.cats.service.port.*
+import com.example.graphQL.cats.service.RepositoryError
 import java.time.Instant
 import java.util.UUID
 

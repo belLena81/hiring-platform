@@ -79,6 +79,11 @@ final case class SubjectToken private (private val tokenValue: String) {
 }
 
 object SubjectToken {
+
+  /** Stable digest of a deletion-marker view, independent of marker order. */
+  def markerFingerprint(markers: Vector[SubjectToken]): String =
+    AnalyticsDigest.sha256Hex(markers.map(_.tokenValue).sorted.mkString("\n"))
+
   def fromHmac(value: String): Either[String, SubjectToken] =
     value
       .refineEither[Match["[A-Za-z0-9-]{1,40}_[A-Za-z0-9_-]{43}"]]

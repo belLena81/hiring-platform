@@ -7,7 +7,10 @@ import scala.jdk.CollectionConverters.*
 /** Test-only environment layer: `${?NAME}` placeholders in `raw` resolve against `env`, never the real process. */
 object AppConfigFixtures {
   def fromConfig(raw: String, env: Map[String, String]): Either[NonEmptyList[ConfigError], AppConfig] =
-    AppConfig.parse(raw).map(_.withFallback(ConfigFactory.parseMap(env.asJava))).flatMap(AppConfig.fromParsed)
+    AppConfigValidation
+      .parse(raw)
+      .map(_.withFallback(ConfigFactory.parseMap(env.asJava)))
+      .flatMap(AppConfigValidation.fromParsed)
 
   /** The packaged `application.conf` plus the minimal local values it leaves unset, then `overrides`. */
   def withPackagedDefaults(overrides: String): Either[NonEmptyList[ConfigError], AppConfig] =

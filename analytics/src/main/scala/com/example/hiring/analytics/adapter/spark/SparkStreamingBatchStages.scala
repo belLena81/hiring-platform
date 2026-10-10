@@ -19,7 +19,6 @@ import org.apache.spark.storage.StorageLevel
 
 import java.sql.Timestamp
 import java.time.Instant
-import scala.jdk.CollectionConverters.*
 
 /** Adapter for one callback's parsed Kafka frame. The Resource owns its Spark cache through ingestion and publication.
   */
@@ -60,8 +59,8 @@ private[analytics] object SparkStreamingBatchStages {
       .agg(
         count(when(col(category) === lit("MALFORMED"), lit(1))),
         count(when(col(category) === lit("CONFLICT"), lit(1))),
-        count(when(col(category) === lit("FUTURE"), lit(1))),
-        count(when(col(category) === lit("CLOSED"), lit(1)))
+        count(when(col(category) === lit(EventTimeAdmission.FutureStatus), lit(1))),
+        count(when(col(category) === lit(EventTimeAdmission.ClosedStatus), lit(1)))
       )
       .head()
     AdmissionQuality(measured.getLong(0), measured.getLong(1), measured.getLong(2), measured.getLong(3))
@@ -161,7 +160,9 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
       closedCount: Long,
       deletionSuppressedCount: Long,
       newlyAdmittedOpenFacts: DataFrame
-  )
+  ) {
+    def qualityBlocked: Boolean = malformedCount > 0L || conflictingEventCount > 0L || futureCount > 0L
+  }
 
   override def reservePublication(
       preparation: StreamingInputPreparation,
@@ -185,12 +186,12 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
   override def assess(
       preparation: StreamingInputPreparation,
       activeTokens: Vector[SubjectToken],
-      isRecoveryAttempt: Boolean
+      attempt: BatchAttempt
   ): F[StreamingIngestionResult] =
     withMarkers(activeTokens).flatMap { markerFrame =>
-      analyze(preparation, markerFrame, activeTokens.nonEmpty, isRecoveryAttempt).use { facts =>
+      analyze(preparation, markerFrame, activeTokens.nonEmpty, attempt).use { facts =>
         if (facts.deletionSuppressedCount > 0L) F.pure(StreamingIngestionResult.ErasurePending)
-        else if (facts.malformedCount > 0L || facts.conflictingEventCount > 0L || facts.futureCount > 0L)
+        else if (facts.qualityBlocked)
           F.pure(StreamingIngestionResult.QualityBlocked)
         else
           unsuppressedEventTimes(facts).map(StreamingIngestionResult.Ready.apply)
@@ -202,7 +203,7 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
       activeTokens: Vector[SubjectToken],
       assessment: StreamingIngestionResult,
       decision: StreamingDecisionRevision,
-      isRecoveryAttempt: Boolean
+      attempt: BatchAttempt
   ): F[Unit] =
     for {
       _ <- validateDecision(preparation, activeTokens, decision)
@@ -216,16 +217,15 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
         _ => F.unit
       )
       _ <- silverStage.quarantinePreparation(spark, bronze, markerFrame, activeTokens.nonEmpty).use { prepared =>
-        classifyForWriting(preparation, markerFrame, activeTokens.nonEmpty, prepared, isRecoveryAttempt).use {
-          admission =>
-            for {
-              _ <- persistFutureQuarantine(admission, preparation.observedAt)
-              lateEvents <- lateFactsNotAlreadyAdmitted(admission)
-              _ <- lateFactStage.persistClosedDayFacts(lateEvents, markerFrame, preparation.observedAt)
-              openEvents <- openSilverFacts(preparation, prepared)
-              _ <- silverStage.mergeSilver(prepared.copy(incomingSilver = openEvents), preparation.observedAt)
-              _ <- ensureAssessmentOutcome(assessment, admission)
-            } yield ()
+        classifyForWriting(preparation, markerFrame, activeTokens.nonEmpty, prepared, attempt).use { admission =>
+          for {
+            _ <- persistFutureQuarantine(admission, preparation.observedAt)
+            lateEvents <- lateFactsNotAlreadyAdmitted(admission)
+            _ <- lateFactStage.persistClosedDayFacts(lateEvents, markerFrame, preparation.observedAt)
+            openEvents <- openSilverFacts(preparation, prepared)
+            _ <- silverStage.mergeSilver(prepared.copy(incomingSilver = openEvents), preparation.observedAt)
+            _ <- ensureAssessmentOutcome(assessment, admission)
+          } yield ()
         }
       }
     } yield ()
@@ -246,15 +246,14 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
           case AnalyticsReportPublicationReceipt.CurrentGeneration => F.pure(StreamingPublicationResult.Published)
           case AnalyticsReportPublicationReceipt.Absent            =>
             for {
-              report <- rebuildAndExtract(preparation.observedAt)
+              report <- AnalyticsGoldStage.rebuildAndExtract(spark, paths, preparation.observedAt, execution)
               _ <- authorizePublication
               expiresAt = retention.publishedSnapshotExpiry(preparation.observedAt)
               result <- reportPublisher
                 .publish(decision.publicationReservation, report, expiresAt)
                 .as(StreamingPublicationResult.Published)
-                .handleErrorWith {
-                  case AnalyticsError.GuardedErasurePublicationRejected => F.pure(StreamingPublicationResult.Superseded)
-                  case error                                            => F.raiseError(error)
+                .recover { case AnalyticsError.GuardedErasurePublicationRejected =>
+                  StreamingPublicationResult.Superseded
                 }
             } yield result
         }
@@ -264,7 +263,7 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
       preparation: StreamingInputPreparation,
       markerFrame: DataFrame,
       activeMarkersPresent: Boolean,
-      isRecoveryAttempt: Boolean
+      attempt: BatchAttempt
   ): Resource[F, AdmissionFacts] =
     privacySafeSource(markerFrame).flatMap { case (tokenized, safe) =>
       Resource
@@ -272,32 +271,7 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
         .flatMap(cacheFrame)
         .flatMap { incomingSilver =>
           Resource
-            .eval(for {
-              storedSilver <- deltaReader.readOrEmpty(spark, paths.silver, incomingSilver.schema)
-              storedLate <- deltaReader.readOrEmpty(
-                spark,
-                paths.lateFacts,
-                AnalyticsTableSchemas.struct(AnalyticsTableSchemas.lateFacts)
-              )
-              storedBronze <- deltaReader.readOrEmpty(
-                spark,
-                paths.bronze,
-                AnalyticsTableSchemas.struct(AnalyticsTableSchemas.bronze)
-              )
-              facts <- execution.either(
-                buildAdmissionFacts(
-                  preparation,
-                  safe,
-                  tokenized,
-                  incomingSilver,
-                  storedSilver,
-                  storedLate,
-                  storedBronze,
-                  activeMarkersPresent,
-                  isRecoveryAttempt
-                )
-              )
-            } yield facts)
+            .eval(admissionFacts(preparation, safe, tokenized, incomingSilver, activeMarkersPresent, attempt))
             .flatMap(cacheAdmission)
             .evalMap(facts => measureAdmissionFacts(facts, assessmentEventTimeCategories(facts)))
         }
@@ -329,12 +303,18 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
   /** Assess and ingest must compare the same measured quality evidence; unmeasured defaults are not outcomes. */
   private def assessmentEventTimeCategories(facts: AdmissionFacts): DataFrame =
     facts.classifications
-      .filter(col(s"$AdmissionColumn.$AdmissionStatusField").isin("FUTURE", "CLOSED"))
+      .filter(
+        col(s"$AdmissionColumn.$AdmissionStatusField")
+          .isin(EventTimeAdmission.FutureStatus, EventTimeAdmission.ClosedStatus)
+      )
       .select(col(s"$AdmissionColumn.$AdmissionStatusField").as(SparkStreamingBatchStages.AdmissionQualityCategory))
 
   private def ingestionEventTimeCategories(facts: AdmissionFacts): DataFrame =
     facts.classifications
-      .filter(col(s"$AdmissionColumn.$AdmissionStatusField").isin("FUTURE", "CLOSED"))
+      .filter(
+        col(s"$AdmissionColumn.$AdmissionStatusField")
+          .isin(EventTimeAdmission.FutureStatus, EventTimeAdmission.ClosedStatus)
+      )
       .join(facts.conflicts, Seq(Columns.EventId), "left_anti")
       .select(col(s"$AdmissionColumn.$AdmissionStatusField").as(SparkStreamingBatchStages.AdmissionQualityCategory))
 
@@ -353,6 +333,42 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
       )
     }
 
+  /** Reads the persisted Silver, late-fact and Bronze tables and derives the admission facts from them. */
+  private def admissionFacts(
+      preparation: StreamingInputPreparation,
+      safe: DataFrame,
+      tokenized: DataFrame,
+      incomingSilver: DataFrame,
+      activeMarkersPresent: Boolean,
+      attempt: BatchAttempt
+  ): F[AdmissionFacts] =
+    for {
+      storedSilver <- deltaReader.readOrEmpty(spark, paths.silver, incomingSilver.schema)
+      storedLate <- deltaReader.readOrEmpty(
+        spark,
+        paths.lateFacts,
+        AnalyticsTableSchemas.struct(AnalyticsTableSchemas.lateFacts)
+      )
+      storedBronze <- deltaReader.readOrEmpty(
+        spark,
+        paths.bronze,
+        AnalyticsTableSchemas.struct(AnalyticsTableSchemas.bronze)
+      )
+      facts <- execution.either(
+        buildAdmissionFacts(
+          preparation,
+          safe,
+          tokenized,
+          incomingSilver,
+          storedSilver,
+          storedLate,
+          storedBronze,
+          activeMarkersPresent,
+          attempt
+        )
+      )
+    } yield facts
+
   private def buildAdmissionFacts(
       preparation: StreamingInputPreparation,
       safe: DataFrame,
@@ -362,12 +378,11 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
       storedLate: DataFrame,
       storedBronze: DataFrame,
       activeMarkersPresent: Boolean,
-      isRecoveryAttempt: Boolean
+      attempt: BatchAttempt
   ): Either[AnalyticsError, AdmissionFacts] = {
     val validSilver = AnalyticsTableSchemas.matches(incomingSilver.schema, AnalyticsTableSchemas.silver)
     val lateShapeValid = AnalyticsTableSchemas.matches(storedLate.schema, AnalyticsTableSchemas.lateFacts)
-    val silverShapeValid = AnalyticsTableSchemas.matches(storedSilver.schema, AnalyticsTableSchemas.silver) ||
-      AnalyticsTableSchemas.matches(storedSilver.schema, AnalyticsTableSchemas.silver ++ AnalyticsTableSchemas.expiry)
+    val silverShapeValid = OperationalEventTransforms.validateSilverSchema(storedSilver).isRight
     val bronzeShapeValid = AnalyticsTableSchemas.matches(storedBronze.schema, AnalyticsTableSchemas.bronze)
     if (!validSilver) Left(AnalyticsError.InvalidSilverSchema)
     else if (!lateShapeValid)
@@ -404,11 +419,10 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
         .join(incomingPairs, Seq(Columns.EventId, Columns.EventFingerprint), "inner")
         .join(conflicts, Seq(Columns.EventId), "left_anti")
       val classified = withEventTimeAdmission(selectedValid, preparation)
-      val existingFingerprints = persistedFingerprints.distinct()
-      val watermarkFacts = if (isRecoveryAttempt) selectedValid else classified
+      val watermarkFacts = if (attempt.isRecovery) selectedValid else classified
       val alreadyAdmitted = watermarkFacts
         .select(Columns.EventId, Columns.EventFingerprint)
-        .join(existingFingerprints, Seq(Columns.EventId, Columns.EventFingerprint), "inner")
+        .join(persistedFingerprints, Seq(Columns.EventId, Columns.EventFingerprint), "inner")
         .select(Columns.EventId)
         .distinct()
       val previouslyWrittenCoordinates = storedBronze
@@ -418,14 +432,6 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
         .distinct()
       val sourceCoordinates = watermarkFacts
         .select(Columns.EventId, Columns.Topic, Columns.Partition, Columns.Offset, Columns.EventFingerprint)
-      val sameBatchCoordinates = sourceCoordinates
-        .join(
-          previouslyWrittenCoordinates,
-          Seq(Columns.Topic, Columns.Partition, Columns.Offset, Columns.EventFingerprint),
-          "inner"
-        )
-        .select(Columns.EventId)
-        .distinct()
       val idsWithPriorBronzeCoordinate = sourceCoordinates
         .join(
           previouslyWrittenCoordinates,
@@ -440,17 +446,17 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
         .join(alreadyAdmitted, Seq(Columns.EventId), "left_anti")
         .join(idsWithPriorBronzeCoordinate, Seq(Columns.EventId), "left_anti")
       val newBySameBatchCoordinate =
-        if (isRecoveryAttempt)
+        if (attempt.isRecovery)
           watermarkFacts
             .select(Columns.EventId)
             .distinct()
-            .join(sameBatchCoordinates, Seq(Columns.EventId), "inner")
+            .join(idsWithPriorBronzeCoordinate, Seq(Columns.EventId), "inner")
             .join(alreadyAdmitted, Seq(Columns.EventId), "left_anti")
         else watermarkFacts.limit(0).select(Columns.EventId)
       val newlyAdmittedIds = newByIdentity.unionByName(newBySameBatchCoordinate).distinct()
       val newlyAdmitted = classified
         .join(newlyAdmittedIds, Seq(Columns.EventId), "inner")
-        .filter(col(s"$AdmissionColumn.$AdmissionStatusField") === lit("OPEN"))
+        .filter(col(s"$AdmissionColumn.$AdmissionStatusField") === lit(EventTimeAdmission.OpenStatus))
         .dropDuplicates(Columns.EventId)
       Right(
         AdmissionFacts(
@@ -499,39 +505,14 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
       markerFrame: DataFrame,
       activeMarkersPresent: Boolean,
       prepared: AnalyticsPreparedEvents,
-      isRecoveryAttempt: Boolean
+      attempt: BatchAttempt
   ): Resource[F, AdmissionFacts] =
     privacySafeSource(markerFrame).flatMap { case (tokenized, safe) =>
       // Quarantine preparation already built this projection from the same source/keys/markers after Bronze.
       // Historical admission remains fresh: reload all persisted facts and compare the full conflict set below.
       cacheFrame(prepared.incomingSilver).flatMap { incomingSilver =>
         Resource
-          .eval(for {
-            storedSilver <- deltaReader.readOrEmpty(spark, paths.silver, incomingSilver.schema)
-            storedLate <- deltaReader.readOrEmpty(
-              spark,
-              paths.lateFacts,
-              AnalyticsTableSchemas.struct(AnalyticsTableSchemas.lateFacts)
-            )
-            storedBronze <- deltaReader.readOrEmpty(
-              spark,
-              paths.bronze,
-              AnalyticsTableSchemas.struct(AnalyticsTableSchemas.bronze)
-            )
-            facts <- execution.either(
-              buildAdmissionFacts(
-                preparation,
-                safe,
-                tokenized,
-                incomingSilver,
-                storedSilver,
-                storedLate,
-                storedBronze,
-                activeMarkersPresent,
-                isRecoveryAttempt
-              )
-            )
-          } yield facts)
+          .eval(admissionFacts(preparation, safe, tokenized, incomingSilver, activeMarkersPresent, attempt))
           .flatMap { facts =>
             SparkStreamingBatchStages
               .cacheAdmissionFrames(Vector(facts.conflicts, prepared.conflicts), execution)
@@ -553,7 +534,7 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
   private def persistFutureQuarantine(facts: AdmissionFacts, observedAt: Instant): F[Unit] =
     execution {
       val future = facts.classifications
-        .filter(col(s"$AdmissionColumn.$AdmissionStatusField") === lit("FUTURE"))
+        .filter(col(s"$AdmissionColumn.$AdmissionStatusField") === lit(EventTimeAdmission.FutureStatus))
         .join(facts.conflicts, Seq(Columns.EventId), "left_anti")
         .withColumn("payloadHash", sha2(col(Columns.RawValue), 256))
         .withColumn(
@@ -573,18 +554,7 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
           )
         )
         .withColumn("quarantineReason", lit("EVENT_TIMESTAMP_TOO_FAR_IN_FUTURE"))
-        .withColumn(
-          Columns.ExpiresAt,
-          lit(
-            Timestamp.from(
-              observedAt.plus(
-                java.time.Duration.ofDays(
-                  retention.quarantineDays.toLong
-                )
-              )
-            )
-          )
-        )
+        .withColumn(Columns.ExpiresAt, AnalyticsTableSchemas.expiryAt(observedAt, retention.quarantineDays.toLong))
         // The serialized envelope is used only to derive a fingerprint and is removed before Delta persistence.
         .drop(Columns.RawValue, Columns.ActorId, Columns.Payload, Columns.SubjectToken)
         .select(AnalyticsTableSchemas.quarantine.map { case (name, _) => col(name) }*)
@@ -599,7 +569,9 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
     }
 
   private def lateFactsNotAlreadyAdmitted(facts: AdmissionFacts): F[DataFrame] = execution {
-    val closed = facts.classifications.filter(col(s"$AdmissionColumn.$AdmissionStatusField") === lit("CLOSED"))
+    val closed = facts.classifications.filter(
+      col(s"$AdmissionColumn.$AdmissionStatusField") === lit(EventTimeAdmission.ClosedStatus)
+    )
     SparkStreamingBatchStages
       .closedDayFactsSource(closed, facts.closedCount) {
         val eligiblePairs = facts.incomingSilver
@@ -620,7 +592,7 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
       prepared: AnalyticsPreparedEvents
   ): F[DataFrame] = execution {
     withEventTimeAdmission(prepared.incomingSilver, preparation)
-      .filter(col(s"$AdmissionColumn.$AdmissionStatusField") === lit("OPEN"))
+      .filter(col(s"$AdmissionColumn.$AdmissionStatusField") === lit(EventTimeAdmission.OpenStatus))
       .select(AnalyticsTableSchemas.silver.map { case (name, _) => col(name) }*)
   }
 
@@ -635,13 +607,14 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
     val previousWatermark = preparation.priorWatermark
     val classify = udf(
       (timestamp: Timestamp) => {
-        if (timestamp == null) Row("FUTURE", null)
-        else
-          AnalyticsEventTimePolicy.admit(timestamp.toInstant, observedAt, previousWatermark) match {
-            case EventTimeAdmission.Admitted(effective) => Row("OPEN", Timestamp.from(effective))
-            case EventTimeAdmission.LateClosedDay(_)    => Row("CLOSED", null)
-            case EventTimeAdmission.TooFarInFuture      => Row("FUTURE", null)
+        if (timestamp == null) Row(EventTimeAdmission.FutureStatus, null)
+        else {
+          val admission = AnalyticsEventTimePolicy.admit(timestamp.toInstant, observedAt, previousWatermark)
+          admission match {
+            case EventTimeAdmission.Admitted(effective) => Row(admission.wireStatus, Timestamp.from(effective))
+            case _                                      => Row(admission.wireStatus, null)
           }
+        }
       },
       schema
     )
@@ -655,27 +628,25 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
       frame.filter(col(Columns.ExpiresAt).isNull || col(Columns.ExpiresAt) > lit(Timestamp.from(observedAt)))
     else frame
 
-  private def withMarkers(tokens: Vector[SubjectToken]): F[DataFrame] = execution {
-    val schema = StructType(Vector(StructField(Columns.SubjectToken, StringType, nullable = false)))
-    spark.createDataFrame(tokens.map(token => Row(token.value)).asJava, schema)
-  }
+  private def withMarkers(tokens: Vector[SubjectToken]): F[DataFrame] =
+    execution(AnalyticsTableSchemas.markerFrame(spark, tokens))
 
   private def validateDecision(
       preparation: StreamingInputPreparation,
       tokens: Vector[SubjectToken],
       decision: StreamingDecisionRevision
   ): F[Unit] = {
-    val expectedMarkerFingerprint = AnalyticsDigest.sha256Hex(tokens.map(_.value).sorted.mkString("\n"))
+    val expectedMarkerFingerprint = SubjectToken.markerFingerprint(tokens)
     F.raiseWhen(
       decision.identity != preparation.identity || decision.deletionMarkerFingerprint != expectedMarkerFingerprint
-    )(AnalyticsError.InvalidConfiguration("streaming batch decision does not match its input or deletion markers"))
+    )(AnalyticsError.DataIntegrityViolation("streaming batch decision does not match its input or deletion markers"))
   }
 
   private def ensureAssessmentOutcome(
       assessment: StreamingIngestionResult,
       facts: AdmissionFacts
   ): F[Unit] = {
-    val shouldBeQualityBlocked = facts.malformedCount > 0L || facts.conflictingEventCount > 0L || facts.futureCount > 0L
+    val shouldBeQualityBlocked = facts.qualityBlocked
     val shouldBeErasurePending = facts.deletionSuppressedCount > 0L
     val valid = assessment match {
       case StreamingIngestionResult.Ready(_)       => !shouldBeQualityBlocked && !shouldBeErasurePending
@@ -683,20 +654,9 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
       case StreamingIngestionResult.ErasurePending => shouldBeErasurePending
     }
     F.raiseWhen(!valid)(
-      AnalyticsError.InvalidConfiguration("streaming admission outcome changed before durable ingestion")
+      AnalyticsError.DataIntegrityViolation("streaming admission outcome changed before durable ingestion")
     )
   }
-
-  private def rebuildAndExtract(asOf: Instant): F[AnalyticsReportOutput] =
-    execution(DeltaTables.exists(spark, paths.silver)).flatMap {
-      case true =>
-        execution(DeltaTables.read(spark, paths.silver))
-          .flatMap(AnalyticsGoldStage.rebuild(paths, _, execution)) *>
-          AnalyticsGoldStage.extract(spark, paths, asOf, execution)
-      case false =>
-        AnalyticsGoldStage.clear(spark, paths, execution) *>
-          AnalyticsGoldStage.extract(spark, paths, asOf, execution)
-    }
 
   private def streamRunId(identity: StreamingBatchIdentity, revision: Long): RunId = {
     import io.github.iltotore.iron.autoRefine
@@ -748,21 +708,14 @@ private[analytics] object StreamingWatermarkAdmission {
       .withColumn(Columns.Day, date_trunc(Columns.Day, col(Columns.OccurredAt)))
       .join(visibleFunnelDays.select(Columns.Day), Seq(Columns.Day), "inner")
       .select(col(effectiveTimeColumn))
-    val visibleSkills = allFacts
-      .filter(col(Columns.EventType) === lit(AnalyticsEventType.JobCreated.wire))
-      .withColumn("_day", date_trunc("day", col(Columns.OccurredAt)))
-      .withColumn("_rawSkill", explode(col(Columns.JobSkills)))
-      .withColumn("_skill", lower(trim(col("_rawSkill"))))
-      .filter(length(col("_skill")) > lit(0))
-      .groupBy(col("_day"), col("_skill"))
+    val visibleSkills = HiringGoldTransforms
+      .jobSkillDays(allFacts)
+      .groupBy(Columns.Day, Columns.Skill)
       .agg(countDistinct(col(Columns.SubjectToken)).as("_contributors"))
       .filter(col("_contributors") >= lit(AnalyticsRetention.MinimumContributors))
-    val skillCandidates = candidates
-      .filter(col(Columns.EventType) === lit(AnalyticsEventType.JobCreated.wire))
-      .withColumn("_day", date_trunc("day", col(Columns.OccurredAt)))
-      .withColumn("_rawSkill", explode(col(Columns.JobSkills)))
-      .withColumn("_skill", lower(trim(col("_rawSkill"))))
-      .join(visibleSkills.select("_day", "_skill"), Seq("_day", "_skill"), "inner")
+    val skillCandidates = HiringGoldTransforms
+      .jobSkillDays(candidates)
+      .join(visibleSkills.select(Columns.Day, Columns.Skill), Seq(Columns.Day, Columns.Skill), "inner")
       .select(col(effectiveTimeColumn))
     funnelCandidates.unionByName(skillCandidates).filter(col(effectiveTimeColumn).isNotNull).distinct()
   }

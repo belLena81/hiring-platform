@@ -26,13 +26,13 @@ class AnalyticsReportSnapshotDocumentSpec extends FunSuite {
     assertEquals(document.getString("_id"), AnalyticsReportSnapshotDocument.CurrentId)
     assertEquals(document.getString("state"), "Published")
     assertEquals(document.getDate("expiresAt").toInstant, expiresAt)
-    assertEquals(AnalyticsReportSnapshotDocument.read(document), Some(snapshot))
+    assertEquals(AnalyticsReportSnapshotDocument.read(document), Right(snapshot))
   }
 
   test("a malformed snapshot document is not exposed to the API") {
     val document = AnalyticsReportSnapshotDocument.write(snapshot, expiresAt)
     document.remove("skillPostingActivity")
 
-    assertEquals(AnalyticsReportSnapshotDocument.read(document), None)
+    assert(AnalyticsReportSnapshotDocument.read(document).isLeft)
   }
 }

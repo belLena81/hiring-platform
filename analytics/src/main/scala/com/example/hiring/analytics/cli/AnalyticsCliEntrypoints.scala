@@ -45,7 +45,6 @@ private[cli] object AnalyticsCliProgram {
       case Left(error) => logger.error(safeFailureSummary(error)).as(ExitCode.Error)
     }
 
-  def runProgram[A](program: IO[A]): IO[ExitCode] = runCommand(program.as(ExitCode.Success))
 }
 
 /** Commands configured only through HOCON. Decline rejects any command-line argument, option or help flag, so no

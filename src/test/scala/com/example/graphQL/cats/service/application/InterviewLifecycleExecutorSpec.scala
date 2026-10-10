@@ -54,7 +54,7 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
   private def record(
       workflow: InterviewWorkflow,
       command: InterviewLifecycleCommand,
-      result: Option[InterviewCommandResult]
+      result: Option[InterviewResult]
   ) =
     InterviewWorkflowCommandRecord(
       workflow.id,
@@ -94,10 +94,10 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
       command: InterviewLifecycleCommand,
       providers: Providers = Providers(),
       clock: Instant = at
-  ): IO[(Option[InterviewCommandResult], Calls, Boolean)] =
+  ): IO[(Option[InterviewResult], Calls, Boolean)] =
     for {
       calls <- Ref.of[IO, Calls](noCalls)
-      recorded <- Ref.of[IO, Option[InterviewCommandResult]](None)
+      recorded <- Ref.of[IO, Option[InterviewResult]](None)
       stored = record(workflow, command, None)
       claim = ClaimedInterviewWorkflowCommand(stored, "executor", new UUID(0L, 90L), clock.plusSeconds(60))
       repository = new TestInterviewWorkflowRepository {
@@ -112,7 +112,7 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
         ) = RepositoryIO.fromEither(Right(InterviewExecutionClaimOutcome.Acquired(claim)))
         override def recordResult(
             value: ClaimedInterviewWorkflowCommand,
-            result: InterviewCommandResult,
+            result: InterviewResult,
             now: Instant
         ) =
           RepositoryIO.lift(recorded.set(Some(result)))
@@ -176,7 +176,7 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
         Diagnostics.noop,
         IO.pure(clock)
       )
-      durable <- worker.receiveCommand(messageFor(workflow, stored, None))
+      durable <- worker.receiveCommand(messageFor(workflow, stored, None)).committed
       result <- recorded.get
       seen <- calls.get
     } yield (result, seen, durable)
@@ -186,10 +186,10 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
 
   test("DHW-17 a confirmed or already confirmed cancel is the only thing that counts as released") {
     List(
-      InterviewCalendarCancellation.Cancelled(at) -> InterviewCommandResult.Succeeded,
-      InterviewCalendarCancellation.AlreadyCancelled(at) -> InterviewCommandResult.Succeeded,
+      InterviewCalendarCancellation.Cancelled(at) -> InterviewResult.Succeeded,
+      InterviewCalendarCancellation.AlreadyCancelled(at) -> InterviewResult.Succeeded,
       // Definitive "no such reservation": rejected, so it ends in repair instead of a cancel and lookup loop.
-      InterviewCalendarCancellation.UnknownReservation -> InterviewCommandResult.Rejected
+      InterviewCalendarCancellation.UnknownReservation -> InterviewResult.Rejected
     ).traverse_ { case (answer, expected) =>
       execute(cancelling, C.CancelCalendarSlot(cancelKey), Providers(cancel = EitherT.rightT(answer))).map {
         case (result, calls, durable) =>
@@ -205,7 +205,7 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
       .traverse_ { error =>
         execute(cancelling, C.CancelCalendarSlot(cancelKey), Providers(cancel = EitherT.leftT(error))).map {
           case (result, calls, _) =>
-            assertEquals(result, Some(InterviewCommandResult.OutcomeUnknown))
+            assertEquals(result, Some(InterviewResult.OutcomeUnknown))
             assertEquals(calls.cancels, Vector(cancelKey))
         }
       }
@@ -221,10 +221,10 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
       missing <- execute(cancelling, lookup)
       failing <- execute(cancelling, lookup, Providers(lookup = EitherT.leftT(InterviewProviderError.Unavailable)))
     } yield {
-      assertEquals(released._1, Some(InterviewCommandResult.Found))
-      assertEquals(held._1, Some(InterviewCommandResult.Absent))
-      assertEquals(missing._1, Some(InterviewCommandResult.Absent))
-      assertEquals(failing._1, Some(InterviewCommandResult.OutcomeUnknown))
+      assertEquals(released._1, Some(InterviewResult.Found))
+      assertEquals(held._1, Some(InterviewResult.Absent))
+      assertEquals(missing._1, Some(InterviewResult.Absent))
+      assertEquals(failing._1, Some(InterviewResult.OutcomeUnknown))
       // A lookup reads; it never asks the provider to cancel.
       assertEquals(List(released, held, missing, failing).map(_._2.cancels), List.fill(4)(Vector.empty))
     }
@@ -257,11 +257,11 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
         )
       )
     } yield {
-      assertEquals(held._1, Some(InterviewCommandResult.Succeeded))
-      assertEquals(unavailable._1, Some(InterviewCommandResult.OutcomeUnknown))
-      assertEquals(refusedButHeld._1, Some(InterviewCommandResult.Succeeded))
-      assertEquals(refused._1, Some(InterviewCommandResult.Rejected))
-      assertEquals(refusedUnknown._1, Some(InterviewCommandResult.OutcomeUnknown))
+      assertEquals(held._1, Some(InterviewResult.Succeeded))
+      assertEquals(unavailable._1, Some(InterviewResult.OutcomeUnknown))
+      assertEquals(refusedButHeld._1, Some(InterviewResult.Succeeded))
+      assertEquals(refused._1, Some(InterviewResult.Rejected))
+      assertEquals(refusedUnknown._1, Some(InterviewResult.OutcomeUnknown))
       assertEquals(held._2.reserves, Vector(holdKey))
       assertEquals(held._2.cancels, Vector.empty)
     }
@@ -278,9 +278,9 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
       )
       failing <- execute(holding, lookup, Providers(lookup = EitherT.leftT(InterviewProviderError.Unavailable)))
     } yield {
-      assertEquals(found._1, Some(InterviewCommandResult.Found))
-      assertEquals(cancelled._1, Some(InterviewCommandResult.Absent))
-      assertEquals(failing._1, Some(InterviewCommandResult.OutcomeUnknown))
+      assertEquals(found._1, Some(InterviewResult.Found))
+      assertEquals(cancelled._1, Some(InterviewResult.Absent))
+      assertEquals(failing._1, Some(InterviewResult.OutcomeUnknown))
     }
   }
 
@@ -309,12 +309,12 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
         clock = swapping.interval.startsAt.minusSeconds(3600)
       )
     } yield {
-      assertEquals(replacementStarted._1, Some(InterviewCommandResult.Rejected))
+      assertEquals(replacementStarted._1, Some(InterviewResult.Rejected))
       assertEquals(replacementStarted._2.approvals, 0)
-      assertEquals(approved._1, Some(InterviewCommandResult.Succeeded))
-      assertEquals(refused._1, Some(InterviewCommandResult.Rejected))
-      assertEquals(unknown._1, Some(InterviewCommandResult.OutcomeUnknown))
-      assertEquals(started._1, Some(InterviewCommandResult.Rejected))
+      assertEquals(approved._1, Some(InterviewResult.Succeeded))
+      assertEquals(refused._1, Some(InterviewResult.Rejected))
+      assertEquals(unknown._1, Some(InterviewResult.OutcomeUnknown))
+      assertEquals(started._1, Some(InterviewResult.Rejected))
       assertEquals(started._2.approvals, 0)
     }
   }
@@ -326,16 +326,16 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
       absent <- execute(swapping, lookup)
       unknown <- execute(swapping, lookup, Providers(hasApproval = Left(RepositoryError.Unavailable)))
     } yield {
-      assertEquals(found._1, Some(InterviewCommandResult.Found))
-      assertEquals(absent._1, Some(InterviewCommandResult.Absent))
-      assertEquals(unknown._1, Some(InterviewCommandResult.OutcomeUnknown))
+      assertEquals(found._1, Some(InterviewResult.Found))
+      assertEquals(absent._1, Some(InterviewResult.Absent))
+      assertEquals(unknown._1, Some(InterviewResult.OutcomeUnknown))
     }
   }
 
   test("DHW-20 an expiry command makes no provider call") {
     val proposing = proposalPending(now.plusSeconds(5))
     execute(proposing, C.ExpireProposal(now.plusSeconds(5))).map { case (result, calls, _) =>
-      assertEquals(result, Some(InterviewCommandResult.Succeeded))
+      assertEquals(result, Some(InterviewResult.Succeeded))
       assertEquals(calls, noCalls)
     }
   }
@@ -349,11 +349,11 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
       sent <- execute(cancelNotifying, notify)
       failed <- execute(cancelNotifying, notify, Providers(delivers = false))
     } yield {
-      assertEquals(sent._1, Some(InterviewCommandResult.Succeeded))
+      assertEquals(sent._1, Some(InterviewResult.Succeeded))
       assertEquals(sent._2.notifies, Vector(InterviewNotificationKind.Cancelled -> cancelledKey))
       // Round deliveries are not looked up first: the provider receipt is the idempotent record.
       assertEquals(sent._2.notificationLookups, Vector.empty)
-      assertEquals(failed._1, Some(InterviewCommandResult.OutcomeUnknown))
+      assertEquals(failed._1, Some(InterviewResult.OutcomeUnknown))
     }
   }
 
@@ -372,13 +372,13 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
       )
       failing <- execute(completed, notify, Providers(delivers = false))
     } yield {
-      assertEquals(already._1, Some(InterviewCommandResult.Succeeded))
+      assertEquals(already._1, Some(InterviewResult.Succeeded))
       assertEquals(already._2.notifies, Vector.empty)
-      assertEquals(fresh._1, Some(InterviewCommandResult.Succeeded))
+      assertEquals(fresh._1, Some(InterviewResult.Succeeded))
       assertEquals(fresh._2.notifies, Vector(InterviewNotificationKind.RescheduleDeclined -> declined))
-      assertEquals(unknown._1, Some(InterviewCommandResult.OutcomeUnknown))
+      assertEquals(unknown._1, Some(InterviewResult.OutcomeUnknown))
       assertEquals(unknown._2.notifies, Vector.empty, "an unreadable receipt store is not a reason to send")
-      assertEquals(failing._1, Some(InterviewCommandResult.OutcomeUnknown))
+      assertEquals(failing._1, Some(InterviewResult.OutcomeUnknown))
     }
   }
 
@@ -395,9 +395,9 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
         Providers(notificationLookup = EitherT.leftT(InterviewProviderError.Unavailable))
       )
     } yield {
-      assertEquals(found._1, Some(InterviewCommandResult.Found))
-      assertEquals(absent._1, Some(InterviewCommandResult.Absent))
-      assertEquals(unknown._1, Some(InterviewCommandResult.OutcomeUnknown))
+      assertEquals(found._1, Some(InterviewResult.Found))
+      assertEquals(absent._1, Some(InterviewResult.Absent))
+      assertEquals(unknown._1, Some(InterviewResult.OutcomeUnknown))
       assertEquals(found._2.notifies, Vector.empty)
     }
   }
@@ -419,7 +419,7 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
   ): IO[(Boolean, Applied)] =
     for {
       applied <- Ref.of[IO, Applied](Applied(Vector.empty, Vector.empty, Vector.empty))
-      stored = record(workflow, command, Some(InterviewCommandResult.valueOf(result.toString)))
+      stored = record(workflow, command, Some(InterviewResult.valueOf(result.toString)))
       repository = new TestInterviewWorkflowRepository {
         override def findForAdmin(id: InterviewWorkflowId) = RepositoryIO.fromEither(Right(Some(workflow)))
         override def findCommand(id: InterviewWorkflowId, step: String) = RepositoryIO.fromEither(Right(Some(stored)))
@@ -479,7 +479,7 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
         Diagnostics.noop,
         IO.pure(at)
       )
-      durable <- worker.receiveResult(messageFor(workflow, stored, Some(result)))
+      durable <- worker.receiveResult(messageFor(workflow, stored, Some(result))).committed
       seen <- applied.get
     } yield (durable, seen)
 
@@ -501,7 +501,10 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
     } yield {
       assertEquals(unknown._2.lifecycle.map(_._2), Vector(InterviewLifecycleEvent.CancelOutcomeUnknown))
       assertEquals(unknown._2.lifecycle.map(_._4.isDefined), Vector(true), "the lookup waits for the backoff")
-      assertEquals(exhausted._2.lifecycle.map(_._2), Vector(InterviewLifecycleEvent.RetryExhausted("provider")))
+      assertEquals(
+        exhausted._2.lifecycle.map(_._2),
+        Vector(InterviewLifecycleEvent.RetryExhausted(InterviewFailureCode.Provider))
+      )
       assertEquals(absent._2.lifecycle.map(_._2), Vector(InterviewLifecycleEvent.CancelLookupAbsent))
     }
   }
@@ -553,7 +556,10 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
       assertEquals(ok._2.settlements, Vector.empty)
       assert(retry._2.settlements.headOption.exists(_.isInstanceOf[InterviewNotificationSettlement.Retry]))
       assert(rejected._2.settlements.headOption.exists(_.isInstanceOf[InterviewNotificationSettlement.Retry]))
-      assertEquals(spent._2.settlements, Vector(InterviewNotificationSettlement.Exhausted("notification_exhausted")))
+      assertEquals(
+        spent._2.settlements,
+        Vector(InterviewNotificationSettlement.Exhausted(InterviewFailureCode.NotificationExhausted))
+      )
     }
   }
 
@@ -652,16 +658,18 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
         Diagnostics.noop,
         IO.pure(expiredAt)
       )
-      first <- worker.receiveCommand(messageFor(cancelling, stored, None))
+      first <- worker.receiveCommand(messageFor(cancelling, stored, None)).committed
       _ <- current.set(workflowIn(InterviewWorkflowPhase.Completed) -> informational)
-      second <- worker.receiveCommand(messageFor(workflowIn(InterviewWorkflowPhase.Completed), informational, None))
+      second <- worker
+        .receiveCommand(messageFor(workflowIn(InterviewWorkflowPhase.Completed), informational, None))
+        .committed
       events <- applied.get
       settlements <- settled.get
     } yield {
       assert(first && second)
-      assertEquals(events.map(_._1), Vector(InterviewLifecycleEvent.RetryExhausted("replay_expired")))
+      assertEquals(events.map(_._1), Vector(InterviewLifecycleEvent.RetryExhausted(InterviewFailureCode.ReplayExpired)))
       assert(events.forall(_._2.isInstanceOf[InterviewLifecycleOrigin.Internal]))
-      assertEquals(settlements, Vector(InterviewNotificationSettlement.Exhausted("replay_expired")))
+      assertEquals(settlements, Vector(InterviewNotificationSettlement.Exhausted(InterviewFailureCode.ReplayExpired)))
     }
   }
 
@@ -728,7 +736,7 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
         def lookup(k: String) = EitherT.liftF(IO.raiseError(new AssertionError("no notification")))
       }
       worker = new InterviewWorkflowWorker(repository, never, silent, settings, Diagnostics.noop, IO.pure(now))
-      durable <- worker.receiveCommand(messageFor(open, stored, None))
+      durable <- worker.receiveCommand(messageFor(open, stored, None)).committed
       requeued <- deferred.get
       events <- applied.get
       refused <- quarantined.get
@@ -755,7 +763,7 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
   }
 
   test("DHW-20 an expiry that could not be requeued is acknowledged only when its row is settled elsewhere") {
-    def withState(state: InterviewWorkflowCommandState, result: Option[InterviewCommandResult] = None) =
+    def withState(state: InterviewWorkflowCommandState, result: Option[InterviewResult] = None) =
       (row: Option[InterviewWorkflowCommandRecord]) => row.map(_.copy(state = state, result = result))
     for {
       superseded <- earlyExpiry(oneDayAhead, Right(false), withState(InterviewWorkflowCommandState.Superseded))
@@ -775,7 +783,10 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
   test("DHW-18 a cancel the provider cannot find ends in repair, not in a lookup loop") {
     receive(cancelling, C.CancelCalendarSlot(cancelKey), InterviewResult.Rejected).map { case (durable, seen) =>
       assert(durable)
-      assertEquals(seen.lifecycle.map(_._2), Vector(InterviewLifecycleEvent.RetryExhausted("unknown_reservation")))
+      assertEquals(
+        seen.lifecycle.map(_._2),
+        Vector(InterviewLifecycleEvent.RetryExhausted(InterviewFailureCode.UnknownReservation))
+      )
     }
   }
 }

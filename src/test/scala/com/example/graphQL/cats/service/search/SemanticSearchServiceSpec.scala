@@ -7,6 +7,7 @@ import cats.syntax.all.*
 import com.example.graphQL.cats.service.read.HiringReadScope
 import com.example.graphQL.cats.service.{ActorContext, AuthenticatedActor, SearchError, UseCaseError}
 import com.example.graphQL.cats.service.port.*
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.ServiceFixtures.*
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.*
@@ -24,6 +25,11 @@ import munit.CatsEffectSuite
 import java.util.UUID
 
 final class SemanticSearchServiceSpec extends CatsEffectSuite {
+
+  /** Candidate matches with neither query text nor filters, the common case under test. */
+  extension (service: SemanticSearchService)
+    private def candidateMatches(actor: ActorContext, jobId: Identifiers.JobId, first: PageSize, searchId: UUID) =
+      service.candidateMatches(actor, jobId, None, CandidateMatchFilters.empty, first, searchId)
   private val searchId = UUID.fromString("00000000-0000-0000-0000-000000000099")
   private val profile = CandidateProfile(Set("Scala"), Some("Backend engineer"), Some("resume://candidate"))
   private val candidateWithProfile = candidate.copy(profile = Some(UserProfile.Candidate(profile)))
@@ -970,15 +976,13 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
             scope: HiringReadScope,
             expected: JobSearchEligibility,
             ids: List[Identifiers.UserId]
-        ): RepositoryIO[List[CandidateSearchEligibility]] = candidateEligibility(ids)
+        ): RepositoryIO[List[CandidateSearchEligibility]] = RepositoryIO.fromEither(Right(Nil))
 
         def searchJobs(query: VectorSearchQuery): RepositoryIO[List[JobRetrievalHit]] =
           RepositoryIO.fromEither(Right(List(hit, hit).map(_.retrieval)))
         def recommendedJobs(query: VectorSearchQuery): RepositoryIO[List[JobRetrievalHit]] =
           RepositoryIO.fromEither(Right(Nil))
         def candidateMatches(query: VectorSearchQuery): RepositoryIO[List[CandidateRetrievalHit]] =
-          RepositoryIO.fromEither(Right(Nil))
-        def candidateEligibility(ids: List[Identifiers.UserId]): RepositoryIO[List[CandidateSearchEligibility]] =
           RepositoryIO.fromEither(Right(Nil))
         def jobEligibility(ids: List[Identifiers.JobId]): RepositoryIO[List[JobSearchEligibility]] = RepositoryIO.lift(
           idsSeen.set(ids) *> (entered.complete(()).void *> IO.never[List[JobSearchEligibility]])
@@ -1008,22 +1012,18 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
             scope: HiringReadScope,
             ids: List[Identifiers.JobId],
             expected: Option[CandidateSearchEligibility]
-        ): RepositoryIO[List[JobSearchEligibility]] = jobEligibility(ids)
+        ): RepositoryIO[List[JobSearchEligibility]] = RepositoryIO.fromEither(Left(RepositoryError.InvalidStoredData))
         def authorizedCandidateEligibility(
             scope: HiringReadScope,
             expected: JobSearchEligibility,
             ids: List[Identifiers.UserId]
-        ): RepositoryIO[List[CandidateSearchEligibility]] = candidateEligibility(ids)
+        ): RepositoryIO[List[CandidateSearchEligibility]] = RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
 
         def searchJobs(query: VectorSearchQuery): RepositoryIO[List[JobRetrievalHit]] = repository.searchJobs(query)
         def recommendedJobs(query: VectorSearchQuery): RepositoryIO[List[JobRetrievalHit]] =
           repository.recommendedJobs(query)
         def candidateMatches(query: VectorSearchQuery): RepositoryIO[List[CandidateRetrievalHit]] =
           repository.candidateMatches(query)
-        def candidateEligibility(ids: List[Identifiers.UserId]): RepositoryIO[List[CandidateSearchEligibility]] =
-          RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
-        def jobEligibility(ids: List[Identifiers.JobId]): RepositoryIO[List[JobSearchEligibility]] =
-          RepositoryIO.fromEither(Left(RepositoryError.InvalidStoredData))
       }
       result <- SemanticSearchService(users, jobs, embedder, failing, configuredModel)
         .semanticJobSearch(
@@ -1217,9 +1217,9 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
         def candidateMatches(query: VectorSearchQuery): RepositoryIO[List[CandidateRetrievalHit]] =
           search.candidateMatches(query)
         def jobEligibility(ids: List[Identifiers.JobId]): RepositoryIO[List[JobSearchEligibility]] =
-          jobs.findMany(ids).map(_.map(JobSearchEligibility.fromJob))
+          ids.traverse(jobs.find).map(_.flatten.map(JobSearchEligibility.fromJob))
         def candidateEligibility(ids: List[Identifiers.UserId]): RepositoryIO[List[CandidateSearchEligibility]] =
-          users.findMany(ids).map(_.map(CandidateSearchEligibility.fromUser))
+          ids.traverse(users.find).map(_.flatten.map(CandidateSearchEligibility.fromUser))
       },
       embeddingModel = configuredModel
     )
@@ -1235,11 +1235,6 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
         expected: JobSearchEligibility,
         ids: List[Identifiers.UserId]
     ): RepositoryIO[List[CandidateSearchEligibility]] = RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
-
-    def jobEligibility(ids: List[Identifiers.JobId]): RepositoryIO[List[JobSearchEligibility]] =
-      RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
-    def candidateEligibility(ids: List[Identifiers.UserId]): RepositoryIO[List[CandidateSearchEligibility]] =
-      RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
   }
 
   private final case class FakeEmbeddingService(result: Either[EmbeddingError, EmbeddingVector])

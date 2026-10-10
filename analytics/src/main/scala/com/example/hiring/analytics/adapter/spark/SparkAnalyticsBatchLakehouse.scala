@@ -29,7 +29,6 @@ private[analytics] final class SparkAnalyticsBatchLakehouse[F[_]: Async](
     silverStage: AnalyticsBatchSilverStage[F]
 ) extends AnalyticsBatchLakehouse[F] {
   private val async = Async[F]
-  private def lakehouse[A](work: => A): F[A] = LakehouseErrors.adapt(execution(work))
 
   override def validateHmacConfiguration: F[Unit] = maintenance.validateHmacConfigurationLocked
 
@@ -43,15 +42,7 @@ private[analytics] final class SparkAnalyticsBatchLakehouse[F[_]: Async](
     }
 
   override def rebuildGoldAndExtractReport(asOf: Instant): F[AnalyticsReportOutput] =
-    for {
-      hasSilver <- lakehouse(DeltaTables.exists(spark, paths.silver))
-      _ <-
-        if (hasSilver)
-          lakehouse(DeltaTables.read(spark, paths.silver))
-            .flatMap(AnalyticsGoldStage.rebuild(paths, _, execution))
-        else AnalyticsGoldStage.clear(spark, paths, execution)
-      report <- extractReport(spark, asOf)
-    } yield report
+    AnalyticsGoldStage.rebuildAndExtract(spark, paths, asOf, execution)
 
   private def cachedMarkers(tokens: Vector[SubjectToken]): Resource[F, DataFrame] =
     Resource.make(execution(AnalyticsTableSchemas.markerFrame(spark, tokens).persist(StorageLevel.MEMORY_AND_DISK)))(
@@ -84,8 +75,6 @@ private[analytics] final class SparkAnalyticsBatchLakehouse[F[_]: Async](
       )
     }
 
-  private def extractReport(spark: SparkSession, asOf: Instant): F[AnalyticsReportOutput] =
-    AnalyticsGoldStage.extract(spark, paths, asOf, execution)
 }
 
 /** Bounded batch entry point. Runtime settings and the explicit offset range load from HOCON. */

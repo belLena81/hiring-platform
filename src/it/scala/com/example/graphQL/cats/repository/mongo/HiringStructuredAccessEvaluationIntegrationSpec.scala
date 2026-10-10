@@ -161,8 +161,8 @@ final class HiringStructuredAccessEvaluationIntegrationSpec extends MongoIntegra
     val idempotent = Idempotent(receipts)
     val services = HiringGraphQLServices(
       HiringReadService(users, jobRepository, applicationRepository),
-      JobService.live(users, jobRepository, publisher, idempotent, Diagnostics.noop),
-      ApplicationService.live(users, jobRepository, applicationRepository, idempotent),
+      new JobService(users, jobRepository, publisher, idempotent, Diagnostics.noop),
+      new ApplicationService(users, jobRepository, applicationRepository, idempotent),
       CursorCodec.keyFromSecret(auth.hmacSecret),
       TestGraphQLSupport.accountService,
       TestGraphQLSupport.interactions,

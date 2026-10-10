@@ -5,7 +5,8 @@ import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
 
 import io.delta.tables.DeltaTable
-import org.apache.spark.sql.{DataFrame, Row, SparkSession}
+import org.apache.spark.sql.{Column, DataFrame, Row, SparkSession}
+import org.apache.spark.sql.functions.lit
 import org.apache.spark.sql.types.*
 
 import scala.jdk.CollectionConverters.*
@@ -114,6 +115,10 @@ private[analytics] object AnalyticsTableSchemas {
   def struct(shape: Shape): StructType = StructType(shape.map { case (name, dataType) =>
     StructField(name, dataType, nullable = true)
   })
+
+  /** Timestamp literal `days` after `now`, used for retention expiry columns. */
+  def expiryAt(now: java.time.Instant, days: Long): Column =
+    lit(java.sql.Timestamp.from(now.plus(java.time.Duration.ofDays(days))))
 
   /** Single non-null `subjectToken` column holding the given deletion-marker tokens. */
   def markerFrame(spark: SparkSession, tokens: Vector[SubjectToken]): DataFrame =

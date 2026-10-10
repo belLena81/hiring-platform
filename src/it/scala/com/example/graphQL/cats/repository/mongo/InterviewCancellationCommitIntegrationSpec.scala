@@ -598,7 +598,10 @@ final class InterviewCancellationCommitIntegrationSpec extends MongoIntegrationS
             .append("commandState", "Pending")
             .append("availableAt", Date.from(now))
             .append("occurredAt", Date.from(now))
-            .append("command", new org.bson.Document("kind", "requireRepair").append("reason", "occupied"))
+            .append(
+              "command",
+              new org.bson.Document("kind", "requireRepair").append("reason", "retry exhausted: provider")
+            )
         )
         failed <- apply(
           a,

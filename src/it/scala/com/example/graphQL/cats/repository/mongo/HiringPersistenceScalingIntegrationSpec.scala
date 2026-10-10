@@ -227,7 +227,9 @@ final class HiringPersistenceScalingIntegrationSpec extends MongoIntegrationSuit
           None
         )
         writeStart <- IO.monotonic
-        result <- applications.createForOpenJob(snapshot, application, event).value
+        result <- applications
+          .createForOpenJobWithEvents(snapshot, application, event, Nil, MutationWriteContext.directWrite)
+          .value
         writeEnd <- IO.monotonic
         outcome <- result match {
           case Right(_) =>

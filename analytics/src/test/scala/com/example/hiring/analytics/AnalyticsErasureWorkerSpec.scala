@@ -274,8 +274,6 @@ final class AnalyticsErasureWorkerSpec extends CatsEffectSuite {
         IO.pure(Vector.empty)
       override def checkpointPurgedRawLogs: IO[Vector[String]] = IO.pure(Vector.empty)
       override def verifyFilesAbsent(files: Vector[String]): IO[Unit] = IO.unit
-      override def checkpointRawTableLogs: IO[Unit] = IO.unit
-      override def purgeMarkedSubjectRows(path: String, markerTokens: Vector[SubjectToken]): IO[Unit] = IO.unit
       override def applyDeletionMarkers(markerTokens: Vector[SubjectToken]): IO[Unit] = IO.unit
       override def rebuildGoldAndExtractReport(asOf: Instant): IO[AnalyticsReportOutput] =
         IO.pure(AnalyticsReportOutput(asOf, Vector.empty, None, Vector.empty))

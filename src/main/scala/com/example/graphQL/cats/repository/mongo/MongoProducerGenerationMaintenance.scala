@@ -3,7 +3,8 @@ package com.example.graphQL.cats.repository.mongo
 import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.infrastructure.kafka.KafkaProducerGenerationRetirement
-import com.example.graphQL.cats.service.port.{RepositoryIO, RepositoryError}
+import com.example.graphQL.cats.service.port.{RepositoryIO}
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.Diagnostics
 import com.mongodb.client.model.Sorts
 import mongo4cats.database.MongoDatabase
@@ -74,7 +75,7 @@ final class MongoProducerGenerationMaintenance(
           ).sort(Sorts.ascending("_id")).limit(MongoProducerRegistrations.BatchSize).all
         )
       ).flatMap { batch =>
-        if (batch.isEmpty) RepositoryIO.fromEither(Right(()))
+        if (batch.isEmpty) ().pure[RepositoryIO]
         else
           for {
             ids <- RepositoryIO.fromEither(batch.toList.traverse(text(_, "_id")))

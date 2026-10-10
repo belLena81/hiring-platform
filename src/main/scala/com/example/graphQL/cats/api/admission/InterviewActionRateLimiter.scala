@@ -1,7 +1,7 @@
 package com.example.graphQL.cats.api.admission
 
 import cats.effect.IO
-import com.example.graphQL.cats.config.InterviewActionRateLimitConfig
+import com.example.graphQL.cats.config.RateLimitConfig
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.github.benmanes.caffeine.cache.Ticker
 
@@ -13,10 +13,10 @@ object InterviewActionRateLimiter {
   val RateLimited: FixedWindowRateLimiter.RateLimited.type = FixedWindowRateLimiter.RateLimited
   type Limiter = FixedWindowRateLimiter[UserId]
 
-  def create(config: InterviewActionRateLimitConfig): IO[Limiter] =
+  def create(config: RateLimitConfig): IO[Limiter] =
     create(config, Ticker.systemTicker())
 
-  private[admission] def create(config: InterviewActionRateLimitConfig, ticker: Ticker): IO[Limiter] =
+  private[admission] def create(config: RateLimitConfig, ticker: Ticker): IO[Limiter] =
     FixedWindowRateLimiter.create[UserId](
       config.windowSeconds,
       config.attempts,

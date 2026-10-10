@@ -5,7 +5,7 @@ import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.JobId
 import com.example.graphQL.cats.service.Diagnostics
-import com.example.graphQL.cats.service.port.*
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.search.*
 import com.mongodb.client.model.{Filters, Updates}
 import java.util.UUID

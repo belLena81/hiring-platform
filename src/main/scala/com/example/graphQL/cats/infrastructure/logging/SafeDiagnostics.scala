@@ -1,7 +1,7 @@
 package com.example.graphQL.cats.infrastructure.logging
 
 import cats.effect.IO
-import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFields, LogLevel}
+import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFields, LogLevel, PublicLogValues}
 import com.example.graphQL.cats.service.Diagnostics.*
 import ch.qos.logback.core.{Appender, FileAppender}
 import ch.qos.logback.core.spi.AppenderAttachable
@@ -18,10 +18,10 @@ object SafeDiagnostics {
   private val loggerName = "hiring.foundation"
   private val DefaultLogDirectory = Paths.get("_logs")
 
-  def configure(maskSensitive: Boolean = true): IO[Diagnostics] =
+  def configure(maskSensitive: Boolean, allowed: PublicLogValues): IO[Diagnostics] =
     IO.blocking {
       Files.createDirectories(DefaultLogDirectory)
-      val diagnostics = apply(maskSensitive)
+      val diagnostics = apply(maskSensitive, allowed)
       if (!maskSensitive) {
         restrictToCurrentUser(DefaultLogDirectory)
         activeLogFiles.foreach(restrictToCurrentUser)
@@ -32,10 +32,11 @@ object SafeDiagnostics {
         if (maskSensitive) IO.unit else diagnostics.emit(LogEvent.LocalUnmasked)
       }
 
-  def apply(maskSensitive: Boolean = true): Diagnostics = {
+  def apply(maskSensitive: Boolean, allowed: PublicLogValues): Diagnostics = {
     val structuredLogger = Slf4jLogger.getLoggerFromName[IO](loggerName)
     withEventSink(
       maskSensitive,
+      allowed,
       levelEnabled(structuredLogger, _),
       (event, message) => {
         val logger = structuredLogger.addContext(Map("category" -> event.category, "marker" -> event.marker))
@@ -50,8 +51,12 @@ object SafeDiagnostics {
     )
   }
 
-  private[logging] def withSink(sink: String => IO[Unit], maskSensitive: Boolean = true): Diagnostics =
-    withEventSink(maskSensitive, _ => IO.pure(true), (_, message) => sink(message))
+  private[logging] def withSink(
+      sink: String => IO[Unit],
+      maskSensitive: Boolean = true,
+      allowed: PublicLogValues = PublicLogValues.none
+  ): Diagnostics =
+    withEventSink(maskSensitive, allowed, _ => IO.pure(true), (_, message) => sink(message))
 
   private def levelEnabled(logger: org.typelevel.log4cats.SelfAwareStructuredLogger[IO], level: LogLevel): IO[Boolean] =
     level match {
@@ -143,6 +148,7 @@ object SafeDiagnostics {
 
   private def withEventSink(
       maskSensitive: Boolean,
+      allowed: PublicLogValues,
       isEnabled: LogLevel => IO[Boolean],
       sink: (LogEvent, String) => IO[Unit]
   ): Diagnostics = new Diagnostics {
@@ -156,7 +162,7 @@ object SafeDiagnostics {
               val details = fields.toList.sortBy(_._1.ordinal).take(12).map { case (field, value) =>
                 val rendered =
                   if (field.sensitive && maskSensitive) "[REDACTED]"
-                  else if (field.sensitive || LogFields.validPublic(field, value)) bounded(value, 128)
+                  else if (field.sensitive || LogFields.validPublic(field, value, allowed)) bounded(value, 128)
                   else "[FILTERED]"
                 field.key -> Json.fromString(rendered)
               }

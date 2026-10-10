@@ -328,7 +328,7 @@ final class InterviewRescheduleWorkerIntegrationSpec extends MongoIntegrationSui
         )
         // The provider cancel gave up before any notification was sent: the workflow is in repair.
         failed <- s.applied(
-          InterviewLifecycleEvent.RetryExhausted("provider"),
+          InterviewLifecycleEvent.RetryExhausted(InterviewFailureCode.Provider),
           InterviewLifecycleOrigin.Internal(InterviewAdvanceCause.ResultReceipt(s"exhausted-${UUID.randomUUID()}")),
           cancelling.revision,
           now
@@ -373,7 +373,7 @@ final class InterviewRescheduleWorkerIntegrationSpec extends MongoIntegrationSui
           now
         )
         failed <- s.applied(
-          InterviewLifecycleEvent.RetryExhausted("provider"),
+          InterviewLifecycleEvent.RetryExhausted(InterviewFailureCode.Provider),
           InterviewLifecycleOrigin.Internal(InterviewAdvanceCause.ResultReceipt(s"exhausted-${UUID.randomUUID()}")),
           cancelling.revision,
           now

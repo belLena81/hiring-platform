@@ -3,7 +3,7 @@ package com.example.hiring.analytics
 import cats.effect.{IO, Ref}
 import com.example.hiring.analytics.adapter.spark.SparkShutdownDrain
 import com.example.hiring.analytics.adapter.spark.SparkShutdownDrain.Attempt
-import com.example.hiring.analytics.app.AppModule
+import com.example.hiring.analytics.adapter.spark.SparkRuntime
 import mongo4cats.client.MongoClient
 import org.apache.spark.scheduler.*
 import java.util.concurrent.atomic.{AtomicInteger, AtomicReference}
@@ -151,7 +151,7 @@ final class SparkShutdownDrainSpec extends CatsEffectSuite {
     val original = new AtomicReference[Option[SparkSession]](None)
     val jobs = new AtomicInteger(0)
     val tasks = new AtomicInteger(0)
-    AppModule
+    SparkRuntime
       .managedSparkMongo[IO](
         execution =>
           execution {

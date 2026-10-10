@@ -17,7 +17,7 @@ private[graphql] object HiringGraphQLAccountResolvers {
     authenticated(context) { case (actor, hiring) => raiseOnUseCaseError(hiring.accountService.me(actor)) }
 
   def signUp(context: Context[RequestContext, Unit]): HiringGraphQLResult[MutationOutcome[AuthSuccess]] =
-    rateLimited(context, Operation.SignUp).flatMap { _ =>
+    context.ctx.rateLimited(Operation.SignUp).flatMap { _ =>
       val input = context.arg(signUpInputArgument)
       withHiring(context) { hiring =>
         signUpProfile(input).fold(
@@ -36,7 +36,7 @@ private[graphql] object HiringGraphQLAccountResolvers {
     }
 
   def login(context: Context[RequestContext, Unit]): HiringGraphQLResult[MutationOutcome[AuthSuccess]] =
-    rateLimited(context, Operation.Login).flatMap { _ =>
+    context.ctx.rateLimited(Operation.Login).flatMap { _ =>
       val input = context.arg(loginInputArgument)
       withHiring(context) { hiring =>
         mutationResult(

@@ -10,9 +10,9 @@ import com.example.graphQL.cats.service.port.{
   EmbeddingWorkFailure,
   EmbeddingWorkKind,
   EmbeddingWorkState,
-  RepositoryError,
   RepositoryIO
 }
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.search.*
 import com.example.graphQL.cats.shared.crypto.SourceHash
 import com.mongodb.{ReadConcern, ReadPreference}

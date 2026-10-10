@@ -32,7 +32,7 @@ private[analytics] final class MongoHmacKeyRetirementAuthorizationStore[F[_]: As
   private def decode(
       record: AnalyticsMongoRecords.HmacAuthorization
   ): Either[AnalyticsError, HmacKeyRetirementAuthorization] = {
-    val malformed = AnalyticsError.InvalidConfiguration("HMAC key retirement authorization is malformed")
+    val malformed = AnalyticsError.DataIntegrityViolation("HMAC key retirement authorization is malformed")
     for {
       result <- HmacKeyRetirementAuthorization.validate(
         HmacKeyRetirementAuthorization(

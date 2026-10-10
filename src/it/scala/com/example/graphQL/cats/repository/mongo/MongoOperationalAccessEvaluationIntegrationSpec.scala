@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.service.events.OperationalEventPayload
 import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.*
@@ -7,7 +8,7 @@ import com.example.graphQL.cats.domain.model.Identifiers.*
 import com.example.graphQL.cats.domain.pagination.*
 import com.example.graphQL.cats.service.{ActorContext, Diagnostics, RepositoryError}
 import com.example.graphQL.cats.service.auth.ActorAuthorization
-import com.example.graphQL.cats.service.events.{OperationalEvents, OperationalEventType}
+import com.example.graphQL.cats.service.events.OperationalEvents
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.read.{HiringReadScope, JobRelationKey, UserRelationKey}
 import com.example.graphQL.cats.service.search.{
@@ -131,15 +132,6 @@ final class MongoOperationalAccessEvaluationIntegrationSpec extends MongoIntegra
         Diagnostics.noop
       )
       val applicationRepository = MongoApplicationRepository.transactional(database, fixture.client, Diagnostics.noop)
-      val search = new MongoSemanticSearchRepository(
-        database,
-        "job-vector",
-        "candidate-vector",
-        "job-lexical",
-        "candidate-lexical",
-        100,
-        diagnostics = Diagnostics.noop
-      )
       val authorization = ActorAuthorization(users)
       def scope(value: User): HiringReadScope =
         HiringReadScope
@@ -352,16 +344,6 @@ final class MongoOperationalAccessEvaluationIntegrationSpec extends MongoIntegra
               applications.take(7).map(value => UserRelationKey.ApplicationCandidate(value.id, value.candidateId))
             )
           ).map(_.size)
-        ),
-        Capability(
-          "jobEligibilityProjection",
-          "Candidate",
-          successful(search.jobEligibility(jobs.take(7).map(_.id))).map(_.size)
-        ),
-        Capability(
-          "candidateEligibilityProjection",
-          "Recruiter",
-          successful(search.candidateEligibility(candidates.take(7).map(_.id))).map(_.size)
         )
       )
       for {
@@ -632,20 +614,11 @@ final class MongoOperationalAccessEvaluationIntegrationSpec extends MongoIntegra
         }
         collection <- MongoRepositoryTestSupport.collection(fixture.database, MongoCollections.Users)
         selected <- collection.find(search.candidateFilter(query, includeEmbeddingModel = true)).stream.compile.toList
-        projected <- successful(search.candidateEligibility(values.map(_._1.id)))
-        empty <- successful(search.candidateEligibility(Nil))
-        overflow <- search
-          .candidateEligibility((0 to 100).toList.map(index => UserId(support.deterministicId(s"overflow:$index"))))
-          .value
       } yield {
         assertEquals(
           selected.map(_.getString("name")).toSet,
           Set("true-matching", "false-missing-private", "absent-missing-private")
         )
-        assertEquals(projected.size, values.size)
-        assert(projected.flatMap(_.profile).forall(_.resumeRef.isEmpty))
-        assertEquals(empty, Nil)
-        assert(overflow.isLeft)
       }
     }
   }
@@ -767,7 +740,7 @@ final class MongoOperationalAccessEvaluationIntegrationSpec extends MongoIntegra
           eventId = support.deterministicId(s"created-job-event:$index")
           value = jobs.head.copy(id = JobId(id))
           event = OperationalEvents
-            .jobEvent(OperationalEventType.JOB_CREATED, eventId, value, value.recruiterId, now)
+            .jobEvent(OperationalEventPayload.JobKind.Created, eventId, value, value.recruiterId, now)
             .fold(error => fail(error.toString), identity)
           _ <- successful(jobRepository.createWithEvents(value, now, List(event), MutationWriteContext.directWrite))
         } yield 1

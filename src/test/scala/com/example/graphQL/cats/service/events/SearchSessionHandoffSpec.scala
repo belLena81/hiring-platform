@@ -1,10 +1,12 @@
 package com.example.graphQL.cats.service.events
 
+import com.example.graphQL.cats.service.events.OperationalEventPayload.SearchKind
 import cats.effect.{Deferred, IO, Ref}
 import cats.syntax.all.*
 import com.example.graphQL.cats.FixedTestClock
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.service.port.*
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.Diagnostics
 import com.example.graphQL.cats.service.events.{OperationalEvents, SearchSession, SearchSessionResult}
 import io.circe.Json
@@ -131,7 +133,7 @@ final class SearchSessionHandoffSpec extends CatsEffectSuite {
     val session = SearchSession(
       searchId,
       actorId,
-      "semanticJobSearch",
+      SearchKind.SemanticJobSearch,
       Some("scala"),
       Json.obj("city" -> Json.fromString("Nicosia")),
       Some("test-model"),

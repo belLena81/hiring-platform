@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.service.events.OperationalEventPayload
 import cats.data.EitherT
 import com.example.graphQL.cats.AccountValueFixtures.email
 import cats.effect.{Deferred, IO, Outcome, Ref, Resource}
@@ -19,6 +20,7 @@ import com.example.graphQL.cats.domain.model.{
   UserRole
 }
 import com.example.graphQL.cats.service.port.*
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.mutation.Idempotent
 import com.example.graphQL.cats.service.protocol.{IdempotencyRequest, UseCaseIO}
 import com.example.graphQL.cats.service.events.{OperationalEventEnvelope, OperationalEventType}
@@ -58,7 +60,7 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends MongoIntegrationSu
 
   private def event(value: Job, actorId: UserId): OperationalEventEnvelope =
     com.example.graphQL.cats.service.events.OperationalEvents
-      .jobEvent(OperationalEventType.JOB_CREATED, UUID.randomUUID(), value, actorId, now)
+      .jobEvent(OperationalEventPayload.JobKind.Created, UUID.randomUUID(), value, actorId, now)
       .fold(error => fail(error.toString), identity)
 
   test("native transaction cleanup observes committed rejected failed and cancelled sessions") {

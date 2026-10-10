@@ -21,6 +21,10 @@ object AnalyticsError {
       InvalidConfiguration(NonEmptyChain.one(detail), underlying)
   }
 
+  /** Stored or in-flight state that violates an invariant: corrupt rows, mismatched evidence, broken invariants. */
+  final case class DataIntegrityViolation(detail: String, underlying: Option[Throwable] = None)
+      extends AnalyticsError(detail, underlying)
+
   def fromProblems(problems: NonEmptyChain[String]): InvalidConfiguration = InvalidConfiguration(problems, None)
 
   final case class InvalidSourceSchema(missing: Vector[String])

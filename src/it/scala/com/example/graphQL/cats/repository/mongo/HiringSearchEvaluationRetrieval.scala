@@ -7,6 +7,7 @@ import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.pagination.PageSize
 import com.example.graphQL.cats.service.{ActorContext, Diagnostics}
 import com.example.graphQL.cats.service.port.*
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.read.HiringReadScope
 import com.example.graphQL.cats.service.search.*
 import mongo4cats.database.MongoDatabase
@@ -69,8 +70,6 @@ private[mongo] final class HiringSearchEvaluationRetrieval(database: MongoDataba
       repository.authorizedJobEligibility(scope, ids, candidate)
     def authorizedCandidateEligibility(scope: HiringReadScope, job: JobSearchEligibility, ids: List[UserId]) =
       repository.authorizedCandidateEligibility(scope, job, ids)
-    def jobEligibility(ids: List[JobId]) = repository.jobEligibility(ids)
-    def candidateEligibility(ids: List[UserId]) = repository.candidateEligibility(ids)
     def recommendedJobs(query: VectorSearchQuery) = repository.recommendedJobs(query)
     def searchJobs(query: VectorSearchQuery): RepositoryIO[List[JobRetrievalHit]] = strategy match {
       case SearchEvaluationStrategy.ApplicationRrf => repository.searchJobs(query)

@@ -4,6 +4,7 @@ import cats.effect.IO
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.domain.workflow.*
 import com.example.graphQL.cats.service.port.*
+import com.example.graphQL.cats.service.RepositoryError
 import java.time.Instant
 import java.util.UUID
 
@@ -29,7 +30,7 @@ private[cats] class TestInterviewWorkflowRepository extends InterviewWorkflowRep
     unexpected[Boolean]
   override def attemptCount(workflowId: InterviewWorkflowId, command: InterviewCommand) = unexpected[Long]
   override def quarantine(identity: String, now: Instant) = unexpected[Unit]
-  override def recordResult(claim: ClaimedInterviewWorkflowCommand, result: InterviewCommandResult, now: Instant) =
+  override def recordResult(claim: ClaimedInterviewWorkflowCommand, result: InterviewResult, now: Instant) =
     unexpected[Unit]
   override def findRequest(actorId: UserId, requestKey: UUID, fingerprint: MutationReceiptFingerprint) =
     unexpected[Option[InterviewWorkflow]]
@@ -95,8 +96,8 @@ private[cats] class TestInterviewWorkflowRepository extends InterviewWorkflowRep
       claim: ClaimedInterviewWorkflowCommand,
       now: Instant,
       availableAt: Instant,
-      failureCode: String
+      failureCode: InterviewFailureCode
   ) = unexpected[Unit]
-  override def requireRepair(claim: ClaimedInterviewWorkflowCommand, now: Instant, failureCode: String) =
+  override def requireRepair(claim: ClaimedInterviewWorkflowCommand, now: Instant, failureCode: InterviewFailureCode) =
     unexpected[InterviewPublicationResolution]
 }

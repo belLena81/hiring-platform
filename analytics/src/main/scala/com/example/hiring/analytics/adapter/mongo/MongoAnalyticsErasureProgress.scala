@@ -26,11 +26,12 @@ final class MongoAnalyticsErasureProgress[F[_]: Async] private (
     streams: MongoPublisherStream
 ) extends MongoAnalyticsErasureStoreSupport[F](streams)
     with ErasureProgress[F] {
+  import MongoAnalyticsErasureStoreSupport.ownedClaimFilter
 
   def persistDeltaPurgedAt(claim: ErasureClaim, at: Instant, now: Instant): F[ErasureUpdate] = mongo {
     matchedUpdate(
       requests,
-      ownedClaim(claim, now),
+      ownedClaimFilter(claim, now),
       Updates.set(AnalyticsCollections.Fields.DeltaPurgedAt, Date.from(at))
     ).map(toErasureUpdate)
   }
@@ -38,7 +39,7 @@ final class MongoAnalyticsErasureProgress[F[_]: Async] private (
   def persistDeltaGeneration(claim: ErasureClaim, generation: Long, now: Instant): F[ErasureUpdate] = mongo {
     matchedUpdate(
       requests,
-      ownedClaim(claim, now),
+      ownedClaimFilter(claim, now),
       Updates.set(AnalyticsCollections.Fields.DeltaGeneration, generation)
     ).map(toErasureUpdate)
   }
@@ -50,7 +51,7 @@ final class MongoAnalyticsErasureProgress[F[_]: Async] private (
       mongo {
         matchedUpdate(
           requests,
-          ownedClaim(claim, now),
+          ownedClaimFilter(claim, now),
           Updates.max(AnalyticsCollections.Fields.DeltaAffectedRows, affectedRows)
         ).map(toErasureUpdate)
       }
@@ -73,23 +74,22 @@ final class MongoAnalyticsErasureProgress[F[_]: Async] private (
           new ReplaceOptions().upsert(true)
         ): WriteModel[AnalyticsMongoRecords.DeltaFileEvidence]
       }.asJava
-      val prepared = operations
 
       mongo {
-        MongoSession.resource(client).use { session =>
+        client.startSession.use { session =>
           streams
             .transaction(session) {
               EitherT.liftF[F, AnalyticsError, ErasureUpdate](
                 matchedUpdate(
                   session,
                   requests,
-                  ownedClaim(claim, now),
+                  ownedClaimFilter(claim, now),
                   Updates.inc(AnalyticsCollections.Fields.DeltaEvidenceRevision, 1L)
                 ).flatMap { ownership =>
-                  if (!ownership || prepared.isEmpty) Async[F].pure(toErasureUpdate(ownership))
+                  if (!ownership || operations.isEmpty) Async[F].pure(toErasureUpdate(ownership))
                   else
                     streams
-                      .drain(deltaEvidence.underlying.bulkWrite(session.underlying, prepared))
+                      .drain(deltaEvidence.underlying.bulkWrite(session.underlying, operations))
                       .as(ErasureUpdate.Applied)
                 }
               )
@@ -151,7 +151,7 @@ final class MongoAnalyticsErasureProgress[F[_]: Async] private (
   def releaseForOtherRequests(claim: ErasureClaim, now: Instant): F[ErasureUpdate] = mongo {
     matchedUpdate(
       requests,
-      ownedClaim(claim, now),
+      ownedClaimFilter(claim, now),
       Updates.combine(
         Updates.unset(AnalyticsCollections.Fields.LeaseToken),
         Updates.unset(AnalyticsCollections.Fields.LeaseUntil)
@@ -179,7 +179,7 @@ final class MongoAnalyticsErasureProgress[F[_]: Async] private (
           Updates.unset(AnalyticsCollections.Fields.LeaseToken),
           Updates.unset(AnalyticsCollections.Fields.LeaseUntil)
         ) ++ retryAt.toVector.map(at => Updates.set(AnalyticsCollections.Fields.ResumeAfter, Date.from(at)))
-        matchedUpdate(requests, ownedClaim(claim, now), Updates.combine(updates.asJava)).map(toErasureUpdate)
+        matchedUpdate(requests, ownedClaimFilter(claim, now), Updates.combine(updates.asJava)).map(toErasureUpdate)
       }
 
   def defer(claim: ErasureClaim, resumeAt: Instant, now: Instant): F[ErasureUpdate] =
@@ -189,7 +189,7 @@ final class MongoAnalyticsErasureProgress[F[_]: Async] private (
       mongo {
         matchedUpdate(
           requests,
-          ownedClaim(claim, now),
+          ownedClaimFilter(claim, now),
           Updates.combine(
             Updates.set(AnalyticsCollections.Fields.ResumeAfter, Date.from(resumeAt)),
             Updates.unset(AnalyticsCollections.Fields.LeaseToken),
@@ -205,7 +205,7 @@ final class MongoAnalyticsErasureProgress[F[_]: Async] private (
       mongo {
         matchedUpdate(
           requests,
-          ownedClaim(claim, now),
+          ownedClaimFilter(claim, now),
           Updates.set(AnalyticsCollections.Fields.LeaseUntil, Date.from(leaseUntil))
         ).map(toErasureUpdate)
       }
@@ -224,7 +224,7 @@ final class MongoAnalyticsErasureProgress[F[_]: Async] private (
       else if (phase.ordinal > claim.phase.ordinal + 1)
         Async[F].raiseError(AnalyticsError.InvalidConfiguration("analytics erasure phases cannot be skipped"))
       else if (nextKey == claim.progressKey) mongo {
-        val filter = Filters.and(ownedClaim(claim, now), progressKeyFilter(nextKey))
+        val filter = Filters.and(ownedClaimFilter(claim, now), progressKeyFilter(nextKey))
         matchedUpdate(requests, filter, Updates.set(AnalyticsCollections.Fields.ProgressKey, nextKey))
           .map(toErasureUpdate)
       }
@@ -232,7 +232,7 @@ final class MongoAnalyticsErasureProgress[F[_]: Async] private (
         mongo {
           // Compare against the exact value observed by this claim. A delayed retry from the same
           // lease must not overwrite a later durable checkpoint.
-          val filter = Filters.and(ownedClaim(claim, now), progressKeyFilter(claim.progressKey))
+          val filter = Filters.and(ownedClaimFilter(claim, now), progressKeyFilter(claim.progressKey))
           val update = Updates.combine(
             Updates.set(AnalyticsCollections.Fields.Phase, phase.persistedName),
             Updates.set(AnalyticsCollections.Fields.Progress, progress),
@@ -241,8 +241,6 @@ final class MongoAnalyticsErasureProgress[F[_]: Async] private (
           matchedUpdate(requests, filter, update).map(toErasureUpdate)
         }
     }
-
-  /** Marks the shared worker health lease live after startup or a successful work cycle. */
 }
 
 object MongoAnalyticsErasureProgress {

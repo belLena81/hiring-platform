@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.service.events.OperationalEventPayload.SearchKind
 import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
@@ -42,7 +43,7 @@ class MongoOperationalEventContractIntegrationSpec extends MongoIntegrationSuite
     mongoResource.use { fixture =>
       val actor = UserId(UUID.randomUUID())
       val session =
-        SearchSession(UUID.randomUUID(), actor, "jobs", None, Json.obj(), None, Nil, now, now.plusSeconds(60))
+        SearchSession(UUID.randomUUID(), actor, SearchKind.Jobs, None, Json.obj(), None, Nil, now, now.plusSeconds(60))
       val valid =
         OperationalEvents.searchPerformed(UUID.randomUUID(), session).fold(error => fail(error.toString), identity)
       val invalid =

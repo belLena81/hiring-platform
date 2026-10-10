@@ -92,17 +92,17 @@ final class StreamingBatchCost[F[_]: Async] private[analytics] (
     override def assess(
         preparation: StreamingInputPreparation,
         activeTokens: Vector[SubjectToken],
-        isRecoveryAttempt: Boolean
-    ): F[StreamingIngestionResult] = timed(Stage.Assess)(stages.assess(preparation, activeTokens, isRecoveryAttempt))
+        attempt: BatchAttempt
+    ): F[StreamingIngestionResult] = timed(Stage.Assess)(stages.assess(preparation, activeTokens, attempt))
 
     override def ingest(
         preparation: StreamingInputPreparation,
         activeTokens: Vector[SubjectToken],
         assessment: StreamingIngestionResult,
         decision: StreamingDecisionRevision,
-        isRecoveryAttempt: Boolean
+        attempt: BatchAttempt
     ): F[Unit] =
-      timed(Stage.Ingest)(stages.ingest(preparation, activeTokens, assessment, decision, isRecoveryAttempt))
+      timed(Stage.Ingest)(stages.ingest(preparation, activeTokens, assessment, decision, attempt))
 
     override def publish(
         preparation: StreamingInputPreparation,

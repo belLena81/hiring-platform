@@ -17,6 +17,9 @@ private[config] object AppConfigValidation {
       .map(ConfigSource.fromConfig)
       .flatMap(read)
 
+  def readWithMask(source: ConfigSource): (Boolean, Either[NonEmptyList[ConfigError], AppConfig]) =
+    (source.at("logging").load[RawLoggingConfig].toOption.forall(_.maskSensitive), read(source))
+
   /** Each section is validated as soon as it decodes, so a decode failure in one section never hides another's. */
   def read(source: ConfigSource): Either[NonEmptyList[ConfigError], AppConfig] =
     (

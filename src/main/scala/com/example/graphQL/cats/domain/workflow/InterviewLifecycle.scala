@@ -1,11 +1,22 @@
 package com.example.graphQL.cats.domain.workflow
 
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
+import com.example.graphQL.cats.domain.model.UserRole
 import java.time.{Duration, Instant}
 
 /** Who ends an interview. Derived by the service from trusted actor context, never from request input. */
 enum InterviewCancellationInitiator {
   case Candidate, Recruiter, Admin
+}
+
+object InterviewCancellationInitiator {
+
+  /** The only initiator a trusted actor of `role` may act as. */
+  def of(role: UserRole): InterviewCancellationInitiator = role match {
+    case UserRole.Candidate => Candidate
+    case UserRole.Recruiter => Recruiter
+    case UserRole.Admin     => Admin
+  }
 }
 
 /** System-generated rejection feedback: fixed per initiator, never blank, and free of user data or identifiers. */
@@ -77,7 +88,7 @@ enum InterviewLifecycleEvent {
   case NotificationOutcomeUnknown(participant: InterviewParticipant)
   case NotificationLookupFound(participant: InterviewParticipant)
   case NotificationLookupAbsent(participant: InterviewParticipant)
-  case RetryExhausted(step: String)
+  case RetryExhausted(step: InterviewFailureCode)
 
   /** Admin repair: resumes the step recorded in `repairOrigin` by lookup, never re-opening a cancelled slot. */
   case Repair
@@ -98,7 +109,7 @@ enum InterviewLifecycleCommand {
       participant: InterviewParticipant,
       idempotencyKey: String
   )
-  case RequireRepair(reason: String)
+  case RequireRepair(reason: InterviewRepairReason)
 }
 
 final case class InterviewLifecycleDecision(workflow: InterviewWorkflow, commands: List[InterviewLifecycleCommand])
@@ -117,7 +128,7 @@ object InterviewLifecyclePolicy {
       expectedRevision: Long,
       event: InterviewLifecycleEvent
   ): Either[InterviewWorkflowError, InterviewLifecycleDecision] =
-    if (workflow.revision != expectedRevision || expectedRevision == Long.MaxValue) Left(Error.StaleRevision)
+    if (!InterviewWorkflow.revisionMatches(workflow, expectedRevision)) Left(Error.StaleRevision)
     else transition(workflow, event)
 
   private def transition(
@@ -134,8 +145,8 @@ object InterviewLifecyclePolicy {
     def inform(kind: InterviewNotificationKind, recipients: List[InterviewParticipant]) =
       recipients.map(p => Command.Notify(kind, p, informationalKey(w.id, kind, revision, p)))
 
-    def repair(prefix: String, step: String) =
-      move(List(Command.RequireRepair(s"$prefix: $step")))(
+    def repair(reason: InterviewRepairReason) =
+      move(List(Command.RequireRepair(reason)))(
         _.copy(phase = Phase.RepairRequired, repairOrigin = Some(w.phase))
       )
 
@@ -273,10 +284,10 @@ object InterviewLifecyclePolicy {
             startRound(InterviewNotificationKind.Cancelled, Phase.CancelNotificationsPending)(
               _.copy(cancelledAt = Some(at))
             )
-        ).orElse(exhausted(event, "retry exhausted", repair))
+        ).orElse(exhausted(event, InterviewRepairReason.RetryExhausted.apply, repair))
       case (Phase.CancelNotificationsPending, _) =>
         notificationOutcome(w, event, InterviewNotificationKind.Cancelled, round(Phase.Cancelled), move)
-          .orElse(exhausted(event, "retry exhausted", repair))
+          .orElse(exhausted(event, InterviewRepairReason.RetryExhausted.apply, repair))
 
       case (Phase.RescheduleHoldPending, Event.HoldConfirmed | Event.HoldLookupFound) =>
         w.pendingInterval.toRight(Error.InvalidTransition).flatMap { interval =>
@@ -300,7 +311,8 @@ object InterviewLifecyclePolicy {
             identity
           )
         }
-      case (Phase.RescheduleHoldPending, Event.RetryExhausted(step)) => repair("retry exhausted", step)
+      case (Phase.RescheduleHoldPending, Event.RetryExhausted(step)) =>
+        repair(InterviewRepairReason.RetryExhausted(step))
 
       case (Phase.RescheduleSwapPending, Event.SwapCommitted | Event.SwapLookupFound) =>
         w.pendingInterval.toRight(Error.InvalidTransition).flatMap { interval =>
@@ -323,7 +335,8 @@ object InterviewLifecyclePolicy {
         move(List(Command.CancelCalendarSlot(InterviewWorkflow.cancellationKey(w.id, w.replacementGeneration))))(
           _.copy(phase = Phase.RescheduleCompensationPending)
         )
-      case (Phase.RescheduleSwapPending, Event.RetryExhausted(step)) => repair("retry exhausted", step)
+      case (Phase.RescheduleSwapPending, Event.RetryExhausted(step)) =>
+        repair(InterviewRepairReason.RetryExhausted(step))
 
       case (Phase.RescheduleCancelOldPending, _) =>
         cancelOutcome(
@@ -332,7 +345,7 @@ object InterviewLifecyclePolicy {
             startRound(InterviewNotificationKind.Rescheduled, Phase.RescheduleNotificationsPending)(
               _.copy(skippedGenerations = 0)
             )
-        ).orElse(exhausted(event, "retry exhausted", repair))
+        ).orElse(exhausted(event, InterviewRepairReason.RetryExhausted.apply, repair))
       case (Phase.RescheduleCompensationPending, _) =>
         cancelOutcome(
           InterviewWorkflow.cancellationKey(w.id, w.replacementGeneration),
@@ -341,10 +354,10 @@ object InterviewLifecyclePolicy {
             move(inform(InterviewNotificationKind.RescheduleUnavailable, bothParticipants))(
               _.copy(phase = Phase.Completed, pendingInterval = None, skippedGenerations = w.skippedGenerations + 1)
             )
-        ).orElse(exhausted(event, "compensation failed", repair))
+        ).orElse(exhausted(event, InterviewRepairReason.CompensationFailed.apply, repair))
       case (Phase.RescheduleNotificationsPending, _) =>
         notificationOutcome(w, event, InterviewNotificationKind.Rescheduled, round(Phase.Completed), move)
-          .orElse(exhausted(event, "retry exhausted", repair))
+          .orElse(exhausted(event, InterviewRepairReason.RetryExhausted.apply, repair))
 
       case _ => Left(Error.InvalidTransition)
     }
@@ -371,10 +384,10 @@ object InterviewLifecyclePolicy {
 
   private def exhausted(
       event: InterviewLifecycleEvent,
-      prefix: String,
-      repair: (String, String) => Either[InterviewWorkflowError, InterviewLifecycleDecision]
+      reason: InterviewFailureCode => InterviewRepairReason,
+      repair: InterviewRepairReason => Either[InterviewWorkflowError, InterviewLifecycleDecision]
   ): Either[InterviewWorkflowError, InterviewLifecycleDecision] = event match {
-    case InterviewLifecycleEvent.RetryExhausted(step) => repair(prefix, step)
+    case InterviewLifecycleEvent.RetryExhausted(step) => repair(reason(step))
     case _                                            => Left(InterviewWorkflowError.InvalidTransition)
   }
 
@@ -406,12 +419,9 @@ object InterviewLifecyclePolicy {
       w: InterviewWorkflow,
       now: Instant
   ): Either[InterviewWorkflowError, InterviewRescheduleProposal] =
-    w.proposal
-      .filter(_ => w.phase == InterviewWorkflowPhase.ProposalPending)
-      .toRight(InterviewWorkflowError.NoOpenProposal)
-      .flatMap(proposal =>
-        Either.cond(now.isBefore(proposal.expiresAt), proposal, InterviewWorkflowError.ProposalExpired)
-      )
+    pendingProposal(w).flatMap(proposal =>
+      Either.cond(now.isBefore(proposal.expiresAt), proposal, InterviewWorkflowError.ProposalExpired)
+    )
 
   /** Earliest of `now + ttl`, the current start and the proposed start; arithmetic cannot overflow. */
   private def proposalExpiry(now: Instant, ttl: Duration, currentStart: Instant, proposedStart: Instant): Instant = {

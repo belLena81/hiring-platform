@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.service.events.OperationalEventPayload.SearchKind
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.service.port.PendingSearchSessionWork
 import com.example.graphQL.cats.service.events.{OperationalEvents, SearchSession, SearchSessionResult}
@@ -18,7 +19,7 @@ class MongoSearchSessionWorkCodecsSpec extends FunSuite {
     val session = SearchSession(
       searchId,
       actorId,
-      "semanticJobSearch",
+      SearchKind.SemanticJobSearch,
       Some("private candidate query"),
       Json.obj("city" -> Json.fromString("Nicosia")),
       Some("test-model"),
@@ -48,7 +49,7 @@ class MongoSearchSessionWorkCodecsSpec extends FunSuite {
     val session = SearchSession(
       searchId,
       actorId,
-      "semanticJobSearch",
+      SearchKind.SemanticJobSearch,
       None,
       Json.obj(),
       None,
@@ -75,7 +76,8 @@ class MongoSearchSessionWorkCodecsSpec extends FunSuite {
   }
 
   test("a stored event for another actor returns a typed inconsistency") {
-    val session = SearchSession(searchId, actorId, "jobs", None, Json.obj(), None, Nil, now, now.plusSeconds(3600))
+    val session =
+      SearchSession(searchId, actorId, SearchKind.Jobs, None, Json.obj(), None, Nil, now, now.plusSeconds(3600))
     val event =
       OperationalEvents.searchPerformed(UUID.randomUUID(), session).fold(error => fail(error.toString), identity)
     val invalid = PendingSearchSessionWork(session, event.copy(actorId = UserId(UUID.randomUUID())))

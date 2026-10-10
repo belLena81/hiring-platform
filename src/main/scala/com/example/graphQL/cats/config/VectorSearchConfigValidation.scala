@@ -28,12 +28,12 @@ private[config] object VectorSearchConfigValidation {
     }
 
   def validVoyageApiKey(enabled: Boolean, value: Option[String]): ValidatedNel[ConfigError, Option[String]] =
-    val normalized = value.filter(_ != "disabled")
+    val normalized = DisabledSetting.unset(value)
     Either
       .cond(!enabled || normalized.exists(_.trim.nonEmpty), normalized, ConfigError.InvalidVoyageApiKey)
       .toValidatedNel
   def validNumCandidates(value: Int): ValidatedNel[ConfigError, Int] =
-    ConfigBounds.bounded(PageSize.Max, 10000, ConfigError.InvalidVectorNumCandidates)(value)
+    Either.cond(value >= PageSize.Max && value <= 10000, value, ConfigError.InvalidVectorNumCandidates).toValidatedNel
 
   def validBranchResultLimit(value: Option[Int], numCandidates: Int): ValidatedNel[ConfigError, Int] =
     val resolved = value.getOrElse(numCandidates)

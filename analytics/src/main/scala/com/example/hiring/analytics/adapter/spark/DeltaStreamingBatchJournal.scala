@@ -6,7 +6,7 @@ import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
 import com.example.hiring.analytics.service.streaming.*
 
 import cats.syntax.all.*
-import org.apache.spark.sql.{Row, SparkSession}
+import org.apache.spark.sql.{Column, Row, SparkSession}
 import org.apache.spark.sql.functions.{col, lit}
 import org.apache.spark.sql.types.*
 
@@ -238,12 +238,7 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]](
         if (status == IngestionCommittedName) Right(())
         else if (status != PreparedName) Left(progressConflict)
         else {
-          updateProgress(identity, IngestionCommittedName, None, None)
-          Either.cond(
-            readProgress(identity).exists(_.getAs[String](OutcomeColumn) == IngestionCommittedName),
-            (),
-            progressConflict
-          )
+          updateProgress(identity, IngestionCommittedName, None, None)(_ => true)
         }
       }
     }
@@ -299,12 +294,7 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]](
           case None                                                                    => Left(preparationConflict)
           case Some(row) if row.getAs[String](OutcomeColumn) == outcome.toString       => Right(())
           case Some(row) if row.getAs[String](OutcomeColumn) == IngestionCommittedName =>
-            updateProgress(identity, outcome.toString, None, Some(Timestamp.from(nowMicros(completedAt))))
-            Either.cond(
-              readProgress(identity).exists(_.getAs[String](OutcomeColumn) == outcome.toString),
-              (),
-              progressConflict
-            )
+            updateProgress(identity, outcome.toString, None, Some(Timestamp.from(nowMicros(completedAt))))(_ => true)
           case Some(_) => Left(progressConflict)
         }
     }
@@ -337,14 +327,8 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]](
               PublishedName,
               decision.candidateWatermark.map(value => Timestamp.from(nowMicros(value))),
               Some(Timestamp.from(nowMicros(completedAt)))
-            )
-            Either.cond(
-              readProgress(decision.identity).exists { persisted =>
-                persisted.getAs[String](OutcomeColumn) == PublishedName &&
-                readOptionalInstant(persisted, CandidateWatermarkColumn).contains(decision.candidateWatermark)
-              },
-              (),
-              progressConflict
+            )(persisted =>
+              readOptionalInstant(persisted, CandidateWatermarkColumn).contains(decision.candidateWatermark)
             )
           case _ => Left(progressConflict)
         }
@@ -353,17 +337,7 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]](
 
   private def latestDecision(
       identity: StreamingBatchIdentity
-  ): Either[AnalyticsError, Option[StreamingDecisionRevision]] =
-    withDecisions(Option.empty[StreamingDecisionRevision]) {
-      DeltaTables
-        .read(spark, paths.streamingDecisions)
-        .filter(identityFilter(identity))
-        .orderBy(col(RevisionColumn).desc)
-        .limit(1)
-        .collect()
-        .headOption
-        .traverse(decodeDecision)
-    }
+  ): Either[AnalyticsError, Option[StreamingDecisionRevision]] = newestDecision(identityFilter(identity))
 
   private def readProgress(identity: StreamingBatchIdentity): Option[Row] =
     DeltaTables
@@ -377,10 +351,14 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]](
       identity: StreamingBatchIdentity,
       revision: Long
   ): Either[AnalyticsError, Option[StreamingDecisionRevision]] =
+    newestDecision(identityFilter(identity) && col(RevisionColumn) === lit(revision))
+
+  private def newestDecision(selection: Column): Either[AnalyticsError, Option[StreamingDecisionRevision]] =
     withDecisions(Option.empty[StreamingDecisionRevision]) {
       DeltaTables
         .read(spark, paths.streamingDecisions)
-        .filter(identityFilter(identity) && col(RevisionColumn) === lit(revision))
+        .filter(selection)
+        .orderBy(col(RevisionColumn).desc)
         .limit(1)
         .collect()
         .headOption
@@ -391,7 +369,7 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]](
     Either
       .catchNonFatal(decodeProgressFields(row))
       .leftMap(error =>
-        AnalyticsError.InvalidConfiguration(
+        AnalyticsError.DataIntegrityViolation(
           s"streaming batch journal stored field conversion failed: ${error.getClass.getSimpleName}"
         )
       )
@@ -411,12 +389,14 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]](
       offsets <- decodeRows(row, DeliveredOffsetsColumn)(decodeOffset)
       status <- Option(row.getAs[String](OutcomeColumn)).toRight(malformedProgress)
       state <- status match {
-        case PreparedName           => Right((false, None))
-        case IngestionCommittedName => Right((true, None))
-        case QualityBlockedName     => Right((true, Some(StreamingTerminalOutcome.QualityBlocked)))
-        case ErasurePendingName     => Right((true, Some(StreamingTerminalOutcome.ErasurePending)))
-        case PublishedName          => Right((true, Some(StreamingTerminalOutcome.Published)))
-        case _                      => Left(malformedProgress)
+        case PreparedName           => Right(StreamingJournalProgress.Prepared)
+        case IngestionCommittedName => Right(StreamingJournalProgress.IngestionCommitted)
+        case QualityBlockedName     =>
+          Right(StreamingJournalProgress.Terminal(StreamingTerminalOutcome.QualityBlocked))
+        case ErasurePendingName =>
+          Right(StreamingJournalProgress.Terminal(StreamingTerminalOutcome.ErasurePending))
+        case PublishedName => Right(StreamingJournalProgress.Terminal(StreamingTerminalOutcome.Published))
+        case _             => Left(malformedProgress)
       }
       completedAt <- readOptionalInstant(row, CompletedAtColumn).leftMap(_ => malformedProgress)
       candidate <- readOptionalInstant(row, CandidateWatermarkColumn).leftMap(_ => malformedProgress)
@@ -437,9 +417,8 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]](
         sourceEndOffsets,
         offsets
       ),
-      state._1,
-      None,
-      state._2
+      state,
+      None
     )
     decoded
   }
@@ -582,7 +561,7 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]](
       status: String,
       candidateWatermark: Option[Timestamp],
       completedAt: Option[Timestamp]
-  ): Unit = {
+  )(verify: Row => Boolean): Either[AnalyticsError, Unit] = {
     DeltaTables
       .forPath(spark, paths.streamingProgress)
       .update(
@@ -593,6 +572,12 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]](
           CompletedAtColumn -> lit(completedAt.orNull).cast(TimestampType)
         ).asJava
       )
+    // Read back so a concurrent writer that won the transition is reported as a conflict.
+    Either.cond(
+      readProgress(identity).exists(row => row.getAs[String](OutcomeColumn) == status && verify(row)),
+      (),
+      progressConflict
+    )
   }
 
   private def ensureProgressTable(): Unit =
@@ -622,10 +607,7 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]](
   }
 
   private def readRequiredInstant(row: Row, name: String): Option[Instant] =
-    Either
-      .catchNonFatal(Option(row.getAs[Timestamp](name)).map(_.toInstant.truncatedTo(ChronoUnit.MICROS)))
-      .toOption
-      .flatten
+    readOptionalInstant(row, name).toOption.flatten
 
   private def readRequiredLong(row: Row, name: String): Option[Long] =
     Option(row.getAs[java.lang.Long](name)).map(_.longValue())
@@ -711,7 +693,7 @@ private object DeltaStreamingBatchJournal {
   private val DecisionSchema = AnalyticsTableSchemas.struct(DecisionShape)
   private val IdentityKeys = Seq(LineageColumn, BatchIdColumn)
 
-  private val malformedProgress = AnalyticsError.InvalidConfiguration("streaming batch journal record is malformed")
+  private val malformedProgress = AnalyticsError.DataIntegrityViolation("streaming batch journal record is malformed")
   private val preparationConflict =
     AnalyticsError.InvalidInput.one("streaming batch journal conflicts with persisted immutable input evidence")
   private val progressConflict =

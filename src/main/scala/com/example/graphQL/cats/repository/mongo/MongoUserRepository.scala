@@ -1,12 +1,14 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.shared.StableIds
 import cats.data.EitherT
 import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.service.port.*
-import com.example.graphQL.cats.service.events.{OperationalEventType, OperationalEvents}
+import com.example.graphQL.cats.service.RepositoryError
+import com.example.graphQL.cats.service.events.{OperationalEventPayload, OperationalEvents}
 import com.example.graphQL.cats.service.Diagnostics
 import com.mongodb.client.model.{Filters, UpdateOptions}
 import mongo4cats.client.{ClientSession, MongoClient}
@@ -68,9 +70,6 @@ final class MongoUserRepository(
           .lift(MongoSessionOperations.findOne(collection, session, MongoFilter.eq(MongoFields.Id, id.value.toString)))
           .subflatMap(document => MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readUser)))
       )
-
-  override def findMany(ids: List[UserId]): RepositoryIO[List[User]] =
-    MongoKeysetPaging.byId(collection, ids.map(_.value.toString))(MongoHiringCodecs.readUser)(diagnostics)
 
   override def relatedUsers(scope: HiringReadScope, keys: List[UserRelationKey]): RepositoryIO[List[RelatedUser]] = {
     import MongoAuthorizedReadQueries.*
@@ -260,7 +259,7 @@ final class MongoUserRepository(
                 EmbeddingWorkKey(EmbeddingWorkKind.CandidateProfile, user.id.value.toString),
                 now
               )
-            else RepositoryIO.fromEither(Right(()))
+            else ().pure[RepositoryIO]
           }
         } yield ()
       }.pipe(effect =>
@@ -498,7 +497,7 @@ final class MongoUserRepository(
         .lift(MongoSessionOperations.findManyById(jobs, session, batchFilter, MaxJobsClosedByAccountDeletion))
         .subflatMap(documents => MongoStoredDocumentDecoding.values(documents.map(MongoHiringCodecs.readVersionedJob)))
         .flatMap {
-          case Nil           => RepositoryIO.fromEither(Right(()))
+          case Nil           => ().pure[RepositoryIO]
           case versionedJobs =>
             val openJobs = versionedJobs.map(_.value)
             val closedJobs =
@@ -524,11 +523,8 @@ final class MongoUserRepository(
             }
             val closeEvents = closedJobs.traverse { closed =>
               OperationalEvents.jobEvent(
-                OperationalEventType.JOB_CLOSED,
-                java.util.UUID.nameUUIDFromBytes(
-                  s"job:${closed.id.value}:JOB_CLOSED:${closed.updatedAt.toEpochMilli}"
-                    .getBytes(java.nio.charset.StandardCharsets.UTF_8)
-                ),
+                OperationalEventPayload.JobKind.Closed,
+                StableIds.uuid(s"job:${closed.id.value}:JOB_CLOSED:${closed.updatedAt.toEpochMilli}"),
                 closed,
                 userId,
                 now

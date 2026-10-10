@@ -220,7 +220,7 @@ private[analytics] final class SparkHiringAnalyticsStream[F[_]: Async](
               fileSystem
                 .listStatus(lineageDirectory)
                 .filter(_.isFile)
-                .filter(_.getPath.getName.endsWith(".identity"))
+                .filter(_.getPath.getName.endsWith(StreamingLineageFiles.IdentitySuffix))
                 .toVector
                 .map(status => readText(fileSystem, status.getPath))
           }
@@ -439,13 +439,13 @@ private[analytics] final class SparkHiringAnalyticsStream[F[_]: Async](
     AnalyticsError.InvalidConfiguration(CheckpointProblem, Some(cause))
 
   private def lineagePath(directory: Path, identity: StreamingActivationIdentity): Path =
-    new Path(directory, s"${AnalyticsDigest.sha256Hex(identity.streamId)}.identity")
+    new Path(directory, s"${AnalyticsDigest.sha256Hex(identity.streamId)}${StreamingLineageFiles.IdentitySuffix}")
 
   private def establishedPath(directory: Path, identity: StreamingActivationIdentity): Path =
-    new Path(directory, s"${AnalyticsDigest.sha256Hex(identity.streamId)}.established")
+    new Path(directory, s"${AnalyticsDigest.sha256Hex(identity.streamId)}${StreamingLineageFiles.EstablishedSuffix}")
 
   private def queryIdentityPath(directory: Path, identity: StreamingActivationIdentity): Path =
-    new Path(directory, s"${AnalyticsDigest.sha256Hex(identity.streamId)}.query-id")
+    new Path(directory, s"${AnalyticsDigest.sha256Hex(identity.streamId)}${StreamingLineageFiles.QueryIdSuffix}")
 
   private def failAtGrantExpiry(expiresAt: Instant): F[Unit] =
     effect.realTimeInstant.flatMap { now =>

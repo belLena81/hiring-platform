@@ -1,13 +1,12 @@
 package com.example.hiring.analytics.adapter.mongo
 
-import com.example.hiring.analytics.domain.AnalyticsLakehouseIdentity
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.errors.AnalyticsErrorTranslation.translating
 import com.example.hiring.analytics.service.batch.AnalyticsStreamingRegistry
 
 import cats.effect.Async
 import cats.syntax.all.*
-import com.mongodb.{MongoException, WriteConcern}
+import com.mongodb.WriteConcern
 import mongo4cats.database.MongoDatabase
 import org.bson.Document
 
@@ -32,16 +31,16 @@ private[analytics] final class MongoAnalyticsStreamingRegistry[F[_]: Async](
     )
 
   override def registerLakehouse(lakehouseRoot: String): F[Unit] =
-    Async[F].fromEither(lakehouseId(lakehouseRoot)).flatMap { id =>
+    Async[F].fromEither(AnalyticsStreamingRegistry.lakehouseId(lakehouseRoot)).flatMap { id =>
       registrations
         .flatMap(_.insertOne(AnalyticsMongoRecords.StreamingLakehouseRegistration(id, id)))
         .void
-        .recoverWith { case error: MongoException if error.getCode == 11000 => verifyExisting(id) }
+        .recoverWith { case MongoDuplicateKey() => verifyExisting(id) }
         .translating(AnalyticsError.MongoConnectionFailure(_))
     }
 
   override def rejectBatchIfRegistered(lakehouseRoot: String): F[Unit] =
-    Async[F].fromEither(lakehouseId(lakehouseRoot)).flatMap { id =>
+    Async[F].fromEither(AnalyticsStreamingRegistry.lakehouseId(lakehouseRoot)).flatMap { id =>
       registrations
         .flatMap(collection =>
           streams.stream(capacity => collection.find(new Document("_id", id)).boundedStream(capacity)).compile.last
@@ -53,7 +52,7 @@ private[analytics] final class MongoAnalyticsStreamingRegistry[F[_]: Async](
             )
           case Some(_) =>
             Async[F].raiseError[Unit](
-              AnalyticsError.InvalidConfiguration("streaming lakehouse registration is inconsistent")
+              AnalyticsError.DataIntegrityViolation("streaming lakehouse registration is inconsistent")
             )
           case None => Async[F].unit
         }
@@ -68,14 +67,10 @@ private[analytics] final class MongoAnalyticsStreamingRegistry[F[_]: Async](
       .flatMap {
         case Some(record) if record.lakehouseId == id => Async[F].unit
         case _                                        =>
-          Async[F].raiseError(AnalyticsError.InvalidConfiguration("streaming lakehouse registration is inconsistent"))
+          Async[F].raiseError(AnalyticsError.DataIntegrityViolation("streaming lakehouse registration is inconsistent"))
       }
       .translating(AnalyticsError.MongoConnectionFailure(_))
 
-  private def lakehouseId(root: String): Either[AnalyticsError, String] =
-    AnalyticsLakehouseIdentity
-      .from(root)
-      .leftMap(_ => AnalyticsError.InvalidConfiguration("analytics lakehouse root is invalid"))
 }
 
 private object MongoAnalyticsStreamingRegistry {

@@ -17,7 +17,8 @@ import com.example.graphQL.cats.domain.model.{
   UserRole
 }
 import com.example.graphQL.cats.repository.mongo.MongoDatabaseProbe
-import com.example.graphQL.cats.service.port.{MutationWriteContext, RepositoryError, RepositoryIO}
+import com.example.graphQL.cats.service.port.{MutationWriteContext, RepositoryIO}
+import com.example.graphQL.cats.service.RepositoryError
 import com.github.dockerjava.api.model.{ExposedPort, Ulimit}
 import com.example.graphQL.cats.service.{DatabaseProbe, Diagnostics, HealthService, LogEvent, LogField, ProbeResult}
 import io.circe.Json

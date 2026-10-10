@@ -10,7 +10,6 @@ import java.util.{UUID, Date}
 
 /** Maintenance cutover preserves identities, receipts and conservatively charged execution budgets. */
 private[mongo] object MongoInterviewWorkflowMigrations {
-  private val MigrationId = "010_interview_workflow_attempts"
   private val BatchSize = 500
   private val ExecutableKinds = Set(
     "reserveCalendar",
@@ -22,100 +21,62 @@ private[mongo] object MongoInterviewWorkflowMigrations {
     "lookupNotification"
   )
 
-  def initialize(database: MongoHiringSetup.SetupDatabase): IO[Unit] = {
-    val ledger = database.getCollection(MongoCollections.HiringMigrationLedger)
-    val collection = database.getCollection(MongoCollections.InterviewWorkflowCommands)
-    val identity = Filters.eq(MongoFields.Id, MigrationId)
+  /** Converts each stored command once (guarded per row against concurrent initializers), then re-verifies all rows. */
+  val step: MongoMigrationStep = {
+    def commands(database: MongoHiringSetup.SetupDatabase) =
+      database.getCollection(MongoCollections.InterviewWorkflowCommands)
 
-    def scan(after: Option[String], convert: Boolean): IO[Unit] = {
-      val filter = after.fold[Bson](new Document())(id => Filters.gt(MongoFields.Id, id))
-      collection
-        .find(filter)
-        .sort(Indexes.ascending(MongoFields.Id))
-        .limit(BatchSize)
-        .boundedStream(32)
-        .compile
-        .toList
-        .flatMap { batch =>
-          batch.traverse_ { row =>
-            IO.delay(commandUpdates(row)).flatMap {
-              case Left(reason) =>
-                IO.raiseError(new IllegalStateException(s"Interview workflow migration rejected a command: $reason"))
-              case Right(updates) if convert && updates.nonEmpty =>
-                // The field guard excludes rows already converted by another initializer or new strict writer.
-                collection
-                  .updateOne(
-                    Filters.and(
-                      Filters.eq(MongoFields.Id, row.getString(MongoFields.Id)),
-                      Filters.exists("executionAttempts", false)
-                    ),
-                    Updates.combine(updates*),
-                    new UpdateOptions()
-                  )
-                  .void
-              case Right(updates) if !convert && updates.nonEmpty =>
-                IO.raiseError(
-                  new IllegalStateException("Interview workflow migration verification found an unconverted command")
+    def requireStringIdentities(run: MigrationRun): IO[Unit] =
+      commands(run.database)
+        .count(Filters.not(Filters.`type`(MongoFields.Id, org.bson.BsonType.STRING)), new CountOptions())
+        .flatMap(count => IO.whenA(count != 0L)(run.fail("found invalid command identity type")))
+
+    def scan(run: MigrationRun, convert: Boolean): IO[Unit] = {
+      val collection = commands(run.database)
+      MongoBatchScan.byId(BatchSize, Option.empty[String])(after =>
+        collection
+          .find(after.fold[Bson](new Document())(id => Filters.gt(MongoFields.Id, id)))
+          .sort(Indexes.ascending(MongoFields.Id))
+          .limit(BatchSize)
+          .boundedStream(32)
+          .compile
+          .toList
+      )(row => IO.delay(row.getString(MongoFields.Id)))(
+        _.traverse_ { row =>
+          IO.delay(commandUpdates(row)).flatMap {
+            case Left(reason)                                  => run.fail(s"rejected a command: $reason")
+            case Right(updates) if convert && updates.nonEmpty =>
+              // The field guard excludes rows already converted by another initializer or new strict writer.
+              collection
+                .updateOne(
+                  Filters.and(
+                    Filters.eq(MongoFields.Id, row.getString(MongoFields.Id)),
+                    Filters.exists("executionAttempts", false)
+                  ),
+                  Updates.combine(updates*),
+                  new UpdateOptions()
                 )
-              case Right(_) =>
-                IO.fromEither(
-                  MongoInterviewWorkflowCommandCodec
-                    .decode(row)
-                    .leftMap(_ =>
-                      new IllegalStateException(
-                        "Interview workflow migration verification rejected the current command contract"
-                      )
-                    )
-                ).void
-            }
-          } *> (if (batch.size == BatchSize) scan(batch.lastOption.map(_.getString(MongoFields.Id)), convert)
-                else IO.unit)
+                .void
+            case Right(updates) if updates.nonEmpty => run.fail("verification found an unconverted command")
+            case Right(_)                           =>
+              IO.fromEither(
+                MongoInterviewWorkflowCommandCodec
+                  .decode(row)
+                  .leftMap(_ => MigrationError.StepFailed(run.id, "verification rejected the current command contract"))
+              ).void
+          }
         }
+      )
     }
 
-    def run: IO[Unit] =
-      ledger
-        .updateOne(
-          identity,
-          Updates.combine(
-            Updates.setOnInsert(MongoFields.Id, MigrationId),
-            Updates.set(MongoFields.Version, 1L),
-            Updates.set(MongoFields.State, "Running")
-          ),
-          new UpdateOptions().upsert(true)
-        )
-        .void
-        .handleErrorWith {
-          case MongoDuplicateKey(_) => IO.unit
-          case error                => IO.raiseError(error)
-        } *> scan(None, true) *> scan(None, false) *>
-        ledger
-          .updateOne(
-            identity,
-            Updates.combine(Updates.set(MongoFields.Version, 1L), Updates.set(MongoFields.State, "Complete")),
-            new UpdateOptions()
-          )
-          .void
-
-    collection
-      .count(Filters.not(Filters.`type`(MongoFields.Id, org.bson.BsonType.STRING)), new CountOptions())
-      .flatMap {
-        case 0L => IO.unit
-        case _  =>
-          IO.raiseError(new IllegalStateException("Interview workflow migration found invalid command identity type"))
-      } *> ledger.find(identity).first.flatMap {
-      case Some(row)
-          if !Option(row.get(MongoFields.Version))
-            .collect {
-              case value: java.lang.Long if value.longValue == 1L => ()
-            }
-            .contains(()) =>
-        IO.raiseError(new IllegalStateException("Unsupported interview workflow attempt migration version"))
-      case Some(row) if Option(row.get(MongoFields.State)).contains("Complete") => scan(None, false)
-      case Some(row) if Option(row.get(MongoFields.State)).contains("Running")  => run
-      case Some(_) => IO.raiseError(new IllegalStateException("Invalid interview workflow attempt migration state"))
-      case None    => run
-    }
+    MongoMigrationStep(
+      MigrationIds.InterviewWorkflowAttempts,
+      run => requireStringIdentities(run) *> scan(run, convert = true) *> scan(run, convert = false),
+      database => {
+        val run = MigrationRun(database, MigrationIds.InterviewWorkflowAttempts, None)
+        requireStringIdentities(run) *> scan(run, convert = false).as(CompletedProof.Trusted)
+      }
+    )
   }
 
   /** Driver document construction remains inside the migration's effect evaluation. */

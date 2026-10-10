@@ -81,36 +81,32 @@ private[mongo] object MongoCandidateResidenceIntegrityMigrations {
 
   private def audit(run: MigrationRun): IO[Unit] = {
     val users = run.database.getCollection(MongoCollections.Users)
-    def scan(after: Option[String], checkpoint: Boolean): IO[Unit] = {
-      val selection = after.fold(Filters.empty())(value => Filters.gt(MongoFields.Id, value))
-      users
-        .find(selection)
-        .projection(Projections.include(MongoFields.Id, s"${MongoFields.Profile}.${MongoFields.CurrentResidence}"))
-        .sort(Sorts.ascending(MongoFields.Id))
-        .hint("_id_")
-        .limit(BatchSize)
-        .boundedStream(32)
-        .take(BatchSize.toLong + 1L)
-        .compile
-        .toList
-        .flatMap { rows =>
-          IO.raiseWhen(rows.size > BatchSize)(MigrationError.StepFailed(run.id, "audit exceeded batch limit")) *>
-            rows.traverse_(row =>
-              IO.fromEither(
-                CandidateResidenceIntegrity
-                  .validate(row)
-                  .leftMap(_ => MigrationError.StepFailed(run.id, "audit rejected a stored residence"))
-              )
-            ) *> rows.lastOption.traverse_ { last =>
-              val identity = Option(last.get(MongoFields.Id)).collect { case value: String if value.nonEmpty => value }
-              IO.fromEither(identity.toRight(MigrationError.StepFailed(run.id, "audit identity is invalid")))
-                .flatMap { id =>
-                  (if (checkpoint) run.advance(id) else IO.unit) *>
-                    (if (rows.size == BatchSize) IO.defer(scan(Some(id), checkpoint)) else IO.unit)
-                }
-            }
-        }
-    }
+    def key(row: Document): IO[String] =
+      IO.fromOption(Option(row.get(MongoFields.Id)).collect { case value: String if value.nonEmpty => value })(
+        MigrationError.StepFailed(run.id, "audit identity is invalid")
+      )
+    def scan(from: Option[String], checkpoint: Boolean): IO[Unit] =
+      MongoBatchScan.byId(BatchSize, from)(after =>
+        MongoBoundedResults.collect(
+          users
+            .find(after.fold(Filters.empty())(value => Filters.gt(MongoFields.Id, value)))
+            .projection(Projections.include(MongoFields.Id, s"${MongoFields.Profile}.${MongoFields.CurrentResidence}"))
+            .sort(Sorts.ascending(MongoFields.Id))
+            .hint("_id_")
+            .limit(BatchSize)
+            .boundedStream(32),
+          BatchSize,
+          MigrationError.StepFailed(run.id, "audit exceeded batch limit")
+        )
+      )(key) { rows =>
+        rows.traverse_(row =>
+          IO.fromEither(
+            CandidateResidenceIntegrity
+              .validate(row)
+              .leftMap(_ => MigrationError.StepFailed(run.id, "audit rejected a stored residence"))
+          )
+        ) *> IO.whenA(checkpoint)(rows.lastOption.traverse_(key(_).flatMap(run.advance)))
+      }
     requireValidator(run.database) *> run.textCheckpoint.flatMap(after => scan(after, checkpoint = true)) *>
       // The paired validator prevents unpaired new writes. Recheck the prefix before freezing its proof.
       scan(None, checkpoint = false) *> requireValidator(run.database)

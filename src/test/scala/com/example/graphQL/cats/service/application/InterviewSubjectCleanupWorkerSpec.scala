@@ -10,9 +10,9 @@ import com.example.graphQL.cats.service.port.{
   InterviewCleanupUpdate,
   InterviewCleanupCursor,
   InterviewCleanupPage,
-  RepositoryIO,
-  RepositoryError
+  RepositoryIO
 }
+import com.example.graphQL.cats.service.RepositoryError
 import java.time.Instant
 import java.util.UUID
 import munit.CatsEffectSuite

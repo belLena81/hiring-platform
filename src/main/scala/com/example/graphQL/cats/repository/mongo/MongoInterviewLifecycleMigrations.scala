@@ -100,7 +100,7 @@ private[mongo] object MongoInterviewLifecycleMigrations {
   /** Workflows keep decoding after the cutover: known phase and a consistent set of lifecycle fields. */
   private def verifyWorkflows(run: MigrationRun): IO[Unit] = {
     val workflows = run.database.getCollection(MongoCollections.InterviewWorkflows)
-    def scan(after: Option[String]): IO[Unit] =
+    run.scanByStringId(BatchSize, "invalid workflow key")(after =>
       workflows
         .find(
           after.fold(Filters.eq("documentType", "workflow"))(id =>
@@ -112,19 +112,14 @@ private[mongo] object MongoInterviewLifecycleMigrations {
         .boundedStream(32)
         .compile
         .toList
-        .flatMap { batch =>
-          batch.traverse_ { row =>
-            val valid = for {
-              phaseName <- Option(row.get("phase")).collect { case value: String => value }
-              phase <- InterviewWorkflowPhase.values.find(_.toString == phaseName)
-              _ <- MongoInterviewWorkflowLifecycleCodec.decode(row, phase).toOption
-            } yield ()
-            IO.whenA(valid.isEmpty)(run.fail("a stored workflow is not decodable by the active contract"))
-          } *> batch.lastOption.traverse_ { last =>
-            Option(last.getString(MongoFields.Id)).fold(run.fail[Unit]("invalid workflow key"))(run.advance)
-          } *> IO.whenA(batch.size == BatchSize)(scan(batch.lastOption.map(_.getString(MongoFields.Id))))
-        }
-    run.textCheckpoint.flatMap(scan)
+    )(_.traverse_ { row =>
+      val valid = for {
+        phaseName <- Option(row.get("phase")).collect { case value: String => value }
+        phase <- MongoDocumentFields.byName(InterviewWorkflowPhase.values)(phaseName)
+        _ <- MongoInterviewWorkflowLifecycleCodec.decode(row, phase).toOption
+      } yield ()
+      IO.whenA(valid.isEmpty)(run.fail("a stored workflow is not decodable by the active contract"))
+    })
   }
 
   private def verifyStoredCommands(run: MigrationRun): IO[Unit] =

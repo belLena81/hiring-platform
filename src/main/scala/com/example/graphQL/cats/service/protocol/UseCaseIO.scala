@@ -2,7 +2,8 @@ package com.example.graphQL.cats.service.protocol
 
 import cats.data.EitherT
 import cats.effect.IO
-import com.example.graphQL.cats.service.port.{MutationReceiptFingerprint, RepositoryError, RepositoryIO}
+import com.example.graphQL.cats.service.port.{MutationReceiptFingerprint, RepositoryIO}
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.service.UseCaseError
 

@@ -17,44 +17,25 @@ import retry.*
 import retry.RetryPolicies.*
 import scala.concurrent.duration.*
 
-enum EmbeddingWork {
-  case JobChanged(id: JobId)
-  case CandidateProfileChanged(id: UserId)
-}
-
 trait EmbeddingWorkPublisher {
 
   /** Signals work that was atomically persisted by the mutation transaction. */
   def wake: IO[Unit]
+
+  /** A failed wake never fails the committed mutation; the durable work is picked up by the next poll. */
+  final def wakeAfterCommit(diagnostics: Diagnostics): IO[Unit] =
+    wake.handleErrorWith(error => diagnostics.emit(LogEvent.EmbeddingWakeFailed, fields = LogFields.failure(error)))
 }
 
-final class DurableEmbeddingWorkPublisher private[search] (
-    repository: EmbeddingWorkRepository,
-    wakeups: Queue[IO, Unit],
-    clock: Clock[IO]
-) extends EmbeddingWorkPublisher {
-  private[search] def offer(work: EmbeddingWork): IO[Unit] =
-    clock.realTimeInstant.flatMap(repository.enqueue(DurableEmbeddingWorkPublisher.keyFor(work), _).value).flatMap {
-      case Right(())   => wake
-      case Left(error) => IO.raiseError(new IllegalStateException(s"Embedding work enqueue failed: $error"))
-    }
-
+final class DurableEmbeddingWorkPublisher private[search] (wakeups: Queue[IO, Unit]) extends EmbeddingWorkPublisher {
   override def wake: IO[Unit] = wakeups.tryOffer(()).void
 }
 
-object DurableEmbeddingWorkPublisher {
-  def keyFor(work: EmbeddingWork): EmbeddingWorkKey = work match {
-    case EmbeddingWork.JobChanged(id)              => EmbeddingWorkKey(EmbeddingWorkKind.Job, id.value.toString)
-    case EmbeddingWork.CandidateProfileChanged(id) =>
-      EmbeddingWorkKey(EmbeddingWorkKind.CandidateProfile, id.value.toString)
-  }
-}
-
 /** Bounded durable retries of failed embedding work: attempts before failure, then capped exponential backoff. */
-final class DurableRetrySettings(
-    val attempts: Int = 1,
-    val base: FiniteDuration = 1.second,
-    val cap: FiniteDuration = 5.minutes
+final case class DurableRetrySettings(
+    attempts: Int = 1,
+    base: FiniteDuration = 1.second,
+    cap: FiniteDuration = 5.minutes
 )
 
 final class EmbeddingPipeline(
@@ -313,7 +294,7 @@ object EmbeddingPipeline {
     Resource.eval(Queue.bounded[IO, Unit](queueSize)).flatMap { wakeups =>
       for {
         workerId <- Resource.eval(uuidGen.randomUUID.map(_.toString))
-        publisher = new DurableEmbeddingWorkPublisher(work, wakeups, clock)
+        publisher = new DurableEmbeddingWorkPublisher(wakeups)
         pipeline = new EmbeddingPipeline(
           wakeups,
           work,

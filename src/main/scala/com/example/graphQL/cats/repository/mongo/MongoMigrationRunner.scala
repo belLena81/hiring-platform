@@ -2,6 +2,7 @@ package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.IO
 import cats.syntax.all.*
+import org.bson.Document
 
 /** Outcome of re-verifying a completed proof: trust it, or reopen the step because covered data regressed. */
 private[mongo] enum CompletedProof {
@@ -20,6 +21,19 @@ private[mongo] final case class MigrationRun(
   def textCheckpoint: IO[Option[String]] = IO.fromEither(MongoMigrationLedger.textCheckpoint(id, checkpoint))
   def advance(lastId: AnyRef): IO[Unit] = MongoMigrationLedger.checkpoint(database, id, lastId)
   def fail[A](detail: String): IO[A] = IO.raiseError(MigrationError.StepFailed(id, detail))
+
+  /** Scans string `_id`s in ascending order from the ledger checkpoint, advancing it after every page. */
+  def scanByStringId(batchSize: Int, invalidKey: String)(fetch: Option[String] => IO[List[Document]])(
+      handle: List[Document] => IO[Unit]
+  ): IO[Unit] = {
+    def key(document: Document): IO[String] =
+      Option(document.getString(MongoFields.Id)).fold(fail[String](invalidKey))(IO.pure)
+    textCheckpoint.flatMap { from =>
+      MongoBatchScan.byId(batchSize, from)(fetch)(key) { rows =>
+        handle(rows) *> rows.lastOption.traverse_(key(_).flatMap(advance))
+      }
+    }
+  }
 }
 
 /** One ledger-tracked migration. `run` must be idempotent and restart-safe from its checkpoint; `whenComplete`

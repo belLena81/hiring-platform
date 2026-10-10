@@ -1,6 +1,5 @@
 package com.example.graphQL.cats.service.protocol
 
-import cats.data.EitherT
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId}
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, ApplicationStatus, Job}
@@ -20,7 +19,7 @@ import com.example.graphQL.cats.service.search.{
   RankedJob
 }
 import com.example.graphQL.cats.service.port.RepositoryIO
-import com.example.graphQL.cats.service.{ActorContext, AuthenticatedActor, SearchError, UseCaseError}
+import com.example.graphQL.cats.service.{ActorContext, AuthenticatedActor}
 import com.example.graphQL.cats.service.job.{CreateJobInput, UpdateJobInput}
 import java.util.UUID
 
@@ -30,7 +29,6 @@ trait HiringReadModel {
   def relatedUsers(actor: ActorContext, keys: List[UserRelationKey]): UseCaseIO[List[RelatedUser]]
   def relatedJobs(actor: ActorContext, keys: List[JobRelationKey]): UseCaseIO[List[RelatedJob]]
   def viewer(actor: ActorContext): UseCaseIO[AuthenticatedActor]
-  def canViewUserEmail(actor: ActorContext, userId: UserId): UseCaseIO[Boolean]
   def canViewUserEmails(actor: ActorContext, userIds: List[UserId]): UseCaseIO[Set[UserId]]
   def application(id: ApplicationId): UseCaseIO[Option[Application]]
   def canViewApplication(actor: ActorContext, applicationId: ApplicationId): UseCaseIO[Unit]
@@ -47,7 +45,7 @@ trait UserAuthenticator {
   /** Resolves a cryptographically verified principal, including a deleted account for idempotent deletion replay.
     * Operations still resolve active ownership through their service authorization boundary.
     */
-  def actorForVerifiedToken(userId: UserId): RepositoryIO[Option[ActorContext]] = actorFor(userId)
+  def actorForVerifiedToken(userId: UserId): RepositoryIO[Option[ActorContext]]
 }
 
 trait JobUseCases {
@@ -96,21 +94,11 @@ trait SearchUseCases {
   def candidateMatches(
       actor: ActorContext,
       jobId: JobId,
-      first: PageSize,
-      searchId: UUID
-  ): UseCaseIO[List[RankedCandidate]]
-
-  def candidateMatches(
-      actor: ActorContext,
-      jobId: JobId,
       query: Option[String],
       filters: com.example.graphQL.cats.service.search.CandidateMatchFilters,
       first: PageSize,
       searchId: UUID
-  ): UseCaseIO[List[RankedCandidate]] =
-    if (query.isEmpty && filters == com.example.graphQL.cats.service.search.CandidateMatchFilters.empty)
-      candidateMatches(actor, jobId, first, searchId)
-    else EitherT.leftT(UseCaseError.Search(SearchError.VectorSearchUnavailable))
+  ): UseCaseIO[List[RankedCandidate]]
 }
 
 trait InteractionUseCases {

@@ -130,7 +130,7 @@ final class InterviewRequestReceiptIndexMigrationIntegrationSpec extends MongoIn
       for {
         _ <- initialize(fixture.database)
         // The production filters themselves, so a changed retention query cannot drift from what is explained.
-        plans <- MongoInterviewWorkflowRepository
+        plans <- MongoInterviewFields
           .retentionTargets(workflow)
           .traverse((collection, filter) => explain(collection, filter).map(collection -> _))
       } yield {

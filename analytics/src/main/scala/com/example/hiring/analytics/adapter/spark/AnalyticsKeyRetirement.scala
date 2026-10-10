@@ -455,10 +455,11 @@ private[analytics] object AnalyticsKeyRetirement {
           val body = try
             new String(input.readNBytes(MaximumLineageControlBytes + 1), java.nio.charset.StandardCharsets.UTF_8)
           finally input.close()
-          val identity = new Path(root, name.take(64) + ".identity")
-          val query = new Path(root, name.take(64) + ".query-id")
-          val complete = !name.endsWith(".established") || (fs.exists(identity) && fs.exists(query))
-          val paired = !name.endsWith(".query-id") || fs.exists(identity)
+          val identity = new Path(root, name.take(64) + StreamingLineageFiles.IdentitySuffix)
+          val query = new Path(root, name.take(64) + StreamingLineageFiles.QueryIdSuffix)
+          val complete =
+            !name.endsWith(StreamingLineageFiles.EstablishedSuffix) || (fs.exists(identity) && fs.exists(query))
+          val paired = !name.endsWith(StreamingLineageFiles.QueryIdSuffix) || fs.exists(identity)
           if (
             body
               .getBytes(java.nio.charset.StandardCharsets.UTF_8)

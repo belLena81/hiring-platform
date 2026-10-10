@@ -20,10 +20,10 @@ object KafkaRetentionBarrier {
       for {
         partition <- AnalyticsPartition
           .from(number)
-          .leftMap(_ => AnalyticsError.InvalidConfiguration("Kafka erasure retention barrier is malformed"))
+          .leftMap(_ => AnalyticsError.DataIntegrityViolation("Kafka erasure retention barrier is malformed"))
         offset <- AnalyticsOffset
           .from(endOffsetExclusive)
-          .leftMap(_ => AnalyticsError.InvalidConfiguration("Kafka erasure retention barrier is malformed"))
+          .leftMap(_ => AnalyticsError.DataIntegrityViolation("Kafka erasure retention barrier is malformed"))
       } yield Partition(partition, offset)
   }
 
@@ -31,7 +31,7 @@ object KafkaRetentionBarrier {
     for {
       refinedTopic <- AnalyticsTopic
         .from(topic)
-        .leftMap(_ => AnalyticsError.InvalidConfiguration("Kafka erasure retention barrier is malformed"))
+        .leftMap(_ => AnalyticsError.DataIntegrityViolation("Kafka erasure retention barrier is malformed"))
       refinedPartitions <- partitions.traverse { case (number, offset) => Partition.from(number, offset) }
       barrier <- validate(KafkaRetentionBarrier(refinedTopic, refinedPartitions))
     } yield barrier
@@ -39,7 +39,7 @@ object KafkaRetentionBarrier {
   def validate(barrier: KafkaRetentionBarrier): Either[AnalyticsError, KafkaRetentionBarrier] = {
     val invalid = barrier.partitions.isEmpty ||
       barrier.partitions.map(_.number).distinct.size != barrier.partitions.size
-    if (invalid) Left(AnalyticsError.InvalidConfiguration("Kafka erasure retention barrier is malformed"))
+    if (invalid) Left(AnalyticsError.DataIntegrityViolation("Kafka erasure retention barrier is malformed"))
     else Right(barrier.copy(partitions = barrier.partitions.sortBy(_.number)))
   }
 
@@ -49,7 +49,7 @@ object KafkaRetentionBarrier {
   ): Either[AnalyticsError, Boolean] =
     validate(barrier).flatMap { valid =>
       if (valid.partitions.exists(partition => !earliestOffsets.contains(AnalyticsPartition.unwrap(partition.number))))
-        Left(AnalyticsError.InvalidConfiguration("Kafka erasure retention barrier references a missing partition"))
+        Left(AnalyticsError.DataIntegrityViolation("Kafka erasure retention barrier references a missing partition"))
       else
         Right(
           valid.partitions.forall(partition =>

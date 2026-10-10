@@ -3,7 +3,8 @@ package com.example.graphQL.cats.repository.mongo
 import cats.effect.{IO, Ref, Resource}
 import cats.syntax.all.*
 import com.example.graphQL.cats.service.Diagnostics
-import com.example.graphQL.cats.service.port.{RepositoryError, RepositoryIO}
+import com.example.graphQL.cats.service.port.{RepositoryIO}
+import com.example.graphQL.cats.service.RepositoryError
 import com.mongodb.MongoException
 import com.mongodb.reactivestreams.client.{ClientSession as JClientSession, MongoClient as JMongoClient}
 import mongo4cats.bson.Document

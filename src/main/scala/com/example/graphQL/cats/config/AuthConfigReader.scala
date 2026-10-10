@@ -12,15 +12,10 @@ private object AuthSettingReaders {
       (iterations: PasswordHashIterations, memoryKib: PasswordHashMemoryKib, parallelism: PasswordHashParallelism) =>
         PasswordHashConfig(iterations, memoryKib, parallelism)
     )
-  given ConfigReader[AuthRateLimitConfig] =
+  given ConfigReader[RateLimitConfig] =
     ConfigReader.forProduct3("window-seconds", "attempts", "max-buckets")(
       (window: AuthRateWindowSeconds, attempts: AuthRateAttempts, buckets: AuthRateBuckets) =>
-        AuthRateLimitConfig(window, attempts, buckets)
-    )
-  given ConfigReader[InterviewActionRateLimitConfig] =
-    ConfigReader.forProduct3("window-seconds", "attempts", "max-buckets")(
-      (window: AuthRateWindowSeconds, attempts: AuthRateAttempts, buckets: AuthRateBuckets) =>
-        InterviewActionRateLimitConfig(window, attempts, buckets)
+        RateLimitConfig(window, attempts, buckets)
     )
 }
 import AuthSettingReaders.given
@@ -28,8 +23,8 @@ import AuthSettingReaders.given
 private[config] final case class RawAuthConfig(
     jwt: RawJwtAuthConfig,
     passwordHash: Option[PasswordHashConfig],
-    rateLimit: AuthRateLimitConfig,
-    interviewActionRateLimit: InterviewActionRateLimitConfig,
+    rateLimit: RateLimitConfig,
+    interviewActionRateLimit: RateLimitConfig,
     adminSeed: Option[AdminSeedConfig]
 ) derives ConfigReader
 private[config] final case class RawJwtAuthConfig(
@@ -42,6 +37,7 @@ private[config] final case class RawJwtAuthConfig(
   override def toString: String = "RawJwtAuthConfig([REDACTED])"
 }
 private[config] object RawJwtAuthConfig {
+  // Derived kebab-casing would split `hs256` at the digits, so the five keys are named explicitly.
   given ConfigReader[RawJwtAuthConfig] =
     ConfigReader.forProduct5(
       "hs256-secret",

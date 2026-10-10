@@ -77,7 +77,7 @@ final class InterviewMessagePolicySpec extends FunSuite {
   }
 
   test("expired receipt reconciliation deliberately differs from timely result admission") {
-    val stored = command.copy(result = Some(InterviewCommandResult.Succeeded))
+    val stored = command.copy(result = Some(InterviewResult.Succeeded))
     val mismatched = message.copy(
       messageId = InterviewMessagePolicy.stableId(s"$commandId:result"),
       causationId = commandId,
@@ -130,7 +130,7 @@ final class InterviewMessagePolicySpec extends FunSuite {
     )
     assertEquals(
       InterviewMessagePolicy.resultEvent(message.copy(result = Some(InterviewResult.OutcomeUnknown)), 5L, 5),
-      Some(InterviewWorkflowEvent.RetryExhausted("provider"))
+      Some(InterviewWorkflowEvent.RetryExhausted(InterviewFailureCode.Provider))
     )
     assertEquals(
       InterviewMessagePolicy.resultEvent(message.copy(result = Some(InterviewResult.Succeeded)), 5L, 5),
@@ -215,7 +215,7 @@ final class InterviewMessagePolicySpec extends FunSuite {
         InterviewStep.LookupNotifyCandidate,
       C.LookupNotificationReceipt(InterviewNotificationKind.Cancelled, InterviewParticipant.Recruiter, "k") ->
         InterviewStep.LookupNotifyRecruiter,
-      C.RequireRepair("x") -> InterviewStep.RequireRepair
+      C.RequireRepair(InterviewRepairReason.StatusNotCommitted) -> InterviewStep.RequireRepair
     )
     samples.foreach((command, step) => assertEquals(InterviewMessagePolicy.step(command), step, command.toString))
   }
@@ -254,14 +254,16 @@ final class InterviewMessagePolicySpec extends FunSuite {
       Some(lifecycleWorkflow),
       Some(command),
       cancelMessage,
-      "replay_expired",
+      InterviewFailureCode.ReplayExpired,
       InterviewMessageRejection.Expired,
       now
     )
     assertEquals(
       failure,
       Right(
-        InterviewMessagePolicy.LifecycleReplayFailure.Workflow(InterviewLifecycleEvent.RetryExhausted("replay_expired"))
+        InterviewMessagePolicy.LifecycleReplayFailure.Workflow(
+          InterviewLifecycleEvent.RetryExhausted(InterviewFailureCode.ReplayExpired)
+        )
       )
     )
     val informational = lifecycleRecord(
@@ -280,7 +282,7 @@ final class InterviewMessagePolicySpec extends FunSuite {
         Some(workflow.copy(phase = InterviewWorkflowPhase.Completed, revision = 4L)),
         Some(informational),
         informationalMessage,
-        "replay_expired",
+        InterviewFailureCode.ReplayExpired,
         InterviewMessageRejection.Expired,
         now
       ),
@@ -288,7 +290,14 @@ final class InterviewMessagePolicySpec extends FunSuite {
     )
     assertEquals(
       InterviewMessagePolicy
-        .lifecycleReplayFailure(None, Some(command), cancelMessage, "x", InterviewMessageRejection.Future, now),
+        .lifecycleReplayFailure(
+          None,
+          Some(command),
+          cancelMessage,
+          InterviewFailureCode.Provider,
+          InterviewMessageRejection.Future,
+          now
+        ),
       Left(InterviewMessageRejection.Future)
     )
   }
@@ -311,7 +320,7 @@ final class InterviewMessagePolicySpec extends FunSuite {
         Some(proposing),
         Some(expiry),
         expiryMessage,
-        "replay_expired",
+        InterviewFailureCode.ReplayExpired,
         rejection,
         at
       )
@@ -329,16 +338,16 @@ final class InterviewMessagePolicySpec extends FunSuite {
     )
     // The give-up event of every step except expiry is repair; expiry is expiry.
     assertEquals(
-      InterviewCommands.giveUpEvent(expiry.command, "publication_exhausted", now),
+      InterviewCommands.giveUpEvent(expiry.command, InterviewFailureCode.PublicationExhausted, now),
       InterviewLifecycleEvent.ProposalExpired(now)
     )
     assertEquals(
       InterviewCommands.giveUpEvent(
         InterviewLifecycleCommand.CancelCalendarSlot(InterviewWorkflow.cancellationKey(workflow.id, 0)),
-        "publication_exhausted",
+        InterviewFailureCode.PublicationExhausted,
         now
       ),
-      InterviewLifecycleEvent.RetryExhausted("publication_exhausted")
+      InterviewLifecycleEvent.RetryExhausted(InterviewFailureCode.PublicationExhausted)
     )
   }
 }

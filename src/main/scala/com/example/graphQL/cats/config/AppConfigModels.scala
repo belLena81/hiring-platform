@@ -256,10 +256,11 @@ final case class JwtAuthConfig(
   override def toString: String = s"JwtAuthConfig($issuer, $audience, [REDACTED])"
 }
 final case class PasswordHashConfig(iterations: Int = 2, memoryKilobytes: Int = 19456, parallelism: Int = 1)
-final case class AuthRateLimitConfig(windowSeconds: Int, attempts: Int, maxBuckets: Int)
 
-/** Per-actor allowance for interview cancel and reschedule actions: `attempts` actions per `windowSeconds`. */
-final case class InterviewActionRateLimitConfig(windowSeconds: Int, attempts: Int, maxBuckets: Int)
+/** Allowance of `attempts` per `windowSeconds`, tracked in at most `maxBuckets` buckets. Used for authentication
+  * attempts and for per-actor interview cancel and reschedule actions.
+  */
+final case class RateLimitConfig(windowSeconds: Int, attempts: Int, maxBuckets: Int)
 final case class TrustedProxyConfig(cidrs: List[Cidr[IpAddress]])
 final case class KafkaPublisherConfig(
     workerId: String,

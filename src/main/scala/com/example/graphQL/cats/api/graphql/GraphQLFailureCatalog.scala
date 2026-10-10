@@ -76,6 +76,7 @@ private[graphql] object GraphQLFailureCatalog {
       case UseCaseError.Account(value)           => classifyAccount(value)
       case UseCaseError.Availability(value)      => classifyAvailability(value)
       case UseCaseError.Analytics(value)         => classifyAnalytics(value)
+      case UseCaseError.InterviewRule(value)     => classifyInterviewRule(value)
       case UseCaseError.Domain(value)            => classifyDomain(value)
       case UseCaseError.Repository(value)        => classifyRepository(value)
       case UseCaseError.Search(value)            => classifySearch(value)

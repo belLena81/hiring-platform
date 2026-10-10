@@ -242,7 +242,7 @@ private[mongo] object MongoHiringCodecs {
       StoredSearchSession(
         value.id.toString,
         value.actorId.value.toString,
-        value.searchKind,
+        value.searchKind.wire,
         value.query,
         value.filter.noSpaces,
         value.model,
@@ -257,7 +257,10 @@ private[mongo] object MongoHiringCodecs {
       (
         uuid(MongoFields.Id, value._id).toValidatedNel,
         uuid(MongoFields.ActorId, value.actorId).toValidatedNel.map(UserId.apply),
-        value.searchKind.validNel,
+        OperationalEventPayload.SearchKind.values
+          .find(_.wire == value.searchKind)
+          .toRight(InvalidField(MongoFields.SearchKind))
+          .toValidatedNel,
         value.query.validNel,
         parseJson(MongoFields.Filter, value.filter).toValidatedNel,
         value.model.validNel,

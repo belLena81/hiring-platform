@@ -69,7 +69,7 @@ private[analytics] final class AnalyticsLateFactStage[F[_]: Async](
           .withColumn(Columns.JobSkills, col(Columns.PayloadJobSkills))
           .withColumn(Columns.AdmissionReason, lit(closedDayReason))
           .withColumn(Columns.IngestedAt, lit(Timestamp.from(observedAt)))
-          .withColumn(Columns.ExpiresAt, lit(Timestamp.from(observedAt.plus(java.time.Duration.ofDays(retentionDays)))))
+          .withColumn(Columns.ExpiresAt, AnalyticsTableSchemas.expiryAt(observedAt, retentionDays))
           // This projection retains only the normalized fields required by the existing report transforms. No raw
           // value, payload, actor, or direct subject identity is retained.
           .select(AnalyticsTableSchemas.lateFacts.map { case (name, _) => col(name) }*)

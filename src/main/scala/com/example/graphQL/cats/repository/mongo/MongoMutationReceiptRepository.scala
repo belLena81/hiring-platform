@@ -4,6 +4,7 @@ import cats.effect.IO
 import cats.effect.std.UUIDGen
 import cats.syntax.all.*
 import com.example.graphQL.cats.service.port.*
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.Diagnostics
 import mongo4cats.client.{ClientSession, MongoClient}
 import mongo4cats.database.MongoDatabase

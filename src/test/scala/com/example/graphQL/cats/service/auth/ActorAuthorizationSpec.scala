@@ -33,11 +33,6 @@ final class ActorAuthorizationSpec extends CatsEffectSuite {
       ): RepositoryIO[Option[User]] =
         com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Right(values.get(id))))
 
-      override def findMany(
-          ids: List[com.example.graphQL.cats.domain.model.Identifiers.UserId]
-      ): RepositoryIO[List[User]] =
-        com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Right(ids.flatMap(values.get))))
-
       override def updateEmbedding(
           id: com.example.graphQL.cats.domain.model.Identifiers.UserId,
           embedding: EntityEmbedding

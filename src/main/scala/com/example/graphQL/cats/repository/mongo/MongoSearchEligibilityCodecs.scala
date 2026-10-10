@@ -3,7 +3,7 @@ package com.example.graphQL.cats.repository.mongo
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.{UserId, parse as parseIdentifier}
-import com.example.graphQL.cats.service.port.RepositoryError
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.search.*
 import com.example.graphQL.cats.repository.mongo.MongoHiringCodecs.StoredDocumentError
 import org.bson.Document

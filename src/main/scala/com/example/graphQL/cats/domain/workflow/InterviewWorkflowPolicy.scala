@@ -42,7 +42,7 @@ object InterviewWorkflowPolicy {
       expectedRevision: Long,
       hiringCommitted: Boolean
   ): Either[InterviewWorkflowError, InterviewWorkflowDecision] =
-    if (workflow.revision != expectedRevision || expectedRevision == Long.MaxValue)
+    if (!InterviewWorkflow.revisionMatches(workflow, expectedRevision))
       Left(InterviewWorkflowError.StaleRevision)
     else if (workflow.phase != InterviewWorkflowPhase.RepairRequired)
       Left(InterviewWorkflowError.InvalidTransition)
@@ -55,7 +55,7 @@ object InterviewWorkflowPolicy {
             .filterNot(workflow.notified)
             .map(participant =>
               InterviewWorkflowCommand
-                .LookupNotificationReceipt(participant, s"${workflow.id.value}:notify:$participant")
+                .LookupNotificationReceipt(participant, InterviewWorkflow.notificationKey(workflow.id, participant))
             )
         else List(InterviewWorkflowCommand.LookupCalendarReservation(workflow.id))
       Right(InterviewWorkflowDecision(workflow.copy(revision = expectedRevision + 1L, phase = phase), commands))

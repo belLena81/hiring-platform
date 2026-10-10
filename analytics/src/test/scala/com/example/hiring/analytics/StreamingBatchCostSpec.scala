@@ -42,19 +42,21 @@ final class StreamingBatchCostSpec extends CatsEffectSuite {
     override def assess(
         p: StreamingInputPreparation,
         tokens: Vector[SubjectToken],
-        recovery: Boolean
+        recovery: BatchAttempt
     ): IO[StreamingIngestionResult] =
-      IO { assertEquals(p, preparation); assertEquals(tokens, Vector.empty); assert(recovery) } *> action.as(assessment)
+      IO { assertEquals(p, preparation); assertEquals(tokens, Vector.empty); assert(recovery.isRecovery) } *> action.as(
+        assessment
+      )
     override def ingest(
         p: StreamingInputPreparation,
         tokens: Vector[SubjectToken],
         a: StreamingIngestionResult,
         d: StreamingDecisionRevision,
-        recovery: Boolean
+        recovery: BatchAttempt
     ): IO[Unit] =
       IO {
         assertEquals(p, preparation); assertEquals(tokens, Vector.empty); assertEquals(a, assessment);
-        assertEquals(d, decision); assert(recovery)
+        assertEquals(d, decision); assert(recovery.isRecovery)
       } *> action
     override def publish(
         p: StreamingInputPreparation,
@@ -75,8 +77,8 @@ final class StreamingBatchCostSpec extends CatsEffectSuite {
         wrapped = cost.wrap(stages(IO.sleep(2.seconds) *> counter.update(v => v.copy(tasks = v.tasks + 3L))))
         r <- wrapped.reservePublication(preparation, 7L)
         receipt <- wrapped.publicationReceipt(preparation, decision)
-        a <- wrapped.assess(preparation, Vector.empty, true)
-        _ <- wrapped.ingest(preparation, Vector.empty, assessment, decision, true)
+        a <- wrapped.assess(preparation, Vector.empty, BatchAttempt.Recovery)
+        _ <- wrapped.ingest(preparation, Vector.empty, assessment, decision, BatchAttempt.Recovery)
         p <- wrapped.publish(preparation, decision, Vector.empty)
         recorded <- summaries.get
         _ <- IO {

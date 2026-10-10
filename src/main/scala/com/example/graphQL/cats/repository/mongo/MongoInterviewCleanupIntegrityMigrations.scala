@@ -35,31 +35,30 @@ private[mongo] object MongoInterviewCleanupIntegrityMigrations {
   private def audit(run: MigrationRun, topics: InterviewTopicPair): IO[Unit] = {
     val queue = run.database.getCollection(MongoCollections.InterviewSubjectCleanup)
     val validator = MongoInterviewCleanupValidator.definition(topics)
-    def scan(after: Option[BsonValue]): IO[Unit] =
-      queue
-        .find(MongoInterviewCleanupSweepCodec.afterFilter(after))
-        .sort(Sorts.ascending(MongoFields.Id))
-        .hint("_id_")
-        .limit(BatchSize)
-        .all
-        .flatMap { rows =>
-          rows.toList.traverse_(row =>
-            IO.fromEither(
-              MongoInterviewCleanupCodec
-                .decodeCurrent(row, topics)
-                .leftMap(_ => MigrationError.StepFailed(run.id, "cutover rejected stored cleanup evidence"))
-            ).void
-          ) *> rows.lastOption.traverse_ { last =>
-            IO.fromEither(
-              MongoInterviewCleanupSweepCodec
-                .identity(last)
-                .leftMap(_ => MigrationError.StepFailed(run.id, "cleanup identity is absent"))
-            ).flatMap { identity =>
-              run.advance(last.get(MongoFields.Id)) *>
-                (if (rows.size == BatchSize) IO.defer(scan(Some(identity))) else IO.unit)
-            }
-          }
-        }
+    def scan(from: Option[BsonValue]): IO[Unit] =
+      MongoBatchScan.byId(BatchSize, from)(after =>
+        queue
+          .find(MongoInterviewCleanupSweepCodec.afterFilter(after))
+          .sort(Sorts.ascending(MongoFields.Id))
+          .hint("_id_")
+          .limit(BatchSize)
+          .all
+          .map(_.toList)
+      )(last =>
+        IO.fromEither(
+          MongoInterviewCleanupSweepCodec
+            .identity(last)
+            .leftMap(_ => MigrationError.StepFailed(run.id, "cleanup identity is absent"))
+        )
+      ) { rows =>
+        rows.traverse_(row =>
+          IO.fromEither(
+            MongoInterviewCleanupCodec
+              .decodeCurrent(row, topics)
+              .leftMap(_ => MigrationError.StepFailed(run.id, "cutover rejected stored cleanup evidence"))
+          ).void
+        ) *> rows.lastOption.traverse_(last => run.advance(last.get(MongoFields.Id)))
+      }
     for {
       _ <- MongoMigrationLedger.requireComplete(run.database, CoveredProofs)
       after <- IO.fromEither(run.checkpoint.traverse { value =>

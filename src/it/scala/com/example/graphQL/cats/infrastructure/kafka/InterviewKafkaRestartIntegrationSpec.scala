@@ -10,6 +10,7 @@ import org.apache.kafka.common.serialization.{ByteArrayDeserializer, StringDeser
 import org.bson.types.Binary
 import java.util.{Collections, Properties}
 import com.example.graphQL.cats.service.port.*
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.events.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.config.{KafkaConfig, KafkaPublisherConfig, KafkaConsumerConfig}
@@ -35,6 +36,11 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
     workerGroup = kafkaNamespace.workers,
     orchestratorGroup = kafkaNamespace.orchestrator
   )
+  private def durably(
+      receive: Either[String, InterviewMessage] => IO[Boolean]
+  ): Either[String, InterviewMessage] => RepositoryIO[Unit] = value =>
+    RepositoryIO.fromIOEither(receive(value).map(Either.cond(_, (), RepositoryError.Unavailable)))
+
   test("failed record restarts consumer and is replayed before a later command") {
     assume(enabled, "BLOCKED: isolated Kafka restart proof credentials absent")
     val workflowId = UUID.randomUUID()
@@ -54,7 +60,7 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
       failures <- Ref.of[IO, Int](0)
       durable <- Ref.of[IO, Vector[String]](Vector.empty)
       _ <- InterviewKafkaRuntime
-        .resource(config(worker = true), Diagnostics.noop) {
+        .resource(config(worker = true), Diagnostics.noop)(durably {
           case Right(message) if message.workflowId == workflowId =>
             if (message.stepId == first.stepId) failures.updateAndGet(_ + 1).flatMap {
               case 1 => IO.pure(false)
@@ -62,17 +68,18 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
             }
             else durable.update(_ :+ message.stepId).as(true)
           case _ => IO.pure(true)
-        }
+        })
         .use { _ =>
-          InterviewKafkaRuntime.resource(config(worker = false), Diagnostics.noop)(_ => IO.pure(true)).use {
-            publisher =>
+          InterviewKafkaRuntime
+            .resource(config(worker = false), Diagnostics.noop)(_ => RepositoryIO.lift(IO.unit))
+            .use { publisher =>
               publisher.publish(first) *> publisher.publish(second) *>
                 IO.sleep(10.seconds) *> durable.get.flatMap(values =>
                   IO {
                     assertEquals(values.take(2), Vector(first.stepId, second.stepId))
                   }
                 )
-          }
+            }
         }
       count <- failures.get
     } yield assert(count >= 2)
@@ -101,12 +108,12 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
     for {
       observed <- Ref.of[IO, Vector[String]](Vector.empty)
       _ <- InterviewKafkaRuntime
-        .resource(config(worker = true), Diagnostics.noop) {
+        .resource(config(worker = true), Diagnostics.noop)(durably {
           case Left(identity) if identity.startsWith("transport:") =>
             observed.update(_ :+ "quarantined").as(true)
           case Right(value) if value.workflowId == workflowId => observed.update(_ :+ "valid").as(true)
           case _                                              => IO.pure(true)
-        }
+        })
         .use { _ =>
           KafkaProducer.resource(settings).use { producer =>
             producer
@@ -202,7 +209,7 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
           )
           partition = new TopicPartition(topics.commands, first.partition())
           _ <- InterviewKafkaRuntime
-            .consumerResource(broker.config(worker = true), Diagnostics.noop) {
+            .consumerResource(broker.config(worker = true), Diagnostics.noop)(durably {
               case Left(observed) =>
                 for {
                   _ <- IO(assertEquals(observed, identity))
@@ -219,21 +226,21 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
                   IO(assertEquals(rows, 1L)) *> saved.update(_ :+ "valid") *> received.complete(()).as(true)
                 }
               case _ => IO.pure(true)
-            }
+            })
             .use { _ =>
               received.get.timeout(45.seconds) *>
                 awaitCommitted(kafka, partition, second.offset() + 1L).timeout(30.seconds)
             }
           order <- saved.get
           _ = assertEquals(order.take(2), Vector("quarantined", "valid"))
-          failedCommit <- OperationalEventKafkaRuntime
+          failedCommit <- KafkaRuntimeSupport
             .processRecord(topics.commands, first.partition(), first.offset())(
               repository.quarantine(identity, now)
             )(IO.raiseError(new IllegalStateException("synthetic acknowledgment failure")))
             .attempt
           _ = assert(failedCommit.isLeft)
           acknowledged <- Ref.of[IO, Boolean](false)
-          _ <- OperationalEventKafkaRuntime.processRecord(
+          _ <- KafkaRuntimeSupport.processRecord(
             topics.commands,
             first.partition(),
             first.offset()
@@ -357,7 +364,7 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
         _ = assertEquals(document.map(_.getString("reason")), Some("null event envelope"))
         _ = assertEquals(document.map(_.get("rawBytes", classOf[Binary]).getData.toList), Some(List.empty[Byte]))
         // A durable quarantine survives a failed acknowledgment; replay must remain idempotent.
-        failedCommit <- OperationalEventKafkaRuntime
+        failedCommit <- KafkaRuntimeSupport
           .processRecord(kafka.topic, first.partition(), first.offset())(
             OperationalEventKafkaRuntime.recordDurably(
               kafka,
@@ -372,7 +379,7 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
           .attempt
         _ = assert(failedCommit.isLeft)
         acknowledged <- Ref.of[IO, Boolean](false)
-        _ <- OperationalEventKafkaRuntime.processRecord(kafka.topic, first.partition(), first.offset())(
+        _ <- KafkaRuntimeSupport.processRecord(kafka.topic, first.partition(), first.offset())(
           OperationalEventKafkaRuntime.recordDurably(
             kafka,
             storedReceipts,

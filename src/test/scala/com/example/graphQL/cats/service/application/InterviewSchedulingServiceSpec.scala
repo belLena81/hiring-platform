@@ -5,8 +5,9 @@ import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, ApplicationStatus, Job, User, UserRole}
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.workflow.*
-import com.example.graphQL.cats.service.{ActorContext, SearchError, ServiceFixtures, UseCaseError}
+import com.example.graphQL.cats.service.{ActorContext, ServiceFixtures, UseCaseError}
 import com.example.graphQL.cats.service.port.*
+import com.example.graphQL.cats.service.RepositoryError
 import java.time.Instant
 import java.util.UUID
 import munit.CatsEffectSuite
@@ -155,7 +156,7 @@ final class InterviewSchedulingServiceSpec extends CatsEffectSuite {
         .value
       observed <- reads.get
     } yield {
-      assertEquals(rejected, Left(UseCaseError.Search(SearchError.InvalidFilter("interviewInterval"))))
+      assertEquals(rejected, Left(UseCaseError.InterviewRule(InterviewWorkflowError.StartMustBeInFuture)))
       assertEquals(observed, 1)
     }
   }

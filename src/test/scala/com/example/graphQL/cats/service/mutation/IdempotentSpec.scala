@@ -6,6 +6,7 @@ import com.example.graphQL.cats.FixedTestClock
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.service.port.*
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.UseCaseError
 import com.example.graphQL.cats.service.protocol.IdempotencyRequest
 import munit.CatsEffectSuite

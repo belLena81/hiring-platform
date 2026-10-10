@@ -4,6 +4,7 @@ import cats.data.NonEmptyList
 import cats.effect.{IO, Ref}
 import com.example.graphQL.cats.config.ConfigError
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFields}
+import com.example.graphQL.cats.runtime.HiringLogValues
 import munit.CatsEffectSuite
 
 class ConfigInvalidStartupLoggingSpec extends CatsEffectSuite {
@@ -31,7 +32,7 @@ class ConfigInvalidStartupLoggingSpec extends CatsEffectSuite {
         Vector("HTTP_HOST", "KAFKA_CREDENTIALS", "INTERVIEW_CLAIM_WINDOW").map(key => Map(LogField.ConfigKey -> key))
       )
       emitted.flatMap(_._2).foreach { case (field, value) =>
-        assert(LogFields.validPublic(field, value), clues(field, value))
+        assert(LogFields.validPublic(field, value, HiringLogValues.allowed), clues(field, value))
       }
     }
   }

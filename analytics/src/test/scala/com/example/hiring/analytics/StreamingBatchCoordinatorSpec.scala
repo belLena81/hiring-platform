@@ -342,7 +342,13 @@ final class StreamingBatchCoordinatorSpec extends CatsEffectSuite {
       terminal: Option[StreamingTerminalOutcome] = None
   ) {
     def asState: StreamingJournalState =
-      StreamingJournalState(preparation, ingestionCommitted, decisions.lastOption, terminal)
+      StreamingJournalState(
+        preparation,
+        terminal.fold(
+          if (ingestionCommitted) StreamingJournalProgress.IngestionCommitted else StreamingJournalProgress.Prepared
+        )(StreamingJournalProgress.Terminal.apply),
+        decisions.lastOption
+      )
   }
 
   private final case class FakeState(
@@ -461,10 +467,10 @@ final class StreamingBatchCoordinatorSpec extends CatsEffectSuite {
       override def assess(
           preparation: StreamingInputPreparation,
           activeTokens: Vector[SubjectToken],
-          isRecoveryAttempt: Boolean
+          attempt: BatchAttempt
       ): IO[StreamingIngestionResult] =
         state
-          .update(s => s.copy(events = s.events :+ (if (isRecoveryAttempt) "assess-recovery" else "assess-new")))
+          .update(s => s.copy(events = s.events :+ (if (attempt.isRecovery) "assess-recovery" else "assess-new")))
           .flatMap(_ => state.get.map(_.ingestionResult))
 
       override def ingest(
@@ -472,14 +478,14 @@ final class StreamingBatchCoordinatorSpec extends CatsEffectSuite {
           activeTokens: Vector[SubjectToken],
           assessment: StreamingIngestionResult,
           decision: StreamingDecisionRevision,
-          isRecoveryAttempt: Boolean
+          attempt: BatchAttempt
       ): IO[Unit] =
         state
           .modify { s =>
             val failed = s.failIngestAfterWriteCount > 0
             s.copy(
               failIngestAfterWriteCount = if (failed) s.failIngestAfterWriteCount - 1 else 0,
-              events = s.events :+ (if (isRecoveryAttempt) "ingest-recovery" else "ingest-new")
+              events = s.events :+ (if (attempt.isRecovery) "ingest-recovery" else "ingest-new")
             ) -> failed
           }
           .flatMap(failed =>

@@ -10,7 +10,6 @@ import cats.effect.{Async, Clock, Resource, Temporal}
 import cats.effect.kernel.Poll
 import cats.effect.std.{Random, UUIDGen}
 import cats.syntax.all.*
-import com.mongodb.MongoException
 import com.mongodb.{WriteConcern, ReadConcern, ReadPreference}
 import mongo4cats.database.MongoDatabase
 import org.bson.Document
@@ -63,7 +62,7 @@ private[analytics] final class MongoAnalyticsLakehouseLock[F[_]: Async: UUIDGen]
             .flatMap(_ => afterInsertOverride.getOrElse(effect.unit))
             .as(owner)
             .handleErrorWith {
-              case error: MongoException if error.getCode == 11000 =>
+              case MongoDuplicateKey() =>
                 clock.monotonic.flatMap { reconciliationStarted =>
                   effect
                     .timeoutTo(

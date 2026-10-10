@@ -136,7 +136,7 @@ class AppConfigSpec extends FunSuite {
   private val defaultPasswordHash =
     PasswordHashConfig(iterations = 2, memoryKilobytes = 19456, parallelism = 1)
   private val defaultAuthRateLimit =
-    AuthRateLimitConfig(windowSeconds = 60, attempts = 20, maxBuckets = 10000)
+    RateLimitConfig(windowSeconds = 60, attempts = 20, maxBuckets = 10000)
   private val defaultKafka =
     KafkaConfig(
       enabled = false,
@@ -312,10 +312,10 @@ class AppConfigSpec extends FunSuite {
           true,
           JwtAuthConfig("01234567890123456789012345678901", "hiring-platform-local", "hiring-graphql-api"),
           defaultPasswordHash,
-          AuthRateLimitConfig(30, 10, 500),
+          RateLimitConfig(30, 10, 500),
           defaultVectorSearch,
           defaultKafka,
-          interviewActionRateLimit = InterviewActionRateLimitConfig(60, 30, 10000)
+          interviewActionRateLimit = RateLimitConfig(60, 30, 10000)
         )
       )
     )
@@ -690,7 +690,7 @@ class AppConfigSpec extends FunSuite {
           defaultAuthRateLimit,
           defaultVectorSearch,
           defaultKafka,
-          interviewActionRateLimit = InterviewActionRateLimitConfig(60, 30, 10000)
+          interviewActionRateLimit = RateLimitConfig(60, 30, 10000)
         )
       )
     )
@@ -795,7 +795,7 @@ class AppConfigSpec extends FunSuite {
          |""".stripMargin
     assertEquals(
       AppConfigFixtures.fromConfig(defaultConfig, Map.empty).map(_.interviewActionRateLimit),
-      Right(InterviewActionRateLimitConfig(60, 30, 10000))
+      Right(RateLimitConfig(60, 30, 10000))
     )
     // The section is required: removing it fails closed instead of falling back to a built-in value.
     val without = defaultConfig.replace(block(60, 30, 10000), "")
@@ -803,7 +803,7 @@ class AppConfigSpec extends FunSuite {
     assertContainsError(AppConfigFixtures.fromConfig(without, Map.empty), ConfigError.InvalidConfigFile)
     assertEquals(
       AppConfigFixtures.fromConfig(defaultConfig + block(), Map.empty).map(_.interviewActionRateLimit),
-      Right(InterviewActionRateLimitConfig(30, 5, 200))
+      Right(RateLimitConfig(30, 5, 200))
     )
     assertContainsError(
       AppConfigFixtures.fromConfig(defaultConfig + block(window = 0), Map.empty),

@@ -203,5 +203,11 @@ private[mongo] object MongoDocumentFields {
       toRepository(requiredInt32(document, field))
     def int64(document: Document, field: String): Either[RepositoryError, Long] =
       toRepository(requiredInt64(document, field))
+    def uuid(document: Document, field: String): Either[RepositoryError, UUID] =
+      toRepository(requiredUuid(document, field))
+
+    /** The case of `values` persisted under `name`. */
+    def named[A](values: Array[A])(name: String): Either[RepositoryError, A] =
+      byName(values)(name).toRight(RepositoryError.InvalidStoredData)
   }
 }

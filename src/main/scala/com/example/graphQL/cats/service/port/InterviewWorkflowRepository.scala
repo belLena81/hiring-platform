@@ -5,6 +5,7 @@ import com.example.graphQL.cats.domain.model.{ApplicationStatus, UserRole}
 import com.example.graphQL.cats.domain.workflow.{
   InterviewAdvanceCause,
   InterviewCommand,
+  InterviewFailureCode,
   InterviewLifecycleEvent,
   InterviewWorkflow,
   InterviewWorkflowCommand,
@@ -26,18 +27,6 @@ enum InterviewWorkflowCommandState {
   case Pending, Claimed, Published, Executing, ResultPending, ResultPublished, RepairRequired, Superseded
 }
 
-enum InterviewCommandResult { case Succeeded, Rejected, OutcomeUnknown, Found, Absent }
-
-object InterviewCommandResult {
-  def fromTransportResult(value: InterviewResult): InterviewCommandResult = value match {
-    case InterviewResult.Succeeded      => Succeeded
-    case InterviewResult.Rejected       => Rejected
-    case InterviewResult.OutcomeUnknown => OutcomeUnknown
-    case InterviewResult.Found          => Found
-    case InterviewResult.Absent         => Absent
-  }
-}
-
 /** A durable scheduling, cancellation or rescheduling intent; one executor claims, runs and settles every family. */
 final case class InterviewWorkflowCommandRecord(
     workflowId: InterviewWorkflowId,
@@ -48,7 +37,7 @@ final case class InterviewWorkflowCommandRecord(
     publicationAttempts: Int,
     availableAt: Instant,
     occurredAt: Instant,
-    result: Option[InterviewCommandResult] = None,
+    result: Option[InterviewResult] = None,
     executionAttempts: Int = 0
 )
 
@@ -58,6 +47,12 @@ final case class InterviewWorkflowCommandRecord(
 enum InterviewLifecycleOrigin {
   case Actor(access: InterviewWorkflowAccess, requestKey: UUID, fingerprint: MutationReceiptFingerprint)
   case Internal(cause: InterviewAdvanceCause)
+
+  /** The person behind the write, as the role and id the pure actor policy needs; the system has none. */
+  def actor: Option[(UserRole, UserId)] = this match {
+    case Actor(access, _, _) => Some((access.role, access.actorId))
+    case Internal(_)         => None
+  }
 }
 
 enum InterviewLifecycleOutcome {
@@ -84,7 +79,7 @@ enum InterviewNotificationSettlement {
   case Retry(availableAt: Instant)
 
   /** The retry budget is spent: the command alone becomes `RepairRequired`, visible to Admin. */
-  case Exhausted(failureCode: String)
+  case Exhausted(failureCode: InterviewFailureCode)
 }
 
 final case class ClaimedInterviewWorkflowCommand(
@@ -124,7 +119,7 @@ trait InterviewWorkflowRepository {
   def quarantine(identity: String, now: Instant): RepositoryIO[Unit]
   def recordResult(
       claim: ClaimedInterviewWorkflowCommand,
-      result: InterviewCommandResult,
+      result: InterviewResult,
       now: Instant
   ): RepositoryIO[Unit]
   def findRequest(
@@ -248,12 +243,12 @@ trait InterviewWorkflowRepository {
       claim: ClaimedInterviewWorkflowCommand,
       now: Instant,
       availableAt: Instant,
-      failureCode: String
+      failureCode: InterviewFailureCode
   ): RepositoryIO[Unit]
 
   def requireRepair(
       claim: ClaimedInterviewWorkflowCommand,
       now: Instant,
-      failureCode: String
+      failureCode: InterviewFailureCode
   ): RepositoryIO[InterviewPublicationResolution]
 }

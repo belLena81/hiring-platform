@@ -40,7 +40,7 @@ final class MongoInterviewLifecycleCodecSpec extends FunSuite {
       InterviewParticipant.Recruiter,
       s"${workflowId.value}:cancelled:notify:Recruiter"
     ),
-    InterviewLifecycleCommand.RequireRepair("retry exhausted: cancel")
+    InterviewLifecycleCommand.RequireRepair(InterviewRepairReason.RetryExhausted(InterviewFailureCode.Provider))
   )
 
   test("every lifecycle intent round-trips through its stored shape and is recognised as a lifecycle row") {

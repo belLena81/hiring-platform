@@ -6,6 +6,7 @@ import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId}
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.service.port.*
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.events.OperationalEventEnvelope
 import com.example.graphQL.cats.domain.pagination.*
 import com.example.graphQL.cats.service.Diagnostics
@@ -92,26 +93,6 @@ final class MongoApplicationRepository private (
       .subflatMap(values => MongoStoredDocumentDecoding.values(values.map(MongoHiringCodecs.readEvent)))
   }
 
-  override def createForOpenJob(
-      observedJob: JobSubmissionSnapshot,
-      application: Application,
-      initialEvent: ApplicationEvent
-  ): RepositoryIO[Unit] =
-    if (!isConsistentSubmit(observedJob, application, initialEvent))
-      EitherT.leftT[IO, Unit](RepositoryError.Conflict)
-    else submitWithRetry(observedJob, application, initialEvent, remainingRetries = 2)
-
-  def createForOpenJobWithEvents(
-      observedJob: JobSubmissionSnapshot,
-      application: Application,
-      initialEvent: ApplicationEvent,
-      operationalEvents: List[OperationalEventEnvelope]
-  ): RepositoryIO[Unit] =
-    if (!isConsistentSubmit(observedJob, application, initialEvent))
-      EitherT.leftT[IO, Unit](RepositoryError.Conflict)
-    else
-      submitWithRetry(observedJob, application, initialEvent, operationalEvents, remainingRetries = 2)
-
   override def createForOpenJobWithEvents(
       observedJob: JobSubmissionSnapshot,
       application: Application,
@@ -124,25 +105,10 @@ final class MongoApplicationRepository private (
     else
       MongoRepositorySupport
         .repositoryGuard(diagnostics, "applications.createWithEvents") {
-          RepositoryIO
-            .lift(MongoMutationWriteContext.session(context))
-            .flatMap(session =>
-              submitOnceWithSession(observedJob, application, initialEvent, operationalEvents, session)
-            )
+          MongoMutationWriteContext.run(context, transactionRunner, transactionRequired = true)(session =>
+            submitOnceWithSession(observedJob, application, initialEvent, operationalEvents, session)
+          )
         }(MongoErrors.duplicateAs(RepositoryError.DuplicateApplication))
-
-  override def updateStatus(application: Application, event: ApplicationEvent): RepositoryIO[Unit] =
-    updateStatusWithEvents(application, event, Nil)
-
-  def updateStatusWithEvents(
-      application: Application,
-      event: ApplicationEvent,
-      operationalEvents: List[OperationalEventEnvelope]
-  ): RepositoryIO[Unit] =
-    MongoRepositorySupport
-      .repositoryGuard(diagnostics, "applications.updateStatus") {
-        transactionRunner.run(session => updateStatusWithSession(application, event, operationalEvents, session))
-      }(MongoErrors.duplicateAs(RepositoryError.DuplicateApplication))
 
   override def updateStatusWithEvents(
       application: Application,
@@ -152,9 +118,9 @@ final class MongoApplicationRepository private (
   ): RepositoryIO[Unit] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "applications.updateStatusWithContext") {
-        RepositoryIO
-          .lift(MongoMutationWriteContext.session(context))
-          .flatMap(session => updateStatusWithSession(application, event, operationalEvents, session))
+        MongoMutationWriteContext.run(context, transactionRunner, transactionRequired = true)(session =>
+          updateStatusWithSession(application, event, operationalEvents, session)
+        )
       }(MongoErrors.duplicateAs(RepositoryError.DuplicateApplication))
 
   private def updateStatusWithSession(
@@ -198,31 +164,6 @@ final class MongoApplicationRepository private (
     )
   }
 
-  private def submitWithRetry(
-      observedJob: JobSubmissionSnapshot,
-      application: Application,
-      initialEvent: ApplicationEvent,
-      remainingRetries: Int
-  ): RepositoryIO[Unit] =
-    submitWithRetry(observedJob, application, initialEvent, Nil, remainingRetries)
-
-  private def submitWithRetry(
-      observedJob: JobSubmissionSnapshot,
-      application: Application,
-      initialEvent: ApplicationEvent,
-      operationalEvents: List[OperationalEventEnvelope],
-      remainingRetries: Int
-  ): RepositoryIO[Unit] =
-    submitOnce(observedJob, application, initialEvent, operationalEvents).leftFlatMap {
-      case RepositoryError.Conflict if remainingRetries > 0 =>
-        currentOpenJob(observedJob.id).flatMap {
-          case Some(current) =>
-            submitWithRetry(current, application, initialEvent, operationalEvents, remainingRetries - 1)
-          case None => RepositoryIO.fromEither(Left(RepositoryError.Conflict))
-        }
-      case error => RepositoryIO.fromEither(Left(error))
-    }
-
   private def isConsistentSubmit(
       observedJob: JobSubmissionSnapshot,
       application: Application,
@@ -233,18 +174,6 @@ final class MongoApplicationRepository private (
       initialEvent.previousStatus.isEmpty &&
       initialEvent.newStatus == ApplicationStatus.Created &&
       initialEvent.actorId == application.candidateId
-
-  private def submitOnce(
-      observedJob: JobSubmissionSnapshot,
-      application: Application,
-      initialEvent: ApplicationEvent,
-      operationalEvents: List[OperationalEventEnvelope]
-  ): RepositoryIO[Unit] =
-    MongoRepositorySupport
-      .repositoryGuard(diagnostics, "applications.submit") {
-        transactionRunner
-          .run(session => submitOnceWithSession(observedJob, application, initialEvent, operationalEvents, session))
-      }(MongoErrors.duplicateAs(RepositoryError.DuplicateApplication))
 
   private def submitOnceWithSession(
       observedJob: JobSubmissionSnapshot,
@@ -289,20 +218,6 @@ final class MongoApplicationRepository private (
       _ <- MongoOperationalEventInsertion.insert(outbox, session, operationalEvents, application.createdAt, diagnostics)
     } yield ()
 
-  private def currentOpenJob(id: JobId): RepositoryIO[Option[JobSubmissionSnapshot]] =
-    MongoRepositorySupport
-      .repositoryGuard(diagnostics, "applications.findOpenJob") {
-        RepositoryIO
-          .lift(
-            MongoSessionOperations
-              .findById(jobs, None, id.value.toString, Some(MongoJobSubmissionSnapshotCodec.projection))
-          )
-          .subflatMap(document =>
-            MongoStoredDocumentDecoding
-              .repository(document.traverse(MongoJobSubmissionSnapshotCodec.read))
-              .map(_.filter(_.status == JobStatus.Open))
-          )
-      }
 }
 
 object MongoApplicationRepository {

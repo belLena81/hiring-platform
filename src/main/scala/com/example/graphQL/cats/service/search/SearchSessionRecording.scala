@@ -14,7 +14,7 @@ import com.example.graphQL.cats.service.events.{
 }
 import io.circe.Json
 
-import java.nio.charset.StandardCharsets
+import com.example.graphQL.cats.shared.StableIds
 import java.util.UUID
 import scala.concurrent.duration.*
 
@@ -41,7 +41,7 @@ object SearchSessionRecording {
   private[search] val Retention: FiniteDuration = 7.days
 
   def eventId(searchId: UUID): UUID =
-    UUID.nameUUIDFromBytes(s"search-performed:$searchId".getBytes(StandardCharsets.UTF_8))
+    StableIds.uuid(s"search-performed:$searchId")
 
   def apply(
       handoff: SearchSessionHandoff,
@@ -62,7 +62,7 @@ object SearchSessionRecording {
         val session = SearchSession(
           searchId,
           actorId,
-          kind.wire,
+          kind,
           None,
           filter,
           model,

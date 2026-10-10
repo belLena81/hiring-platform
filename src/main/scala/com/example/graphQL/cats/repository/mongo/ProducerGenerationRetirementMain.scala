@@ -5,6 +5,7 @@ import cats.syntax.all.*
 import com.example.graphQL.cats.config.AppConfig
 import com.example.graphQL.cats.infrastructure.kafka.KafkaProducerGenerationRetirement
 import com.example.graphQL.cats.infrastructure.logging.SafeDiagnostics
+import com.example.graphQL.cats.runtime.HiringLogValues
 import io.circe.Json
 
 /** Inventory is read-only; retirement requires stopping the selected publisher before invoking its exact ID. */
@@ -21,7 +22,7 @@ object ProducerGenerationRetirementMain extends IOApp {
         case Left(_)       => IO.pure(ExitCode.Error)
         case Right(config) =>
           (
-            Resource.eval(SafeDiagnostics.configure(config.maskSensitive)),
+            Resource.eval(SafeDiagnostics.configure(config.maskSensitive, HiringLogValues.allowed)),
             MongoDatabaseProbe.clientResource(config.mongoUri)
           ).tupled
             .use { case (diagnostics, client) =>

@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.service.events
 
+import com.example.graphQL.cats.service.events.OperationalEventPayload.SearchKind
 import cats.effect.{IO, Ref}
 import com.example.graphQL.cats.FixedTestClock
 import com.example.graphQL.cats.domain.error.DomainError
@@ -163,7 +164,7 @@ class OperationalTelemetryServiceSpec extends CatsEffectSuite {
     SearchSession(
       searchId,
       candidateId,
-      "jobs",
+      SearchKind.Jobs,
       None,
       Json.obj(),
       None,

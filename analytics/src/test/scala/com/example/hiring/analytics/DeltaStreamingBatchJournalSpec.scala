@@ -128,7 +128,7 @@ final class DeltaStreamingBatchJournalSpec extends CatsEffectSuite {
         }
         result <- journal.load(invalidIdentity).attempt
       } yield assert(
-        result.left.exists(_.isInstanceOf[AnalyticsError.InvalidConfiguration]),
+        result.left.exists(_.isInstanceOf[AnalyticsError.DataIntegrityViolation]),
         s"$column case $index decoded missing data"
       )
     }
@@ -255,7 +255,7 @@ final class DeltaStreamingBatchJournalSpec extends CatsEffectSuite {
           )
       }
       result <- journal.load(malformedIdentity).attempt
-    } yield assert(result.left.exists(_.isInstanceOf[AnalyticsError.InvalidConfiguration]))
+    } yield assert(result.left.exists(_.isInstanceOf[AnalyticsError.DataIntegrityViolation]))
   }
 
   test("existing incompatible Delta schema is rejected instead of adopted") {
@@ -389,7 +389,7 @@ final class DeltaStreamingBatchJournalSpec extends CatsEffectSuite {
               Map("publicationRunId" -> org.apache.spark.sql.functions.lit(original.value))
             )
         })
-    } yield assert(result.left.exists(_.isInstanceOf[AnalyticsError.InvalidConfiguration]))
+    } yield assert(result.left.exists(_.isInstanceOf[AnalyticsError.DataIntegrityViolation]))
   }
 
   override def afterAll(): Unit = {

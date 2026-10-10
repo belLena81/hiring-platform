@@ -28,7 +28,11 @@ object InterviewCommands {
   /** The event that ends a lifecycle step which can no longer run (retries or delivery given up). Expiry has no
     * external effect, so giving up on it is expiring the proposal; every other step enters repair.
     */
-  def giveUpEvent(command: InterviewCommand, step: String, now: java.time.Instant): InterviewLifecycleEvent =
+  def giveUpEvent(
+      command: InterviewCommand,
+      step: InterviewFailureCode,
+      now: java.time.Instant
+  ): InterviewLifecycleEvent =
     command match {
       case InterviewLifecycleCommand.ExpireProposal(_) => InterviewLifecycleEvent.ProposalExpired(now)
       case _                                           => InterviewLifecycleEvent.RetryExhausted(step)

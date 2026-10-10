@@ -74,7 +74,7 @@ class InterviewRescheduleGenerationSpec extends FunSuite {
   test("DHW-29 repair of a later attempt resumes the lookups of its own generation") {
     val failed = decided(
       workflowIn(Phase.RescheduleSwapPending, _.copy(skippedGenerations = 1, pendingInterval = Some(replacement))),
-      Event.RetryExhausted("provider")
+      Event.RetryExhausted(InterviewFailureCode.Provider)
     ).workflow
     assertEquals(
       decided(failed, Event.Repair).commands,

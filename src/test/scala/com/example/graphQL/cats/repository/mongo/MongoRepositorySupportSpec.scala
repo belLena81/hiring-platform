@@ -4,7 +4,8 @@ import com.mongodb.client.result.{DeleteResult, UpdateResult}
 import cats.effect.IO
 import cats.effect.{Deferred, Outcome, Ref}
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
-import com.example.graphQL.cats.service.port.{RepositoryError, RepositoryIO}
+import com.example.graphQL.cats.service.port.{RepositoryIO}
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.events.{
   OperationalAggregateType,
   OperationalEventEnvelope,

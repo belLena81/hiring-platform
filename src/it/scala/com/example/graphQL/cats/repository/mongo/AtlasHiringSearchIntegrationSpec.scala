@@ -211,13 +211,9 @@ final class AtlasHiringSearchIntegrationSpec extends CatsEffectSuite {
         _ <- List(false, true).traverse_ { lexical =>
           def await(attempts: Int): IO[Unit] = repo.candidateMatches(query(job, lexical)).value.flatMap { result =>
             result match {
-              case Right(hits) if hits.map(_.id).toSet == expected =>
-                repo.candidateEligibility(hits.map(_.id)).value.map { current =>
-                  assertEquals(current.map(_.map(_.id).toSet), Right(expected))
-                  assert(current.toOption.toList.flatten.forall(value => value.profile.forall(_.resumeRef.isEmpty)))
-                }
-              case _ if attempts > 0 => IO.sleep(500.millis) *> await(attempts - 1)
-              case _                 => IO(assertEquals(result.map(_.map(_.id).toSet), Right(expected)))
+              case Right(hits) if hits.map(_.id).toSet == expected => IO.unit
+              case _ if attempts > 0                               => IO.sleep(500.millis) *> await(attempts - 1)
+              case _ => IO(assertEquals(result.map(_.map(_.id).toSet), Right(expected)))
             }
           }
           await(120)
@@ -268,18 +264,6 @@ final class AtlasHiringSearchIntegrationSpec extends CatsEffectSuite {
                     new org.bson.Document("status", "Closed").append("closedAt", java.util.Date.from(now))
                   )
                 )
-            )
-          )
-        )
-        current <- repo.jobEligibility(List(job.id)).value
-        _ = assertEquals(current.map(_.map(_.job.id)), Right(List(job.id)))
-        _ = assert(
-          current.toOption.toList.flatten.forall(value =>
-            !SearchEligibilityPolicy.job(
-              value,
-              job.embedding.fold(throw new IllegalStateException("fixture embedding missing"))(_.meta),
-              model,
-              query(job, false).filter
             )
           )
         )

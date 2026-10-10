@@ -16,7 +16,7 @@ final class ProducerGenerationLifecycleSpec extends CatsEffectSuite {
         def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]) =
           released.get.flatMap(closed => observations.update(_ :+ ((event, closed, fields))))
       }
-      _ <- OperationalEventKafkaRuntime
+      _ <- KafkaRuntimeSupport
         .observedGeneration(id, diagnostics)(
           Resource.make(IO.unit)(_ => released.set(true))
         )
@@ -37,7 +37,7 @@ final class ProducerGenerationLifecycleSpec extends CatsEffectSuite {
       diagnostics = new Diagnostics {
         def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]) = count.update(_ + 1)
       }
-      result <- OperationalEventKafkaRuntime
+      result <- KafkaRuntimeSupport
         .observedGeneration(id, diagnostics)(
           Resource.eval(IO.raiseError[Unit](new IllegalStateException("initialization failed")))
         )
@@ -61,7 +61,7 @@ final class ProducerGenerationLifecycleSpec extends CatsEffectSuite {
       }
       partial = Resource.make(IO.unit)(_ => released.set(true)) *>
         Resource.eval(acquiring.complete(()).void *> IO.never[Unit])
-      fiber <- OperationalEventKafkaRuntime.observedGeneration(id, diagnostics)(partial).use(_ => IO.unit).start
+      fiber <- KafkaRuntimeSupport.observedGeneration(id, diagnostics)(partial).use(_ => IO.unit).start
       _ <- acquiring.get
       _ <- fiber.cancel
       closed <- released.get
@@ -79,7 +79,7 @@ final class ProducerGenerationLifecycleSpec extends CatsEffectSuite {
         def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]) =
           IO.raiseError(new IllegalStateException("diagnostics unavailable"))
       }
-      _ <- OperationalEventKafkaRuntime
+      _ <- KafkaRuntimeSupport
         .observedGeneration(id, diagnostics)(
           Resource.make(IO.unit)(_ => released.set(true))
         )
@@ -95,7 +95,7 @@ final class ProducerGenerationLifecycleSpec extends CatsEffectSuite {
         def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]) =
           events.update(_ :+ event)
       }
-      result <- OperationalEventKafkaRuntime
+      result <- KafkaRuntimeSupport
         .observedGeneration(id, diagnostics)(
           Resource.make(IO.unit)(_ => IO.raiseError(new IllegalStateException("close failed")))
         )

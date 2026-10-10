@@ -3,7 +3,7 @@ package com.example.graphQL.cats.api.graphql
 import cats.effect.{IO, Ref}
 import cats.syntax.all.*
 import com.example.graphQL.cats.api.admission.InterviewActionRateLimiter
-import com.example.graphQL.cats.config.InterviewActionRateLimitConfig
+import com.example.graphQL.cats.config.RateLimitConfig
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.workflow.*
@@ -567,7 +567,7 @@ final class HiringGraphQLInterviewActionSpec extends CatsEffectSuite {
       .mkString("mutation { ", "\n", " }")
 
   private def limiter(attempts: Int): IO[UserId => IO[Either[InterviewActionRateLimiter.RateLimited, Unit]]] =
-    InterviewActionRateLimiter.create(InterviewActionRateLimitConfig(60, attempts, 100)).map(limiter => limiter.permit)
+    InterviewActionRateLimiter.create(RateLimitConfig(60, attempts, 100)).map(limiter => limiter.permit)
 
   test("DHW-34 aliased mutations in one request each take an allowance unit and the surplus is a typed refusal") {
     for {

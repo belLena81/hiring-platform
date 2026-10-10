@@ -20,9 +20,7 @@ import java.util.Date
 private[analytics] abstract class MongoAnalyticsErasureStoreSupport[F[_]: Async](
     protected val streams: MongoPublisherStream
 ) {
-  import MongoAnalyticsErasureStoreSupport.*
 
-  protected def ownedClaim(claim: ErasureClaim, now: Instant): Bson = ownedClaimFilter(claim, now)
   protected def toErasureUpdate(matched: Boolean): ErasureUpdate =
     if (matched) ErasureUpdate.Applied else ErasureUpdate.LeaseLost
 
@@ -42,8 +40,7 @@ private[analytics] abstract class MongoAnalyticsErasureStoreSupport[F[_]: Async]
       collection: MongoCollection[F, A],
       filter: Bson,
       update: Bson
-  ): F[Boolean] =
-    streams.one(collection.underlying.updateOne(session.underlying, filter, update)).map(_.getMatchedCount == 1L)
+  ): F[Boolean] = MongoAnalyticsErasureStoreSupport.matchedUpdate(streams, session, collection, filter, update)
 
   protected def mongo[A](work: => F[A]): F[A] = Async[F]
     .defer(work)
@@ -53,13 +50,31 @@ private[analytics] abstract class MongoAnalyticsErasureStoreSupport[F[_]: Async]
 }
 
 private[analytics] object MongoAnalyticsErasureStoreSupport {
+  def matchedUpdate[F[_]: Async](
+      streams: MongoPublisherStream,
+      session: ClientSession[F],
+      collection: MongoCollection[F, ?],
+      filter: Bson,
+      update: Bson
+  ): F[Boolean] =
+    streams.one(collection.underlying.updateOne(session.underlying, filter, update)).map(_.getMatchedCount == 1L)
+
+  /** Other requests that have not yet reached the publication-ready phase. */
+  def nonReadyOtherRequests(requestId: String): Bson = Filters.and(
+    Filters.ne(AnalyticsCollections.Fields.Id, requestId),
+    Filters.in(
+      AnalyticsCollections.Fields.State,
+      ErasureRequestState.Pending.persistedName,
+      ErasureRequestState.Processing.persistedName
+    ),
+    Filters.ne(AnalyticsCollections.Fields.Phase, ErasurePhase.ReadyToPublish.persistedName)
+  )
+
   val RequestCollection = AnalyticsCollections.ErasureRequests
   val HeartbeatCollection = AnalyticsCollections.ErasureHeartbeats
   val HeartbeatId = "analytics-erasure"
   val MaximumClaimPageSize = 100
   val ProgressPerPhase = ErasurePhase.ProgressPerPhase
-
-  final case class PublisherFence(deleted: Boolean, leaseToken: Option[String], leaseUntil: Option[Instant])
 
   private[analytics] def decodeRetentionBarrier(
       barrier: Option[AnalyticsMongoRecords.RetentionBarrier]
@@ -70,11 +85,6 @@ private[analytics] object MongoAnalyticsErasureStoreSupport {
         value.partitions.map(partition => partition.number -> partition.endOffsetExclusive)
       )
     }
-
-  private[analytics] def decodePublisherFence(
-      document: AnalyticsMongoRecords.PublisherFence
-  ): Either[AnalyticsError, PublisherFence] =
-    Right(PublisherFence(document.deleted.getOrElse(false), document.leaseToken, document.leaseUntil))
 
   private[analytics] def ownedClaimFilter(claim: ErasureClaim, now: Instant): Bson =
     Filters.and(
@@ -90,7 +100,6 @@ private[analytics] object MongoAnalyticsErasureStoreSupport {
       .orElse(Option.when(document.phase.isEmpty)(ErasurePhase.Requested))
     for {
       _ <- Option.when(document.fencingVersion.contains(1))(())
-      _ <- Option.when(AccountSubjectId.from(document._id).isRight)(())
       id <- AccountSubjectId.from(document._id).toOption
       token <- document.leaseToken.filter(AccountSubjectId.from(_).isRight)
       expiry <- document.leaseUntil

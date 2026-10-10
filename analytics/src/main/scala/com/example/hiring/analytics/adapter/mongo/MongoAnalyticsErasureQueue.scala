@@ -2,7 +2,6 @@ package com.example.hiring.analytics.adapter.mongo
 
 import com.example.hiring.analytics.domain.AccountSubjectId
 import com.example.hiring.analytics.errors.AnalyticsError
-import com.example.hiring.analytics.errors.AnalyticsErrorTranslation.translating
 import com.example.hiring.analytics.service.erasure.*
 
 import cats.data.Chain
@@ -33,7 +32,12 @@ final class MongoAnalyticsErasureQueue[F[_]: Async: UUIDGen] private (
     with ErasureQueue[F] {
   import MongoAnalyticsErasureStoreSupport.*
 
-  final case class RepairRequest(requestId: AccountSubjectId, phase: String, attemptCount: Int, failureCategory: String)
+  final case class RepairRequest(
+      requestId: AccountSubjectId,
+      phase: ErasurePhase,
+      attemptCount: Int,
+      failureCategory: ErasureFailureCategory
+  )
 
   private def decodeRepairRequest(
       document: AnalyticsMongoRecords.ErasureRequest
@@ -41,11 +45,11 @@ final class MongoAnalyticsErasureQueue[F[_]: Async: UUIDGen] private (
     val malformed = AnalyticsError.MalformedMarker
     for {
       subjectId <- AccountSubjectId.from(document._id).leftMap(_ => malformed)
-      phase = document.phase.getOrElse(ErasurePhase.Requested.persistedName)
-      _ <- Either.cond(ErasurePhase.fromString(phase).nonEmpty, (), malformed)
+      phase <- document.phase.fold(Option(ErasurePhase.Requested))(ErasurePhase.fromString).toRight(malformed)
       attempt <- document.attemptCount.toRight(malformed)
-      category <- document.failureCategory.toRight(malformed)
-      _ <- Either.cond(ErasureFailureCategory.values.exists(_.persistedName == category), (), malformed)
+      category <- document.failureCategory
+        .flatMap(stored => ErasureFailureCategory.values.find(_.persistedName == stored))
+        .toRight(malformed)
     } yield RepairRequest(subjectId, phase, attempt, category)
   }
 
@@ -75,7 +79,6 @@ final class MongoAnalyticsErasureQueue[F[_]: Async: UUIDGen] private (
           .flatMap { documents =>
             Async[F].fromEither(documents.traverse(decodeRepairRequest))
           }
-          .translating(AnalyticsError.MarkerStorageFailure(_))
       }
 
   /** Explicitly requeues one observed repair request without altering its durable phase or progress. */
@@ -217,11 +220,8 @@ final class MongoAnalyticsErasureQueue[F[_]: Async: UUIDGen] private (
       .map {
         case None        => false
         case Some(fence) =>
-          decodePublisherFence(fence).toOption.exists { decoded =>
-            decoded.deleted && decoded.leaseToken.forall(_ =>
-              decoded.leaseUntil.exists(until => !now.isBefore(until.plusMillis(deliveryTimeout.toMillis)))
-            )
-          }
+          fence.deleted.getOrElse(false) && fence.leaseToken
+            .forall(_ => fence.leaseUntil.exists(until => !now.isBefore(until.plusMillis(deliveryTimeout.toMillis))))
       }
   }
 
@@ -311,15 +311,7 @@ final class MongoAnalyticsErasureQueue[F[_]: Async: UUIDGen] private (
     }
 
   def hasNonReadyOtherRequests(requestId: AccountSubjectId): F[Boolean] = {
-    val filter = Filters.and(
-      Filters.ne(AnalyticsCollections.Fields.Id, requestId.value),
-      Filters.in(
-        AnalyticsCollections.Fields.State,
-        ErasureRequestState.Pending.persistedName,
-        ErasureRequestState.Processing.persistedName
-      ),
-      Filters.ne(AnalyticsCollections.Fields.Phase, ErasurePhase.ReadyToPublish.persistedName)
-    )
+    val filter = nonReadyOtherRequests(requestId.value)
     mongo {
       streams
         .stream(capacity =>
@@ -333,7 +325,6 @@ final class MongoAnalyticsErasureQueue[F[_]: Async: UUIDGen] private (
         .compile
         .count
         .map(_ > 0L)
-        .translating(AnalyticsError.MarkerStorageFailure(_))
     }
   }
 

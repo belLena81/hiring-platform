@@ -186,8 +186,8 @@ final class InterviewSchedulingWorkerIntegrationSpec extends KafkaIntegrationSui
         Diagnostics.noop
       )
     val bootstrap = env("INTERVIEW_KAFKA_BOOTSTRAP")
-    def invalid(identity: String): IO[Boolean] =
-      IO.realTimeInstant.flatMap(now => repository.quarantine(identity, now).value.map(_.isRight))
+    def invalid(identity: String): RepositoryIO[Unit] =
+      RepositoryIO.lift(IO.realTimeInstant).flatMap(repository.quarantine(identity, _))
     for {
       orchestrator <- InterviewKafkaRuntime.resource(
         InterviewKafkaConfig(
@@ -203,7 +203,8 @@ final class InterviewSchedulingWorkerIntegrationSpec extends KafkaIntegrationSui
         Diagnostics.noop
       ) {
         case Left(identity) => invalid(identity)
-        case Right(message) => count("brokerResultsConsumed") *> first.receiveResult(message)
+        case Right(message) =>
+          RepositoryIO.lift(count("brokerResultsConsumed")) *> first.receiveResult(message)
       }
       workerTransport <- InterviewKafkaRuntime.resource(
         InterviewKafkaConfig(
@@ -219,7 +220,8 @@ final class InterviewSchedulingWorkerIntegrationSpec extends KafkaIntegrationSui
         Diagnostics.noop
       ) {
         case Left(identity) => invalid(identity)
-        case Right(message) => count("brokerCommandsConsumed") *> first.receiveCommand(message)
+        case Right(message) =>
+          RepositoryIO.lift(count("brokerCommandsConsumed")) *> first.receiveCommand(message)
       }
       _ <- InterviewKafkaRuntime.resource(
         InterviewKafkaConfig(
@@ -235,7 +237,8 @@ final class InterviewSchedulingWorkerIntegrationSpec extends KafkaIntegrationSui
         Diagnostics.noop
       ) {
         case Left(identity) => invalid(identity)
-        case Right(message) => count("brokerCommandsConsumed") *> second.receiveCommand(message)
+        case Right(message) =>
+          RepositoryIO.lift(count("brokerCommandsConsumed")) *> second.receiveCommand(message)
       }
       routing = new InterviewTransport {
         override def generationFor(message: InterviewMessage): InterviewPublisherGeneration =

@@ -17,8 +17,3 @@ final class UserAuthenticationService(users: UserRepository) extends UserAuthent
   override def actorForVerifiedToken(userId: UserId): RepositoryIO[Option[ActorContext]] =
     users.find(userId).map(_.map(user => ActorContext(user.id, user.role)))
 }
-
-object UserAuthenticationService {
-  def apply(users: UserRepository): UserAuthenticationService =
-    new UserAuthenticationService(users)
-}

@@ -13,8 +13,6 @@ trait AnalyticsErasureLakehouse[F[_]] {
   def captureMarkedFiles(markerTokens: Vector[SubjectToken]): F[Vector[String]]
   def checkpointPurgedRawLogs: F[Vector[String]]
   def verifyFilesAbsent(files: Vector[String]): F[Unit]
-  def checkpointRawTableLogs: F[Unit]
-  def purgeMarkedSubjectRows(path: String, markerTokens: Vector[SubjectToken]): F[Unit]
   def applyDeletionMarkers(markerTokens: Vector[SubjectToken]): F[Unit]
   def rebuildGoldAndExtractReport(asOf: Instant): F[AnalyticsReportOutput]
 }

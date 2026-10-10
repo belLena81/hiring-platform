@@ -7,7 +7,8 @@ import com.example.graphQL.cats.api.graphql.HiringGraphQLResolverSupport.*
 import com.example.graphQL.cats.domain.error.{DomainError as DomainFailure, DomainValidationError}
 import com.example.graphQL.cats.domain.model.{ApplicationStatus, JobStatus, UserRole}
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId}
-import com.example.graphQL.cats.service.port.{MutationReceiptFingerprint, RepositoryError}
+import com.example.graphQL.cats.service.port.{MutationReceiptFingerprint}
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.{
   AccountError,
   AuthenticationError,
@@ -289,6 +290,15 @@ final class HiringGraphQLResolverSupportSpec extends CatsEffectSuite {
         GraphQLFailure("INVALID_SEARCH_FILTER", "Invalid city, skills filters", exceptional = false)
       ),
       Scenario(
+        "invalid interview interval",
+        UseCaseError.InterviewRule(com.example.graphQL.cats.domain.workflow.InterviewWorkflowError.EndMustFollowStart),
+        GraphQLFailure(
+          "INVALID_INTERVIEW_INTERVAL",
+          "The interval must start in the future and end after it starts",
+          exceptional = false
+        )
+      ),
+      Scenario(
         "provider unavailable",
         UseCaseError.Search(SearchError.ProviderUnavailable),
         GraphQLFailure("PROVIDER_UNAVAILABLE", "Embedding provider unavailable", exceptional = true)
@@ -353,16 +363,22 @@ final class HiringGraphQLResolverSupportSpec extends CatsEffectSuite {
 
     IO {
       scenarios.foreach { scenario =>
-        assertEquals(HiringGraphQLResolverSupport.toGraphQLFailure(scenario.error), scenario.expected, scenario.name)
+        assertEquals(
+          GraphQLFailureCatalog.classify(scenario.error),
+          scenario.expected,
+          scenario.name
+        )
       }
     }
   }
 
   test("keeps authentication and deleted-account UNAUTHORIZED classifications distinct") {
     val unauthenticated =
-      HiringGraphQLResolverSupport.toGraphQLFailure(UseCaseError.Authentication(AuthenticationError.Unauthorized))
+      GraphQLFailureCatalog.classify(
+        UseCaseError.Authentication(AuthenticationError.Unauthorized)
+      )
     val deletedAccount =
-      HiringGraphQLResolverSupport.toGraphQLFailure(UseCaseError.Account(AccountError.DeletedAccount))
+      GraphQLFailureCatalog.classify(UseCaseError.Account(AccountError.DeletedAccount))
 
     IO {
       assertEquals(unauthenticated.code, deletedAccount.code)

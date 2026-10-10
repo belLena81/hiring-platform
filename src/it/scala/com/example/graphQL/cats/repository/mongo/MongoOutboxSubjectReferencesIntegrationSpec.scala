@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.service.events.OperationalEventPayload.SearchKind
 import com.example.graphQL.cats.AccountValueFixtures.email
 import cats.effect.{Deferred, IO, Resource}
 import cats.syntax.all.*
@@ -15,13 +16,8 @@ import com.example.graphQL.cats.domain.model.{
   UserRole
 }
 import com.example.graphQL.cats.service.{AnalyticsFunnelDay, AnalyticsReportSnapshot, AnalyticsSkillPostingDay}
-import com.example.graphQL.cats.service.port.{
-  AnalyticsRangeFingerprint,
-  AnalyticsRunId,
-  MutationWriteContext,
-  RepositoryError,
-  RepositoryIO
-}
+import com.example.graphQL.cats.service.port.{MutationWriteContext, RepositoryIO}
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.events.{
   OperationalAggregateType,
   OperationalEventEnvelope,
@@ -57,9 +53,6 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
   private def uri(instance: LocalTestServices.MongoEndpoint): String = instance.uri
 
   private def uuid(value: Long): UUID = new UUID(0L, value)
-  private def runId(value: String): AnalyticsRunId = AnalyticsRunId.from(value).getOrElse(fail("invalid test run ID"))
-  private def fingerprint(value: String): AnalyticsRangeFingerprint =
-    AnalyticsRangeFingerprint.from(value).getOrElse(fail("invalid test range fingerprint"))
 
   private def event(
       id: Long,
@@ -82,8 +75,45 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
       List(AnalyticsSkillPostingDay(asOf, "scala", created))
     )
 
-  private def right[A](value: Either[RepositoryError, A]): IO[A] =
-    value.fold(error => IO.raiseError(new AssertionError(s"Unexpected repository error: $error")), IO.pure)
+  /** Stands in for the analytics batch: stores the published control state and the current snapshot document. */
+  private def seedPublishedReport(
+      database: mongo4cats.database.MongoDatabase[IO],
+      generation: Long,
+      revision: Long,
+      created: Long
+  ): IO[Unit] =
+    for {
+      _ <- MongoRepositoryTestSupport.first(
+        MongoRepositoryTestSupport
+          .collection(database, MongoCollections.AnalyticsReportControl)
+          .flatMap(
+            _.updateOne(
+              new Document("_id", "analytics-report"),
+              com.mongodb.client.model.Updates.combine(
+                com.mongodb.client.model.Updates.set("state", "Published"),
+                com.mongodb.client.model.Updates.set("generation", generation),
+                com.mongodb.client.model.Updates.set("nextRevision", revision),
+                com.mongodb.client.model.Updates.set("lastPublishedRevision", revision)
+              )
+            )
+          )
+      )
+      _ <- MongoRepositoryTestSupport.first(
+        MongoRepositoryTestSupport
+          .collection(database, MongoCollections.AnalyticsReportSnapshots)
+          .flatMap(
+            _.replaceOne(
+              new Document("_id", "current"),
+              AnalyticsReportSnapshotDocument
+                .write(report(now.plusSeconds(created), created), now.plusSeconds(120L * 24L * 60L * 60L))
+                .append("generation", generation)
+                .append("revision", revision)
+                .append("runId", s"batch-$revision"),
+              new com.mongodb.client.model.ReplaceOptions().upsert(true)
+            )
+          )
+      )
+    } yield ()
 
   test("outbox subject migration resumes after unresolved search results and indexes candidate subjects") {
     replicaSet.use { instance =>
@@ -95,7 +125,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
           val session = SearchSession(
             searchId,
             actor,
-            "candidateMatches",
+            SearchKind.CandidateMatches,
             None,
             Json.obj(),
             None,
@@ -107,7 +137,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
             uuid(2L),
             searchId,
             candidate.value.toString,
-            "candidateMatches",
+            SearchKind.CandidateMatches,
             actor,
             1,
             now
@@ -231,7 +261,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
     }
   }
 
-  test("report generations hide snapshots and reject stale or conflicting batch publications") {
+  test("account erasure hides published analytics reports until a newer generation is published") {
     replicaSet.use { instance =>
       MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
         LocalTestServices.database(client).use { database =>
@@ -239,8 +269,6 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
           val erasures = MongoAnalyticsErasureRequestRepository.transactional(database, client, Diagnostics.noop)
           val runner = MongoTransactionRunner.sessions(client, RepositoryError.Conflict, diagnostics = Diagnostics.noop)
           val deletedUser = UserId(UUID.randomUUID())
-          val reservationExpiry = now.plusSeconds(90L * 24L * 60L * 60L)
-          val reportExpiry = now.plusSeconds(120L * 24L * 60L * 60L)
 
           for {
             _ <- MongoHiringSetup.initialize(database, Diagnostics.noop)
@@ -291,36 +319,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
             )
             _ = assertEquals(afterRollback.map(_.getLong("generation").longValue()), Option(0L))
             _ = assertEquals(requestAfterRollback, None)
-            oldRun <- reports.reserve(runId("batch-old"), fingerprint("range-old"), now, reservationExpiry).value
-            sameOldRun <- reports.reserve(runId("batch-old"), fingerprint("range-old"), now, reservationExpiry).value
-            conflictingOldRun <- reports
-              .reserve(
-                runId("batch-old"),
-                fingerprint("different-range"),
-                now,
-                reservationExpiry
-              )
-              .value
-            newerRun <- reports.reserve(runId("batch-new"), fingerprint("range-new"), now, reservationExpiry).value
-            _ = assertEquals(oldRun, sameOldRun)
-            _ = assertEquals(conflictingOldRun, Left(RepositoryError.Conflict))
-            oldReservation <- right(oldRun)
-            newerReservation <- right(newerRun)
-            newerPublished <- reports.publish(newerReservation, report(now.plusSeconds(2), 2L), reportExpiry).value
-            stalePublished <- reports.publish(oldReservation, report(now.plusSeconds(1), 1L), reportExpiry).value
-            _ = assertEquals(newerPublished, Right(()))
-            _ = assertEquals(stalePublished, Left(RepositoryError.Conflict))
-            retryAfterNewer <- reports
-              .reserve(
-                runId("batch-old"),
-                fingerprint("range-old"),
-                now.plusSeconds(2L),
-                reservationExpiry
-              )
-              .value
-            retryAfterNewerReservation <- right(retryAfterNewer)
-            _ = assertEquals(retryAfterNewerReservation.generation, oldReservation.generation)
-            _ = assert(retryAfterNewerReservation.revision > newerReservation.revision)
+            _ <- seedPublishedReport(database, 0L, 2L, 2L)
             visible <- reports.latest.value
             _ = assertEquals(visible.map(_.map(_.funnel.head.created)), Right(Some(2L)))
             _ <- MongoRepositoryTestSupport.first(
@@ -335,14 +334,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
             )
             expiredSnapshot <- reports.latest.value
             _ = assertEquals(expiredSnapshot, Right(None))
-            restoredRetry <- reports
-              .publish(
-                newerReservation,
-                report(now.plusSeconds(2), 2L),
-                reportExpiry
-              )
-              .value
-            _ = assertEquals(restoredRetry, Right(()))
+            _ <- seedPublishedReport(database, 0L, 2L, 2L)
             visibleAfterRetry <- reports.latest.value
             _ = assertEquals(visibleAfterRetry.map(_.map(_.funnel.head.created)), Right(Some(2L)))
             _ <- MongoHiringSetup.initialize(database, Diagnostics.noop)
@@ -368,21 +360,6 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
                 .find(new Document("_id", "analytics-report"))
             )
             _ = assertEquals(generationAfterDelete.map(_.getLong("generation").longValue()), Option(1L))
-            refreshedRetry <- reports
-              .reserve(
-                runId("batch-old"),
-                fingerprint("range-old"),
-                now.plusSeconds(3L),
-                reservationExpiry
-              )
-              .value
-            refreshedReservation <- right(refreshedRetry)
-            _ = assertEquals(refreshedReservation.generation, 1L)
-            _ = assert(refreshedReservation.revision > oldReservation.revision)
-            oldGenerationPublish <- reports
-              .publish(newerReservation, report(now.plusSeconds(4), 3L), reportExpiry)
-              .value
-            _ = assertEquals(oldGenerationPublish, Left(RepositoryError.Conflict))
             _ <- MongoRepositoryTestSupport.first(
               database
                 .getCollection(MongoCollections.EventOutbox)
@@ -460,17 +437,6 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
                 .find(new Document("_id", "analytics-report"))
             )
             _ = assertEquals(generationAfterTtlReplay.map(_.getLong("generation").longValue()), Option(1L))
-            postDeleteRun <- reports
-              .reserve(
-                runId("batch-after-delete"),
-                fingerprint("range-after-delete"),
-                now,
-                reservationExpiry
-              )
-              .value
-            postDeleteReservation <- right(postDeleteRun)
-            hiddenPublish <- reports.publish(postDeleteReservation, report(now.plusSeconds(5), 3L), reportExpiry).value
-            _ = assertEquals(hiddenPublish, Left(RepositoryError.Conflict))
             visibleAfterCompletion <- reports.latest.value
             _ = assertEquals(visibleAfterCompletion, Right(None))
           } yield ()

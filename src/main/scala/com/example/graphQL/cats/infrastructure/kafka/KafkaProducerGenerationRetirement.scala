@@ -3,10 +3,11 @@ package com.example.graphQL.cats.infrastructure.kafka
 import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.config.KafkaConfig
-import com.example.graphQL.cats.service.port.{InterviewPublisherRole, RepositoryIO, RepositoryError}
+import com.example.graphQL.cats.service.port.{InterviewPublisherRole, RepositoryIO}
+import com.example.graphQL.cats.service.RepositoryError
 import fs2.kafka.*
+import com.example.graphQL.cats.shared.Parsing
 import fs2.kafka.producer.MkProducer
-import java.util.UUID
 
 /** Explicit operator action; initializing the same transactional ID confirms fencing of the previous epoch. */
 object KafkaProducerGenerationRetirement {
@@ -16,10 +17,12 @@ object KafkaProducerGenerationRetirement {
   def canonicalPrefix(id: String): Either[RepositoryError, String] =
     Prefixes.find(id.startsWith).toRight(RepositoryError.InvalidStoredData).flatMap { prefix =>
       val suffix = id.substring(prefix.length)
-      Either
-        .catchNonFatal(UUID.fromString(suffix))
-        .leftMap(_ => RepositoryError.InvalidStoredData)
-        .flatMap(uuid => Either.cond(uuid.toString == suffix, prefix, RepositoryError.InvalidStoredData))
+      Parsing
+        .parseUuid(suffix)
+        .toOption
+        .filter(_.toString == suffix)
+        .as(prefix)
+        .toRight(RepositoryError.InvalidStoredData)
     }
 
   def credentials(config: KafkaConfig, id: String): Either[RepositoryError, (String, String)] =

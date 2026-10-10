@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.service.application.committed
 import cats.effect.{IO, Ref}
 import cats.data.EitherT
 import com.example.graphQL.cats.domain.model.{ApplicationStatus, User, UserRole}
@@ -8,6 +9,7 @@ import com.example.graphQL.cats.domain.workflow.*
 import com.example.graphQL.cats.service.Diagnostics
 import com.example.graphQL.cats.service.application.{InterviewWorkflowWorker, InterviewWorkerSettings}
 import com.example.graphQL.cats.service.port.*
+import com.example.graphQL.cats.service.RepositoryError
 import java.time.Instant
 import java.util.UUID
 import scala.concurrent.duration.*
@@ -60,8 +62,8 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
       _ <- worker.publishDue(transport)
       messages <- outgoing.get
       _ <- messages.foldLeft(IO.unit)((done, message) =>
-        done *> (if (message.result.isEmpty) worker.receiveCommand(message)
-                 else worker.receiveResult(message)).flatMap(durable =>
+        done *> (if (message.result.isEmpty) worker.receiveCommand(message).committed
+                 else worker.receiveResult(message).committed).flatMap(durable =>
           if (durable) IO.unit else IO.raiseError(new AssertionError(s"Undurable ${message.step} record"))
         )
       )
@@ -416,7 +418,7 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
         }
         _ <- worker.publishDue(transport)
         command <- outgoing.get.map(_.head)
-        reserved <- worker.receiveCommand(command)
+        reserved <- worker.receiveCommand(command).committed
         _ = assert(reserved)
         _ <- outgoing.set(Vector.empty)
         _ <- worker.publishDue(transport)
@@ -452,8 +454,8 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
         _ <- success(cleaner.runOnce(None))
         _ <- success(cleaner.runOnce(None))
         _ <- success(cleaner.runOnce(None))
-        commandAcknowledged <- worker.receiveCommand(command)
-        resultAcknowledged <- worker.receiveResult(result)
+        commandAcknowledged <- worker.receiveCommand(command).committed
+        resultAcknowledged <- worker.receiveResult(result).committed
         pending <- cleanup.complete(value.candidateId)
         workflowCount <- MongoRepositoryTestSupport.count(fixture.database, MongoCollections.InterviewWorkflows)
         reservationCount <- MongoRepositoryTestSupport.count(

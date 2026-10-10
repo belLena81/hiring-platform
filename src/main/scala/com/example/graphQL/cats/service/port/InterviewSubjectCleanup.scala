@@ -1,6 +1,7 @@
 package com.example.graphQL.cats.service.port
 
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
+import com.example.graphQL.cats.service.RepositoryError
 import cats.data.EitherT
 import com.example.graphQL.cats.domain.workflow.{InterviewSubjectCleanup, InterviewWorkflowId}
 import java.time.Instant

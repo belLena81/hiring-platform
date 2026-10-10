@@ -84,11 +84,8 @@ private[analytics] final class DeltaAnalyticsErasureLakehouse[F[_]: Async: UUIDG
   override def verifyFilesAbsent(files: Vector[String]): F[Unit] =
     erasure.verifyFilesAbsent(spark, files)
 
-  override def checkpointRawTableLogs: F[Unit] =
+  def checkpointRawTableLogs: F[Unit] =
     erasure.checkpointRawTableLogs(spark)
-
-  override def purgeMarkedSubjectRows(path: String, markerTokens: Vector[SubjectToken]): F[Unit] =
-    withMarkerTokens(markerTokens)(frame => erasure.purgeMarkedSubjectRows(spark, path, frame))
 
   override def applyDeletionMarkers(markerTokens: Vector[SubjectToken]): F[Unit] =
     retention.configureRawTablePrivacy(spark) *> applyActiveDeletions(markerTokens)
@@ -111,20 +108,11 @@ private[analytics] final class DeltaAnalyticsErasureLakehouse[F[_]: Async: UUIDG
   private def purgeMarkedSubjectsFrame(markerTokens: DataFrame): F[Unit] =
     paths.inventory.subjectDelta.traverse_(surface =>
       erasure.purgeMarkedSubjectRows(spark, surface.location, markerTokens)
-    ) *> rebuildGoldFromStoredSilver(spark)
+    ) *> AnalyticsGoldStage.rebuildFromStoredSilver(spark, paths, execution)
 
   override def rebuildGoldAndExtractReport(asOf: Instant): F[AnalyticsReportOutput] =
-    rebuildGoldFromStoredSilver(spark) *> AnalyticsGoldStage.extract(spark, paths, asOf, execution)
+    AnalyticsGoldStage.rebuildAndExtract(spark, paths, asOf, execution)
 
   private def withMarkerTokens[A](tokens: Vector[SubjectToken])(use: DataFrame => F[A]): F[A] =
     execution(AnalyticsTableSchemas.markerFrame(spark, tokens)).flatMap(use)
-
-  private def rebuildGoldFromStoredSilver(spark: SparkSession): F[Unit] =
-    execution(DeltaTables.exists(spark, paths.silver)).flatMap {
-      case true =>
-        execution(DeltaTables.read(spark, paths.silver)).flatMap(
-          AnalyticsGoldStage.rebuild(paths, _, execution)
-        )
-      case false => AnalyticsGoldStage.clear(spark, paths, execution)
-    }
 }

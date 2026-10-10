@@ -35,7 +35,7 @@ final class HealthService(probe: DatabaseProbe, diagnostics: Diagnostics) {
         val elapsed = outcome.elapsed
         val fields = Map(
           LogField.DurationMs -> elapsed.toMillis.toString,
-          LogField.Outcome -> "NOT_READY",
+          LogField.Outcome -> LogOutcome.NotReady.wire,
           LogField.Reason ->
             (if (result == ProbeResult.AuthenticationFailed) FailureReason.AuthenticationFailed.reason
              else FailureReason.DatabaseUnavailable.reason)

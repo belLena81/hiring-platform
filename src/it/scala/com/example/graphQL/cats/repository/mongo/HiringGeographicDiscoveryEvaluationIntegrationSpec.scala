@@ -92,7 +92,7 @@ final class HiringGeographicDiscoveryEvaluationIntegrationSpec extends MongoInte
           Diagnostics.noop
         )
         val receipts = MongoMutationReceiptRepository.transactional(fixture.database, fixture.client, Diagnostics.noop)
-        val service = JobService.live(
+        val service = new JobService(
           users,
           repository,
           new EmbeddingWorkPublisher { def wake: IO[Unit] = IO.unit },

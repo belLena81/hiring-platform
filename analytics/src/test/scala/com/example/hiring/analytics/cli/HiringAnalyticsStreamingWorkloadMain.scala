@@ -2,7 +2,7 @@ package com.example.hiring.analytics.cli
 
 import cats.effect.{ExitCode, IO, IOApp, Ref, Resource}
 import cats.syntax.all.*
-import com.example.hiring.analytics.app.AppModule
+import com.example.hiring.analytics.adapter.spark.SparkRuntime
 import com.example.hiring.analytics.adapter.kafka.KafkaClientProperties
 import com.example.hiring.analytics.domain.AnalyticsTopic
 import com.example.hiring.analytics.config.AnalyticsRuntimeConfig
@@ -310,7 +310,7 @@ object HiringAnalyticsStreamingWorkloadMain extends IOApp {
             Resource
               .make(IO.blocking(MongoClients.create(settings.common.mongoUri)))(client => IO.blocking(client.close()))
               .use { mongo =>
-                AppModule
+                SparkRuntime
                   .sparkMongo[IO](
                     settings.common.mongoUri,
                     "local[1]",

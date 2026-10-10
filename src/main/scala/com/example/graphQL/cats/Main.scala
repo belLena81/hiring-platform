@@ -13,11 +13,11 @@ import com.example.graphQL.cats.service.Diagnostics.*
 import com.example.graphQL.cats.config.{AppConfig, ConfigError}
 import com.example.graphQL.cats.infrastructure.logging.SafeDiagnostics
 import com.example.graphQL.cats.infrastructure.telemetry.TelemetryRuntime
-import com.example.graphQL.cats.runtime.{HiringPlatformServer, MongoHiringRuntime}
+import com.example.graphQL.cats.runtime.{HiringLogValues, HiringPlatformServer, MongoHiringRuntime}
 
 object Main extends IOApp {
   override protected def reportFailure(error: Throwable): IO[Unit] =
-    SafeDiagnostics.configure().flatMap { diagnostics =>
+    SafeDiagnostics.configure(maskSensitive = true, HiringLogValues.allowed).flatMap { diagnostics =>
       diagnostics.emit(LogEvent.RuntimeFailed, fields = LogFields.failure(error))
     }
 
@@ -70,9 +70,8 @@ object Main extends IOApp {
   /** The configuration is read once; the masking flag is read leniently first so invalid files still log safely. */
   def run(args: List[String]): IO[ExitCode] =
     for {
-      mask <- AppConfig.loadMaskSensitive
-      diagnostics <- SafeDiagnostics.configure(mask)
-      loaded <- AppConfig.load
+      (mask, loaded) <- AppConfig.loadWithMask
+      diagnostics <- SafeDiagnostics.configure(mask, HiringLogValues.allowed)
       exit <- loaded.fold(
         errors => configInvalidEvents(diagnostics, errors).as(ExitCode.Error),
         config =>

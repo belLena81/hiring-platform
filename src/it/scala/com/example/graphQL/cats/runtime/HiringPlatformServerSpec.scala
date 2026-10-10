@@ -4,7 +4,7 @@ import cats.effect.{Deferred, IO, Ref, Resource}
 import com.comcast.ip4s.{Host, Port}
 import com.example.graphQL.cats.api.graphql.TestGraphQLSupport
 import com.example.graphQL.cats.api.http.HiringApiRoutes
-import com.example.graphQL.cats.config.AuthRateLimitConfig
+import com.example.graphQL.cats.config.RateLimitConfig
 import com.example.graphQL.cats.service.{
   DatabaseProbe,
   Diagnostics,
@@ -34,7 +34,7 @@ class HiringPlatformServerSpec extends CatsEffectSuite {
   private val cleanupBound = 6.seconds
   private val shutdownBound = 14.seconds
   private val AdmissionPermits = 16
-  private val authRateLimit = AuthRateLimitConfig(60, 100, 1000)
+  private val authRateLimit = RateLimitConfig(60, 100, 1000)
 
   private def probe(result: IO[ProbeResult]): DatabaseProbe = new DatabaseProbe {
     def check(requestId: Option[String]): IO[ProbeResult] = result

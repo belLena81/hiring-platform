@@ -6,7 +6,7 @@ import cats.effect.{IO, Resource}
 import com.example.graphQL.cats.api.admission.{AuthRateLimiter, FixedWindowRateLimiter, InterviewActionRateLimiter}
 import com.example.graphQL.cats.api.auth.AuthFailure
 import com.example.graphQL.cats.api.http.{ClientAddressResolver, HiringApiRoutes}
-import com.example.graphQL.cats.config.{AuthRateLimitConfig, InterviewActionRateLimitConfig, TrustedProxyConfig}
+import com.example.graphQL.cats.config.{RateLimitConfig, TrustedProxyConfig}
 import com.example.graphQL.cats.domain.model.{AccountDeletionStatus, ApplicationStatus, UserPageRequest}
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.service.{ActorContext, Diagnostics, ProbeResult}
@@ -74,7 +74,6 @@ object TestGraphQLSupport {
   val emptyServices: HiringGraphQLServices = HiringGraphQLServices(
     new HiringReadModel {
       def viewer(actor: ActorContext) = unsupported
-      def canViewUserEmail(actor: ActorContext, userId: UserId) = unsupported
       def canViewUserEmails(actor: ActorContext, userIds: List[UserId]) = unsupported
       def application(id: ApplicationId) = unsupported
       def canViewApplication(actor: ActorContext, applicationId: ApplicationId) = unsupported
@@ -150,9 +149,9 @@ object TestGraphQLSupport {
       hiring: HiringGraphQLServices = emptyServices,
       authenticate: Request[IO] => IO[Either[AuthFailure, Option[ActorContext]]] = _ => IO.pure(Right(None)),
       hiringReady: IO[ProbeResult] = IO.pure(ProbeResult.Ready),
-      authRateLimit: AuthRateLimitConfig = AuthRateLimitConfig(60, 100, 1000),
+      authRateLimit: RateLimitConfig = RateLimitConfig(60, 100, 1000),
       trustedProxy: TrustedProxyConfig = TrustedProxyConfig(Nil),
-      interviewActionRateLimit: InterviewActionRateLimitConfig = InterviewActionRateLimitConfig(60, 1000, 1000)
+      interviewActionRateLimit: RateLimitConfig = RateLimitConfig(60, 1000, 1000)
   ): Resource[IO, HiringApiRoutes.Dependencies] =
     for {
       factory <- RequestContextFactory.resource

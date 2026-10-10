@@ -62,7 +62,7 @@ final class SearchSessionRecordingSpec extends CatsEffectSuite {
       val (session, event) = recorded.head
       assertEquals(session.id, supplied)
       assertEquals(session.actorId, actorId)
-      assertEquals(session.searchKind, "jobs")
+      assertEquals(session.searchKind, SearchKind.Jobs)
       assertEquals(session.occurredAt, now)
       assertEquals(session.expiresAt, now.plusSeconds(7L * 24L * 3600L))
       assertEquals(
@@ -93,7 +93,7 @@ final class SearchSessionRecordingSpec extends CatsEffectSuite {
       assertEquals(recorded.size, 1)
       assertEquals(recorded.head._1.results, Nil)
       assertEquals(recorded.head._1.model, Some("voyage-4-lite"))
-      assertEquals(recorded.head._1.searchKind, "semanticJobSearch")
+      assertEquals(recorded.head._1.searchKind, SearchKind.SemanticJobSearch)
     }
   }
 }

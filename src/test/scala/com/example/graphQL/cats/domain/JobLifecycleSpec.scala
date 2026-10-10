@@ -49,7 +49,7 @@ class JobLifecycleSpec extends FunSuite {
   }
 
   test("update replaces content without changing owner or status") {
-    val input = JobLifecycle.Update(
+    val input = draftJob.copy(
       title = "Lead Scala Developer",
       description = "Own backend services",
       requirements = List("Cats Effect", "MongoDB"),

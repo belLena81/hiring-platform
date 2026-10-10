@@ -2,6 +2,7 @@ package com.example.graphQL.cats.service
 
 import cats.data.{NonEmptyChain, NonEmptyList}
 import com.example.graphQL.cats.domain.error.{DomainError, DomainValidationError}
+import com.example.graphQL.cats.domain.workflow.InterviewWorkflowError
 
 enum AuthenticationError {
   case Unauthorized
@@ -68,5 +69,6 @@ object UseCaseError {
   final case class Search(error: SearchError) extends UseCaseError
   final case class Availability(error: AvailabilityError) extends UseCaseError
   final case class Analytics(error: AnalyticsError) extends UseCaseError
+  final case class InterviewRule(error: InterviewWorkflowError) extends UseCaseError
   final case class ValidationFailed(errors: NonEmptyList[DomainValidationError]) extends UseCaseError
 }

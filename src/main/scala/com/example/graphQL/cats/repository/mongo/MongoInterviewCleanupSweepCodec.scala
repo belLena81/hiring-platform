@@ -1,7 +1,8 @@
 package com.example.graphQL.cats.repository.mongo
 
 import cats.syntax.all.*
-import com.example.graphQL.cats.service.port.{InterviewCleanupCursor, RepositoryError}
+import com.example.graphQL.cats.service.port.{InterviewCleanupCursor}
+import com.example.graphQL.cats.service.RepositoryError
 import com.mongodb.MongoClientSettings
 import org.bson.{BsonArray, BsonDateTime, BsonDocument, BsonString, BsonValue, Document}
 import org.bson.conversions.Bson

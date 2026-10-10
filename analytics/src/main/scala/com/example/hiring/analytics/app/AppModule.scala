@@ -14,11 +14,9 @@ import com.example.hiring.analytics.config.{
   AnalyticsStreamingRuntimeSettings,
   AnalyticsNonBlank,
   AnalyticsKeyRetirementAuditSettings,
-  AnalyticsLateFactReplaySettings,
-  AnalyticsRuntimeDirectory
+  AnalyticsLateFactReplaySettings
 }
 import com.example.hiring.analytics.errors.AnalyticsError
-import com.example.hiring.analytics.errors.AnalyticsErrorTranslation.{translating, translatingWith}
 import com.example.hiring.analytics.service.batch.*
 import com.example.hiring.analytics.service.erasure.*
 import com.example.hiring.analytics.service.streaming.*
@@ -35,8 +33,6 @@ import org.typelevel.log4cats.slf4j.Slf4jLogger
 import io.github.iltotore.iron.*
 import io.github.iltotore.iron.constraint.any.Not
 import io.github.iltotore.iron.constraint.string.Blank
-
-import scala.util.control.NonFatal
 
 /** Resource-managed composition for analytics command-line applications. */
 object AppModule {
@@ -75,24 +71,7 @@ object AppModule {
       } yield {
         val common = settings.common
         val manifestStore = new DeltaManifestStore[F](shared.spark, shared.paths, shared.sparkExecution)
-        val ingestionStage = new AnalyticsBatchIngestionStage[F](
-          shared.paths,
-          common.pseudonymizer,
-          shared.lakehouseExecution,
-          manifestStore,
-          shared.writer,
-          common.operational.retention,
-          Clock[F]
-        )
-        val silverStage = new AnalyticsBatchSilverStage[F](
-          shared.paths,
-          common.pseudonymizer,
-          shared.lakehouseExecution,
-          shared.writer,
-          shared.reader,
-          QuarantineIdentifier,
-          common.operational.retention
-        )
+        val (ingestionStage, silverStage) = batchStages(shared, common, manifestStore, shared.writer)
         val job = new HiringAnalyticsBatch[F](
           shared.paths,
           shared.markers,
@@ -117,6 +96,38 @@ object AppModule {
 
       }
     }
+
+  private def timed[F[_], A](cost: Option[StreamingBatchCost[F]], stage: StreamingBatchCost.Stage)(
+      work: F[A]
+  ): F[A] = cost.fold(work)(_.timed(stage)(work))
+
+  /** The ingestion and Silver stages share one wiring; only the writer and manifest store differ per program. */
+  private def batchStages[F[_]: Async](
+      shared: Shared[F],
+      common: AnalyticsCommonSettings,
+      manifestStore: AnalyticsRunManifestStore[F],
+      writer: DeltaWriter[F]
+  ): (AnalyticsBatchIngestionStage[F], AnalyticsBatchSilverStage[F]) =
+    (
+      new AnalyticsBatchIngestionStage[F](
+        shared.paths,
+        common.pseudonymizer,
+        shared.lakehouseExecution,
+        manifestStore,
+        writer,
+        common.operational.retention,
+        Clock[F]
+      ),
+      new AnalyticsBatchSilverStage[F](
+        shared.paths,
+        common.pseudonymizer,
+        shared.lakehouseExecution,
+        writer,
+        shared.reader,
+        QuarantineIdentifier,
+        common.operational.retention
+      )
+    )
 
   def worker[F[_]: Async](settings: AnalyticsWorkerSettings): Resource[F, F[Unit]] =
     withSecureUuids[F, F[Unit]] {
@@ -198,8 +209,8 @@ object AppModule {
             (rawFrame, batchId, lineage, sourceEndOffsets, authorize) => {
               val callback = for {
                 observedAt <- Async[F].realTimeInstant
-                _ <- cost.fold(shared.maintenance.validateHmacConfigurationLocked)(
-                  _.timed(StreamingBatchCost.Stage.HmacValidation)(shared.maintenance.validateHmacConfigurationLocked)
+                _ <- timed(cost, StreamingBatchCost.Stage.HmacValidation)(
+                  shared.maintenance.validateHmacConfigurationLocked
                 )
                 parsed <- shared.lakehouseExecution(OperationalEventTransforms.parseKafkaRecords(rawFrame))
                 preparing = StreamingBatchPreparation(
@@ -211,27 +222,15 @@ object AppModule {
                   sourceEndOffsets,
                   observedJournal
                 )
-                preparation <- cost.fold(preparing)(_.timed(StreamingBatchCost.Stage.Prepare)(preparing))
+                preparation <- timed(cost, StreamingBatchCost.Stage.Prepare)(preparing)
                 observedWriter = observer.fold[DeltaWriter[F]](shared.writer)(value =>
                   StreamingDurableBoundaryObserver.writer(shared.writer, shared.paths, preparation.identity, value)
                 )
-                ingestion = new AnalyticsBatchIngestionStage[F](
-                  shared.paths,
-                  common.pseudonymizer,
-                  shared.lakehouseExecution,
+                (ingestion, silver) = batchStages(
+                  shared,
+                  common,
                   new DeltaManifestStore[F](shared.spark, shared.paths, shared.sparkExecution),
-                  observedWriter,
-                  common.operational.retention,
-                  Clock[F]
-                )
-                silver = new AnalyticsBatchSilverStage[F](
-                  shared.paths,
-                  common.pseudonymizer,
-                  shared.lakehouseExecution,
-                  observedWriter,
-                  shared.reader,
-                  QuarantineIdentifier,
-                  common.operational.retention
+                  observedWriter
                 )
                 _ <- SparkStreamingBatchStages
                   .resource(
@@ -267,7 +266,7 @@ object AppModule {
                       .void
                   )
               } yield ()
-              cost.fold(callback)(_.timed(StreamingBatchCost.Stage.Callback)(callback))
+              timed(cost, StreamingBatchCost.Stage.Callback)(callback)
             },
             () => KafkaOffsetRangeSource.sourceIdentity(common.kafka, settings.topic, shared.sparkExecution),
             maintenance = Some((identity, lineage, retainedCheckpoint, authorize) =>
@@ -277,7 +276,7 @@ object AppModule {
                 settings.streaming.maintenanceInterval,
                 at => {
                   val maintaining = maintenanceTick.run(identity, lineage, retainedCheckpoint, authorize, at)
-                  cost.fold(maintaining)(_.timed(StreamingBatchCost.Stage.Maintenance)(maintaining))
+                  timed(cost, StreamingBatchCost.Stage.Maintenance)(maintaining)
                 },
                 Some(observation =>
                   Slf4jLogger
@@ -336,13 +335,13 @@ object AppModule {
     withSecureUuids[F, F[Either[NonEmptyChain[String], AnalyticsKeyRetirement.AuditSummary]]] {
       for {
         paths <- Resource.eval(Async[F].fromEither(resolveLakehousePaths(settings.lakehouseRoot)))
-        (spark, client, sparkExecution) <- sparkMongo[F](
+        (spark, client, sparkExecution) <- SparkRuntime.sparkMongo[F](
           settings.mongoUri,
           settings.sparkMaster,
           appName = "hiring-analytics-key-retirement-audit",
           sparkUiEnabled = Some(false)
         )
-        database <- Resource.eval(mongoDatabase[F](client, settings.mongoDatabase))
+        database <- Resource.eval(SparkRuntime.mongoDatabase[F](client, settings.mongoDatabase))
       } yield {
         val streams = new MongoPublisherStream(settings.operational)
 
@@ -367,8 +366,8 @@ object AppModule {
   def repair[F[_]: Async](settings: AnalyticsWorkerSettings): Resource[F, MongoAnalyticsErasureQueue[F]] =
     withSecureUuids[F, MongoAnalyticsErasureQueue[F]] {
       for {
-        client <- mongoClient[F](settings.common.mongoUri)
-        database <- Resource.eval(mongoDatabase[F](client, settings.common.mongoDatabase))
+        client <- SparkRuntime.mongoClient[F](settings.common.mongoUri)
+        database <- Resource.eval(SparkRuntime.mongoDatabase[F](client, settings.common.mongoDatabase))
         queue <- MongoAnalyticsErasureQueue.resource(database, new MongoPublisherStream(settings.common.operational))
       } yield queue
     }
@@ -380,13 +379,13 @@ object AppModule {
     for {
       _ <- Resource.eval(KafkaConnection.preflight[F](common.kafka))
       paths <- Resource.eval(Async[F].fromEither(resolveLakehousePaths(common.lakehouseRoot)))
-      (spark, client, sparkExecution) <- sparkMongo[F](
+      (spark, client, sparkExecution) <- SparkRuntime.sparkMongo[F](
         common.mongoUri,
         common.sparkMaster,
         appName,
         sparkLocalDirectory = common.sparkLocalDirectory
       )
-      database <- Resource.eval(mongoDatabase[F](client, common.mongoDatabase))
+      database <- Resource.eval(SparkRuntime.mongoDatabase[F](client, common.mongoDatabase))
     } yield {
       val streams = new MongoPublisherStream(common.operational)
       val lock = new MongoAnalyticsLakehouseLock[F](database, streams, Clock[F])
@@ -432,85 +431,4 @@ object AppModule {
         )
       )
   }
-
-  /** Shared resource boundary for operator diagnostics that need Spark and Mongo without batch services. */
-  def sparkMongo[F[_]: Async](
-      mongoUri: String,
-      sparkMaster: String,
-      appName: String,
-      sparkUiEnabled: Option[Boolean] = None,
-      sparkLocalDirectory: String = AnalyticsRuntimeDirectory.container(AnalyticsRuntimeDirectory.SparkTemp).toString
-  ): Resource[F, (SparkSession, MongoClient[F], SparkBlockingExecution[F])] =
-    managedSparkMongo(
-      execution => sparkSession(sparkMaster, appName, sparkUiEnabled, sparkLocalDirectory, execution),
-      mongoClient[F](mongoUri)
-    )
-
-  private[analytics] def managedSparkMongo[F[_]: Async](
-      acquireSpark: SparkBlockingExecution[F] => F[SparkSession],
-      acquireMongo: Resource[F, MongoClient[F]]
-  ): Resource[F, (SparkSession, MongoClient[F], SparkBlockingExecution[F])] =
-    for {
-      sparkExecution <- SparkBlockingExecution.resource[F]
-      shutdown <- Resource.eval(Async[F].ref(Option.empty[SparkShutdownDrain]))
-      spark <- Resource.make(
-        acquireSpark(sparkExecution)
-          .adaptError { case NonFatal(cause) =>
-            AnalyticsError.SparkStartupFailure(cause)
-          }
-      )(session =>
-        shutdown.get.flatMap { owned =>
-          val stop = sparkExecution(session.stop()).translating(AnalyticsError.LakehouseFailure(_))
-          owned.fold(stop)(drain =>
-            SparkShutdownDrain.close(
-              drain.await(sparkExecution),
-              stop,
-              sparkExecution.blocking(drain.remove())
-            )
-          )
-        }
-      )
-      _ <- Resource.eval(Async[F].uncancelable { _ =>
-        sparkExecution.attachSparkContext(spark.sparkContext) *>
-          sparkExecution
-            .blocking(SparkShutdownDrain.install(spark.sparkContext))
-            .flatMap(drain => shutdown.set(Some(drain)))
-      })
-      mongo <- acquireMongo
-    } yield (spark, mongo, sparkExecution)
-
-  private[analytics] def mongoClient[F[_]: Async](uri: String): Resource[F, MongoClient[F]] =
-    MongoClient
-      .fromConnectionString[F](uri)
-      .translatingWith { case _: IllegalArgumentException =>
-        AnalyticsError.InvalidConfiguration("MONGODB_URI is invalid")
-      }(AnalyticsError.MongoConnectionFailure(_))
-
-  private def mongoDatabase[F[_]: Async](client: MongoClient[F], name: String): F[MongoDatabase[F]] =
-    client
-      .getDatabase(name)
-      .translatingWith { case _: IllegalArgumentException =>
-        AnalyticsError.InvalidConfiguration("analytics.mongo.database is invalid")
-      }(AnalyticsError.MongoConnectionFailure(_))
-
-  private def sparkSession[F[_]](
-      master: String,
-      appName: String,
-      sparkUiEnabled: Option[Boolean],
-      sparkLocalDirectory: String,
-      sparkExecution: SparkExecution[F]
-  ): F[SparkSession] =
-    sparkExecution {
-      val builder = SparkSession
-        .builder()
-        .appName(appName)
-        .master(master)
-        .config("spark.local.dir", sparkLocalDirectory)
-        .config("spark.sql.session.timeZone", "UTC")
-      sparkUiEnabled.foreach(enabled => builder.config("spark.ui.enabled", enabled.toString))
-      builder
-        .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-        .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
-        .getOrCreate()
-    }
 }

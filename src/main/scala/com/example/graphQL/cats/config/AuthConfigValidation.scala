@@ -40,7 +40,7 @@ private[config] object AuthConfigValidation {
   }
 
   def validJwtSecret(value: Option[String]): ValidatedNel[ConfigError, String] =
-    value.filter(_ != "disabled").filter(_.trim.nonEmpty).fold(ConfigError.InvalidJwtSecret.invalidNel[String]) {
+    DisabledSetting.unset(value).filter(_.trim.nonEmpty).fold(ConfigError.InvalidJwtSecret.invalidNel[String]) {
       secret =>
         Either
           .cond(secret.getBytes(StandardCharsets.UTF_8).length >= 32, secret, ConfigError.InvalidJwtSecret)

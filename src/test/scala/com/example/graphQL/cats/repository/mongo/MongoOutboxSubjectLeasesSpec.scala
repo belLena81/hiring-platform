@@ -1,7 +1,8 @@
 package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.Ref
-import com.example.graphQL.cats.service.port.{RepositoryError, RepositoryIO}
+import com.example.graphQL.cats.service.port.{RepositoryIO}
+import com.example.graphQL.cats.service.RepositoryError
 import munit.CatsEffectSuite
 
 final class MongoOutboxSubjectLeasesSpec extends CatsEffectSuite {

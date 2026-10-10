@@ -92,8 +92,8 @@ final class InterviewBrokerOutageIntegrationSpec extends MongoIntegrationSuite {
           replayTarget <- Ref.of[IO, Option[UUID]](None)
           replayProcessed <- Deferred[IO, Unit]
           scheduled <- {
-            def invalid(identity: String): IO[Boolean] =
-              IO.realTimeInstant.flatMap(at => repository.quarantine(identity, at).value.map(_.isRight))
+            def invalid(identity: String): RepositoryIO[Unit] =
+              RepositoryIO.lift(IO.realTimeInstant).flatMap(repository.quarantine(identity, _))
             val transports = for {
               orchestrator <- InterviewKafkaRuntime.resource(broker.config(worker = false), Diagnostics.noop) {
                 case Left(identity) => invalid(identity)
@@ -102,9 +102,9 @@ final class InterviewBrokerOutageIntegrationSpec extends MongoIntegrationSuite {
               executor <- InterviewKafkaRuntime.resource(broker.config(worker = true), Diagnostics.noop) {
                 case Left(identity) => invalid(identity)
                 case Right(message) =>
-                  worker.receiveCommand(message).flatTap { accepted =>
+                  worker.receiveCommand(message).semiflatTap { _ =>
                     replayTarget.get.flatMap { target =>
-                      if (accepted && target.contains(message.messageId)) replayProcessed.complete(()).void
+                      if (target.contains(message.messageId)) replayProcessed.complete(()).void
                       else IO.unit
                     }
                   }

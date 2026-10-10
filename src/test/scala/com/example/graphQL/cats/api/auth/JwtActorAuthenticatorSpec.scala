@@ -125,8 +125,6 @@ final class JwtActorAuthenticatorSpec extends CatsEffectSuite {
     val unavailableUsers = new com.example.graphQL.cats.service.ServiceFixtures.VersionedUserRepositoryTestAdapter {
       override def find(id: UserId): RepositoryIO[Option[User]] =
         com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Left(RepositoryError.Unavailable)))
-      override def findMany(ids: List[UserId]): RepositoryIO[List[User]] =
-        com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Right(Nil)))
       override def updateEmbedding(id: UserId, embedding: EntityEmbedding): RepositoryIO[Unit] =
         com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Right(())))
     }
@@ -177,8 +175,6 @@ final class JwtActorAuthenticatorSpec extends CatsEffectSuite {
     new com.example.graphQL.cats.service.ServiceFixtures.VersionedUserRepositoryTestAdapter {
       override def find(id: UserId): RepositoryIO[Option[User]] =
         com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Right(values.get(id))))
-      override def findMany(ids: List[UserId]): RepositoryIO[List[User]] =
-        com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Right(ids.flatMap(values.get))))
       override def updateEmbedding(id: UserId, embedding: EntityEmbedding): RepositoryIO[Unit] =
         com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Right(())))
     }

@@ -2,7 +2,8 @@ package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.{IO, Ref}
 import cats.syntax.all.*
-import com.example.graphQL.cats.service.port.{MutationWriteContext, RepositoryError, RepositoryIO}
+import com.example.graphQL.cats.service.port.{MutationWriteContext, RepositoryIO}
+import com.example.graphQL.cats.service.RepositoryError
 import mongo4cats.client.ClientSession
 import munit.CatsEffectSuite
 

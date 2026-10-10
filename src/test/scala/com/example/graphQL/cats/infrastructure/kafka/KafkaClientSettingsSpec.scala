@@ -75,4 +75,35 @@ class KafkaClientSettingsSpec extends munit.FunSuite {
       KafkaClientSettings.consumer("127.0.0.1:9092", None, None, KafkaSaslSecurityProtocol.Tls).properties
     assertEquals(properties("security.protocol"), "PLAINTEXT")
   }
+
+  test("blocking clients get one bounded timeout and the shared transport security") {
+    val properties = KafkaClientSettings.clientProperties(
+      "broker:9092",
+      Some("user"),
+      Some("secret"),
+      KafkaSaslSecurityProtocol.Plaintext
+    )
+    assertEquals(properties.getProperty("bootstrap.servers"), "broker:9092")
+    assertEquals(properties.getProperty("request.timeout.ms"), "10000")
+    assertEquals(properties.getProperty("default.api.timeout.ms"), "10000")
+    assertEquals(
+      KafkaClientSettings.security(Some("user"), Some("secret"), KafkaSaslSecurityProtocol.Plaintext).toSet,
+      properties.asScala.view.filterKeys(_.startsWith("s")).toMap.toSet
+    )
+  }
+
+  test("committed consumers join their group, commit manually, start earliest and skip aborted records") {
+    val settings = KafkaClientSettings.committedConsumer("broker:9092", None, None, KafkaSaslSecurityProtocol.Tls, "g")
+    assertEquals(
+      List("group.id", "enable.auto.commit", "auto.offset.reset", "isolation.level")
+        .map(key => key -> settings.properties(key))
+        .toMap,
+      Map(
+        "group.id" -> "g",
+        "enable.auto.commit" -> "false",
+        "auto.offset.reset" -> "earliest",
+        "isolation.level" -> "read_committed"
+      )
+    )
+  }
 }

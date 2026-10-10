@@ -4,7 +4,7 @@ import cats.effect.{IO, Ref, Resource}
 import cats.syntax.all.*
 import com.example.hiring.analytics.adapter.mongo.*
 import com.example.hiring.analytics.adapter.spark.*
-import com.example.hiring.analytics.app.AppModule
+
 import com.example.hiring.analytics.domain.*
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.batch.*
@@ -73,7 +73,7 @@ private[analytics] object HiringAnalyticsRecoveryTestSupport {
       }
     )
     uri = endpoint.uri
-    managed <- AppModule.sparkMongo[IO](
+    managed <- SparkRuntime.sparkMongo[IO](
       uri,
       "local[2]",
       "HiringAnalyticsDurableSinkRecovery",

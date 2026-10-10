@@ -4,7 +4,7 @@ import cats.effect.{IO, Ref}
 import com.example.graphQL.cats.FixedTestClock
 import com.example.graphQL.cats.domain.model.{AccountStatus, EntityEmbedding, User, UserRole}
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
-import com.example.graphQL.cats.service.port.{EmbeddingCoverageRepository, RepositoryError, RepositoryIO}
+import com.example.graphQL.cats.service.port.{EmbeddingCoverageRepository, RepositoryIO}
 import com.example.graphQL.cats.service.search.*
 import munit.CatsEffectSuite
 
@@ -140,8 +140,6 @@ final class EmbeddingCoverageServiceSpec extends CatsEffectSuite {
 
   private final class TestUsers(values: Map[UserId, User]) extends ServiceFixtures.VersionedUserRepositoryTestAdapter {
     override def find(id: UserId): RepositoryIO[Option[User]] = RepositoryIO.fromEither(Right(values.get(id)))
-    override def findMany(ids: List[UserId]): RepositoryIO[List[User]] =
-      RepositoryIO.fromEither(Right(ids.flatMap(values.get)))
     override def updateEmbedding(id: UserId, embedding: EntityEmbedding): RepositoryIO[Unit] =
       RepositoryIO.fromEither(Right(()))
   }

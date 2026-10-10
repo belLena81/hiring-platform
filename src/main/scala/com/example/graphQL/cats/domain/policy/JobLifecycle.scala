@@ -2,24 +2,16 @@ package com.example.graphQL.cats.domain.policy
 
 import cats.data.StateT
 import com.example.graphQL.cats.domain.error.DomainError
-import com.example.graphQL.cats.domain.model.{Job, JobStatus, Location}
+import com.example.graphQL.cats.domain.model.{Job, JobStatus}
 import java.time.Instant
 
 object JobLifecycle {
-  final case class Update(
-      title: String,
-      description: String,
-      requirements: List[String],
-      skills: Set[String],
-      location: Location,
-      updatedAt: Instant
-  )
-
   def create(job: Job): Either[DomainError, Job] =
     if (job.status == JobStatus.Closed) Left(DomainError.InvalidInitialJobStatus(JobStatus.Closed))
     else Right(job)
 
-  def update(input: Update): LifecycleProgram[Job, Unit] =
+  /** Applies the editable content of an already validated job; owner, status and embedding stay as they are. */
+  def update(input: Job): LifecycleProgram[Job, Unit] =
     StateT { job =>
       Right(
         (

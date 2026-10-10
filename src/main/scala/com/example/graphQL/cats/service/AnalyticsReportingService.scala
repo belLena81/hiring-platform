@@ -1,7 +1,7 @@
 package com.example.graphQL.cats.service
 
 import cats.data.EitherT
-import com.example.graphQL.cats.service.protocol.{UseCaseIO, UseCaseIO as UseCase}
+import com.example.graphQL.cats.service.protocol.{UseCaseIO}
 import com.example.graphQL.cats.service.auth.ActorAuthorization
 import com.example.graphQL.cats.service.port.{AnalyticsReportRepository, UserRepository}
 
@@ -65,9 +65,9 @@ final class AnalyticsReportingService(
       period: AnalyticsPeriod
   ): UseCaseIO[AnalyticsReportSnapshot] =
     for {
-      _ <- UseCase.ensure(validPeriod(period), UseCaseError.Analytics(AnalyticsError.InvalidPeriod))
+      _ <- UseCaseIO.ensure(validPeriod(period), UseCaseError.Analytics(AnalyticsError.InvalidPeriod))
       _ <- authorization.requireAdmin(actor)
-      snapshot <- UseCase
+      snapshot <- UseCaseIO
         .repository(reports.latest)
         .subflatMap(_.toRight(UseCaseError.Analytics(AnalyticsError.ReportsUnavailable)))
     } yield filter(snapshot, period)

@@ -6,7 +6,7 @@ import com.example.hiring.analytics.domain.*
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.errors.AnalyticsErrorTranslation.translatingWith
 import com.example.hiring.analytics.service.batch.*
-import com.mongodb.{MongoException, ReadConcern, WriteConcern}
+import com.mongodb.{ReadConcern, WriteConcern}
 import com.mongodb.client.model.{Filters, Updates, Indexes, IndexOptions}
 import io.circe.generic.auto.*
 import mongo4cats.circe.MongoJsonCodecs
@@ -106,10 +106,7 @@ private[analytics] final class MongoAnalyticsLateFactReplayJournal[F[_]: Async](
       at,
       None
     )
-    _ <- records.flatMap(_.insertOne(value)).void.handleErrorWith {
-      case error: MongoException if error.getCode == 11000 => F.unit
-      case error                                           => F.raiseError(error)
-    }
+    _ <- records.flatMap(_.insertOne(value)).void.recover { case MongoDuplicateKey() => () }
     existing <- required(request)
     _ <- F.raiseUnless(existing.publicationAttempt == 0 && existing.reservation == reservation)(Conflict)
   } yield existing)

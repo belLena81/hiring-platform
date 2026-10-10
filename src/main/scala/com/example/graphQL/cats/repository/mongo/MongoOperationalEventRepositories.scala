@@ -24,7 +24,7 @@ import com.mongodb.client.model.{FindOneAndUpdateOptions, ReturnDocument, Sorts,
 import org.bson.Document
 import org.bson.types.Binary
 import java.time.Instant
-import java.util.Date
+import com.example.graphQL.cats.repository.mongo.MongoDocumentFields.Repository.{instant, string}
 import java.util.UUID
 import scala.jdk.CollectionConverters.*
 
@@ -54,7 +54,7 @@ final class MongoSearchSessionRepository(
             result.flatMap(value =>
               if (Option(value.getUpsertedId).nonEmpty)
                 MongoOperationalEventInsertion.insert(outbox, active, List(event), session.occurredAt, diagnostics)
-              else RepositoryIO.fromEither(Right(()))
+              else ().pure[RepositoryIO]
             )
           }
       )(MongoErrors.duplicateAsConflict)
@@ -164,15 +164,9 @@ final class MongoOperationalEventOutboxRepository(
   ): RepositoryIO[List[ClaimedOperationalEvent]] = {
     val cursors = Mongo4catsCollections.documents(database, MongoProducerRegistrations.ClaimCursorsCollection)
     def cursorFilter(row: Document): Either[RepositoryError, MongoFilter] = for {
-      at <- Option(row.get("availableAt"))
-        .collect { case date: Date => date }
-        .toRight(RepositoryError.InvalidStoredData)
-      occurred <- Option(row.get("occurredAt"))
-        .collect { case date: Date => date }
-        .toRight(RepositoryError.InvalidStoredData)
-      id <- Option(row.get("eventId"))
-        .collect { case value: String => value }
-        .toRight(RepositoryError.InvalidStoredData)
+      at <- instant(row, "availableAt").map(_.toDate)
+      occurred <- instant(row, "occurredAt").map(_.toDate)
+      id <- string(row, "eventId")
     } yield MongoFilter.or(
       MongoFilter.gt(MongoFields.AvailableAt, at),
       MongoFilter.and(MongoFilter.eq(MongoFields.AvailableAt, at), MongoFilter.gt(MongoFields.OccurredAt, occurred)),
@@ -193,10 +187,8 @@ final class MongoOperationalEventOutboxRepository(
         )
       )
       .subflatMap(_.toList.traverse { row =>
-        val valid = Option(row.get("_id")).exists(_.isInstanceOf[String]) &&
-          Option(row.get("availableAt")).exists(_.isInstanceOf[Date]) && Option(row.get("occurredAt"))
-            .exists(_.isInstanceOf[Date])
-        Either.cond(valid, row, RepositoryError.InvalidStoredData)
+        (string(row, MongoFields.Id), instant(row, MongoFields.AvailableAt), instant(row, MongoFields.OccurredAt))
+          .mapN((_, _, _) => row)
       })
     def checkpoint(row: Document): RepositoryIO[Unit] = RepositoryIO
       .lift(

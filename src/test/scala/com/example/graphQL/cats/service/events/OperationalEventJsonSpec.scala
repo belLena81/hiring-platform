@@ -64,7 +64,7 @@ class OperationalEventJsonSpec extends FunSuite {
     val session = SearchSession(
       searchId,
       actor,
-      "jobs",
+      SearchKind.Jobs,
       Some("private query"),
       Json.obj("private" -> Json.fromString("data")),
       Some("private-model"),
@@ -156,17 +156,19 @@ class OperationalEventJsonSpec extends FunSuite {
   }
 
   test("fact factories return typed validation failures for unsupported inputs") {
-    val session = SearchSession(searchId, actor, "unknown", None, Json.obj(), None, Nil, now, now.plusSeconds(60))
+    val tooMany = (1 to 101).toList.map(rank => SearchSessionResult(UUID.randomUUID().toString, rank, 0.5))
+    val session =
+      SearchSession(searchId, actor, SearchKind.Jobs, None, Json.obj(), None, tooMany, now, now.plusSeconds(60))
     assertEquals(
       OperationalEvents.searchPerformed(eventId, session),
       Left(OperationalEventContractError.InvalidPayload)
     )
     assertEquals(
-      OperationalEvents.searchResultClicked(eventId, searchId, "bad", "jobs", actor, 1, now),
+      OperationalEvents.searchResultClicked(eventId, searchId, "bad", SearchKind.Jobs, actor, 1, now),
       Left(OperationalEventContractError.InvalidPayload)
     )
     assertEquals(
-      OperationalEvents.searchResultClicked(eventId, searchId, jobId.toString, "jobs", actor, 0, now),
+      OperationalEvents.searchResultClicked(eventId, searchId, jobId.toString, SearchKind.Jobs, actor, 0, now),
       Left(OperationalEventContractError.InvalidPayload)
     )
   }

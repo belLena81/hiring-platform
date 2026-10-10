@@ -1,6 +1,7 @@
 package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.IO
+import com.example.graphQL.cats.service.port.MutationWriteContext
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.{
   Application,
@@ -95,6 +96,16 @@ final class MongoJobSubmissionIntegrationSpec extends MongoIntegrationSuite {
         None,
         None
       )
+      val readSnapshot = jobs
+        .findSubmissionSnapshot(id)
+        .value
+        .flatMap(result =>
+          IO.fromEither(
+            result
+              .flatMap(_.toRight(RepositoryError.InvalidStoredData))
+              .leftMap(error => new AssertionError(s"Missing snapshot: $error"))
+          )
+        )
       for {
         _ <- MongoHiringIndexSetup.create(fixture.database)
         _ <- MongoRepositoryTestSupport.insertOne(
@@ -102,24 +113,23 @@ final class MongoJobSubmissionIntegrationSpec extends MongoIntegrationSuite {
           MongoCollections.Jobs,
           new Document("_id", id.value.toString).append("status", "Open").append("version", 0L)
         )
-        snapshot <- jobs
-          .findSubmissionSnapshot(id)
+        snapshot <- readSnapshot
+        first <- repository
+          .createForOpenJobWithEvents(snapshot, application, event, Nil, MutationWriteContext.directWrite)
           .value
-          .flatMap(result =>
-            IO.fromEither(
-              result
-                .flatMap(_.toRight(RepositoryError.InvalidStoredData))
-                .leftMap(error => new AssertionError(s"Missing snapshot: $error"))
-            )
-          )
-        first <- repository.createForOpenJob(snapshot, application, event).value
-        duplicate <- repository.createForOpenJob(snapshot, application, event).value
+        // The first submission advanced the job revision, so a duplicate is attempted against the fresh snapshot.
+        fresh <- readSnapshot
+        duplicate <- repository
+          .createForOpenJobWithEvents(fresh, application, event, Nil, MutationWriteContext.directWrite)
+          .value
         afterDuplicate <- jobs.findSubmissionSnapshot(id).value
         collection <- MongoRepositoryTestSupport.collection(fixture.database, MongoCollections.Jobs)
         _ <- collection.updateOne(Filters.eq("_id", id.value.toString), Updates.set("status", "Closed"))
         closedApplication = application.copy(id = ApplicationId(UUID.randomUUID()))
         closedEvent = event.copy(id = ApplicationEventId(UUID.randomUUID()), applicationId = closedApplication.id)
-        closed <- repository.createForOpenJob(snapshot, closedApplication, closedEvent).value
+        closed <- repository
+          .createForOpenJobWithEvents(fresh, closedApplication, closedEvent, Nil, MutationWriteContext.directWrite)
+          .value
         count <- MongoRepositoryTestSupport.count(fixture.database, MongoCollections.Applications)
         history <- MongoRepositoryTestSupport.count(fixture.database, MongoCollections.ApplicationEvents)
       } yield {

@@ -195,7 +195,7 @@ final class InterviewCancellationAccessIntegrationSpec extends MongoIntegrationS
           InterviewLifecycleEvent.SwapCommitted,
           InterviewLifecycleEvent.ProposalExpired(now),
           InterviewLifecycleEvent.NotificationDelivered(InterviewParticipant.Candidate),
-          InterviewLifecycleEvent.RetryExhausted("provider"),
+          InterviewLifecycleEvent.RetryExhausted(InterviewFailureCode.Provider),
           InterviewLifecycleEvent.Repair
         )
         _ <- denied(

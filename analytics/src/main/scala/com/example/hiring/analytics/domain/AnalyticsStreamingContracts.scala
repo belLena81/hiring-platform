@@ -175,6 +175,19 @@ enum EventTimeAdmission {
   case Admitted(effectiveEventTime: Instant)
   case LateClosedDay(day: LocalDate)
   case TooFarInFuture
+
+  /** Status written to the Spark admission column. */
+  def wireStatus: String = this match {
+    case Admitted(_)      => EventTimeAdmission.OpenStatus
+    case LateClosedDay(_) => EventTimeAdmission.ClosedStatus
+    case TooFarInFuture   => EventTimeAdmission.FutureStatus
+  }
+}
+
+object EventTimeAdmission {
+  val OpenStatus = "OPEN"
+  val ClosedStatus = "CLOSED"
+  val FutureStatus = "FUTURE"
 }
 
 object AnalyticsEventTimePolicy {

@@ -6,6 +6,7 @@ import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.service.port.*
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.events.OperationalEventEnvelope
 import com.example.graphQL.cats.domain.pagination.JobPageRequest
 import com.example.graphQL.cats.service.search.JobSearchFilter
@@ -58,9 +59,6 @@ final class MongoJobRepository(
           MongoStoredDocumentDecoding.repository(document.traverse(MongoJobSubmissionSnapshotCodec.read))
         )
     )
-
-  override def findMany(ids: List[JobId]): RepositoryIO[List[Job]] =
-    MongoKeysetPaging.byId(collection, ids.map(_.value.toString))(MongoHiringCodecs.readJob)(diagnostics)
 
   override def relatedJobs(scope: HiringReadScope, keys: List[JobRelationKey]): RepositoryIO[List[RelatedJob]] = {
     import MongoAuthorizedReadQueries.*

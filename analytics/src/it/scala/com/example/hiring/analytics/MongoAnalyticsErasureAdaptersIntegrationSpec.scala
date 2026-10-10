@@ -711,9 +711,9 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends AnalyticsMongoIntegra
       assertEquals(saved, ErasureUpdate.Applied)
       val repair = store.queue.inspectRepairRequests(10).unsafeRunSync().head
       assertEquals(repair.requestId, asAccountSubjectId(requestId))
-      assertEquals(repair.phase, ErasurePhase.Requested.persistedName)
+      assertEquals(repair.phase, ErasurePhase.Requested)
       assertEquals(repair.attemptCount, 1)
-      assertEquals(repair.failureCategory, ErasureFailureCategory.InvalidState.persistedName)
+      assertEquals(repair.failureCategory, ErasureFailureCategory.InvalidState)
       assertEquals(store.queue.claim(now.plusSeconds(2L), now.plusSeconds(62L), 1).unsafeRunSync(), Vector.empty)
       assertEquals(
         store.queue.requeueRepair(asAccountSubjectId(requestId), 2, now.plusSeconds(3L)).unsafeRunSync(),

@@ -3,7 +3,6 @@ package com.example.graphQL.cats.api.graphql
 import cats.data.{EitherT, NonEmptyList}
 import cats.effect.IO
 import cats.syntax.all.*
-import com.example.graphQL.cats.api.admission.AuthRateLimiter
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.given
 import com.example.graphQL.cats.domain.error.DomainValidationError
@@ -36,7 +35,7 @@ private[graphql] object HiringGraphQLResolverSupport {
       case Right(result)                               => IO.pure(Right(result))
       case Left(UseCaseError.ValidationFailed(errors)) => IO.pure(Right(validationError(errors)))
       case Left(error)                                 =>
-        val failure = toGraphQLFailure(error)
+        val failure = GraphQLFailureCatalog.classify(error)
         if (failure.exceptional) IO.pure(Left(HiringGraphQLFailure.UseCase(error)))
         else IO.pure(Right(DomainError(failure.code, failure.message)))
     })
@@ -107,12 +106,6 @@ private[graphql] object HiringGraphQLResolverSupport {
       case _                 => EitherT.leftT(availabilityFailure)
     }
 
-  def rateLimited(
-      context: Context[RequestContext, Unit],
-      operation: AuthRateLimiter.Operation
-  ): HiringGraphQLResult[Unit] =
-    context.ctx.rateLimited(operation)
-
   def authenticatedSearch(
       context: Context[RequestContext, Unit]
   ): HiringGraphQLResult[
@@ -146,11 +139,8 @@ private[graphql] object HiringGraphQLResolverSupport {
     Connection(edges, PageInfo(values.size > requested, edges.lastOption.map(_.cursor)))
   }
 
-  def toGraphQLFailure(error: UseCaseError): GraphQLFailure =
-    GraphQLFailureCatalog.classify(error)
-
   private def validationError(errors: NonEmptyList[DomainValidationError]): ValidationError = {
-    val failure = toGraphQLFailure(UseCaseError.ValidationFailed(errors))
+    val failure = GraphQLFailureCatalog.classify(UseCaseError.ValidationFailed(errors))
     ValidationError(failure.code, failure.message)
   }
 
@@ -175,6 +165,9 @@ private[graphql] object HiringGraphQLResolverSupport {
     }
 
   def pageSize(first: Int): Either[GraphQLFailure, PageSize] =
-    PageSize.fromInt(first).toEither.leftMap(errors => toGraphQLFailure(UseCaseError.ValidationFailed(errors)))
+    PageSize
+      .fromInt(first)
+      .toEither
+      .leftMap(errors => GraphQLFailureCatalog.classify(UseCaseError.ValidationFailed(errors)))
 
 }

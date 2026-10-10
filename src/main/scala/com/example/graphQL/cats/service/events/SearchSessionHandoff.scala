@@ -4,11 +4,11 @@ import cats.effect.{Clock, IO, Resource}
 import cats.syntax.all.*
 import com.example.graphQL.cats.service.port.{
   PendingSearchSessionWork,
-  RepositoryError,
   SearchSessionWorkFailure,
   SearchSessionWorkRepository
 }
-import com.example.graphQL.cats.service.{BackgroundWorker, Diagnostics, LogEvent, LogField}
+import com.example.graphQL.cats.service.RepositoryError
+import com.example.graphQL.cats.service.{BackgroundWorker, Diagnostics, LogEvent, LogField, LogOutcome}
 import com.example.graphQL.cats.service.events.{OperationalEventEnvelope, SearchSession}
 
 import scala.concurrent.duration.*
@@ -49,7 +49,7 @@ object SearchSessionHandoff {
               diagnostics.emit(
                 LogEvent.RuntimeFailed,
                 fields = Map(
-                  LogField.Outcome -> "REJECTED",
+                  LogField.Outcome -> LogOutcome.Rejected.wire,
                   LogField.ErrorType -> errorType(error),
                   LogField.ErrorLocation -> "unavailable"
                 )
@@ -70,11 +70,12 @@ object SearchSessionHandoff {
           processClaim(repository, config, claim, now).flatMap {
             case WorkOutcome.Completed | WorkOutcome.RetryScheduled | WorkOutcome.Failed => IO.unit
             case WorkOutcome.OwnershipLost                                               =>
-              diagnostics.emit(LogEvent.RuntimeFailed, fields = Map(LogField.Outcome -> "OWNERSHIP_LOST"))
+              diagnostics.emit(LogEvent.RuntimeFailed, fields = Map(LogField.Outcome -> LogOutcome.OwnershipLost.wire))
             case WorkOutcome.RecoveryDeferred(error) =>
               diagnostics.emit(
                 LogEvent.RuntimeFailed,
-                fields = Map(LogField.Outcome -> "RECOVERY_DEFERRED", LogField.ErrorType -> errorType(error))
+                fields =
+                  Map(LogField.Outcome -> LogOutcome.RecoveryDeferred.wire, LogField.ErrorType -> errorType(error))
               ) *> IO.sleep(config.pollInterval)
           }
         case Right(None) => IO.sleep(config.pollInterval)
@@ -82,7 +83,7 @@ object SearchSessionHandoff {
           diagnostics.emit(
             LogEvent.RuntimeFailed,
             fields = Map(
-              LogField.Outcome -> "REJECTED",
+              LogField.Outcome -> LogOutcome.Rejected.wire,
               LogField.ErrorType -> errorType(error),
               LogField.ErrorLocation -> "unavailable"
             )

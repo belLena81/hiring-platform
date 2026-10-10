@@ -1,9 +1,10 @@
 package com.example.graphQL.cats.infrastructure.kafka
 
 import cats.effect.{IO, Resource}
+import cats.effect.std.UUIDGen
 import cats.syntax.all.*
-import com.example.graphQL.cats.config.KafkaSaslSecurityProtocol
-import com.example.graphQL.cats.service.Diagnostics
+import com.example.graphQL.cats.config.{InterviewRuntimeConfig, KafkaConfig, KafkaSaslSecurityProtocol}
+import com.example.graphQL.cats.service.{BackgroundWorker, Diagnostics}
 import com.example.graphQL.cats.service.port.{
   InterviewMessage,
   InterviewStep,
@@ -12,7 +13,6 @@ import com.example.graphQL.cats.service.port.{
   InterviewPublisherRole,
   InterviewPublisherGeneration,
   InterviewProducerGenerationFenced,
-  RepositoryError,
   RepositoryIO
 }
 import fs2.kafka.*
@@ -21,7 +21,6 @@ import io.circe.{Decoder, Encoder}
 import io.circe.generic.semiauto.*
 import io.circe.parser.decode
 import io.circe.syntax.*
-import org.apache.kafka.clients.consumer.ConsumerConfig
 
 import java.nio.charset.StandardCharsets
 import scala.concurrent.duration.*
@@ -36,10 +35,18 @@ object InterviewMessageCodec {
   )
   given Encoder[InterviewMessage] = deriveEncoder
   given Decoder[InterviewMessage] = deriveDecoder
+
+  /** The largest record either side of the transport will produce or accept. */
+  val MaxRecordBytes: Int = 65536
   def bytes(message: InterviewMessage): Array[Byte] = message.asJson.noSpaces.getBytes(StandardCharsets.UTF_8)
+
+  /** The wire bytes of an outgoing message, refused when they exceed the record limit. */
+  def encode(message: InterviewMessage): Either[String, Array[Byte]] =
+    Some(bytes(message)).filter(_.length <= MaxRecordBytes).toRight("interview record exceeds size limit")
+
   def parse(bytes: Array[Byte]): Either[String, InterviewMessage] =
     if (Option(bytes).isEmpty) Left("invalid null interview message")
-    else if (bytes.length > 65536) Left("interview record exceeds size limit")
+    else if (bytes.length > MaxRecordBytes) Left("interview record exceeds size limit")
     else
       decode[InterviewMessage](new String(bytes, StandardCharsets.UTF_8)).left
         .map(_ => "invalid interview message")
@@ -58,13 +65,16 @@ final case class InterviewKafkaConfig(
     password: String,
     protocol: KafkaSaslSecurityProtocol,
     worker: Boolean,
-    partitionConcurrency: Int = 4,
-    topics: com.example.graphQL.cats.domain.workflow.InterviewTopicPair =
-      com.example.graphQL.cats.domain.workflow.InterviewTopicPair.Default,
-    workerGroup: String = "hiring-interview-workers",
-    orchestratorGroup: String = "hiring-interview-orchestrator",
-    restartMaxDelaySeconds: Int = 30
+    partitionConcurrency: Int = InterviewKafkaConfig.Defaults.partitionConcurrency,
+    topics: com.example.graphQL.cats.domain.workflow.InterviewTopicPair = InterviewKafkaConfig.Defaults.topics,
+    workerGroup: String = InterviewKafkaConfig.Defaults.workerGroup,
+    orchestratorGroup: String = InterviewKafkaConfig.Defaults.orchestratorGroup,
+    restartMaxDelaySeconds: Int = KafkaConfig.DefaultRestartMaxDelaySeconds
 )
+
+object InterviewKafkaConfig {
+  private[kafka] val Defaults: InterviewRuntimeConfig = InterviewRuntimeConfig()
+}
 
 object InterviewKafkaRuntime {
 
@@ -84,70 +94,69 @@ object InterviewKafkaRuntime {
       .sha256(s"$topic:$partition:$offset:$digest:$reason")
   }
 
-  /** Callback true means inbox/state/outgoing intent or bounded quarantine has committed durably. A false response
-    * tears down the consumer before any later offset can be committed.
+  /** The callback succeeds once the inbox, state, outgoing intent or bounded quarantine has committed durably. A
+    * failure tears down the consumer before any later offset can be committed.
     */
   def resource(
       config: InterviewKafkaConfig,
       diagnostics: Diagnostics
   )(
-      receive: Either[String, InterviewMessage] => IO[Boolean]
+      receive: Either[String, InterviewMessage] => RepositoryIO[Unit]
   ): Resource[IO, InterviewTransport] =
     consumerResource(config, diagnostics)(receive) *> publisherResource(config, diagnostics)
 
   /** Producer initialization completes before the immutable generation is exposed for Mongo authorization. */
   def publisherResource(
       config: InterviewKafkaConfig,
-      diagnostics: Diagnostics = Diagnostics.noop
+      diagnostics: Diagnostics = Diagnostics.noop,
+      uuidGen: UUIDGen[IO] = UUIDGen[IO]
   ): Resource[IO, InterviewTransport] = {
     val producerSettings = KafkaClientSettings
-      .producer(config.bootstrapServers, Some(config.username), Some(config.password), config.protocol, 65536)
+      .producer(
+        config.bootstrapServers,
+        Some(config.username),
+        Some(config.password),
+        config.protocol,
+        InterviewMessageCodec.MaxRecordBytes
+      )
       .withCloseTimeout(5.seconds)
     val role = if (config.worker) InterviewPublisherRole.Worker else InterviewPublisherRole.Orchestrator
     val output = if (config.worker) config.topics.results else config.topics.commands
     for {
-      id <- Resource.eval(IO.randomUUID)
+      id <- Resource.eval(uuidGen.randomUUID)
       generation = InterviewPublisherGeneration(role, id)
-      producer <- OperationalEventKafkaRuntime.observedGeneration(generation.transactionalId, diagnostics)(
-        initializedProducer(
+      producer <- KafkaRuntimeSupport.observedGeneration(generation.transactionalId, diagnostics)(
+        GuardedTransactionalProducer.resource(
           TransactionalProducerSettings(generation.transactionalId, producerSettings),
           MkProducer.mkProducerForSync[IO]
         )
       )
     } yield new InterviewTransport {
       def generationFor(_message: InterviewMessage): InterviewPublisherGeneration = generation
-      def publish(message: InterviewMessage): IO[Unit] = {
-        val bytes = InterviewMessageCodec.bytes(message)
-        if (bytes.length > 65536) IO.raiseError(new IllegalArgumentException("interview record exceeds size limit"))
-        else
+      def publish(message: InterviewMessage): IO[Unit] =
+        IO.fromEither(InterviewMessageCodec.encode(message).leftMap(new IllegalArgumentException(_))).flatMap { bytes =>
           producer
             .produceWithoutOffsets(ProducerRecords.one(ProducerRecord(output, message.workflowId.toString, bytes)))
             .void
-            .handleErrorWith { error =>
-              if (OperationalEventKafkaRuntime.isProducerFenced(error))
-                IO.raiseError(InterviewProducerGenerationFenced(error))
-              else IO.raiseError(error)
+            .adaptError {
+              case error if KafkaRuntimeSupport.isProducerFenced(error) =>
+                InterviewProducerGenerationFenced(error)
             }
-      }
+        }
     }
   }
 
-  private[kafka] def initializedProducer(
-      settings: TransactionalProducerSettings[IO, String, Array[Byte]],
-      factory: MkProducer[IO]
-  ): Resource[IO, TransactionalKafkaProducer.WithoutOffsets[IO, String, Array[Byte]]] =
-    GuardedTransactionalProducer.resource(settings, factory)
-
   /** Consumers have independent lifetimes so replacing a fenced producer does not reset their offset frontier. */
   def consumerResource(config: InterviewKafkaConfig, diagnostics: Diagnostics)(
-      receive: Either[String, InterviewMessage] => IO[Boolean]
+      receive: Either[String, InterviewMessage] => RepositoryIO[Unit]
   ): Resource[IO, Unit] = {
-    val consumerSettings = KafkaClientSettings
-      .consumer(config.bootstrapServers, Some(config.username), Some(config.password), config.protocol)
-      .withGroupId(if (config.worker) config.workerGroup else config.orchestratorGroup)
-      .withEnableAutoCommit(false)
-      .withAutoOffsetReset(AutoOffsetReset.Earliest)
-      .withProperty(ConsumerConfig.ISOLATION_LEVEL_CONFIG, "read_committed")
+    val consumerSettings = KafkaClientSettings.committedConsumer(
+      config.bootstrapServers,
+      Some(config.username),
+      Some(config.password),
+      config.protocol,
+      if (config.worker) config.workerGroup else config.orchestratorGroup
+    )
     val input = if (config.worker) config.topics.commands else config.topics.results
     val consumer = KafkaPartitionProcessing(
       KafkaConsumer.stream(consumerSettings).subscribeTo(input).partitionedRecords,
@@ -156,30 +165,27 @@ object InterviewKafkaRuntime {
       val parsed = InterviewMessageCodec
         .parse(message.record.value)
         .flatMap(value => Either.cond(value.workflowId.toString == message.record.key, value, "workflow key mismatch"))
-      OperationalEventKafkaRuntime.processRecord(input, message.record.partition, message.record.offset)(
-        RepositoryIO.fromIOEither(
-          receive(
-            parsed.left.map(reason =>
-              rejectionIdentity(
-                input,
-                message.record.partition,
-                message.record.offset,
-                Option(message.record.value),
-                reason
-              )
+      KafkaRuntimeSupport.processRecord(input, message.record.partition, message.record.offset)(
+        receive(
+          parsed.left.map(reason =>
+            rejectionIdentity(
+              input,
+              message.record.partition,
+              message.record.offset,
+              Option(message.record.value),
+              reason
             )
-          ).map(durable => Either.cond(durable, (), RepositoryError.Unavailable))
+          )
         )
       )(message.offset.commit)
     }
-    Resource
-      .make(
-        OperationalEventKafkaRuntime
-          .resilientStream(diagnostics, consumer, 1.second, maxDelay = config.restartMaxDelaySeconds.seconds)
-          .compile
-          .drain
-          .start
-      )(_.cancel)
-      .void
+    BackgroundWorker.resource(InterviewConsumerWorker, diagnostics)(
+      KafkaRuntimeSupport
+        .resilientStream(diagnostics, consumer, 1.second, maxDelay = config.restartMaxDelaySeconds.seconds)
+        .compile
+        .drain
+    )
   }
+
+  private val InterviewConsumerWorker = "interview-consumer"
 }

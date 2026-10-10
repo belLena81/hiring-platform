@@ -1,7 +1,7 @@
 package com.example.graphQL.cats.infrastructure.kafka
 
 import com.example.graphQL.cats.config.{KafkaConfig, KafkaPublisherConfig, KafkaConsumerConfig, InterviewRuntimeConfig}
-import com.example.graphQL.cats.service.port.RepositoryError
+import com.example.graphQL.cats.service.RepositoryError
 import munit.FunSuite
 import java.util.UUID
 

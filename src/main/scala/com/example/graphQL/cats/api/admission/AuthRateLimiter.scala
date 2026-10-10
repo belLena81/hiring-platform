@@ -2,7 +2,7 @@ package com.example.graphQL.cats.api.admission
 
 import cats.effect.{IO, Resource}
 import com.comcast.ip4s.{Cidr, IpAddress}
-import com.example.graphQL.cats.config.AuthRateLimitConfig
+import com.example.graphQL.cats.config.RateLimitConfig
 import com.github.benmanes.caffeine.cache.Ticker
 
 /** Login and sign-up attempts per client network and operation. */
@@ -21,13 +21,13 @@ object AuthRateLimiter {
   enum Operation { case Login, SignUp }
 
   /** Preferred constructor for composition roots: the limiter is process-local and holds no releasable resources. */
-  def resource(config: AuthRateLimitConfig): Resource[IO, AuthRateLimiter] =
+  def resource(config: RateLimitConfig): Resource[IO, AuthRateLimiter] =
     Resource.eval(create(config))
 
-  def create(config: AuthRateLimitConfig): IO[AuthRateLimiter] =
+  def create(config: RateLimitConfig): IO[AuthRateLimiter] =
     create(config, Ticker.systemTicker())
 
-  private[admission] def create(config: AuthRateLimitConfig, ticker: Ticker): IO[AuthRateLimiter] =
+  private[admission] def create(config: RateLimitConfig, ticker: Ticker): IO[AuthRateLimiter] =
     FixedWindowRateLimiter
       .create[Key](config.windowSeconds, config.attempts, config.maxBuckets, ticker, normalize)
       .map(new AuthRateLimiter(_))

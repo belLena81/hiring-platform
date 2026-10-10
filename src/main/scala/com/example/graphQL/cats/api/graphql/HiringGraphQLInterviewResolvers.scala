@@ -164,7 +164,7 @@ private[graphql] object HiringGraphQLInterviewResolvers {
     EitherT(value.value.flatMap {
       case Right(workflow) => IO.pure(Right(workflow))
       case Left(InterviewActionError.UseCase(error)) if GraphQLFailureCatalog.isAuthorizationRefusal(error) =>
-        val failure = toGraphQLFailure(error)
+        val failure = GraphQLFailureCatalog.classify(error)
         IO.pure(Right(DomainError(failure.code, failure.message)))
       case Left(InterviewActionError.UseCase(error))  => mutationResult(EitherT.leftT(error)).value
       case Left(InterviewActionError.Workflow(error)) =>

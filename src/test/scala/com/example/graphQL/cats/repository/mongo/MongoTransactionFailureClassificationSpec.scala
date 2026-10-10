@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
-import com.example.graphQL.cats.service.port.RepositoryError
+import com.example.graphQL.cats.service.RepositoryError
 import com.mongodb.{MongoCommandException, MongoException, ServerAddress}
 import org.bson.BsonDocument
 import munit.FunSuite

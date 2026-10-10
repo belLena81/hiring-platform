@@ -28,10 +28,10 @@ object MongoWorkflowIntegrityAudit extends IOApp {
       MongoCollections.EventOutbox,
       MongoCollections.InterviewSubjectCleanup
     )
-    def scan(collectionName: String, after: Option[BsonValue]): IO[Unit] = {
+    def scan(collectionName: String, from: Option[BsonValue]): IO[Unit] = {
       val collection = Mongo4catsCollections.documents(database, collectionName)
-      collection
-        .flatMap(
+      MongoBatchScan.byId(BatchSize, from)(after =>
+        collection.flatMap(
           _.find(MongoInterviewCleanupSweepCodec.afterFilter(after))
             .sort(Sorts.ascending(MongoFields.Id))
             .limit(BatchSize)
@@ -39,61 +39,60 @@ object MongoWorkflowIntegrityAudit extends IOApp {
             .compile
             .toList
         )
-        .flatMap { rows =>
-          val validate =
-            if (collectionName == MongoCollections.InterviewWorkflowCommands)
-              rows.traverse_(row =>
-                IO.fromEither(
-                  MongoInterviewWorkflowCommandCodec
-                    .decodeStored(row)
-                    .left
-                    .map(_ => MigrationError.StepFailed(Audit, "rejected a command"))
-                ).void
-              )
-            else if (collectionName == MongoCollections.InterviewSubjectCleanup)
-              rows.traverse_(row =>
-                IO.fromEither(
-                  MongoInterviewCleanupCodec
-                    .decodeCurrent(row, topics)
-                    .leftMap(_ => MigrationError.StepFailed(Audit, "rejected cleanup evidence"))
-                ).void
-              )
-            else {
-              val invalid = new Document("$nor", List(MongoHiringValidators.outboxValidator).asJava)
-              collection
-                .flatMap(
-                  _.find(Filters.and(Filters.in(MongoFields.Id, rows.map(_.get(MongoFields.Id))*), invalid))
-                    .limit(1)
-                    .first
-                )
-                .flatMap {
-                  case None    => IO.unit
-                  case Some(_) => IO.raiseError(MigrationError.StepFailed(Audit, "rejected an outbox row"))
-                }
-            }
-          validate *> rows.lastOption.traverse_(row =>
-            ledger
+      )(row =>
+        IO.fromEither(
+          MongoInterviewCleanupSweepCodec
+            .identity(row)
+            .leftMap(_ => MigrationError.StepFailed(Audit, "invalid audit identity"))
+        )
+      ) { rows =>
+        val validate =
+          if (collectionName == MongoCollections.InterviewWorkflowCommands)
+            rows.traverse_(row =>
+              IO.fromEither(
+                MongoInterviewWorkflowCommandCodec
+                  .decodeStored(row)
+                  .left
+                  .map(_ => MigrationError.StepFailed(Audit, "rejected a command"))
+              ).void
+            )
+          else if (collectionName == MongoCollections.InterviewSubjectCleanup)
+            rows.traverse_(row =>
+              IO.fromEither(
+                MongoInterviewCleanupCodec
+                  .decodeCurrent(row, topics)
+                  .leftMap(_ => MigrationError.StepFailed(Audit, "rejected cleanup evidence"))
+              ).void
+            )
+          else {
+            val invalid = new Document("$nor", List(MongoHiringValidators.outboxValidator).asJava)
+            collection
               .flatMap(
-                _.updateOne(
-                  Filters.eq(MongoFields.Id, AuditId),
-                  Updates
-                    .combine(
-                      Updates.set("collection", collectionName),
-                      Updates.set(MongoFields.LastId, row.get(MongoFields.Id))
-                    ),
-                  new UpdateOptions().upsert(true)
-                )
+                _.find(Filters.and(Filters.in(MongoFields.Id, rows.map(_.get(MongoFields.Id))*), invalid))
+                  .limit(1)
+                  .first
               )
-              .void
-          ) *>
-            (if (rows.size == BatchSize)
-               IO.fromEither(
-                 rows.lastOption
-                   .traverse(MongoInterviewCleanupSweepCodec.identity)
-                   .leftMap(_ => MigrationError.StepFailed(Audit, "invalid audit identity"))
-               ).flatMap(scan(collectionName, _))
-             else IO.unit)
-        }
+              .flatMap {
+                case None    => IO.unit
+                case Some(_) => IO.raiseError(MigrationError.StepFailed(Audit, "rejected an outbox row"))
+              }
+          }
+        validate *> rows.lastOption.traverse_(row =>
+          ledger
+            .flatMap(
+              _.updateOne(
+                Filters.eq(MongoFields.Id, AuditId),
+                Updates
+                  .combine(
+                    Updates.set("collection", collectionName),
+                    Updates.set(MongoFields.LastId, row.get(MongoFields.Id))
+                  ),
+                new UpdateOptions().upsert(true)
+              )
+            )
+            .void
+        )
+      }
     }
     for {
       previous <- MongoSessionOperations.findById(ledger, None, AuditId)

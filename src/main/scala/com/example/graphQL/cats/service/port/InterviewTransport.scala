@@ -30,16 +30,6 @@ final case class InterviewPublisherGeneration(role: InterviewPublisherRole, id: 
 final case class InterviewProducerGenerationFenced(cause: Throwable)
     extends RuntimeException("interview producer generation was fenced", cause)
 
-object InterviewResult {
-  def fromCommandResult(value: InterviewCommandResult): InterviewResult = value match {
-    case InterviewCommandResult.Succeeded      => Succeeded
-    case InterviewCommandResult.Rejected       => Rejected
-    case InterviewCommandResult.OutcomeUnknown => OutcomeUnknown
-    case InterviewCommandResult.Found          => Found
-    case InterviewCommandResult.Absent         => Absent
-  }
-}
-
 /** A coordination envelope: participant identities and scheduling details stay in MongoDB. */
 final case class InterviewMessage(
     messageId: UUID,

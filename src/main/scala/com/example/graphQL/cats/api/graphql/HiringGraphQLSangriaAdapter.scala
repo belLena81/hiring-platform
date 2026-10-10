@@ -60,7 +60,7 @@ private[graphql] final class HiringGraphQLSangriaAdapter(dispatcher: Dispatcher[
   ): HandledException =
     failure match {
       case HiringGraphQLFailure.UseCase(error) =>
-        handledGraphQLFailure(marshaller, HiringGraphQLResolverSupport.toGraphQLFailure(error))
+        handledGraphQLFailure(marshaller, GraphQLFailureCatalog.classify(error))
       case HiringGraphQLFailure.Input(error)         => handledGraphQLFailure(marshaller, error)
       case HiringGraphQLFailure.RateLimited(seconds) =>
         HandledException(

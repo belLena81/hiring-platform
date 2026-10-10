@@ -46,8 +46,14 @@ private[graphql] object HiringGraphQLInputs {
   lazy val candidateAvailabilityStatus: EnumType[CandidateAvailabilityStatus] =
     enumType("CandidateAvailabilityStatus", CandidateAvailabilityStatus.values.toList)
 
-  private def enumType[A](name: String, values: List[A]): EnumType[A] =
-    EnumType(name, values = values.map(value => EnumValue(value.toString.toUpperCase(Locale.ROOT), value = value)))
+  /** The wire name of each value is its case name in SCREAMING_SNAKE_CASE. */
+  private[graphql] def enumType[A](name: String, values: List[A]): EnumType[A] =
+    EnumType(
+      name,
+      values = values.map(value =>
+        EnumValue(value.toString.replaceAll("([a-z])([A-Z])", "$1_$2").toUpperCase(Locale.ROOT), value = value)
+      )
+    )
 
   private def stringScalar[A](name: String, parse: String => Either[Violation, A], render: A => String): ScalarType[A] =
     ScalarType[A](

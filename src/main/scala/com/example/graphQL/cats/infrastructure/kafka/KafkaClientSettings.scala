@@ -3,6 +3,7 @@ package com.example.graphQL.cats.infrastructure.kafka
 import cats.effect.IO
 import com.example.graphQL.cats.config.KafkaSaslSecurityProtocol
 import fs2.kafka.*
+import org.apache.kafka.clients.consumer.ConsumerConfig
 import org.apache.kafka.clients.producer.ProducerConfig
 
 /** The single builder of Kafka client transport, SASL and producer reliability settings for the application build. */
@@ -62,6 +63,22 @@ object KafkaClientSettings {
       .withProperty(ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG, ProducerRequestTimeoutMillis.toString)
       .withProperties(security(username, password, protocol))
 
+  /** Connection, bounded API timeouts and security for the blocking admin and plain consumer clients. */
+  def clientProperties(
+      bootstrapServers: String,
+      username: Option[String],
+      password: Option[String],
+      protocol: KafkaSaslSecurityProtocol
+  ): java.util.Properties = {
+    val properties = new java.util.Properties()
+    (Map(
+      "bootstrap.servers" -> bootstrapServers,
+      "request.timeout.ms" -> ProducerRequestTimeoutMillis.toString,
+      "default.api.timeout.ms" -> ProducerRequestTimeoutMillis.toString
+    ) ++ security(username, password, protocol)).foreach { case (key, value) => properties.setProperty(key, value) }
+    properties
+  }
+
   def consumer(
       bootstrapServers: String,
       username: Option[String],
@@ -71,4 +88,18 @@ object KafkaClientSettings {
     ConsumerSettings(Deserializer[IO, String], Deserializer[IO, Array[Byte]])
       .withBootstrapServers(bootstrapServers)
       .withProperties(security(username, password, protocol))
+
+  /** A group member that commits offsets only after its records are durable and never reads aborted transactions. */
+  def committedConsumer(
+      bootstrapServers: String,
+      username: Option[String],
+      password: Option[String],
+      protocol: KafkaSaslSecurityProtocol,
+      groupId: String
+  ): ConsumerSettings[IO, String, Array[Byte]] =
+    consumer(bootstrapServers, username, password, protocol)
+      .withGroupId(groupId)
+      .withEnableAutoCommit(false)
+      .withAutoOffsetReset(AutoOffsetReset.Earliest)
+      .withProperty(ConsumerConfig.ISOLATION_LEVEL_CONFIG, "read_committed")
 }

@@ -11,11 +11,11 @@ import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.service.port.{
   AnalyticsErasureRequestRepository,
   MutationWriteContext,
-  RepositoryError,
   UserAccountRepository,
   UserRepository,
   MutationEntityReference
 }
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.*
 import com.example.graphQL.cats.service.protocol.*
 import com.example.graphQL.cats.service.mutation.Idempotent
@@ -78,7 +78,7 @@ final class UserAccountService(
           case RepositoryError.Conflict => UseCaseError.Account(AccountError.NameTaken)
           case error                    => UseCaseError.Repository(error)
         }
-      } yield issued).semiflatTap(_ => wakeCandidateAfterCommit)
+      } yield issued).semiflatTap(_ => embeddingWork.wakeAfterCommit(diagnostics))
 
   override def login(request: IdempotencyRequest, input: LoginInput): UseCaseIO[(User, AccountToken)] =
     idempotent.execute(
@@ -92,14 +92,24 @@ final class UserAccountService(
     }
 
   private def loginOnce(input: LoginInput, now: Instant): UseCaseIO[(User, AccountToken)] =
-    UseCaseIO.repository(accounts.findByCanonicalName(canonicalName(input.name))).flatMap {
-      case Some(credentials) if credentials.user.accountStatus == AccountStatus.Active =>
-        EitherT.liftF(hasher.verify(credentials.passwordHash, input.password)).flatMap {
+    UseCaseIO
+      .repository(accounts.findByCanonicalName(canonicalName(input.name)))
+      .flatMap(found =>
+        verified(found.filter(_.user.accountStatus == AccountStatus.Active), input.password)(token(_, now))
+      )
+
+  /** Every refusal costs one password verification, so an unknown or inactive account is not distinguishable. */
+  private def verified(credentials: Option[AccountCredentials], password: String)(
+      issue: User => UseCaseIO[(User, AccountToken)]
+  ): UseCaseIO[(User, AccountToken)] =
+    credentials match {
+      case Some(known) =>
+        EitherT.liftF(hasher.verify(known.passwordHash, password)).flatMap {
+          case true  => issue(known.user)
           case false => EitherT.leftT(UseCaseError.Account(AccountError.InvalidCredentials))
-          case true  => token(credentials.user, now)
         }
-      case _ =>
-        EitherT.liftF(hasher.verifyUnknown(input.password)) *>
+      case None =>
+        EitherT.liftF(hasher.verifyUnknown(password)) *>
           EitherT.leftT(UseCaseError.Account(AccountError.InvalidCredentials))
     }
 
@@ -135,7 +145,7 @@ final class UserAccountService(
         ) *>
           UseCaseIO
             .repository(accounts.updateProfile(user.id, input.profile, now, context))
-            .semiflatTap(_ => wakeCandidateAfterCommit)
+            .semiflatTap(_ => embeddingWork.wakeAfterCommit(diagnostics))
     }
 
   override def deleteMyAccount(request: IdempotencyRequest, actor: ActorContext): UseCaseIO[String] =
@@ -197,19 +207,18 @@ final class UserAccountService(
       password: String,
       reference: MutationEntityReference
   ): UseCaseIO[(User, AccountToken)] =
-    UseCaseIO.repository(accounts.findByCanonicalName(canonicalName(name))).flatMap {
-      case Some(credentials)
-          if credentials.user.id.value.toString == reference.entityId &&
-            credentials.user.accountStatus == AccountStatus.Active &&
-            canonicalName(credentials.user.name) == canonicalName(name) =>
-        EitherT.liftF(hasher.verify(credentials.passwordHash, password)).flatMap {
-          case true  => EitherT.liftF(clock.realTimeInstant).flatMap(token(credentials.user, _))
-          case false => EitherT.leftT(UseCaseError.Account(AccountError.InvalidCredentials))
-        }
-      case _ =>
-        EitherT.liftF(hasher.verifyUnknown(password)) *>
-          EitherT.leftT(UseCaseError.Account(AccountError.InvalidCredentials))
-    }
+    UseCaseIO
+      .repository(accounts.findByCanonicalName(canonicalName(name)))
+      .flatMap(found =>
+        verified(
+          found.filter(credentials =>
+            credentials.user.id.value.toString == reference.entityId &&
+              credentials.user.accountStatus == AccountStatus.Active &&
+              canonicalName(credentials.user.name) == canonicalName(name)
+          ),
+          password
+        )(user => EitherT.liftF(clock.realTimeInstant).flatMap(token(user, _)))
+      )
 
   private def replayUser(actor: ActorContext): MutationEntityReference => UseCaseIO[User] =
     Idempotent.replayById("user", UserId.apply) { userId =>
@@ -251,9 +260,4 @@ final class UserAccountService(
 
   private def canonicalName(value: String): String =
     AccountName.canonical(value)
-
-  private def wakeCandidateAfterCommit: IO[Unit] =
-    embeddingWork.wake.handleErrorWith(error =>
-      diagnostics.emit(LogEvent.EmbeddingWakeFailed, fields = LogFields.failure(error))
-    )
 }

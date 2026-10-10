@@ -22,7 +22,7 @@ final class StreamingCheckpointReconciliationSpec extends FunSuite {
     Vector(StreamingPartitionEndOffset.from("hiring.events", 0, 15L).toEither.toOption.get),
     Vector(summary)
   )
-  private val state = StreamingJournalState(preparation, true, None, None)
+  private val state = StreamingJournalState(preparation, StreamingJournalProgress.IngestionCommitted, None)
   private val batch = StreamingCheckpointBatch(batchId, Map(("hiring.events", 0) -> 15L), committed = false)
 
   test("an offset record without a Spark commit can recover from its matching durable preparation") {
@@ -55,7 +55,7 @@ final class StreamingCheckpointReconciliationSpec extends FunSuite {
         sourceEndOffsets = Vector(StreamingPartitionEndOffset.from("hiring.events", 0, 11L).toEither.toOption.get),
         deliveredOffsets = Vector(priorSummary)
       ),
-      terminalOutcome = Some(StreamingTerminalOutcome.Published)
+      progress = StreamingJournalProgress.Terminal(StreamingTerminalOutcome.Published)
     )
     val withPriorAck = new DeltaStreamingCheckpointAcknowledgement[IO](new Journal(Vector(priorState, state)))
     assert(
@@ -109,7 +109,7 @@ final class StreamingCheckpointReconciliationSpec extends FunSuite {
   }
 
   test("bootstrap rejects an empty checkpoint when durable lineage progress already exists") {
-    val terminalState = state.copy(terminalOutcome = Some(StreamingTerminalOutcome.Published))
+    val terminalState = state.copy(progress = StreamingJournalProgress.Terminal(StreamingTerminalOutcome.Published))
     val ack = new DeltaStreamingCheckpointAcknowledgement[IO](new Journal(Vector(terminalState)))
     assert(
       ack

@@ -10,9 +10,13 @@ final case class InterviewWorkflowId(value: UUID)
 final case class InterviewInterval(startsAt: Instant, endsAt: Instant)
 
 object InterviewInterval {
+
+  /** Stored times have millisecond precision, so every comparison and fingerprint uses the truncated instant. */
+  def canonical(instant: Instant): Instant = instant.truncatedTo(java.time.temporal.ChronoUnit.MILLIS)
+
   def validate(startsAt: Instant, endsAt: Instant, now: Instant): Either[InterviewWorkflowError, InterviewInterval] = {
-    val canonicalStart = startsAt.truncatedTo(java.time.temporal.ChronoUnit.MILLIS)
-    val canonicalEnd = endsAt.truncatedTo(java.time.temporal.ChronoUnit.MILLIS)
+    val canonicalStart = canonical(startsAt)
+    val canonicalEnd = canonical(endsAt)
     if (!canonicalStart.isAfter(now)) Left(InterviewWorkflowError.StartMustBeInFuture)
     else if (!canonicalEnd.isAfter(canonicalStart)) Left(InterviewWorkflowError.EndMustFollowStart)
     else Right(InterviewInterval(canonicalStart, canonicalEnd))
@@ -75,7 +79,7 @@ enum InterviewWorkflowEvent {
   case NotificationOutcomeUnknown(participant: InterviewParticipant)
   case NotificationLookupFound(participant: InterviewParticipant)
   case NotificationLookupAbsent(participant: InterviewParticipant)
-  case RetryExhausted(step: String)
+  case RetryExhausted(step: InterviewFailureCode)
 }
 
 enum InterviewWorkflowCommand {
@@ -86,7 +90,7 @@ enum InterviewWorkflowCommand {
   case ReleaseCalendarSlot(idempotencyKey: String)
   case Notify(participant: InterviewParticipant, idempotencyKey: String)
   case LookupNotificationReceipt(participant: InterviewParticipant, idempotencyKey: String)
-  case RequireRepair(reason: String)
+  case RequireRepair(reason: InterviewRepairReason)
 }
 
 final case class InterviewWorkflow(
@@ -191,14 +195,21 @@ object InterviewWorkflow {
       InterviewWorkflowError.ApplicationMustBeAccepted
     )
 
+  /** One stale-revision rule for every interview decision; `Long.MaxValue` could not be incremented. */
+  def revisionMatches(workflow: InterviewWorkflow, expectedRevision: Long): Boolean =
+    workflow.revision == expectedRevision && expectedRevision != Long.MaxValue
+
+  /** The stable idempotency key of a scheduling notification. */
+  def notificationKey(id: InterviewWorkflowId, participant: InterviewParticipant): String =
+    s"${id.value}:notify:$participant"
+
   /** Pure policy: the caller persists the returned state and command intent in one transaction. */
   def decide(
       workflow: InterviewWorkflow,
       expectedRevision: Long,
       event: InterviewWorkflowEvent
   ): Either[InterviewWorkflowError, InterviewWorkflowDecision] =
-    if (workflow.revision != expectedRevision || expectedRevision == Long.MaxValue)
-      Left(InterviewWorkflowError.StaleRevision)
+    if (!revisionMatches(workflow, expectedRevision)) Left(InterviewWorkflowError.StaleRevision)
     else
       transition(workflow, event).map { case (phase, notified, commands) =>
         InterviewWorkflowDecision(
@@ -207,184 +218,57 @@ object InterviewWorkflow {
         )
       }
 
+  private type Step = (InterviewWorkflowPhase, Set[InterviewParticipant], List[InterviewWorkflowCommand])
+
   private def transition(
       workflow: InterviewWorkflow,
       event: InterviewWorkflowEvent
-  ): Either[
-    InterviewWorkflowError,
-    (InterviewWorkflowPhase, Set[InterviewParticipant], List[InterviewWorkflowCommand])
-  ] = {
+  ): Either[InterviewWorkflowError, Step] = {
+    import InterviewWorkflowPhase.*
+    import InterviewWorkflowEvent as Event
+    import InterviewWorkflowCommand as Command
     val releaseKey = s"${workflow.id.value}:release"
-    val notifyKey = (participant: InterviewParticipant) => s"${workflow.id.value}:notify:${participant.toString}"
+    def notifyKey(participant: InterviewParticipant) = notificationKey(workflow.id, participant)
+    def move(phase: InterviewWorkflowPhase, commands: Command*): Either[InterviewWorkflowError, Step] =
+      Right((phase, workflow.notified, commands.toList))
+    def delivered(participant: InterviewParticipant): Either[InterviewWorkflowError, Step] = {
+      val all = workflow.notified + participant
+      Right((if (all.size == 2) Completed else NotificationsPending, all, Nil))
+    }
+    val commit = Command.CommitAcceptedToInterview(ApplicationStatus.Accepted)
+    val notifyBoth = InterviewParticipant.values.toList.map(p => Command.Notify(p, notifyKey(p)))
+
     (workflow.phase, event) match {
-      case (InterviewWorkflowPhase.ReservationPending, InterviewWorkflowEvent.ReservationConfirmed) =>
-        Right(
-          (
-            InterviewWorkflowPhase.StatusCommitPending,
-            workflow.notified,
-            List(InterviewWorkflowCommand.CommitAcceptedToInterview(ApplicationStatus.Accepted))
-          )
-        )
-      case (InterviewWorkflowPhase.ReservationPending, InterviewWorkflowEvent.ReservationOutcomeUnknown) =>
-        Right(
-          (
-            InterviewWorkflowPhase.ReservationPending,
-            workflow.notified,
-            List(InterviewWorkflowCommand.LookupCalendarReservation(workflow.id))
-          )
-        )
-      case (InterviewWorkflowPhase.ReservationPending, InterviewWorkflowEvent.ReservationLookupFound) =>
-        Right(
-          (
-            InterviewWorkflowPhase.StatusCommitPending,
-            workflow.notified,
-            List(InterviewWorkflowCommand.CommitAcceptedToInterview(ApplicationStatus.Accepted))
-          )
-        )
-      case (InterviewWorkflowPhase.ReservationPending, InterviewWorkflowEvent.ReservationLookupAbsent) =>
-        Right(
-          (
-            InterviewWorkflowPhase.ReservationPending,
-            workflow.notified,
-            List(InterviewWorkflowCommand.ReserveCalendarSlot(reservationKey(workflow.id, 0)))
-          )
-        )
-      case (InterviewWorkflowPhase.ReservationPending, InterviewWorkflowEvent.ReservationRejected) =>
-        Right(
-          (
-            InterviewWorkflowPhase.RepairRequired,
-            workflow.notified,
-            List(InterviewWorkflowCommand.RequireRepair("calendar reservation rejected"))
-          )
-        )
-      case (InterviewWorkflowPhase.ReservationPending, InterviewWorkflowEvent.RetryExhausted(step)) =>
-        Right(
-          (
-            InterviewWorkflowPhase.RepairRequired,
-            workflow.notified,
-            List(InterviewWorkflowCommand.RequireRepair(s"retry exhausted: $step"))
-          )
-        )
-      case (InterviewWorkflowPhase.StatusCommitPending, InterviewWorkflowEvent.StatusCommitted) =>
-        Right(
-          (
-            InterviewWorkflowPhase.NotificationsPending,
-            workflow.notified,
-            List(
-              InterviewWorkflowCommand
-                .Notify(InterviewParticipant.Candidate, notifyKey(InterviewParticipant.Candidate)),
-              InterviewWorkflowCommand.Notify(InterviewParticipant.Recruiter, notifyKey(InterviewParticipant.Recruiter))
-            )
-          )
-        )
-      case (InterviewWorkflowPhase.StatusCommitPending, InterviewWorkflowEvent.StatusCommitOutcomeUnknown) =>
-        Right(
-          (
-            InterviewWorkflowPhase.StatusCommitPending,
-            workflow.notified,
-            List(InterviewWorkflowCommand.LookupStatusCommitReceipt(workflow.id))
-          )
-        )
-      case (InterviewWorkflowPhase.StatusCommitPending, InterviewWorkflowEvent.StatusLookupFound) =>
-        Right(
-          (
-            InterviewWorkflowPhase.NotificationsPending,
-            workflow.notified,
-            List(
-              InterviewWorkflowCommand
-                .Notify(InterviewParticipant.Candidate, notifyKey(InterviewParticipant.Candidate)),
-              InterviewWorkflowCommand.Notify(InterviewParticipant.Recruiter, notifyKey(InterviewParticipant.Recruiter))
-            )
-          )
-        )
-      case (InterviewWorkflowPhase.StatusCommitPending, InterviewWorkflowEvent.StatusLookupAbsent) =>
-        Right(
-          (
-            InterviewWorkflowPhase.StatusCommitPending,
-            workflow.notified,
-            List(InterviewWorkflowCommand.CommitAcceptedToInterview(ApplicationStatus.Accepted))
-          )
-        )
-      case (InterviewWorkflowPhase.StatusCommitPending, InterviewWorkflowEvent.StatusCommitRejected) =>
-        Right(
-          (
-            InterviewWorkflowPhase.CompensationPending,
-            workflow.notified,
-            List(InterviewWorkflowCommand.ReleaseCalendarSlot(releaseKey))
-          )
-        )
-      case (InterviewWorkflowPhase.StatusCommitPending, InterviewWorkflowEvent.RetryExhausted(step)) =>
-        Right(
-          (
-            InterviewWorkflowPhase.RepairRequired,
-            workflow.notified,
-            List(InterviewWorkflowCommand.RequireRepair(s"retry exhausted: $step"))
-          )
-        )
-      case (InterviewWorkflowPhase.CompensationPending, InterviewWorkflowEvent.ReservationReleaseOutcomeUnknown) =>
-        Right(
-          (
-            InterviewWorkflowPhase.CompensationPending,
-            workflow.notified,
-            List(InterviewWorkflowCommand.ReleaseCalendarSlot(releaseKey))
-          )
-        )
-      case (InterviewWorkflowPhase.CompensationPending, InterviewWorkflowEvent.ReservationReleased) =>
-        Right(
-          (
-            InterviewWorkflowPhase.RepairRequired,
-            workflow.notified,
-            List(InterviewWorkflowCommand.RequireRepair("application status was not committed"))
-          )
-        )
-      case (InterviewWorkflowPhase.CompensationPending, InterviewWorkflowEvent.RetryExhausted(step)) =>
-        Right(
-          (
-            InterviewWorkflowPhase.RepairRequired,
-            workflow.notified,
-            List(InterviewWorkflowCommand.RequireRepair(s"compensation failed: $step"))
-          )
-        )
-      case (InterviewWorkflowPhase.NotificationsPending, InterviewWorkflowEvent.NotificationDelivered(participant)) =>
-        val delivered = workflow.notified + participant
-        val next =
-          if (delivered.size == 2) InterviewWorkflowPhase.Completed else InterviewWorkflowPhase.NotificationsPending
-        Right((next, delivered, Nil))
-      case (
-            InterviewWorkflowPhase.NotificationsPending,
-            InterviewWorkflowEvent.NotificationOutcomeUnknown(participant)
-          ) =>
-        Right(
-          (
-            InterviewWorkflowPhase.NotificationsPending,
-            workflow.notified,
-            List(InterviewWorkflowCommand.LookupNotificationReceipt(participant, notifyKey(participant)))
-          )
-        )
-      case (InterviewWorkflowPhase.NotificationsPending, InterviewWorkflowEvent.NotificationLookupFound(participant)) =>
-        val delivered = workflow.notified + participant
-        val next =
-          if (delivered.size == 2) InterviewWorkflowPhase.Completed else InterviewWorkflowPhase.NotificationsPending
-        Right((next, delivered, Nil))
-      case (
-            InterviewWorkflowPhase.NotificationsPending,
-            InterviewWorkflowEvent.NotificationLookupAbsent(participant)
-          ) =>
-        Right(
-          (
-            InterviewWorkflowPhase.NotificationsPending,
-            workflow.notified,
-            List(InterviewWorkflowCommand.Notify(participant, notifyKey(participant)))
-          )
-        )
-      case (InterviewWorkflowPhase.NotificationsPending, InterviewWorkflowEvent.RetryExhausted(step)) =>
-        Right(
-          (
-            InterviewWorkflowPhase.RepairRequired,
-            workflow.notified,
-            List(InterviewWorkflowCommand.RequireRepair(s"retry exhausted: $step"))
-          )
-        )
+      case (ReservationPending, Event.ReservationConfirmed | Event.ReservationLookupFound) =>
+        move(StatusCommitPending, commit)
+      case (ReservationPending, Event.ReservationOutcomeUnknown) =>
+        move(ReservationPending, Command.LookupCalendarReservation(workflow.id))
+      case (ReservationPending, Event.ReservationLookupAbsent) =>
+        move(ReservationPending, Command.ReserveCalendarSlot(reservationKey(workflow.id, 0)))
+      case (ReservationPending, Event.ReservationRejected) =>
+        move(RepairRequired, Command.RequireRepair(InterviewRepairReason.CalendarReservationRejected))
+      case (ReservationPending | StatusCommitPending | NotificationsPending, Event.RetryExhausted(step)) =>
+        move(RepairRequired, Command.RequireRepair(InterviewRepairReason.RetryExhausted(step)))
+      case (StatusCommitPending, Event.StatusCommitted | Event.StatusLookupFound) =>
+        move(NotificationsPending, notifyBoth*)
+      case (StatusCommitPending, Event.StatusCommitOutcomeUnknown) =>
+        move(StatusCommitPending, Command.LookupStatusCommitReceipt(workflow.id))
+      case (StatusCommitPending, Event.StatusLookupAbsent) =>
+        move(StatusCommitPending, commit)
+      case (StatusCommitPending, Event.StatusCommitRejected) =>
+        move(CompensationPending, Command.ReleaseCalendarSlot(releaseKey))
+      case (CompensationPending, Event.ReservationReleaseOutcomeUnknown) =>
+        move(CompensationPending, Command.ReleaseCalendarSlot(releaseKey))
+      case (CompensationPending, Event.ReservationReleased) =>
+        move(RepairRequired, Command.RequireRepair(InterviewRepairReason.StatusNotCommitted))
+      case (CompensationPending, Event.RetryExhausted(step)) =>
+        move(RepairRequired, Command.RequireRepair(InterviewRepairReason.CompensationFailed(step)))
+      case (NotificationsPending, Event.NotificationDelivered(p))      => delivered(p)
+      case (NotificationsPending, Event.NotificationLookupFound(p))    => delivered(p)
+      case (NotificationsPending, Event.NotificationOutcomeUnknown(p)) =>
+        move(NotificationsPending, Command.LookupNotificationReceipt(p, notifyKey(p)))
+      case (NotificationsPending, Event.NotificationLookupAbsent(p)) =>
+        move(NotificationsPending, Command.Notify(p, notifyKey(p)))
       case _ => Left(InterviewWorkflowError.InvalidTransition)
     }
   }

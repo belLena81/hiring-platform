@@ -36,7 +36,7 @@ final class InterviewExecutionPolicySpec extends FunSuite {
   test("recorded results and obsolete commands stop admission before lease or budget observation") {
     val executing = command.copy(state = InterviewWorkflowCommandState.Executing)
     assertEquals(
-      InterviewExecutionPolicy.admission(workflow, executing.copy(result = Some(InterviewCommandResult.Succeeded))),
+      InterviewExecutionPolicy.admission(workflow, executing.copy(result = Some(InterviewResult.Succeeded))),
       InterviewExecutionAdmission.AlreadyHandled
     )
     assertEquals(

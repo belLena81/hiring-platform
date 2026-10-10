@@ -18,7 +18,12 @@ private[config] final case class TransportSettings(
 private[config] final case class AuthSettings(
     jwt: JwtAuthConfig,
     passwordHash: PasswordHashConfig,
-    rateLimit: AuthRateLimitConfig,
-    interviewActionRateLimit: InterviewActionRateLimitConfig,
+    rateLimit: RateLimitConfig,
+    interviewActionRateLimit: RateLimitConfig,
     adminSeed: AdminSeedConfig
 )
+
+/** Placeholder written into configuration files where a secret or key is intentionally switched off. */
+private[config] object DisabledSetting {
+  def unset(value: Option[String]): Option[String] = value.filter(_ != "disabled")
+}

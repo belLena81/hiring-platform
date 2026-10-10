@@ -6,7 +6,7 @@ import cats.syntax.all.*
 import com.example.graphQL.cats.api.auth.AuthFailure
 import com.example.graphQL.cats.api.graphql.{GraphQLRequest, HiringGraphQLSchema, RequestContextParameters}
 import com.example.graphQL.cats.shared.HiringHttpPaths
-import com.example.graphQL.cats.service.{ActorContext, Diagnostics, HealthService, LogEvent, LogField}
+import com.example.graphQL.cats.service.{ActorContext, Diagnostics, HealthService, LogEvent, LogField, LogOutcome}
 import com.example.graphQL.cats.service.Diagnostics.*
 import com.example.graphQL.cats.service.FailureReason
 import io.circe.Json
@@ -131,7 +131,7 @@ private[http] final class GraphQLHttpRoutes(
     val operationName = document.flatMap(_.operation(parsed.operationName).flatMap(_.name)).orElse(parsed.operationName)
     val fields = Map(
       LogField.Outcome ->
-        (if (result.hcursor.downField("errors").succeeded) "FIELD_ERROR" else "COMPLETED")
+        (if (result.hcursor.downField("errors").succeeded) LogOutcome.FieldError else LogOutcome.Completed).wire
     ) ++
       operationName.map(LogField.OperationName -> _)
     diagnostics

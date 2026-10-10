@@ -48,7 +48,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
         )
         .use { publisher =>
           for {
-            _ <- publisher.offer(EmbeddingWork.JobChanged(jobId))
+            _ <- Offering(work, publisher).offer(EmbeddingWork.JobChanged(jobId))
             _ <- IO.sleep(100.millis)
             beforeSetup <- calls.get
             _ <- setup.complete(true)
@@ -182,8 +182,8 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
           durableRetry = new DurableRetrySettings(attempts = 1)
         )
         .use { publisher =>
-          val key = DurableEmbeddingWorkPublisher.keyFor(EmbeddingWork.JobChanged(jobId))
-          publisher.offer(EmbeddingWork.JobChanged(jobId)) *>
+          val key = EmbeddingWorkKeys.keyFor(EmbeddingWork.JobChanged(jobId))
+          Offering(work, publisher).offer(EmbeddingWork.JobChanged(jobId)) *>
             eventually(work.snapshot)(
               _.get(key.value).exists(_.failure.contains(EmbeddingWorkFailure.RetryExhausted))
             ).void
@@ -191,7 +191,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
       snapshot <- work.snapshot
       attempts <- calls.get
     } yield {
-      val stored = snapshot(DurableEmbeddingWorkPublisher.keyFor(EmbeddingWork.JobChanged(jobId)).value)
+      val stored = snapshot(EmbeddingWorkKeys.keyFor(EmbeddingWork.JobChanged(jobId)).value)
       assertEquals(attempts, 3)
       assertEquals(stored.attempts, 0)
       assertEquals(stored.state, "Failed")
@@ -211,7 +211,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
           override def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] =
             IO.monotonic.flatMap(time => calls.update(_ :+ time)).as(Left(failure))
         }
-        key = DurableEmbeddingWorkPublisher.keyFor(EmbeddingWork.JobChanged(jobId))
+        key = EmbeddingWorkKeys.keyFor(EmbeddingWork.JobChanged(jobId))
         _ <- successful(work.enqueue(key, now))
         _ <- controlledWorker(
           ObservableWork(work, completion),
@@ -258,7 +258,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
           override def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] =
             IO.pure(Right(EmbeddingVector(List(0.1f, 0.2f), "another-model", 2)))
         }
-        key = DurableEmbeddingWorkPublisher.keyFor(change)
+        key = EmbeddingWorkKeys.keyFor(change)
         _ <- successful(work.enqueue(key, now))
         _ <- controlledWorker(
           ObservableWork(work, completion),
@@ -298,7 +298,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
             writeFailure = if (failFetch) None else Some(failure),
             onFind = fetches.update(_ + 1)
           )
-          key = DurableEmbeddingWorkPublisher.keyFor(EmbeddingWork.JobChanged(jobId))
+          key = EmbeddingWorkKeys.keyFor(EmbeddingWork.JobChanged(jobId))
           _ <- successful(work.enqueue(key, now))
           _ <- controlledWorker(
             ObservableWork(work, completion),
@@ -338,7 +338,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
       observed <- Ref.of[IO, List[LogEvent]](Nil)
       clock <- Ref.of[IO, Instant](now)
       work <- InMemoryEmbeddingWorkRepository.create
-      key = DurableEmbeddingWorkPublisher.keyFor(EmbeddingWork.JobChanged(jobId))
+      key = EmbeddingWorkKeys.keyFor(EmbeddingWork.JobChanged(jobId))
       _ <- successful(work.enqueue(key, now))
       interruptedWork = new EmbeddingWorkRepository {
         override def enqueue(value: EmbeddingWorkKey, at: Instant): RepositoryIO[Unit] = work.enqueue(value, at)
@@ -415,8 +415,8 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
           durableRetry = new DurableRetrySettings(attempts = 1)
         )
         .use { publisher =>
-          val key = DurableEmbeddingWorkPublisher.keyFor(EmbeddingWork.JobChanged(jobId))
-          publisher.offer(EmbeddingWork.JobChanged(jobId)) *>
+          val key = EmbeddingWorkKeys.keyFor(EmbeddingWork.JobChanged(jobId))
+          Offering(work, publisher).offer(EmbeddingWork.JobChanged(jobId)) *>
             eventually(work.snapshot)(
               _.get(key.value).exists(_.failure.contains(EmbeddingWorkFailure.RetryExhausted))
             ).void
@@ -424,7 +424,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
       events <- observed.get
       snapshot <- work.snapshot
     } yield {
-      val key = DurableEmbeddingWorkPublisher.keyFor(EmbeddingWork.JobChanged(jobId))
+      val key = EmbeddingWorkKeys.keyFor(EmbeddingWork.JobChanged(jobId))
       assertEquals(snapshot.get(key.value).flatMap(_.failure), Some(EmbeddingWorkFailure.RetryExhausted))
       assertEquals(events.map(_._1), List(LogEvent.EmbeddingProcessingFailed))
       assertEquals(events.headOption.flatMap(_._2.get(LogField.ErrorType)), Some("java.lang.IllegalStateException"))
@@ -533,7 +533,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
         calls <- Ref.of[IO, Int](0)
         clock <- Ref.of[IO, Instant](now)
         work <- InMemoryEmbeddingWorkRepository.create
-        _ <- successful(work.enqueue(DurableEmbeddingWorkPublisher.keyFor(changed), now))
+        _ <- successful(work.enqueue(EmbeddingWorkKeys.keyFor(changed), now))
         _ <- controlledWorker(
           ObservableWork(work, completion),
           InMemoryUsers(usersRef),
@@ -593,7 +593,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
         calls <- Ref.of[IO, Int](0)
         clock <- Ref.of[IO, Instant](now)
         work <- InMemoryEmbeddingWorkRepository.create
-        key = DurableEmbeddingWorkPublisher.keyFor(changed)
+        key = EmbeddingWorkKeys.keyFor(changed)
         changedProfile = CandidateProfile(Set("Scala", "Kafka"), Some("Updated summary"), None)
         _ <- successful(work.enqueue(key, now))
         _ <- controlledWorker(
@@ -671,7 +671,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
       completion <- Deferred[IO, Either[RepositoryError, Unit]]
       clock <- Ref.of[IO, Instant](now.plusSeconds(5))
       work <- InMemoryEmbeddingWorkRepository.create
-      _ <- successful(work.enqueue(DurableEmbeddingWorkPublisher.keyFor(EmbeddingWork.JobChanged(jobId)), now))
+      _ <- successful(work.enqueue(EmbeddingWorkKeys.keyFor(EmbeddingWork.JobChanged(jobId)), now))
       _ <- controlledWorker(
         ObservableWork(work, completion),
         InMemoryUsers(usersRef),
@@ -719,7 +719,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
         completion <- Deferred[IO, Either[RepositoryError, Unit]]
         clock <- Ref.of[IO, Instant](now)
         work <- InMemoryEmbeddingWorkRepository.create
-        _ <- successful(work.enqueue(DurableEmbeddingWorkPublisher.keyFor(changed), now))
+        _ <- successful(work.enqueue(EmbeddingWorkKeys.keyFor(changed), now))
         _ <- controlledWorker(
           ObservableWork(work, completion),
           InMemoryUsers(usersRef),
@@ -731,7 +731,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
         storedJobs <- jobsRef.get
         storedUsers <- usersRef.get
       } yield {
-        assertEquals(snapshot.get(DurableEmbeddingWorkPublisher.keyFor(changed).value).flatMap(_.failure), failure)
+        assertEquals(snapshot.get(EmbeddingWorkKeys.keyFor(changed).value).flatMap(_.failure), failure)
         assertEquals(storedJobs, job.map(value => jobId -> value).toMap)
         assertEquals(storedUsers, user.map(value => candidateId -> value).toMap)
       }
@@ -749,7 +749,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
         calls <- Ref.of[IO, Int](0)
         clock <- Ref.of[IO, Instant](now)
         work <- InMemoryEmbeddingWorkRepository.create
-        key = DurableEmbeddingWorkPublisher.keyFor(changed)
+        key = EmbeddingWorkKeys.keyFor(changed)
         _ <- successful(work.enqueue(key, now))
         _ <- controlledWorker(
           ObservableWork(work, completion),
@@ -799,7 +799,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
         calls <- Ref.of[IO, Int](0)
         clock <- Ref.of[IO, Instant](now)
         work <- InMemoryEmbeddingWorkRepository.create
-        key = DurableEmbeddingWorkPublisher.keyFor(changed)
+        key = EmbeddingWorkKeys.keyFor(changed)
         interruptedWork = ObservableWork(work, completion, beforeCompletion.complete(()).void *> IO.never[Unit])
         _ <- successful(work.enqueue(key, now))
         _ <- controlledWorker(
@@ -931,16 +931,18 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
           durableRetry = new DurableRetrySettings(attempts = 1)
         )
         .use { publisher =>
-          publisher.offer(EmbeddingWork.JobChanged(jobId)) *> publisher.offer(EmbeddingWork.JobChanged(otherJobId)) *>
+          Offering(work, publisher).offer(EmbeddingWork.JobChanged(jobId)) *> Offering(work, publisher).offer(
+            EmbeddingWork.JobChanged(otherJobId)
+          ) *>
             eventually(jobsRef.get.map(_.get(otherJobId).flatMap(_.embedding).nonEmpty))(identity).void
         }
       snapshot <- work.snapshot
     } yield {
       assertEquals(
-        snapshot(DurableEmbeddingWorkPublisher.keyFor(EmbeddingWork.JobChanged(jobId)).value).failure,
+        snapshot(EmbeddingWorkKeys.keyFor(EmbeddingWork.JobChanged(jobId)).value).failure,
         Some(EmbeddingWorkFailure.RetryExhausted)
       )
-      assert(snapshot.get(DurableEmbeddingWorkPublisher.keyFor(EmbeddingWork.JobChanged(otherJobId)).value).isEmpty)
+      assert(snapshot.get(EmbeddingWorkKeys.keyFor(EmbeddingWork.JobChanged(otherJobId)).value).isEmpty)
     }
   }
 
@@ -1000,7 +1002,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
               else IO.pure(Some(RepositoryError.Unavailable))
             )
         )
-        key = DurableEmbeddingWorkPublisher.keyFor(EmbeddingWork.JobChanged(jobId))
+        key = EmbeddingWorkKeys.keyFor(EmbeddingWork.JobChanged(jobId))
         _ <- successful(work.enqueue(key, now))
         _ <- controlledWorker(
           ObservableWork(work, completion),
@@ -1033,7 +1035,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
             work <- InMemoryEmbeddingWorkRepository.create
             changed =
               if (candidateWork) EmbeddingWork.CandidateProfileChanged(candidateId) else EmbeddingWork.JobChanged(jobId)
-            key = DurableEmbeddingWorkPublisher.keyFor(changed)
+            key = EmbeddingWorkKeys.keyFor(changed)
             currentProfile = CandidateProfile(Set("Scala", "Cats"), Some("Engineer"), None)
             source = if (candidateWork) SearchableText.candidate(currentProfile) else SearchableText.job(openJob)
             embedding = EntityEmbedding(List(0.1f), EmbeddingMeta("voyage-4-lite", SourceHash.sha256(source), now))
@@ -1112,7 +1114,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
       calls <- Ref.of[IO, Int](0)
       durableAttempts <- Ref.of[IO, List[Int]](Nil)
       work <- InMemoryEmbeddingWorkRepository.create
-      key = DurableEmbeddingWorkPublisher.keyFor(EmbeddingWork.JobChanged(jobId))
+      key = EmbeddingWorkKeys.keyFor(EmbeddingWork.JobChanged(jobId))
       provider = new EmbeddingService {
         def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] =
           calls.updateAndGet(_ + 1).flatMap { count =>
@@ -1139,7 +1141,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
           durableRetry = new DurableRetrySettings(8, 10.millis, 20.millis)
         )
         .use { publisher =>
-          publisher.offer(EmbeddingWork.JobChanged(jobId)) *>
+          Offering(work, publisher).offer(EmbeddingWork.JobChanged(jobId)) *>
             eventually(jobsRef.get)(_.get(jobId).flatMap(_.embedding).nonEmpty).void *>
             eventually(work.snapshot)(_.isEmpty).void
         }
@@ -1185,7 +1187,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
           durableRetry = new DurableRetrySettings(2, 10.millis, 20.millis)
         )
         .use { publisher =>
-          publisher.offer(EmbeddingWork.JobChanged(jobId)) *>
+          Offering(work, publisher).offer(EmbeddingWork.JobChanged(jobId)) *>
             eventually(jobsRef.get)(_.get(jobId).flatMap(_.embedding).nonEmpty).void *>
             eventually(work.snapshot)(_.isEmpty).void
         }
@@ -1217,7 +1219,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
         )
         .use { publisher =>
           for {
-            _ <- publisher.offer(EmbeddingWork.JobChanged(jobId))
+            _ <- Offering(work, publisher).offer(EmbeddingWork.JobChanged(jobId))
             _ <- started.get
             _ <- IO.sleep(300.millis)
             at <- IO.realTimeInstant
@@ -1279,7 +1281,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
             workerHealth = value => health.update(_ :+ value)
           )
           .use { publisher =>
-            publisher.offer(EmbeddingWork.JobChanged(jobId)) *>
+            Offering(work, publisher).offer(EmbeddingWork.JobChanged(jobId)) *>
               eventually(jobsRef.get)(_.get(jobId).flatMap(_.embedding).nonEmpty).void *>
               eventually(work.snapshot)(_.isEmpty).void
           }
@@ -1306,10 +1308,11 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
   ) =
     Resource
       .eval(InMemoryEmbeddingWorkRepository.create)
-      .flatMap(work =>
+      .flatMap { work =>
+        val target = durableWork.getOrElse(work)
         EmbeddingPipeline
           .resource(
-            durableWork.getOrElse(work),
+            target,
             users,
             jobs,
             embeddings,
@@ -1322,7 +1325,14 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
             diagnostics = com.example.graphQL.cats.service.Diagnostics.noop,
             durableRetry = new DurableRetrySettings(attempts = 1)
           )
-      )
+          .map(Offering(target, _))
+      }
+
+  /** Enqueues durable work for a change, as the repositories do in a mutation, then wakes the worker. */
+  private final case class Offering(work: EmbeddingWorkRepository, publisher: DurableEmbeddingWorkPublisher) {
+    def offer(change: EmbeddingWork): IO[Unit] =
+      IO.realTimeInstant.flatMap(at => successful(work.enqueue(EmbeddingWorkKeys.keyFor(change), at))) *> publisher.wake
+  }
 
   private def successful[A](result: RepositoryIO[A]): IO[A] =
     result.value.flatMap(_.fold(error => IO.raiseError(new AssertionError(s"Repository failure: $error")), IO.pure))
@@ -1471,8 +1481,6 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
         .flatMap(error =>
           error.orElse(fetchFailure).fold(delegate.findVersioned(id))(failure => RepositoryIO.fromEither(Left(failure)))
         )
-
-    override def findMany(ids: List[Identifiers.JobId]): RepositoryIO[List[Job]] = delegate.findMany(ids)
 
     override def findOpen(filter: JobSearchFilter, page: JobPageRequest): RepositoryIO[List[Job]] =
       delegate.findOpen(filter, page)
