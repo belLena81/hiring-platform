@@ -248,7 +248,7 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
       ): RepositoryIO[MutationReceiptExecution[A, E]] = {
         assertEquals(fingerprint, protector.protect(key.operation, key.actorScope, request.fingerprint))
         assertNotEquals(fingerprint, request.fingerprint)
-        RepositoryIO.fromEither(Right(MutationReceiptExecution.InProgress))
+        RepositoryIO.pure(MutationReceiptExecution.InProgress)
       }
     }
     for {

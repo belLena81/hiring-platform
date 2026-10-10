@@ -101,7 +101,7 @@ final class MongoInterviewWorkflowStore(
       execution: Option[ClaimedInterviewWorkflowCommand]
   ): RepositoryIO[Unit] = execution match {
     case None                                                 => ().pure[RepositoryIO]
-    case Some(claim) if claim.record.workflowId != workflowId => RepositoryIO.fromEither(Left(RepositoryError.Conflict))
+    case Some(claim) if claim.record.workflowId != workflowId => RepositoryIO.raise(RepositoryError.Conflict)
     case Some(claim)                                          =>
       RepositoryIO
         .lift(clock.realTimeInstant)

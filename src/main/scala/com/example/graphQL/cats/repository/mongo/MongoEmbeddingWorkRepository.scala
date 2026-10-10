@@ -103,7 +103,7 @@ final class MongoEmbeddingWorkRepository(
       transactions: MongoTransactionRunner
   ): RepositoryIO[Boolean] =
     if (expectedGeneration < 1L || expectedGeneration == Long.MaxValue)
-      RepositoryIO.fromEither(Left(RepositoryError.InvalidStoredData))
+      RepositoryIO.raise(RepositoryError.InvalidStoredData)
     else
       transactions.run { session =>
         for {
@@ -241,7 +241,7 @@ final class MongoEmbeddingWorkRepository(
     }
 
   override def renew(claim: ClaimedEmbeddingWork, now: Instant, leaseUntil: Instant): RepositoryIO[Boolean] =
-    if (!leaseUntil.isAfter(now)) RepositoryIO.fromEither(Left(RepositoryError.InvalidStoredData))
+    if (!leaseUntil.isAfter(now)) RepositoryIO.raise(RepositoryError.InvalidStoredData)
     else
       MongoRepositorySupport.repositoryGuard(diagnostics, "embeddingWork.renew") {
         MongoLeaseQueue

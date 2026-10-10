@@ -14,7 +14,14 @@
       "Bash(git diff:*)",
       "Bash(git log:*)",
       "Bash(git show:*)",
-      "Bash(git check-ignore:*)"
+      "Bash(git check-ignore:*)",
+      "Bash(scripts/run-local-tests.sh status:*)",
+      "Bash(scripts/run-local-tests.sh test:*)",
+      "Bash(scripts/run-local-tests.sh analytics:*)",
+      "Bash(scripts/run-local-tests.sh interview)",
+      "Bash(scripts/run-local-tests.sh retention)",
+      "Bash(scripts/run-local-tests.sh recovery)",
+      "Bash(scripts/run-local-tests.sh start)"
     ],
     "ask": [
       "Bash(git commit:*)",
@@ -23,7 +30,11 @@
       "Bash(git reset:*)",
       "Bash(git checkout:*)",
       "Bash(docker:*)",
-      "Bash(sbt run:*)"
+      "Bash(sbt run:*)",
+      "Bash(scripts/run-local-tests.sh stop:*)",
+      "Bash(rm:*)",
+      "Bash(rmdir:*)",
+      "Bash(sbt clean:*)"
     ],
     "deny": [
       "Read(./.env)",
@@ -41,7 +52,20 @@
       "Bash(git clean:*)",
       "Bash(git stash drop:*)",
       "Bash(git branch -D:*)",
-      "Bash(git reset --hard:*)"
+      "Bash(git reset --hard:*)",
+      "Bash(mongosh:*)",
+      "Bash(mongo:*)",
+      "Bash(mongodump:*)",
+      "Bash(mongorestore:*)",
+      "Bash(sudo:*)",
+      "Bash(docker compose -f compose.yaml:*)",
+      "Bash(docker compose -f compose.cloud.yaml:*)",
+      "Bash(docker compose -f compose.atlas-local.yaml:*)",
+      "Bash(docker compose up:*)",
+      "Bash(docker-compose:*)",
+      "Bash(docker exec:*)",
+      "Bash(docker run:*)",
+      "Read(./.local/config/test-services/**)"
     ]
   },
   "hooks": {
@@ -52,6 +76,17 @@
           {
             "type": "command",
             "command": "python3 -I \"$CLAUDE_PROJECT_DIR\"/scripts/check-skills.py"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Edit|Write|NotebookEdit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -I \"$CLAUDE_PROJECT_DIR\"/scripts/guard-harness.py || exit 2"
           }
         ]
       }

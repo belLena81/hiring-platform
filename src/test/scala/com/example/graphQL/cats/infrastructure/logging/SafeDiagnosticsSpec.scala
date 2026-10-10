@@ -241,6 +241,18 @@ class SafeDiagnosticsSpec extends CatsEffectSuite {
     assert(!LogFields.validPublic(LogField.ErrorLocation, "ResolverFile.scala:1000000"))
   }
 
+  test("LOG-01 a failure class outside every allow-list is reported as OtherException") {
+    for {
+      emitted <- Ref.of[IO, Vector[String]](Vector.empty)
+      diagnostics = SafeDiagnostics.withSink(line => emitted.update(_ :+ line), maskSensitive = false)
+      _ <- diagnostics.event(
+        LogEvent.RuntimeFailed,
+        fields = LogFields.failure(new com.mongodb.MongoTimeoutException("x"))
+      )
+      lines <- emitted.get
+    } yield assert(lines.head.contains("OtherException"), clues(lines))
+  }
+
   test("LOG-01 every LogOutcome value is a valid public outcome field") {
     LogOutcome.values.foreach(outcome => assert(LogFields.validPublic(LogField.Outcome, outcome.wire), outcome.wire))
     assert(!LogFields.validPublic(LogField.Outcome, "UNLISTED"))

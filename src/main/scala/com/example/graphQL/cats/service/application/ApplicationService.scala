@@ -4,7 +4,6 @@ import cats.data.EitherT
 import cats.effect.{Clock, IO}
 import cats.effect.std.UUIDGen
 import cats.syntax.all.*
-import com.example.graphQL.cats.service.HiringReadService
 import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
 import com.example.graphQL.cats.service.port.{
   ApplicationRepository,
@@ -21,7 +20,7 @@ import com.example.graphQL.cats.domain.policy.{ApplicationLifecycle, Application
 import com.example.graphQL.cats.service.auth.ActorAuthorization
 import com.example.graphQL.cats.service.job.AuthorizedJobAccess
 import com.example.graphQL.cats.service.mutation.Idempotent
-import com.example.graphQL.cats.service.protocol.{ApplicationUseCases, IdempotencyRequest, UseCaseIO}
+import com.example.graphQL.cats.service.protocol.{ApplicationUseCases, HiringReadModel, IdempotencyRequest, UseCaseIO}
 import com.example.graphQL.cats.domain.pagination.ApplicationPageRequest
 import com.example.graphQL.cats.shared.StableIds
 import java.util.UUID
@@ -30,13 +29,13 @@ final class ApplicationService(
     users: UserRepository,
     jobs: JobRepository,
     applications: ApplicationRepository,
+    readModel: HiringReadModel,
     idempotent: Idempotent,
     clock: Clock[IO] = Clock[IO],
     uuidGen: UUIDGen[IO] = UUIDGen[IO]
 ) extends ApplicationUseCases {
   private val authorization = ActorAuthorization(users)
   private val authorizedJobs = AuthorizedJobAccess(authorization, jobs)
-  private val readModel = HiringReadService(users, jobs, applications)
 
   override def submitApplication(
       request: IdempotencyRequest,

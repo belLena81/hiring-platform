@@ -147,7 +147,7 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
     fakes.flatMap { values =>
       val failing = new EventQuarantineRepository {
         def save(record: EventQuarantineRecord): RepositoryIO[Unit] =
-          RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
+          RepositoryIO.raise(RepositoryError.Unavailable)
       }
       for {
         success <- durable(
@@ -313,7 +313,7 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
               at: Instant,
               until: Instant
           ): RepositoryIO[Boolean] =
-            RepositoryIO.fromEither(Left(error))
+            RepositoryIO.raise(error)
         }
         durable(
           config,
@@ -410,7 +410,7 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
         at: Instant,
         until: Instant,
         limit: Int
-    ): RepositoryIO[List[ClaimedOperationalEvent]] = RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
+    ): RepositoryIO[List[ClaimedOperationalEvent]] = RepositoryIO.raise(RepositoryError.Unavailable)
     def renewLease(id: UUID, token: String, subjects: List[String], until: Instant): RepositoryIO[Unit] =
       RepositoryIO.fromIOEither(renewal)
     def markPublished(id: UUID, token: String, at: Instant, expires: Instant): RepositoryIO[Unit] =

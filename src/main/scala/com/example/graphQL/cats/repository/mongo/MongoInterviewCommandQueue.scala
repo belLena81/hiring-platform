@@ -39,7 +39,7 @@ final class MongoInterviewCommandQueue(
       maxAttempts: Int
   ): RepositoryIO[InterviewExecutionClaimOutcome] =
     if (workerId.isEmpty || workerId.length > 128 || !leaseUntil.isAfter(now) || maxAttempts <= 0)
-      RepositoryIO.fromEither(Left(RepositoryError.InvalidEvent))
+      RepositoryIO.raise(RepositoryError.InvalidEvent)
     else
       RepositoryIO.lift(uuids.randomUUID).flatMap { token =>
         transactionRunner.run { session =>
@@ -65,7 +65,7 @@ final class MongoInterviewCommandQueue(
                           RepositoryIO.fromEither(readLease(document)).flatMap { lease =>
                             InterviewExecutionPolicy.lease(lease, now) match {
                               case InterviewExecutionLeaseDisposition.Busy =>
-                                RepositoryIO.fromEither(Right(InterviewExecutionClaimOutcome.Busy))
+                                RepositoryIO.pure(InterviewExecutionClaimOutcome.Busy)
                               case InterviewExecutionLeaseDisposition.Reconcile =>
                                 guardWrite(
                                   commands,
@@ -211,7 +211,7 @@ final class MongoInterviewCommandQueue(
       )
     val preliminary = decide(false)
     if (record.result.isEmpty || preliminary == InterviewPublicationDisposition.Supersede)
-      RepositoryIO.fromEither(Right(preliminary))
+      RepositoryIO.pure(preliminary)
     else {
       val commandId = StableIds.uuid(record.stepId)
       val resultId = StableIds.uuid(s"$commandId:result")
@@ -304,7 +304,7 @@ final class MongoInterviewCommandQueue(
     }
 
   def quarantine(identity: String, now: Instant): RepositoryIO[Unit] =
-    if (identity.isEmpty || identity.length > 256) RepositoryIO.fromEither(Left(RepositoryError.InvalidEvent))
+    if (identity.isEmpty || identity.length > 256) RepositoryIO.raise(RepositoryError.InvalidEvent)
     else
       RepositoryIO
         .lift(
@@ -373,7 +373,7 @@ final class MongoInterviewCommandQueue(
       settlement: InterviewNotificationSettlement,
       now: Instant
   ): RepositoryIO[Boolean] =
-    if (!InterviewCommands.isInformational(record.command)) RepositoryIO.fromEither(Left(RepositoryError.InvalidEvent))
+    if (!InterviewCommands.isInformational(record.command)) RepositoryIO.raise(RepositoryError.InvalidEvent)
     else
       MongoRepositorySupport.repositoryGuard(diagnostics, "interviewWorkflow.settleNotificationResult") {
         val target = MongoFilter.and(
@@ -457,7 +457,7 @@ final class MongoInterviewCommandQueue(
             )
             .map(_.getMatchedCount == 1L)
         }
-      case _ => RepositoryIO.fromEither(Left(RepositoryError.InvalidEvent))
+      case _ => RepositoryIO.raise(RepositoryError.InvalidEvent)
     }
 
   private val NotificationRepairLimit = 32
@@ -543,7 +543,7 @@ final class MongoInterviewCommandQueue(
       limit: Int
   ): RepositoryIO[List[ClaimedInterviewWorkflowCommand]] =
     if (workerId.isEmpty || workerId.length > 128 || !leaseUntil.isAfter(now) || limit < 0 || limit > 64)
-      RepositoryIO.fromEither(Left(RepositoryError.InvalidEvent))
+      RepositoryIO.raise(RepositoryError.InvalidEvent)
     else if (limit == 0) List.empty[ClaimedInterviewWorkflowCommand].pure[RepositoryIO]
     else
       claimOne(workerId, now, leaseUntil).flatMap {
@@ -588,7 +588,7 @@ final class MongoInterviewCommandQueue(
       now: Instant,
       leaseUntil: Instant
   ): RepositoryIO[Boolean] =
-    if (!leaseUntil.isAfter(now)) RepositoryIO.fromEither(Left(RepositoryError.InvalidEvent))
+    if (!leaseUntil.isAfter(now)) RepositoryIO.raise(RepositoryError.InvalidEvent)
     else
       MongoRepositorySupport.repositoryGuard(diagnostics, "interviewWorkflow.renewPublication") {
         MongoLeaseQueue.renewHeld(commands, None, claimFilter(claim, now), leaseUntil, Lease.until)
@@ -712,7 +712,7 @@ final class MongoInterviewCommandQueue(
       val event = InterviewCommands.giveUpEvent(lifecycle, reason, now)
       InterviewLifecyclePolicy.decide(workflow, workflow.revision, event) match {
         case Left(_) if InterviewCommands.isExpiry(lifecycle) => RepairOutcome.CommandOnly.pure[RepositoryIO]
-        case Left(_)                                          => RepositoryIO.fromEither(Left(RepositoryError.Conflict))
+        case Left(_)                                          => RepositoryIO.raise(RepositoryError.Conflict)
         case Right(decision)                                  =>
           lifecycleStore
             .commitLifecycle(session, workflow, decision, event, InterviewLifecycleOrigin.Internal(cause), now, None)

@@ -304,7 +304,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
             _ = assertEquals(initial.map(_.getString("state")), Some("Unpublished"))
             rolledBack <- runner.run { session =>
               erasures.enqueue(deletedUser, now, MongoMutationWriteContext(session)) *>
-                RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
+                RepositoryIO.raise(RepositoryError.Unavailable)
             }.value
             _ = assertEquals(rolledBack, Left(RepositoryError.Unavailable))
             afterRollback <- MongoRepositoryTestSupport.first(

@@ -93,9 +93,9 @@ final class SearchSessionHandoffSpec extends CatsEffectSuite {
       observed <- Deferred[IO, (Instant, Instant)]
       repository = new SearchSessionWorkRepository {
         override def enqueue(work: PendingSearchSessionWork, createdAt: Instant): RepositoryIO[Unit] =
-          RepositoryIO.fromEither(Right(()))
+          RepositoryIO.pure(())
         override def findForActor(actor: UserId, search: UUID): RepositoryIO[Option[SearchSessionLookup]] =
-          RepositoryIO.fromEither(Right(None))
+          RepositoryIO.pure(None)
         override def claim(
             workerId: String,
             currentTime: Instant,
@@ -103,14 +103,14 @@ final class SearchSessionHandoffSpec extends CatsEffectSuite {
         ): RepositoryIO[Option[ClaimedSearchSessionWork]] =
           RepositoryIO.lift(observed.complete((currentTime, leaseUntil)).as(None))
         override def complete(claim: ClaimedSearchSessionWork, completedAt: Instant): RepositoryIO[Unit] =
-          RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
+          RepositoryIO.raise(RepositoryError.Unavailable)
         override def retry(claim: ClaimedSearchSessionWork, availableAt: Instant): RepositoryIO[Unit] =
-          RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
+          RepositoryIO.raise(RepositoryError.Unavailable)
         override def fail(
             claim: ClaimedSearchSessionWork,
             failure: SearchSessionWorkFailure,
             failedAt: Instant
-        ): RepositoryIO[Unit] = RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
+        ): RepositoryIO[Unit] = RepositoryIO.raise(RepositoryError.Unavailable)
       }
       result <- SearchSessionHandoff
         .resource(

@@ -42,7 +42,7 @@ final class MongoApplicationRepository private (
       page: ApplicationPageRequest
   ): RepositoryIO[List[Application]] = {
     import MongoAuthorizedReadQueries.*
-    if (scope.role != UserRole.Candidate) RepositoryIO.fromEither(Right(Nil))
+    if (scope.role != UserRole.Candidate) RepositoryIO.pure(Nil)
     else {
       val pipeline = List(matching(baseFilter(MongoFields.CandidateId, scope.userId.value.toString, page).bson)) ++
         actor(scope) ++ List(new Document("$sort", new Document(MongoFields.CreatedAt, -1).append(MongoFields.Id, -1)))

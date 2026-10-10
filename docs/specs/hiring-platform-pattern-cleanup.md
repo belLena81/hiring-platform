@@ -152,3 +152,21 @@ Owner: Scala Developer, working on the integrated tree.
   - In the analytics erasure queue, a driver JSON-parse failure is now `MalformedMarker`.
   - Analytics corrupt-data errors log `DATA_INTEGRITY_VIOLATION`.
 - Committed at the user's request before the final `scripts/check-local.sh`, Code Reviewer, Security Engineer and QA gates. Those gates are pending and follow on the committed state.
+- 2026-10-10 gates on `6a08853`:
+  - `scripts/check-local.sh` exit 0. Root: unit 1040, it 288 passed / 10 skipped, merged lines 91.08%. Analytics: unit 449, it 42 / 6 ignored, merged lines 87.69%.
+  - Security Engineer PASS (static).
+  - Code Reviewer PASS with 8 low findings: canonical-UUID tightening for interview command, lease and cleanup fields; erasure-queue parse category; two sources of truth for log allow-lists; partial `ReportState`; per-call retention consumers; barrier validation; spec outcome cells; analytics net is −41, not −20.
+  - Root per-file coverage: the split groups have fewer uncovered lines (interview repository 71 → 47, ports 21 → 17). Small regressions in config and codecs are addressed in the follow-up.
+- 2026-10-10 root follow-up (user request "continue working on skipped or partially done"):
+  - Mongo driver names move to the startup allow-list, and one predicate-based allow-list replaces the `PublicFailureType` marker plus the `classOf` list.
+  - Search-event validation is a typed `UseCaseError`.
+  - Added `RepositoryIO.pure`/`raise`, converting 156 sites.
+  - `HiringReadModel` is injected into `ApplicationService`.
+  - `workerReady` removed.
+  - Three coverage tests added.
+  - Still skipped:
+    - `RawJwtAuthConfig` `derives`: the only override is deprecated and fails `-Werror`; the replacement needs `pureconfig-generic-scala3`.
+    - `RawInterviewRuntimeConfig` mirror: a 23-field flat raw shape plus cross-field validation, so removing it is no simplification.
+  - Root unit 1041/1041 on the merged tree.
+- Analytics follow-up (journal enums, shared error text, `StreamingBatchCallback`, `StreamingCheckpointControl`, key-retirement moves, restored `MarkerStorageFailure`, `ReportState` records, validated-only `KafkaRetentionBarrier`) is still in progress in its worktree. Its coverage is being brought to baseline, and it is not in this commit.
+- Next: integrate the analytics follow-up, run `scripts/check-local.sh`, re-review the follow-up diff, and run QA on the final state.

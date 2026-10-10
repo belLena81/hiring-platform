@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.service
 
+import com.example.graphQL.cats.service.HiringReadService
 import com.example.graphQL.cats.service.port.{ApplicationRepository, JobRepository, UserRepository}
 import com.example.graphQL.cats.service.application.ApplicationService
 import com.example.graphQL.cats.service.job.JobService
@@ -15,5 +16,11 @@ private[cats] object TestHiringServices {
       jobs: JobRepository,
       applications: ApplicationRepository
   ): ApplicationService =
-    new ApplicationService(users, jobs, applications, TestIdempotency.noop)
+    new ApplicationService(
+      users,
+      jobs,
+      applications,
+      HiringReadService(users, jobs, applications),
+      TestIdempotency.noop
+    )
 }

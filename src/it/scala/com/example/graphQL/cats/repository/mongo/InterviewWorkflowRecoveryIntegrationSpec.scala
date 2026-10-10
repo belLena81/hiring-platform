@@ -445,7 +445,7 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
         cleaner = new com.example.graphQL.cats.service.application.InterviewSubjectCleanupWorker(
           cleanup,
           new InterviewPublisherFencer {
-            override def fence(ids: Vector[String]): RepositoryIO[Unit] = RepositoryIO.fromEither(Right(()))
+            override def fence(ids: Vector[String]): RepositoryIO[Unit] = RepositoryIO.pure(())
           },
           IO.pure(barriers),
           _ => IO.pure(false),

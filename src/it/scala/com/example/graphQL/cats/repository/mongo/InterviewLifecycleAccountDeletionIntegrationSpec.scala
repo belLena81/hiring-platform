@@ -30,7 +30,7 @@ final class InterviewLifecycleAccountDeletionIntegrationSpec extends MongoIntegr
     InterviewRetentionBarrier("hiring.interview-results", 0, 5L)
   )
   private val fencer = new InterviewPublisherFencer {
-    override def fence(ids: Vector[String]): RepositoryIO[Unit] = RepositoryIO.fromEither(Right(()))
+    override def fence(ids: Vector[String]): RepositoryIO[Unit] = RepositoryIO.pure(())
   }
 
   private def scenario[A](use: InterviewLifecycleScenario => IO[A]): IO[A] =

@@ -37,11 +37,10 @@ final class Idempotent private (receipts: MutationReceiptRepository, clock: Cloc
           receipts.execute(key, request.fingerprint, now, now.plusSeconds(Idempotent.ReceiptTtl.toSeconds)) { context =>
             write(context).biflatMap(
               {
-                case UseCaseError.Repository(error) => RepositoryIO.fromEither(Left(error))
-                case error => RepositoryIO.fromEither(Right(MutationWriteOutcome.Rejected(error)))
+                case UseCaseError.Repository(error) => RepositoryIO.raise(error)
+                case error                          => RepositoryIO.pure(MutationWriteOutcome.Rejected(error))
               },
-              value =>
-                RepositoryIO.fromEither(Right(MutationWriteOutcome.Applied(MutationReceiptWrite(value, entity(value)))))
+              value => RepositoryIO.pure(MutationWriteOutcome.Applied(MutationReceiptWrite(value, entity(value))))
             )
           }
         )

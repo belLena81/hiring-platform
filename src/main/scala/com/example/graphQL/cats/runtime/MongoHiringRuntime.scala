@@ -178,7 +178,6 @@ object MongoHiringRuntime {
               embeddingSettings.retryDelayMs.millis,
               (embeddingSettings.retryAttempts.toLong *
                 (embeddingSettings.timeoutMs.toLong + embeddingSettings.retryDelayMs.toLong)).millis,
-              IO.pure(true),
               diagnostics,
               new DurableRetrySettings(
                 embeddingSettings.durableRetryAttempts,
@@ -228,10 +227,11 @@ object MongoHiringRuntime {
         idempotent,
         diagnostics
       )
+      readModel = HiringReadService(users, jobs, applications)
       services = HiringGraphQLServices(
-        HiringReadService(users, jobs, applications),
+        readModel,
         new JobService(users, jobs, publisher, idempotent, diagnostics),
-        new ApplicationService(users, jobs, applications, idempotent),
+        new ApplicationService(users, jobs, applications, readModel, idempotent),
         CursorCodec.keyFromSecret(config.jwtAuth.hmacSecret, config.jwtAuth.cursorTtlSeconds),
         accountService,
         new OperationalTelemetryService(users, jobs, searchSessions, searchSessionWork, idempotent),

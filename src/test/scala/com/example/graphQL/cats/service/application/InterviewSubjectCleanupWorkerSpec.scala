@@ -117,9 +117,9 @@ final class InterviewSubjectCleanupWorkerSpec extends CatsEffectSuite {
             RepositoryIO.lift(calls.update(_ :+ s"fence:${ids.headOption.getOrElse("missing")}")).flatMap { _ =>
               if (ids == initial.transactionalIds && unexpectedFailure)
                 RepositoryIO.lift(IO.raiseError(new IllegalStateException("private provider details")))
-              else if (ids == initial.transactionalIds) RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
-              else if (ids == third.transactionalIds) RepositoryIO.fromEither(Left(RepositoryError.Conflict))
-              else RepositoryIO.fromEither(Right(()))
+              else if (ids == initial.transactionalIds) RepositoryIO.raise(RepositoryError.Unavailable)
+              else if (ids == third.transactionalIds) RepositoryIO.raise(RepositoryError.Conflict)
+              else RepositoryIO.pure(())
             }
         }
         diagnostics = new Diagnostics {
@@ -204,7 +204,7 @@ final class InterviewSubjectCleanupWorkerSpec extends CatsEffectSuite {
       calls <- Ref.of[IO, Vector[String]](Vector.empty)
       registrations <- Ref.of[IO, Vector[String]](Vector.empty)
       fencer = new InterviewPublisherFencer {
-        def fence(ids: Vector[String]) = RepositoryIO.fromEither(Right(()))
+        def fence(ids: Vector[String]) = RepositoryIO.pure(())
       }
       worker = new InterviewSubjectCleanupWorker(
         new Store(state, calls, registrations),
@@ -231,7 +231,7 @@ final class InterviewSubjectCleanupWorkerSpec extends CatsEffectSuite {
       fencer = new InterviewPublisherFencer {
         override def fence(ids: Vector[String]): RepositoryIO[Unit] = {
           assertEquals(ids, initial.transactionalIds)
-          RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
+          RepositoryIO.raise(RepositoryError.Unavailable)
         }
       }
       worker = new InterviewSubjectCleanupWorker(
@@ -303,7 +303,7 @@ final class InterviewSubjectCleanupWorkerSpec extends CatsEffectSuite {
         override def producerBatch(id: UserId) = store.producerBatch(id)
         override def markProducersFenced(id: UserId, ids: Vector[String], at: Instant) =
           RepositoryIO.lift(first.getAndSet(false)).flatMap {
-            case true  => RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
+            case true  => RepositoryIO.raise(RepositoryError.Unavailable)
             case false => store.markProducersFenced(id, ids, at)
           }
         override def pendingPage(cursor: Option[InterviewCleanupCursor], observedAt: Instant) =
@@ -397,9 +397,9 @@ final class InterviewSubjectCleanupWorkerSpec extends CatsEffectSuite {
       continuationCalls <- Ref.of[IO, Int](0)
       finished <- Deferred[IO, Unit]
       repository = new InterviewSubjectCleanupRepository {
-        override def producerBatch(id: UserId) = RepositoryIO.fromEither(Right(Vector.empty))
+        override def producerBatch(id: UserId) = RepositoryIO.pure(Vector.empty)
         override def markProducersFenced(id: UserId, ids: Vector[String], at: Instant) =
-          RepositoryIO.fromEither(Right(()))
+          RepositoryIO.pure(())
         override def pendingPage(cursor: Option[InterviewCleanupCursor], observedAt: Instant) =
           RepositoryIO.lift(calls.update(_ :+ cursor)).flatMap { _ =>
             assertEquals(observedAt, now)
@@ -411,7 +411,7 @@ final class InterviewSubjectCleanupWorkerSpec extends CatsEffectSuite {
               case Some(value) =>
                 assertEquals(value, token)
                 RepositoryIO.lift(continuationCalls.getAndUpdate(_ + 1)).flatMap {
-                  case 0 => RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
+                  case 0 => RepositoryIO.raise(RepositoryError.Unavailable)
                   case 1 => RepositoryIO.lift(IO.raiseError(new IllegalStateException("private driver detail")))
                   case _ =>
                     RepositoryIO
@@ -420,14 +420,14 @@ final class InterviewSubjectCleanupWorkerSpec extends CatsEffectSuite {
                 }
             }
           }
-        override def find(id: UserId) = RepositoryIO.fromEither(Right(None))
+        override def find(id: UserId) = RepositoryIO.pure(None)
         override def transition(expected: InterviewSubjectCleanup, next: InterviewSubjectCleanup) =
-          RepositoryIO.fromEither(Right(InterviewCleanupUpdate.StaleRevision))
-        override def purge(id: UserId) = RepositoryIO.fromEither(Right(()))
-        override def absent(id: UserId) = RepositoryIO.fromEither(Right(false))
+          RepositoryIO.pure(InterviewCleanupUpdate.StaleRevision)
+        override def purge(id: UserId) = RepositoryIO.pure(())
+        override def absent(id: UserId) = RepositoryIO.pure(false)
       }
       fencer = new InterviewPublisherFencer {
-        override def fence(ids: Vector[String]) = RepositoryIO.fromEither(Right(()))
+        override def fence(ids: Vector[String]) = RepositoryIO.pure(())
       }
       worker = new InterviewSubjectCleanupWorker(
         repository,

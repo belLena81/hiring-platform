@@ -82,7 +82,7 @@ private[graphql] object HiringGraphQLResolverSupport {
       filter: Json,
       model: Option[String] = None
   )(results: List[A])(idOf: A => String, scoreOf: A => Double): HiringGraphQLResult[Unit] =
-    EitherT.liftF[IO, HiringGraphQLFailure, Unit](
+    raiseOnUseCaseError(
       hiring.searchSessions.record(
         actorId,
         kind,

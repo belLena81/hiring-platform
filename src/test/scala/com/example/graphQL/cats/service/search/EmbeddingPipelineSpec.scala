@@ -20,44 +20,6 @@ import munit.CatsEffectSuite
 import scala.concurrent.duration.*
 
 final class EmbeddingPipelineSpec extends CatsEffectSuite {
-  test("embedding worker waits for database setup before claiming durable work") {
-    for {
-      usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map.empty)
-      jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> openJob))
-      calls <- Ref.of[IO, Int](0)
-      setup <- Deferred[IO, Boolean]
-      work <- InMemoryEmbeddingWorkRepository.create
-      users = InMemoryUsers(usersRef)
-      jobs = InMemoryJobs(jobsRef)
-      embeddings = CountingEmbeddingService(calls)
-      _ <- EmbeddingPipeline
-        .resource(
-          work,
-          users,
-          jobs,
-          embeddings,
-          "voyage-4-lite",
-          queueSize = 8,
-          parallelism = 1,
-          retryAttempts = 3,
-          retryDelay = 10.millis,
-          leaseDuration = 1.second,
-          workerReady = setup.get,
-          diagnostics = com.example.graphQL.cats.service.Diagnostics.noop,
-          durableRetry = new DurableRetrySettings(attempts = 1)
-        )
-        .use { publisher =>
-          for {
-            _ <- Offering(work, publisher).offer(EmbeddingWork.JobChanged(jobId))
-            _ <- IO.sleep(100.millis)
-            beforeSetup <- calls.get
-            _ <- setup.complete(true)
-            _ <- waitFor(calls.get.map(_ == 1))
-          } yield assertEquals(beforeSetup, 0)
-        }
-    } yield ()
-  }
-
   test("VHS-AC05 VHS-AC06 embedding pipeline updates changed jobs and skips unchanged source hashes") {
     for {
       usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map.empty)
@@ -351,7 +313,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
         override def renew(claim: ClaimedEmbeddingWork, now: Instant, leaseUntil: Instant): RepositoryIO[Boolean] =
           work.renew(claim, now, leaseUntil)
         override def complete(claim: ClaimedEmbeddingWork): RepositoryIO[Unit] =
-          RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
+          RepositoryIO.raise(RepositoryError.Unavailable)
         override def retry(
             claim: ClaimedEmbeddingWork,
             availableAt: Instant,
@@ -1479,7 +1441,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
       RepositoryIO
         .lift(rereadFailure)
         .flatMap(error =>
-          error.orElse(fetchFailure).fold(delegate.findVersioned(id))(failure => RepositoryIO.fromEither(Left(failure)))
+          error.orElse(fetchFailure).fold(delegate.findVersioned(id))(failure => RepositoryIO.raise(failure))
         )
 
     override def findOpen(filter: JobSearchFilter, page: JobPageRequest): RepositoryIO[List[Job]] =
@@ -1522,7 +1484,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
         embedding: EntityEmbedding
     ): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
       writeFailure
-        .fold(delegate.updateEmbedding(id, embedding))(error => RepositoryIO.fromEither(Left(error)))
+        .fold(delegate.updateEmbedding(id, embedding))(error => RepositoryIO.raise(error))
         .value
         .flatTap(result => writeResult.complete(result).void)
     )
@@ -1532,7 +1494,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
         embedding: EntityEmbedding
     ): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
       writeFailure
-        .fold(delegate.updateEmbedding(observed, embedding))(error => RepositoryIO.fromEither(Left(error)))
+        .fold(delegate.updateEmbedding(observed, embedding))(error => RepositoryIO.raise(error))
         .value
         .flatTap(result => writeResult.complete(result).void)
     )

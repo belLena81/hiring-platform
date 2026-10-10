@@ -225,13 +225,13 @@ final class MongoAnalyticsErasureRequestRepository(
                     )
                   )
                   completed.flatMap(
-                    _.fold(RepositoryIO.fromEither(Left(RepositoryError.Conflict)))(_ =>
+                    _.fold(RepositoryIO.raise(RepositoryError.Conflict))(_ =>
                       persistCompletion(session, requestId, now)
                     )
                   )
                 }
               }
-            case _ => RepositoryIO.fromEither(Left(RepositoryError.Conflict))
+            case _ => RepositoryIO.raise(RepositoryError.Conflict)
           }
       })
 

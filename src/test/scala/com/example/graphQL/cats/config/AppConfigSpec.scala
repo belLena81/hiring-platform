@@ -3,6 +3,7 @@ package com.example.graphQL.cats.config
 import com.example.graphQL.cats.domain.pagination.PageSize
 import com.comcast.ip4s.{Host, Port as Ip4sPort}
 import munit.FunSuite
+import pureconfig.ConfigSource
 import cats.data.NonEmptyList
 import scala.concurrent.duration.*
 
@@ -203,6 +204,15 @@ class AppConfigSpec extends FunSuite {
   test("enabled Kafka rejects missing authentication credentials") {
     val enabled = defaultConfig.replace("kafka {\n  enabled = false", "kafka {\n  enabled = true")
     assertContainsError(AppConfigFixtures.fromConfig(enabled, Map.empty), ConfigError.InvalidKafkaCredentials)
+  }
+
+  test("the masking flag is read leniently so an invalid file still logs with the configured masking") {
+    val (mask, result) =
+      AppConfigValidation.readWithMask(ConfigSource.string("logging { mask-sensitive = false }"))
+    assert(!mask)
+    assert(result.isLeft)
+    import cats.effect.unsafe.implicits.global
+    assertEquals(AppConfig.loadWithMask.unsafeRunSync()._2, AppConfig.load.unsafeRunSync())
   }
 
   test("P1-AC01 loads grouped HOCON settings and resolves env placeholders") {

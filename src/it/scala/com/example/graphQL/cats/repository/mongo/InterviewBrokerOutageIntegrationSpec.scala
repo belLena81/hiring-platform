@@ -5,7 +5,7 @@ import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, UserId}
 import com.example.graphQL.cats.domain.workflow.*
 import com.example.graphQL.cats.infrastructure.kafka.{InterviewBrokerFixture, InterviewKafkaRuntime}
-import com.example.graphQL.cats.service.{ActorContext, Diagnostics}
+import com.example.graphQL.cats.service.{ActorContext, Diagnostics, HiringReadService}
 import com.example.graphQL.cats.service.application.{
   ApplicationService,
   InterviewSchedulingService,
@@ -56,6 +56,7 @@ final class InterviewBrokerOutageIntegrationSpec extends MongoIntegrationSuite {
           users,
           jobs,
           applications,
+          HiringReadService(users, jobs, applications),
           Idempotent(MongoMutationReceiptRepository.transactional(fixture.database, fixture.client, Diagnostics.noop))
         )
         val scheduling = new InterviewSchedulingService(users, jobs, applications, repository, 3.minutes)

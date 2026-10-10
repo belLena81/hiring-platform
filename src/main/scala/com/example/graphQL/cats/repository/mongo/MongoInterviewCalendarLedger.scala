@@ -76,7 +76,7 @@ final class MongoInterviewCalendarLedger(store: MongoInterviewWorkflowStore) ext
                 MongoFilter.exists(ReleasedAtField, false)
               )
               RepositoryIO.lift(MongoSessionOperations.findOne(reservations, session, overlap)).flatMap {
-                case Some(_) => RepositoryIO.fromEither(Left(RepositoryError.Conflict))
+                case Some(_) => RepositoryIO.raise(RepositoryError.Conflict)
                 case None    =>
                   // Stored with millisecond precision, so the first answer equals every replayed answer.
                   val stored = reservation.copy(reservedAt = reservation.reservedAt.truncatedTo(ChronoUnit.MILLIS))

@@ -96,14 +96,12 @@ enum LogField(val key: String, val sensitive: Boolean = false) {
   case JobStatus extends LogField("jobStatus")
 }
 
-/** Marks adapter failures whose class name is safe to log; the class names are allow-listed at startup. */
-trait PublicFailureType
-
-/** Startup-injected allow-lists of values owned by outer layers (adapter failure classes, configuration keys). */
-final case class PublicLogValues(errorTypes: Set[String], configKeys: Set[String])
+/** Startup-injected allow-lists of values owned by outer layers (adapter/driver failure classes, configuration keys).
+  */
+final case class PublicLogValues(errorTypes: String => Boolean, configKeys: Set[String])
 
 object PublicLogValues {
-  val none: PublicLogValues = PublicLogValues(Set.empty, Set.empty)
+  val none: PublicLogValues = PublicLogValues(_ => false, Set.empty)
 }
 
 object LogFields {
@@ -117,17 +115,7 @@ object LogFields {
     "java.lang.IllegalArgumentException",
     "java.lang.IllegalStateException",
     "java.lang.RuntimeException",
-    "java.io.IOException",
-    "com.mongodb.MongoSecurityException",
-    "com.mongodb.MongoTimeoutException",
-    "com.mongodb.MongoSocketException",
-    "com.mongodb.MongoSocketOpenException",
-    "com.mongodb.MongoSocketReadException",
-    "com.mongodb.MongoSocketReadTimeoutException",
-    "com.mongodb.MongoCommandException",
-    "com.mongodb.MongoWriteException",
-    "com.mongodb.MongoBulkWriteException",
-    "com.mongodb.MongoException"
+    "java.io.IOException"
   )
   private val Root = "com.example.graphQL.cats."
   private def canonicalUuid(value: String): Boolean = Parsing.parseUuid(value).exists(_.toString == value)
@@ -136,18 +124,22 @@ object LogFields {
     List("hiring-publisher-", "hiring-interview-orchestrator-", "hiring-interview-worker-")
 
   def failure(error: Throwable): Map[LogField, String] = {
-    val errorType = error.getClass.getName
     val location = error.getStackTrace.iterator
       .take(32)
       .find(frame => frame.getClassName.startsWith(Root))
       .filter(frame => frame.getFileName != null && frame.getLineNumber > 0)
       .fold("unavailable")(frame => s"${frame.getFileName}:${frame.getLineNumber}")
     Map(
-      LogField.ErrorType -> (if (jdkErrorTypes.contains(errorType) || error.isInstanceOf[PublicFailureType]) errorType
-                             else "OtherException"),
+      LogField.ErrorType -> error.getClass.getName,
       LogField.ErrorLocation -> location
     )
   }
+
+  /** Failure class names reach diagnostics raw; the sink reports any class outside the allow-lists as this value. */
+  val OtherErrorType = "OtherException"
+
+  private def publicErrorType(value: String, allowed: PublicLogValues): Boolean =
+    jdkErrorTypes.contains(value) || allowed.errorTypes(value) || value == OtherErrorType
 
   def validPublic(field: LogField, value: String, allowed: PublicLogValues = PublicLogValues.none): Boolean =
     field match {
@@ -163,7 +155,7 @@ object LogFields {
         LogOutcome.values.exists(_.wire == value)
       case LogField.ConfigKey => allowed.configKeys.contains(value)
       case LogField.ErrorType =>
-        jdkErrorTypes.contains(value) || allowed.errorTypes.contains(value) || value == "OtherException"
+        publicErrorType(value, allowed)
       case LogField.ErrorLocation => value == "unavailable" || value.matches("[A-Za-z]+\\.scala:[1-9][0-9]{0,5}")
       case LogField.Environment   => Set("local", "production").contains(value)
       case LogField.TraceId       => value.matches("[0-9a-fA-F]{32}")

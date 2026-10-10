@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.service.search
 
+import cats.data.EitherT
 import cats.effect.IO
 import cats.effect.kernel.Clock
 import cats.effect.std.UUIDGen
@@ -14,6 +15,8 @@ import com.example.graphQL.cats.service.events.{
 }
 import io.circe.Json
 
+import com.example.graphQL.cats.service.protocol.UseCaseIO
+import com.example.graphQL.cats.service.{RepositoryError, UseCaseError}
 import com.example.graphQL.cats.shared.StableIds
 import java.util.UUID
 import scala.concurrent.duration.*
@@ -34,7 +37,7 @@ trait SearchSessionRecording {
       filter: Json,
       model: Option[String],
       results: List[SearchSessionEntry]
-  ): IO[Unit]
+  ): UseCaseIO[Unit]
 }
 
 object SearchSessionRecording {
@@ -57,8 +60,8 @@ object SearchSessionRecording {
         filter: Json,
         model: Option[String],
         results: List[SearchSessionEntry]
-    ): IO[Unit] =
-      clock.realTimeInstant.flatMap { now =>
+    ): UseCaseIO[Unit] =
+      EitherT.liftF(clock.realTimeInstant).flatMap { now =>
         val session = SearchSession(
           searchId,
           actorId,
@@ -72,11 +75,13 @@ object SearchSessionRecording {
           now,
           now.plusSeconds(Retention.toSeconds)
         )
-        IO.fromEither(
-          OperationalEvents
-            .searchPerformed(eventId(searchId), session)
-            .leftMap(_ => new IllegalStateException("Invalid search event contract"))
-        ).flatMap(event => handoff.enqueue(session, event))
+        EitherT
+          .fromEither[IO](
+            OperationalEvents
+              .searchPerformed(eventId(searchId), session)
+              .leftMap(_ => UseCaseError.Repository(RepositoryError.InvalidEvent))
+          )
+          .flatMap(event => EitherT.liftF(handoff.enqueue(session, event)))
       }
   }
 }

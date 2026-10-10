@@ -77,7 +77,7 @@ private[mongo] object MongoProducerRegistrations {
       ids: Vector[String],
       now: Instant
   ): RepositoryIO[Unit] =
-    if (ids.isEmpty || ids.size > BatchSize) RepositoryIO.fromEither(Left(RepositoryError.InvalidStoredData))
+    if (ids.isEmpty || ids.size > BatchSize) RepositoryIO.raise(RepositoryError.InvalidStoredData)
     else
       RepositoryIO
         .lift(

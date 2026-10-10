@@ -328,7 +328,7 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
           def record(group: String, event: OperationalEventEnvelope, at: Instant, expiresAt: Instant) =
             storedReceipts.record(group, event, at, expiresAt).flatMap { saved =>
               if (event.eventId == value.eventId) RepositoryIO.lift(received.complete(()).void).as(saved)
-              else RepositoryIO.fromEither(Right(saved))
+              else RepositoryIO.pure(saved)
             }
         }
         quarantine = new EventQuarantineRepository {
@@ -338,7 +338,7 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
               RepositoryIO.lift(attempts.updateAndGet(_ + 1)).flatMap {
                 case 1 =>
                   RepositoryIO.lift(failedAttempt.complete(()).void *> restore.get) *>
-                    RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
+                    RepositoryIO.raise(RepositoryError.Unavailable)
                 case _ => storedQuarantine.save(record)
               }
         }

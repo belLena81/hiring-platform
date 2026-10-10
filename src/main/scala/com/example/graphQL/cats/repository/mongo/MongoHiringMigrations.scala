@@ -237,6 +237,7 @@ private[mongo] object MongoHiringMigrations {
   private def backfillOutboxSubjectReferences(
       run: MigrationRun,
       document: Document,
+
       diagnostics: Diagnostics
   ): IO[Unit] = {
     val outbox = run.database.getCollection(MongoCollections.EventOutbox)

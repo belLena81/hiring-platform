@@ -61,7 +61,7 @@ final class InterviewSchedulingServiceSpec extends CatsEffectSuite {
       writes <- Ref.of[IO, Vector[(InterviewWorkflow, Instant)]](Vector.empty)
       repository = new TestInterviewWorkflowRepository {
         override def findRequest(actor: UserId, key: UUID, fingerprint: MutationReceiptFingerprint) =
-          RepositoryIO.fromEither(Right(Option.empty[InterviewWorkflow]))
+          RepositoryIO.pure(Option.empty[InterviewWorkflow])
         override def create(
             workflow: InterviewWorkflow,
             initialCommand: InterviewWorkflowCommand,
@@ -118,7 +118,7 @@ final class InterviewSchedulingServiceSpec extends CatsEffectSuite {
         assertEquals(actor, recruiterId)
         assertEquals(key, requestKey)
         assertEquals(fingerprint, expectedFingerprint)
-        RepositoryIO.fromEither(Right(Some(past)))
+        RepositoryIO.pure(Some(past))
       }
     }
     for {
@@ -142,7 +142,7 @@ final class InterviewSchedulingServiceSpec extends CatsEffectSuite {
   test("invalid interval observes supplied time but does not generate identity or persist intent") {
     val repository = new TestInterviewWorkflowRepository {
       override def findRequest(actor: UserId, key: UUID, fingerprint: MutationReceiptFingerprint) =
-        RepositoryIO.fromEither(Right(Option.empty[InterviewWorkflow]))
+        RepositoryIO.pure(Option.empty[InterviewWorkflow])
     }
     for {
       reads <- Ref.of[IO, Int](0)
@@ -165,7 +165,7 @@ final class InterviewSchedulingServiceSpec extends CatsEffectSuite {
     for {
       repairs <- Ref.of[IO, Vector[(Instant, UserId)]](Vector.empty)
       repository = new TestInterviewWorkflowRepository {
-        override def findForAdmin(id: InterviewWorkflowId) = RepositoryIO.fromEither(Right(Some(existing)))
+        override def findForAdmin(id: InterviewWorkflowId) = RepositoryIO.pure(Some(existing))
         override def repair(workflow: InterviewWorkflow, revision: Long, key: UUID, at: Instant, actor: UserId) =
           RepositoryIO.lift(repairs.update(_ :+ (at, actor))).as(workflow)
       }

@@ -80,3 +80,17 @@ Use [local engineering quality](engineering-quality.md) for pure FP, debugging, 
 Run `sbt test` for the configured unit suite and `sbt 'IntegrationTest / test'` for live HTTP/disposable MongoDB checks when relevant. Missing Docker is blocked infrastructure, not a passing gate. Run formatting/linting when configured. `sbt run` starts the long-running hiring server; use its probe endpoints and the [startup instructions](../README.md), not process exit, to check health.
 
 For skill edits, run the project-owned `python3 scripts/check-skills.py`, check local references, and request independent scenario review. Frontmatter validation alone does not prove orchestration behavior or native discovery. No database migration or runtime deployment is needed for documentation-only changes.
+
+## Agent test-run safety
+
+Agents run and seed tests only through `scripts/run-local-tests.sh`; it targets the isolated `compose.test.yaml` stack (random loopback ports, tmpfs data, identity check before every write or cleanup). Tests create their own data in per-case databases inside that stack.
+
+`.claude/settings.json` enforces this with permission rules plus the `scripts/guard-harness.py` PreToolUse hook:
+
+- **Allowed without prompt:** wrapper verbs `start`, `status`, `test`, `analytics`, `interview`, `retention`, `recovery`; `sbt test|compile|scalafmtCheckAll`.
+- **Human approval required (cleanup):** `scripts/run-local-tests.sh stop`, `rm`/`rmdir`, `sbt clean`, `find -delete`, any docker lifecycle or cleanup verb.
+- **Denied:** `mongosh`/`mongo*`/Kafka CLI tools, `docker exec|run|cp`, compose files other than `compose.test.yaml`, any MongoDB URI that is not the manifest's isolated endpoint (including ports 27017/9092), `sudo`, and writes (Edit/Write, redirects, `cp`/`mv`/`rm` targets) outside the project folder.
+
+Edits to `.claude/`, `scripts/`, `.git/`, build files and compose files need approval, because those run unprompted. The hook fails closed (exit 2) on malformed input, denies shell substitution in wrapper arguments, docker engine/context flags and `DOCKER_*`/`COMPOSE_*` overrides, and asks for nested shells (`bash -c`, `env`, `xargs`, `python -c`). The wrapper itself unsets Docker engine variables. The agent scratchpad under `/tmp/claude-<uid>` is the only write location outside the project.
+
+Limits: the hook is a guardrail, not a sandbox, so it cannot see inside scripts or interpreters. The wrapper's own automatic release of per-run test namespaces on the isolated stack is not gated per action; this was explicitly accepted by the project owner, because it only touches the identity-verified test stack. sbt, Coursier and Docker keep their caches in the user's home directory and Docker's storage; those are outside the project folder and not controlled by this setup.

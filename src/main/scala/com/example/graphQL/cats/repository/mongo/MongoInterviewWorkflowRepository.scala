@@ -68,7 +68,7 @@ final class MongoInterviewWorkflowRepository(
     requestReceipt(requestReceiptId(actorId, requestKey), None).flatMap {
       case None                                                  => none[InterviewWorkflow].pure[RepositoryIO]
       case Some((id, existing)) if existing == fingerprint.value => loadWorkflow(id, None)
-      case Some(_) => RepositoryIO.fromEither(Left(RepositoryError.Conflict))
+      case Some(_)                                               => RepositoryIO.raise(RepositoryError.Conflict)
     }
 
   override def hasHiringReceipt(workflowId: InterviewWorkflowId): RepositoryIO[Boolean] =
@@ -227,7 +227,7 @@ final class MongoInterviewWorkflowRepository(
             .flatMap {
               case InterviewLifecycleOutcome.Applied(next)       => next.pure[RepositoryIO]
               case InterviewLifecycleOutcome.Duplicate(existing) => existing.pure[RepositoryIO]
-              case _ => RepositoryIO.fromEither(Left(RepositoryError.Conflict))
+              case _                                             => RepositoryIO.raise(RepositoryError.Conflict)
             }
         case None =>
           hasHiringReceipt(workflow.id).flatMap { committed =>
@@ -243,7 +243,7 @@ final class MongoInterviewWorkflowRepository(
                     case InterviewWorkflowAdvanceResult.Applied             => next.pure[RepositoryIO]
                     case InterviewWorkflowAdvanceResult.Duplicate(existing) => existing.pure[RepositoryIO]
                     case InterviewWorkflowAdvanceResult.StaleRevision       =>
-                      RepositoryIO.fromEither(Left(RepositoryError.Conflict))
+                      RepositoryIO.raise(RepositoryError.Conflict)
                   }
               }
           }
@@ -263,7 +263,7 @@ final class MongoInterviewWorkflowRepository(
           workflow.revision != 0L || workflow.phase != InterviewWorkflowPhase.ReservationPending ||
           initialCommand != InterviewWorkflow.initialCommand(workflow)
         )
-          RepositoryIO.fromEither(Left(RepositoryError.InvalidEvent))
+          RepositoryIO.raise(RepositoryError.InvalidEvent)
         else createValid(workflow, initialCommand, requestKey, fingerprint, createdAt)
     }
 
@@ -290,7 +290,7 @@ final class MongoInterviewWorkflowRepository(
         session: Option[ClientSession[IO]]
     ): Option[RepositoryIO[InterviewWorkflowAdvanceResult]] =
       receipt.map { case (existingWorkflowId, existingFingerprint) =>
-        if (existingFingerprint != fingerprint.value) RepositoryIO.fromEither(Left(RepositoryError.Conflict))
+        if (existingFingerprint != fingerprint.value) RepositoryIO.raise(RepositoryError.Conflict)
         else
           loadWorkflow(existingWorkflowId, session)
             .subflatMap(
@@ -342,7 +342,7 @@ final class MongoInterviewWorkflowRepository(
     // A concurrent identical request commits its receipt first; its stored result is this request's result.
     val resolved = write.recoverWith { case RepositoryError.Conflict =>
       requestReceipt(receiptId, None).flatMap(
-        duplicateOf(_, None).getOrElse(RepositoryIO.fromEither(Left(RepositoryError.Conflict)))
+        duplicateOf(_, None).getOrElse(RepositoryIO.raise(RepositoryError.Conflict))
       )
     }
     MongoRepositorySupport.repositoryGuard(diagnostics, "interviewWorkflow.create")(resolved)
@@ -379,7 +379,7 @@ final class MongoInterviewWorkflowRepository(
       inboxMessageId.isEmpty || inboxMessageId.length > 256 || expectedRevision == Long.MaxValue ||
       workflow.revision != expectedRevision + 1L
     )
-      RepositoryIO.fromEither(Left(RepositoryError.InvalidEvent))
+      RepositoryIO.raise(RepositoryError.InvalidEvent)
     else {
       val inboxId = s"${workflow.id.value}:$inboxMessageId"
       MongoRepositorySupport.repositoryGuard(diagnostics, "interviewWorkflow.advance") {

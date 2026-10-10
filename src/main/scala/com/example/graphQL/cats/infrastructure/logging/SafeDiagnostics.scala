@@ -163,6 +163,7 @@ object SafeDiagnostics {
                 val rendered =
                   if (field.sensitive && maskSensitive) "[REDACTED]"
                   else if (field.sensitive || LogFields.validPublic(field, value, allowed)) bounded(value, 128)
+                  else if (field == LogField.ErrorType) LogFields.OtherErrorType
                   else "[FILTERED]"
                 field.key -> Json.fromString(rendered)
               }

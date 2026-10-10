@@ -41,8 +41,8 @@ final class MongoSearchFusionSpec extends CatsEffectSuite {
   }
 
   test("job fusion normalizes each branch's typed error to unavailable") {
-    val successful = RepositoryIO.fromEither(Right(List.empty[JobRetrievalHit]))
-    val invalid: RepositoryIO[List[JobRetrievalHit]] = RepositoryIO.fromEither(Left(RepositoryError.InvalidStoredData))
+    val successful = RepositoryIO.pure(List.empty[JobRetrievalHit])
+    val invalid: RepositoryIO[List[JobRetrievalHit]] = RepositoryIO.raise(RepositoryError.InvalidStoredData)
     for {
       vectorFailure <- MongoSemanticSearchResult.fuseJobs(invalid, successful, 10).value
       lexicalFailure <- MongoSemanticSearchResult.fuseJobs(successful, invalid, 10).value
@@ -53,9 +53,9 @@ final class MongoSearchFusionSpec extends CatsEffectSuite {
   }
 
   test("candidate fusion normalizes each branch's typed error to unavailable") {
-    val successful = RepositoryIO.fromEither(Right(List.empty[CandidateRetrievalHit]))
+    val successful = RepositoryIO.pure(List.empty[CandidateRetrievalHit])
     val invalid: RepositoryIO[List[CandidateRetrievalHit]] =
-      RepositoryIO.fromEither(Left(RepositoryError.InvalidStoredData))
+      RepositoryIO.raise(RepositoryError.InvalidStoredData)
     List(
       MongoSemanticSearchResult.fuseCandidates(invalid, successful, successful, 10),
       MongoSemanticSearchResult.fuseCandidates(successful, invalid, successful, 10),

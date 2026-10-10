@@ -31,26 +31,26 @@ trait AnalyticsErasureRequestRepository {
 object AnalyticsErasureRequestRepository {
   val unavailable: AnalyticsErasureRequestRepository = new AnalyticsErasureRequestRepository {
     override def workerReady(now: Instant): RepositoryIO[Unit] =
-      RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
+      RepositoryIO.raise(RepositoryError.Unavailable)
 
     override def enqueue(
         userId: UserId,
         now: Instant,
         context: MutationWriteContext
     ): RepositoryIO[String] =
-      RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
+      RepositoryIO.raise(RepositoryError.Unavailable)
 
     override def statusForSubject(
         userId: UserId,
         receiptId: String
     ): RepositoryIO[AccountDeletionStatus] =
-      RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
+      RepositoryIO.raise(RepositoryError.Unavailable)
 
     override def purgeSubjectOutbox(userId: UserId): RepositoryIO[Unit] =
-      RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
+      RepositoryIO.raise(RepositoryError.Unavailable)
 
     override def markComplete(userId: UserId, now: Instant): RepositoryIO[Unit] =
-      RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
+      RepositoryIO.raise(RepositoryError.Unavailable)
   }
 }
 

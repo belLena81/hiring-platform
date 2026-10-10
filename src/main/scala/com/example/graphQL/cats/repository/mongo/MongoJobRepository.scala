@@ -63,7 +63,7 @@ final class MongoJobRepository(
   override def relatedJobs(scope: HiringReadScope, keys: List[JobRelationKey]): RepositoryIO[List[RelatedJob]] = {
     import MongoAuthorizedReadQueries.*
     val requested = keys.distinct
-    if (requested.isEmpty) RepositoryIO.fromEither(Right(Nil))
+    if (requested.isEmpty) RepositoryIO.pure(Nil)
     else {
       val pipeline = List(
         matching(
@@ -258,11 +258,11 @@ final class MongoJobRepository(
 
   private def authorizedDiscovery(scope: HiringReadScope, jobsPipeline: List[Document]): RepositoryIO[List[Document]] =
     discoveryPolicy match {
-      case None         => RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
+      case None         => RepositoryIO.raise(RepositoryError.Unavailable)
       case Some(policy) =>
         import scala.jdk.CollectionConverters.*
         val allowed = scope.role == UserRole.Candidate || scope.role == UserRole.Admin
-        if (!allowed) RepositoryIO.fromEither(Left(RepositoryError.AuthorityRevoked))
+        if (!allowed) RepositoryIO.raise(RepositoryError.AuthorityRevoked)
         else {
           val pipeline = MongoJobRepository.authorizedDiscoveryPipeline(scope, jobsPipeline)
           RepositoryIO

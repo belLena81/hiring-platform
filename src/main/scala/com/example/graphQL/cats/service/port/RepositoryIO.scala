@@ -12,5 +12,9 @@ object RepositoryIO {
 
   def fromEither[A](value: Either[RepositoryError, A]): RepositoryIO[A] = EitherT.fromEither[IO](value)
 
+  def pure[A](value: A): RepositoryIO[A] = EitherT.pure[IO, RepositoryError](value)
+
+  def raise[A](error: RepositoryError): RepositoryIO[A] = EitherT.leftT[IO, A](error)
+
   def lift[A](value: IO[A]): RepositoryIO[A] = EitherT.liftF[IO, RepositoryError, A](value)
 }

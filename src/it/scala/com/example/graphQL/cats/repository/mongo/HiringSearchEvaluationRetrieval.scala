@@ -85,7 +85,7 @@ private[mongo] final class HiringSearchEvaluationRetrieval(database: MongoDataba
         documents(MongoCollections.Jobs, pipeline).subflatMap(
           MongoSemanticSearchResult.jobHits(_, query).map(_.flatten)
         )
-      case SearchEvaluationStrategy.AtlasAnn => RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
+      case SearchEvaluationStrategy.AtlasAnn => RepositoryIO.raise(RepositoryError.Unavailable)
     }
     def candidateMatches(query: VectorSearchQuery): RepositoryIO[List[CandidateRetrievalHit]] = strategy match {
       case SearchEvaluationStrategy.ApplicationRrf => repository.candidateMatches(query)
@@ -97,7 +97,7 @@ private[mongo] final class HiringSearchEvaluationRetrieval(database: MongoDataba
         documents(MongoCollections.Users, pipeline).subflatMap(
           MongoSemanticSearchResult.candidateHits(_, query).map(_.flatten)
         )
-      case SearchEvaluationStrategy.AtlasAnn => RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
+      case SearchEvaluationStrategy.AtlasAnn => RepositoryIO.raise(RepositoryError.Unavailable)
     }
   }
 

@@ -101,15 +101,15 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
       stored = record(workflow, command, None)
       claim = ClaimedInterviewWorkflowCommand(stored, "executor", new UUID(0L, 90L), clock.plusSeconds(60))
       repository = new TestInterviewWorkflowRepository {
-        override def findForAdmin(id: InterviewWorkflowId) = RepositoryIO.fromEither(Right(Some(workflow)))
-        override def findCommand(id: InterviewWorkflowId, step: String) = RepositoryIO.fromEither(Right(Some(stored)))
+        override def findForAdmin(id: InterviewWorkflowId) = RepositoryIO.pure(Some(workflow))
+        override def findCommand(id: InterviewWorkflowId, step: String) = RepositoryIO.pure(Some(stored))
         override def claimExecution(
             value: InterviewWorkflowCommandRecord,
             workerId: String,
             now: Instant,
             leaseUntil: Instant,
             maxAttempts: Int
-        ) = RepositoryIO.fromEither(Right(InterviewExecutionClaimOutcome.Acquired(claim)))
+        ) = RepositoryIO.pure(InterviewExecutionClaimOutcome.Acquired(claim))
         override def recordResult(
             value: ClaimedInterviewWorkflowCommand,
             result: InterviewResult,
@@ -421,10 +421,10 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
       applied <- Ref.of[IO, Applied](Applied(Vector.empty, Vector.empty, Vector.empty))
       stored = record(workflow, command, Some(InterviewResult.valueOf(result.toString)))
       repository = new TestInterviewWorkflowRepository {
-        override def findForAdmin(id: InterviewWorkflowId) = RepositoryIO.fromEither(Right(Some(workflow)))
-        override def findCommand(id: InterviewWorkflowId, step: String) = RepositoryIO.fromEither(Right(Some(stored)))
+        override def findForAdmin(id: InterviewWorkflowId) = RepositoryIO.pure(Some(workflow))
+        override def findCommand(id: InterviewWorkflowId, step: String) = RepositoryIO.pure(Some(stored))
         override def attemptCount(id: InterviewWorkflowId, requested: InterviewCommand) =
-          RepositoryIO.fromEither(Right(attempts))
+          RepositoryIO.pure(attempts)
         override def applyLifecycle(
             id: InterviewWorkflowId,
             expectedRevision: Long,
@@ -690,7 +690,7 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
       quarantined <- Ref.of[IO, Vector[String]](Vector.empty)
       reads <- Ref.of[IO, Int](0)
       repository = new TestInterviewWorkflowRepository {
-        override def findForAdmin(id: InterviewWorkflowId) = RepositoryIO.fromEither(Right(Some(open)))
+        override def findForAdmin(id: InterviewWorkflowId) = RepositoryIO.pure(Some(open))
         // The first read is the message's own lookup; a later read is the re-read after a failed requeue.
         override def findCommand(id: InterviewWorkflowId, step: String) =
           RepositoryIO.lift(reads.getAndUpdate(_ + 1).map(n => if (n == 0) Some(stored) else current(Some(stored))))

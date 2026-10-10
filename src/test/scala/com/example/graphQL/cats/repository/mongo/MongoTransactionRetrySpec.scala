@@ -39,7 +39,7 @@ final class MongoTransactionRetrySpec extends CatsEffectSuite {
       runner = recordingRunner(runs)
       result <- MongoMutationWriteContext
         .run(MongoMutationWriteContext(None), runner, transactionRequired = true) { session =>
-          RepositoryIO.fromEither(Right(session))
+          RepositoryIO.pure(session)
         }
         .value
       runCount <- runs.get

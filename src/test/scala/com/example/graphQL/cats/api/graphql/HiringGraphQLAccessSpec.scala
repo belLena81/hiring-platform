@@ -1461,7 +1461,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
         expected: Option[com.example.graphQL.cats.service.search.CandidateSearchEligibility]
     ) =
       if (scope.role == UserRole.Candidate) jobEligibility(ids)
-      else com.example.graphQL.cats.service.port.RepositoryIO.fromEither(Right(Nil))
+      else com.example.graphQL.cats.service.port.RepositoryIO.pure(Nil)
     override def authorizedCandidateEligibility(
         scope: com.example.graphQL.cats.service.read.HiringReadScope,
         expected: com.example.graphQL.cats.service.search.JobSearchEligibility,

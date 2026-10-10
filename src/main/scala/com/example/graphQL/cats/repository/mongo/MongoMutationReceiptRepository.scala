@@ -66,7 +66,7 @@ final class MongoMutationReceiptRepository(
               pending <- RepositoryIO.lift(inProgress(key, fingerprint, now, expiresAt))
               _ <- insert(session, pending)
               outcome <- write(MongoMutationWriteContext(session)).recoverWith { error =>
-                RepositoryIO.lift(remove(session, key)).flatMap(_ => RepositoryIO.fromEither(Left(error)))
+                RepositoryIO.lift(remove(session, key)).flatMap(_ => RepositoryIO.raise(error))
               }
               result <- outcome match {
                 case MutationWriteOutcome.Rejected(error) =>
@@ -77,9 +77,9 @@ final class MongoMutationReceiptRepository(
               }
             } yield result
           case Some(receipt) if receipt.fingerprint != fingerprint =>
-            RepositoryIO.fromEither(Right(MutationReceiptExecution.FingerprintMismatch))
+            RepositoryIO.pure(MutationReceiptExecution.FingerprintMismatch)
           case Some(receipt) if receipt.state == MutationReceiptState.InProgress =>
-            RepositoryIO.fromEither(Right(MutationReceiptExecution.InProgress))
+            RepositoryIO.pure(MutationReceiptExecution.InProgress)
           case Some(receipt) =>
             // A completed receipt without its rehydration key is corrupt; do not repeat the write.
             RepositoryIO.fromEither(

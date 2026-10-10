@@ -103,7 +103,7 @@ final class MongoInterviewSubjectCleanup(
           .map(_.exists(_.nonEmpty))
       )
       .flatMap {
-        case true  => RepositoryIO.fromEither(Right(true))
+        case true  => RepositoryIO.pure(true)
         case false =>
           RepositoryIO
             .lift(
@@ -150,7 +150,7 @@ final class MongoInterviewSubjectCleanup(
           .flatMap(_.traverse(row => RepositoryIO.fromEither(identity(row).map(id => Sweep(None, id, observedAt)))))
     }
     sweep.flatMap {
-      case None          => RepositoryIO.fromEither(Right(InterviewCleanupPage(Vector.empty, None)))
+      case None          => RepositoryIO.pure(InterviewCleanupPage(Vector.empty, None))
       case Some(current) =>
         RepositoryIO
           .lift(

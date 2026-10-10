@@ -77,7 +77,7 @@ final class InterviewSubjectCleanupWorker(
               .flatMap(now => repository.markProducersFenced(current.subjectId, ids, now)) *>
               repository.producerBatch(current.subjectId).flatMap { remaining =>
                 if (remaining.isEmpty) advance(InterviewCleanupObservation.ProducersFenced)
-                else RepositoryIO.fromEither(Right(()))
+                else RepositoryIO.pure(())
               }
         }
       case InterviewCleanupCommand.PurgeMongo =>
@@ -86,14 +86,14 @@ final class InterviewSubjectCleanupWorker(
         boundary(capture).flatMap(barriers => advance(InterviewCleanupObservation.BarriersCaptured(barriers)))
       case InterviewCleanupCommand.AwaitRetention(barriers) =>
         boundary(passed(barriers)).flatMap {
-          case false => RepositoryIO.fromEither(Right(()))
+          case false => RepositoryIO.pure(())
           case true  =>
             repository.purge(current.subjectId) *> repository.absent(current.subjectId).flatMap {
-              case false => RepositoryIO.fromEither(Left(RepositoryError.Conflict))
+              case false => RepositoryIO.raise(RepositoryError.Conflict)
               case true  => advance(InterviewCleanupObservation.RetentionPassedAndMongoAbsent)
             }
         }
-      case InterviewCleanupCommand.Finished => RepositoryIO.fromEither(Right(()))
+      case InterviewCleanupCommand.Finished => RepositoryIO.pure(())
     }
   }
 

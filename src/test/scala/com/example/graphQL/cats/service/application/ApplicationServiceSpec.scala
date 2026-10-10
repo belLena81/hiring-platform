@@ -4,7 +4,7 @@ import cats.effect.IO
 import cats.effect.Ref
 import cats.effect.std.UUIDGen
 import com.example.graphQL.cats.FixedTestClock
-import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
+import com.example.graphQL.cats.service.{ActorContext, HiringReadService, UseCaseError}
 import com.example.graphQL.cats.domain.pagination.{ApplicationPageRequest, PageSize}
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.ServiceFixtures.*
@@ -246,10 +246,12 @@ class ApplicationServiceSpec extends CatsEffectSuite {
         Some(operationalEvents),
         Some(nextOperationalEventError)
       )
+      userRepository = InMemoryUsers(usersRef)
       service = new ApplicationService(
-        InMemoryUsers(usersRef),
+        userRepository,
         jobRepository,
         applicationRepository,
+        HiringReadService(userRepository, jobRepository, applicationRepository),
         com.example.graphQL.cats.service.mutation.TestIdempotency.noop,
         clock = FixedTestClock.at(currentTime),
         uuidGen = new UUIDGen[IO] {

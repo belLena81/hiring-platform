@@ -116,7 +116,7 @@ final class MongoInterviewLifecycleStore(store: MongoInterviewWorkflowStore) {
   ): RepositoryIO[InterviewLifecycleOutcome] =
     if (InterviewActorPolicy.admits(origin.actor, event))
       applyAdmittedLifecycle(workflowId, expectedRevision, event, origin, now, availableAt)
-    else RepositoryIO.fromEither(Left(RepositoryError.InvalidEvent))
+    else RepositoryIO.raise(RepositoryError.InvalidEvent)
 
   private def applyAdmittedLifecycle(
       workflowId: InterviewWorkflowId,
@@ -169,7 +169,7 @@ final class MongoInterviewLifecycleStore(store: MongoInterviewWorkflowStore) {
             case Some(document) =>
               RepositoryIO.fromEither(decodeReceipt(document)).flatMap {
                 case (id, existing) if id == workflowId && existing == fingerprint.value => stored(id)
-                case _ => RepositoryIO.fromEither(Left(RepositoryError.Conflict))
+                case _ => RepositoryIO.raise(RepositoryError.Conflict)
               }
           }
       case InterviewLifecycleOrigin.Internal(cause) =>

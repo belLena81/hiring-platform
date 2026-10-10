@@ -159,10 +159,11 @@ final class HiringStructuredAccessEvaluationIntegrationSpec extends MongoIntegra
       MongoApplicationRepository.transactional(fixture.database, fixture.client, Diagnostics.noop)
     val receipts = MongoMutationReceiptRepository.transactional(fixture.database, fixture.client, Diagnostics.noop)
     val idempotent = Idempotent(receipts)
+    val readModel = HiringReadService(users, jobRepository, applicationRepository)
     val services = HiringGraphQLServices(
-      HiringReadService(users, jobRepository, applicationRepository),
+      readModel,
       new JobService(users, jobRepository, publisher, idempotent, Diagnostics.noop),
-      new ApplicationService(users, jobRepository, applicationRepository, idempotent),
+      new ApplicationService(users, jobRepository, applicationRepository, readModel, idempotent),
       CursorCodec.keyFromSecret(auth.hmacSecret),
       TestGraphQLSupport.accountService,
       TestGraphQLSupport.interactions,

@@ -116,16 +116,16 @@ final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
       store = new TestInterviewWorkflowRepository {
         override def claimDueCommands(workerId: String, now: Instant, leaseUntil: Instant, limit: Int) =
           RepositoryIO.lift(remaining.modify(n => (math.max(0, n - 1), if (n > 0) List(claim) else Nil)))
-        override def findForAdmin(id: InterviewWorkflowId) = RepositoryIO.fromEither(Right(Some(workflow)))
+        override def findForAdmin(id: InterviewWorkflowId) = RepositoryIO.pure(Some(workflow))
         override def authorizePublication(
             value: ClaimedInterviewWorkflowCommand,
             generation: InterviewPublisherGeneration,
             now: Instant
-        ) = RepositoryIO.fromEither(Right(true))
+        ) = RepositoryIO.pure(true)
         override def renewPublication(value: ClaimedInterviewWorkflowCommand, now: Instant, leaseUntil: Instant) =
-          RepositoryIO.fromEither(Right(true))
+          RepositoryIO.pure(true)
         override def markPublished(value: ClaimedInterviewWorkflowCommand, now: Instant) =
-          RepositoryIO.fromEither(Right(()))
+          RepositoryIO.pure(())
       }
       sender = new InterviewTransport {
         def generationFor(value: InterviewMessage) =
@@ -246,9 +246,9 @@ final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
       claims <- Ref.of[IO, Int](0)
       advanced <- Ref.of[IO, Vector[InterviewWorkflow]](Vector.empty)
       store = new TestInterviewWorkflowRepository {
-        override def findForAdmin(id: InterviewWorkflowId) = RepositoryIO.fromEither(Right(current.filter(_.id == id)))
+        override def findForAdmin(id: InterviewWorkflowId) = RepositoryIO.pure(current.filter(_.id == id))
         override def findCommand(id: InterviewWorkflowId, step: String) =
-          RepositoryIO.fromEither(Right(stored.filter(record => record.workflowId == id && record.stepId == step)))
+          RepositoryIO.pure(stored.filter(record => record.workflowId == id && record.stepId == step))
         override def quarantine(identity: String, now: Instant) = RepositoryIO.lift(quarantined.update(_ :+ identity))
         override def claimExecution(
             record: InterviewWorkflowCommandRecord,
@@ -258,7 +258,7 @@ final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
             maxAttempts: Int
         ) = RepositoryIO.lift(claims.update(_ + 1).as(InterviewExecutionClaimOutcome.AlreadyHandled))
         override def attemptCount(id: InterviewWorkflowId, requested: InterviewCommand) =
-          RepositoryIO.fromEither(Right(0L))
+          RepositoryIO.pure(0L)
         override def advance(
             next: InterviewWorkflow,
             expectedRevision: Long,
@@ -294,13 +294,13 @@ final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
       store = new TestInterviewWorkflowRepository {
         override def claimDueCommands(workerId: String, now: Instant, leaseUntil: Instant, limit: Int) =
           RepositoryIO.lift(requested.modify(values => (values :+ limit, if (values.isEmpty) List(claim) else Nil)))
-        override def findForAdmin(id: InterviewWorkflowId) = RepositoryIO.fromEither(Right(Some(workflow)))
+        override def findForAdmin(id: InterviewWorkflowId) = RepositoryIO.pure(Some(workflow))
         override def authorizePublication(
             value: ClaimedInterviewWorkflowCommand,
             generation: InterviewPublisherGeneration,
             now: Instant
         ) =
-          RepositoryIO.fromEither(Right(true))
+          RepositoryIO.pure(true)
         override def renewPublication(value: ClaimedInterviewWorkflowCommand, now: Instant, leaseUntil: Instant) =
           RepositoryIO.lift(renewCount.getAndUpdate(_ + 1).flatMap { count =>
             if (count == 0) IO.pure(true) else renewed.complete(()).as(true)
@@ -339,13 +339,13 @@ final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
       claim = ClaimedInterviewWorkflowCommand(record, "worker", new UUID(0L, 72L), observedAt.plusSeconds(1))
       store = new TestInterviewWorkflowRepository {
         override def claimDueCommands(workerId: String, now: Instant, leaseUntil: Instant, limit: Int) =
-          RepositoryIO.fromEither(Right(List(claim)))
-        override def findForAdmin(id: InterviewWorkflowId) = RepositoryIO.fromEither(Right(Some(workflow)))
+          RepositoryIO.pure(List(claim))
+        override def findForAdmin(id: InterviewWorkflowId) = RepositoryIO.pure(Some(workflow))
         override def authorizePublication(
             value: ClaimedInterviewWorkflowCommand,
             generation: InterviewPublisherGeneration,
             now: Instant
-        ) = RepositoryIO.fromEither(Right(true))
+        ) = RepositoryIO.pure(true)
         override def renewPublication(value: ClaimedInterviewWorkflowCommand, now: Instant, leaseUntil: Instant) =
           RepositoryIO.lift(renewals.getAndUpdate(_ + 1).map(_ == 0))
         override def retry(
@@ -384,13 +384,13 @@ final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
         claim = ClaimedInterviewWorkflowCommand(record, "worker", new UUID(0L, 80L), observedAt.plusSeconds(60))
         store = new TestInterviewWorkflowRepository {
           override def claimDueCommands(workerId: String, now: Instant, leaseUntil: Instant, limit: Int) =
-            RepositoryIO.fromEither(Right(List(claim)))
-          override def findForAdmin(id: InterviewWorkflowId) = RepositoryIO.fromEither(Right(Some(workflow)))
+            RepositoryIO.pure(List(claim))
+          override def findForAdmin(id: InterviewWorkflowId) = RepositoryIO.pure(Some(workflow))
           override def authorizePublication(
               value: ClaimedInterviewWorkflowCommand,
               generation: InterviewPublisherGeneration,
               now: Instant
-          ) = RepositoryIO.fromEither(Right(true))
+          ) = RepositoryIO.pure(true)
           override def renewPublication(value: ClaimedInterviewWorkflowCommand, now: Instant, leaseUntil: Instant) =
             RepositoryIO.fromEither(renewal)
           override def retry(
@@ -441,11 +441,11 @@ final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
             value: ClaimedInterviewWorkflowCommand,
             generation: InterviewPublisherGeneration,
             now: Instant
-        ) = RepositoryIO.fromEither(Right(now.isBefore(claim.leaseUntil)))
+        ) = RepositoryIO.pure(now.isBefore(claim.leaseUntil))
         override def renewPublication(value: ClaimedInterviewWorkflowCommand, now: Instant, leaseUntil: Instant) =
           RepositoryIO.lift(expiry.set(leaseUntil).as(now.isBefore(claim.leaseUntil)))
         override def markPublished(value: ClaimedInterviewWorkflowCommand, now: Instant) =
-          RepositoryIO.fromEither(Right(()))
+          RepositoryIO.pure(())
       }
       sender = new InterviewTransport {
         def generationFor(value: InterviewMessage) =

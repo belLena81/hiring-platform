@@ -46,17 +46,19 @@ final class SearchSessionRecordingSpec extends CatsEffectSuite {
     for {
       sink <- Ref.of[IO, Vector[(SearchSession, OperationalEventEnvelope)]](Vector.empty)
       service = recording(sink)
-      _ <- service.record(
-        actorId,
-        SearchKind.Jobs,
-        supplied,
-        Json.obj("city" -> Json.Null),
-        None,
-        List(
-          SearchSessionEntry("00000000-0000-0000-0000-000000000c01", 0.5d),
-          SearchSessionEntry("00000000-0000-0000-0000-000000000c02", 0.25d)
+      _ <- service
+        .record(
+          actorId,
+          SearchKind.Jobs,
+          supplied,
+          Json.obj("city" -> Json.Null),
+          None,
+          List(
+            SearchSessionEntry("00000000-0000-0000-0000-000000000c01", 0.5d),
+            SearchSessionEntry("00000000-0000-0000-0000-000000000c02", 0.25d)
+          )
         )
-      )
+        .value
       recorded <- sink.get
     } yield {
       val (session, event) = recorded.head
@@ -80,14 +82,16 @@ final class SearchSessionRecordingSpec extends CatsEffectSuite {
   test("an empty result list with a model records an empty ranked session") {
     for {
       sink <- Ref.of[IO, Vector[(SearchSession, OperationalEventEnvelope)]](Vector.empty)
-      _ <- recording(sink).record(
-        actorId,
-        SearchKind.SemanticJobSearch,
-        supplied,
-        Json.obj(),
-        Some("voyage-4-lite"),
-        Nil
-      )
+      _ <- recording(sink)
+        .record(
+          actorId,
+          SearchKind.SemanticJobSearch,
+          supplied,
+          Json.obj(),
+          Some("voyage-4-lite"),
+          Nil
+        )
+        .value
       recorded <- sink.get
     } yield {
       assertEquals(recorded.size, 1)

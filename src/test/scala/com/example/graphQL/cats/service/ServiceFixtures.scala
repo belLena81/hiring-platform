@@ -152,7 +152,7 @@ private[cats] object ServiceFixtures {
 
   private[cats] trait VersionedUserRepositoryTestAdapter extends UserRepository {
     override def relatedUsers(scope: HiringReadScope, keys: List[UserRelationKey]): RepositoryIO[List[RelatedUser]] =
-      RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
+      RepositoryIO.raise(RepositoryError.Unavailable)
 
     override def findVersioned(id: UserId): RepositoryIO[Option[Versioned[User]]] =
       com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(

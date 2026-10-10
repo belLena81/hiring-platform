@@ -246,9 +246,9 @@ final class EmbeddingPipeline(
   private def embedPrepared(prepared: EmbeddingPreparation)(
       persist: EntityEmbedding => RepositoryIO[Unit]
   ): RepositoryIO[ProcessingOutcome] = prepared match {
-    case EmbeddingPreparation.NoWork           => RepositoryIO.fromEither(Right(ProcessingOutcome.Completed))
+    case EmbeddingPreparation.NoWork           => RepositoryIO.pure(ProcessingOutcome.Completed)
     case EmbeddingPreparation.DocumentTooLarge =>
-      RepositoryIO.fromEither(Right(ProcessingOutcome.Terminal(EmbeddingWorkFailure.DocumentTooLarge)))
+      RepositoryIO.pure(ProcessingOutcome.Terminal(EmbeddingWorkFailure.DocumentTooLarge))
     case EmbeddingPreparation.Prepared(text, hash) =>
       RepositoryIO
         .lift(
@@ -257,9 +257,9 @@ final class EmbeddingPipeline(
             .map(_.flatMap(EmbeddingVector.validateModel(_, model)))
         )
         .flatMap {
-          case Left(EmbeddingError.ProviderUnavailable) => RepositoryIO.fromEither(Right(ProcessingOutcome.Retry))
+          case Left(EmbeddingError.ProviderUnavailable) => RepositoryIO.pure(ProcessingOutcome.Retry)
           case Left(EmbeddingError.InvalidResponse)     =>
-            RepositoryIO.fromEither(Right(ProcessingOutcome.Terminal(EmbeddingWorkFailure.InvalidResponse)))
+            RepositoryIO.pure(ProcessingOutcome.Terminal(EmbeddingWorkFailure.InvalidResponse))
           case Right(vector) =>
             RepositoryIO.lift(now).flatMap { instant =>
               persist(EntityEmbedding(vector.values, EmbeddingMeta(model, hash, instant)))
@@ -283,7 +283,6 @@ object EmbeddingPipeline {
       retryAttempts: Int,
       retryDelay: FiniteDuration,
       leaseDuration: FiniteDuration,
-      workerReady: IO[Boolean] = IO.pure(true),
       diagnostics: Diagnostics,
       durableRetry: DurableRetrySettings = new DurableRetrySettings(attempts = 8),
       workerRestartDelay: FiniteDuration = 1.second,
@@ -313,17 +312,13 @@ object EmbeddingPipeline {
           workerHealth
         )
         _ <- BackgroundWorker.resource(WorkerName, diagnostics)(
-          workerReady.flatMap { ready =>
-            if (!ready) workerHealth(false)
-            else
-              (workerHealth(true) *> pipeline.stream.compile.drain)
-                .guarantee(workerHealth(false))
-                .handleErrorWith(error =>
-                  diagnostics.emit(LogEvent.EmbeddingProcessingFailed, fields = LogFields.failure(error))
-                )
-                .flatMap(_ => IO.sleep(workerRestartDelay))
-                .foreverM
-          }
+          (workerHealth(true) *> pipeline.stream.compile.drain)
+            .guarantee(workerHealth(false))
+            .handleErrorWith(error =>
+              diagnostics.emit(LogEvent.EmbeddingProcessingFailed, fields = LogFields.failure(error))
+            )
+            .flatMap(_ => IO.sleep(workerRestartDelay))
+            .foreverM
         )
       } yield publisher
     }

@@ -347,7 +347,7 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends MongoIntegrationSu
                 MutationReceiptFingerprint.fromCanonicalInput("rejected-write"),
                 now,
                 now.plusSeconds(3600)
-              )(_ => RepositoryIO.fromEither(Right(MutationWriteOutcome.Rejected("business rejection"))))
+              )(_ => RepositoryIO.pure(MutationWriteOutcome.Rejected("business rejection")))
               .value
               .flatMap(requireResult)
             receiptRollback <- Idempotent(receipts)
@@ -663,7 +663,7 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends MongoIntegrationSu
             _ <- MongoHiringSetup.initialize(database, com.example.graphQL.cats.service.Diagnostics.noop)
             oldReceipt <- receipts
               .execute[Unit, String](key, legacyFingerprint, now, now.plusSeconds(3600)) { _ =>
-                RepositoryIO.fromEither(Right(MutationWriteOutcome.Applied(MutationReceiptWrite((), entity))))
+                RepositoryIO.pure(MutationWriteOutcome.Applied(MutationReceiptWrite((), entity)))
               }
               .value
             newFormatRetry <- receipts

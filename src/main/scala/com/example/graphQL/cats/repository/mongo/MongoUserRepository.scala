@@ -33,7 +33,7 @@ final class MongoUserRepository(
   private val MaxJobsClosedByAccountDeletion = 1000
 
   def insert(user: User): RepositoryIO[Unit] =
-    if (!user.roleProfileIsValid) RepositoryIO.fromEither(Left(RepositoryError.Conflict))
+    if (!user.roleProfileIsValid) RepositoryIO.raise(RepositoryError.Conflict)
     else
       MongoRepositorySupport
         .repositoryGuard(diagnostics, "MongoUserRepository.insert")(
@@ -84,7 +84,7 @@ final class MongoUserRepository(
         access: List[Document],
         matches: (K, Document) => Boolean
     ): RepositoryIO[List[RelatedUser]] =
-      if (requested.isEmpty) RepositoryIO.fromEither(Right(Nil))
+      if (requested.isEmpty) RepositoryIO.pure(Nil)
       else {
         val pipeline = List(matching(Filters.or(requested.map(predicate)*))) ++ actor(scope) ++ access ++ List(
           lookup(MongoCollections.Users, relatedField, MongoFields.Id, "related"),
@@ -238,7 +238,7 @@ final class MongoUserRepository(
       session: Option[ClientSession[IO]]
   ): RepositoryIO[Unit] =
     if (!user.roleProfileIsValid || user.role == UserRole.Admin)
-      RepositoryIO.fromEither(Left(RepositoryError.Conflict))
+      RepositoryIO.raise(RepositoryError.Conflict)
     else
       {
         val stateFilter = MongoFilter.and(

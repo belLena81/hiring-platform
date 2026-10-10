@@ -104,7 +104,7 @@ final class MongoSearchSessionRepository(
                   case _                                            => Left(RepositoryError.Conflict)
                 }
             )
-        case error => RepositoryIO.fromEither(Left(error))
+        case error => RepositoryIO.raise(error)
       }
 
   private def sameEvent(document: Document, event: OperationalEventEnvelope): Boolean =
@@ -216,8 +216,8 @@ final class MongoOperationalEventOutboxRepository(
           case row :: tail =>
             claimOne(workerId, transactionalId, now, leaseUntil, row.getString("_id"))
               .leftFlatMap {
-                case RepositoryError.Conflict => RepositoryIO.fromEither(Right(None))
-                case error                    => RepositoryIO.fromEither(Left(error))
+                case RepositoryError.Conflict => RepositoryIO.pure(None)
+                case error                    => RepositoryIO.raise(error)
               }
               .flatMap(value => scan(tail, values ++ value.toList, Some(row)))
           case Nil => last.traverse_(checkpoint).as(values)
@@ -226,7 +226,7 @@ final class MongoOperationalEventOutboxRepository(
       current <- RepositoryIO.lift(MongoSessionOperations.findOne(cursors, None, MongoFilter.eq("_id", workerId)))
       after <- RepositoryIO.fromEither(current.traverse(cursorFilter))
       found <- page(after)
-      rows <- if (found.isEmpty && after.nonEmpty) page(None) else RepositoryIO.fromEither(Right(found))
+      rows <- if (found.isEmpty && after.nonEmpty) page(None) else RepositoryIO.pure(found)
       result <- scan(rows, Nil, None)
     } yield result
   }
@@ -325,7 +325,7 @@ final class MongoOperationalEventOutboxRepository(
                   .subflatMap(result =>
                     Either.cond(result.getMatchedCount == subjectIds.size.toLong, (), RepositoryError.Conflict)
                   )
-              case false => RepositoryIO.fromEither(Left(RepositoryError.Conflict))
+              case false => RepositoryIO.raise(RepositoryError.Conflict)
             }
           }
       )
@@ -340,7 +340,7 @@ final class MongoOperationalEventOutboxRepository(
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "outbox.claimOne")(transactionRunner.run { session =>
         claimOneInSession(session, workerId, now, leaseUntil, eventId).flatMap {
-          case None        => RepositoryIO.fromEither(Right(None))
+          case None        => RepositoryIO.pure(None)
           case Some(claim) =>
             subjectIsDeleted(session, claim).flatMap {
               case true  => suppressDeletedClaim(session, claim, now).as(None)
@@ -384,7 +384,7 @@ final class MongoOperationalEventOutboxRepository(
                 )
                 .flatMap { _ =>
                   readClaimed(document) match {
-                    case Right(claim) => RepositoryIO.fromEither(Right(Some(claim)))
+                    case Right(claim) => RepositoryIO.pure(Some(claim))
                     case Left(_)      => failInvalidClaim(session, eventId, token, now).as(None)
                   }
                 }
@@ -711,6 +711,6 @@ object MongoSearchSessionRepository {
 
 private[mongo] object MongoOutboxSubjectLeases {
   def acquire(subjectIds: List[String])(acquireOne: String => RepositoryIO[Unit]): RepositoryIO[Unit] =
-    if (subjectIds.isEmpty) RepositoryIO.fromEither(Left(RepositoryError.InvalidStoredData))
+    if (subjectIds.isEmpty) RepositoryIO.raise(RepositoryError.InvalidStoredData)
     else subjectIds.sorted.traverse_(acquireOne)
 }

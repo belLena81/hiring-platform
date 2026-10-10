@@ -128,8 +128,8 @@ final class MongoSemanticSearchRepository(
       fields: List[String]
   )(decode: Document => Either[RepositoryError, A]): RepositoryIO[List[A]] = {
     val selected = ids.distinct
-    if (selected.size > branchLimit) RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
-    else if (selected.isEmpty) RepositoryIO.fromEither(Right(Nil))
+    if (selected.size > branchLimit) RepositoryIO.raise(RepositoryError.Unavailable)
+    else if (selected.isEmpty) RepositoryIO.pure(Nil)
     else
       MongoRepositorySupport.repositoryGuard(diagnostics, "semanticSearch.authorizedEligibility") {
         val child = List(

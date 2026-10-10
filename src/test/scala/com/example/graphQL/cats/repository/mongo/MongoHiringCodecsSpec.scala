@@ -423,6 +423,11 @@ class MongoHiringCodecsSpec extends FunSuite {
       Right((Right(operational), List(candidateId.value.toString)))
     )
     assertEquals(MongoHiringCodecs.readSearchSession(MongoHiringCodecs.searchSession(search)).toEither, Right(search))
+    assert(
+      MongoHiringCodecs
+        .readSearchSession(MongoHiringCodecs.searchSession(search).append(MongoFields.SearchKind, "unknown"))
+        .isInvalid
+    )
     assert(MongoHiringCodecs.outboxRecord(operational.copy(occurredAt = Instant.MAX), now).isLeft)
     assert(MongoHiringCodecs.outboxRecord(operational, Instant.MAX).isLeft)
   }

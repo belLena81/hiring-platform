@@ -2,7 +2,6 @@ package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.IO
 import cats.syntax.all.*
-import com.example.graphQL.cats.service.PublicFailureType
 import com.mongodb.MongoWriteException
 import com.mongodb.client.model.{Filters, UpdateOptions, Updates}
 import com.mongodb.client.result.UpdateResult
@@ -42,10 +41,7 @@ private[mongo] object MigrationIds {
 /** Typed setup failures. They remain Throwables so the setup lifecycle boundary keeps one failure channel, while
   * callers and tests can match on the case instead of a message. Messages carry identities only, never row data.
   */
-sealed abstract class MigrationError(message: String)
-    extends RuntimeException(message)
-    with NoStackTrace
-    with PublicFailureType
+sealed abstract class MigrationError(message: String) extends RuntimeException(message) with NoStackTrace
 
 object MigrationError {
   final case class LedgerAbsent(id: MigrationId) extends MigrationError(s"Migration ${id.value} proof is absent")
@@ -64,17 +60,8 @@ object MigrationError {
   final case class IndexMismatch(collection: String, index: String, reason: String)
       extends MigrationError(s"Mongo index definition mismatch for collection '$collection' index '$index': $reason")
 
-  /** Class names of the adapter failures the diagnostics allow-list may log. */
-  val publicTypeNames: Set[String] = Set(
-    classOf[LedgerAbsent],
-    classOf[LedgerCorrupt],
-    classOf[UnacknowledgedWrite],
-    classOf[StepFailed],
-    classOf[ValidatorMismatch],
-    classOf[CollectionRenameConflict],
-    classOf[IndexMismatch],
-    classOf[MongoSetupError]
-  ).map(_.getName)
+  /** Every case of the hierarchy (nested `MigrationError$...` classes) is a public failure type. */
+  def isPublicType(className: String): Boolean = className.startsWith(classOf[MigrationError].getName + "$")
 }
 
 /** Decoded ledger row. `Running` carries the raw resumable checkpoint (`lastId`) when one was recorded. */

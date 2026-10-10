@@ -8,6 +8,7 @@ import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, App
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.workflow.*
 import com.example.graphQL.cats.service.{
+  HiringReadService,
   ActorContext,
   AuthenticationError,
   RepositoryError,
@@ -252,10 +253,14 @@ final class InterviewCancellationServiceSpec extends CatsEffectSuite {
       )
       events <- Ref.of[IO, Vector[ApplicationEvent]](Vector.empty)
       errors <- Ref.of[IO, Option[RepositoryError]](None)
+      userRepository = new InMemoryUsers(users)
+      jobRepository = new InMemoryJobs(jobs)
+      applicationRepository = new InMemoryApplications(applications, events, errors)
       service = new ApplicationService(
-        new InMemoryUsers(users),
-        new InMemoryJobs(jobs),
-        new InMemoryApplications(applications, events, errors),
+        userRepository,
+        jobRepository,
+        applicationRepository,
+        HiringReadService(userRepository, jobRepository, applicationRepository),
         com.example.graphQL.cats.service.mutation.TestIdempotency.noop,
         clock = FixedTestClock.at(now)
       )

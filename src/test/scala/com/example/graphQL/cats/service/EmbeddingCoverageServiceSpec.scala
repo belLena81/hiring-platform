@@ -127,7 +127,7 @@ final class EmbeddingCoverageServiceSpec extends CatsEffectSuite {
   test("repository failures stay typed") {
     val failing = new EmbeddingCoverageRepository {
       override def observe(request: EmbeddingCoverageScanRequest): RepositoryIO[EmbeddingCoverageObservation] =
-        RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
+        RepositoryIO.raise(RepositoryError.Unavailable)
     }
     EmbeddingCoverageService
       .live(users(admin), failing, 5.minutes, clock = FixedTestClock.at(now))
@@ -139,8 +139,8 @@ final class EmbeddingCoverageServiceSpec extends CatsEffectSuite {
   }
 
   private final class TestUsers(values: Map[UserId, User]) extends ServiceFixtures.VersionedUserRepositoryTestAdapter {
-    override def find(id: UserId): RepositoryIO[Option[User]] = RepositoryIO.fromEither(Right(values.get(id)))
+    override def find(id: UserId): RepositoryIO[Option[User]] = RepositoryIO.pure(values.get(id))
     override def updateEmbedding(id: UserId, embedding: EntityEmbedding): RepositoryIO[Unit] =
-      RepositoryIO.fromEither(Right(()))
+      RepositoryIO.pure(())
   }
 }
