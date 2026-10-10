@@ -62,8 +62,14 @@ object AnalyticsError {
       extends AnalyticsError("analytics lakehouse operation failed", Some(underlying))
   final case class SparkStartupFailure(underlying: Throwable)
       extends AnalyticsError("analytics Spark session could not start", Some(underlying))
-  final case class MongoConnectionFailure(underlying: Throwable)
-      extends AnalyticsError("analytics Mongo client could not start", Some(underlying))
+  final case class MongoConnectionFailure(
+      underlying: Throwable,
+      detail: String = MongoConnectionFailure.ClientDetail
+  ) extends AnalyticsError(detail, Some(underlying))
+  object MongoConnectionFailure {
+    val ClientDetail = "analytics Mongo client could not start"
+    val EmptyResultDetail = "analytics Mongo operation returned no result"
+  }
   case object LakehouseLockOwnershipLost extends AnalyticsError("lakehouse mutex owner changed before release")
   case object LakehouseLockOwnershipUncertain
       extends AnalyticsError("lakehouse mutex acquisition is uncertain; manual ownership recovery required")

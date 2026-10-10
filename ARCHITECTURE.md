@@ -121,14 +121,18 @@ src/main/scala/com/example/graphQL/cats/
 │   └── policy/
 │
 ├── shared/
-│   ├── crypto/
+│   ├── crypto/          (Hmac, HmacJwt, SourceHash)
+│   ├── CauseChain.scala
 │   ├── HiringHttpPaths.scala
 │   └── Parsing.scala
 │
 ├── infrastructure/
+│   ├── auth/            (Argon2 hasher, JWT issuer, HMAC receipt fingerprints)
 │   ├── embedding/
 │   ├── kafka/
-│   └── logging/
+│   ├── logging/
+│   ├── search/
+│   └── telemetry/
 │
 ├── config/
 ├── runtime/
@@ -268,6 +272,8 @@ def appResource: Resource[IO, Server] =
     server     <- httpServer(graphQL)
   yield server
 ```
+
+The implemented composition follows this shape. `Main.run` reads `AppConfig` once (the masking flag is read first so invalid configuration still logs safely). `MongoHiringRuntime.resource(config, diagnostics, embeddingService)` then runs Mongo setup and Admin seeding, creates one Argon2 hasher, and builds the services. Vector search is a closed `VectorSearchConfig` ADT, `Disabled` or `Enabled(voyage, embedding, indexes, ...)`, that selects either the disabled capability or the embedding pipeline and semantic search. Setup, the Admin seed, and the Kafka and interview runtime resources are acquired before `HiringApiRoutes` builds the single HTTP middleware stack, which applies the active-request cap to every route except `/health` and `/ready`. The maintenance entry points `EmbeddingWorkRepair`, `ProducerGenerationRetirementMain` and `MongoWorkflowIntegrityAudit` load configuration on their own through `AppConfig.load`.
 
 Do not create Mongo or HTTP clients inside resolvers.
 
@@ -1171,7 +1177,7 @@ Raw candidate-filter requests pass through one pure accumulating validator befor
 
 ### Bounded hiring read authorization
 
-`HiringReadScope` is created only after persisted-actor validation. Mongo application/history and relationship queries gate the actor and authorized parent in the same selection. Relation-aware fetcher keys remain scoped to each request. Search eligibility uses required scoped projection ports and a pure `SearchEligibilityPolicy`: services sequence prechecks/retrieval, adapters enforce the final actor/query-entity gate and bounded selection, and policy validates current source/metadata/filter state before response truncation. Driver errors carrying transient transaction labels remain with the transaction retry owner inside active outbox sessions, with final sanitized errors at the repository boundary. The [MongoDB/vector specification](docs/specs/mongodb-vector-retrieval-optimization.md) tracks local, live Atlas and performance acceptance separately.
+`HiringReadScope` is created only after persisted-actor validation (`ActorAuthorization.readScope`). `ActorAuthorization.requireAdmin` is the shared check for a live, Active, singleton Admin and is used by analytics reporting, embedding coverage and the interview repair/notification-repair operations. Mongo application/history and relationship queries gate the actor and authorized parent in the same selection. Relation-aware fetcher keys remain scoped to each request. Search eligibility uses required scoped projection ports and a pure `SearchEligibilityPolicy`: services sequence prechecks/retrieval, adapters enforce the final actor/query-entity gate and bounded selection, and policy validates current source/metadata/filter state before response truncation. Driver errors carrying transient transaction labels remain with the transaction retry owner inside active outbox sessions, with final sanitized errors at the repository boundary. The [MongoDB/vector specification](docs/specs/mongodb-vector-retrieval-optimization.md) tracks local, live Atlas and performance acceptance separately.
 
 ### Local interview coordination
 

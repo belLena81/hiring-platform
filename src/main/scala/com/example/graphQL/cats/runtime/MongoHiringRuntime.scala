@@ -5,7 +5,6 @@ import cats.effect.std.{Semaphore, UUIDGen}
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.workflow.InterviewProposalTtl
 import com.example.graphQL.cats.api.graphql.{CursorCodec, HiringGraphQLServices}
-import com.example.graphQL.cats.service.port.EmbeddingService
 import com.example.graphQL.cats.service.{
   AnalyticsReportingService,
   DatabaseProbe,
@@ -17,7 +16,7 @@ import com.example.graphQL.cats.service.{
   LogFields,
   ProbeResult
 }
-import com.example.graphQL.cats.service.application.ApplicationService
+import com.example.graphQL.cats.service.application.{ApplicationService, InterviewSchedulingService}
 import com.example.graphQL.cats.service.auth.{UserAccountService, UserAuthenticationService}
 import com.example.graphQL.cats.service.job.JobService
 import com.example.graphQL.cats.service.mutation.Idempotent
@@ -34,7 +33,7 @@ import com.example.graphQL.cats.service.search.{
   SearchSessionRecording,
   SemanticSearchService
 }
-import com.example.graphQL.cats.config.{AppConfig, EmbeddingConfig, VectorSearchConfig, VoyageConfig}
+import com.example.graphQL.cats.config.{AppConfig, VectorSearchConfig}
 import com.example.graphQL.cats.infrastructure.auth.{
   JwtAccessTokenIssuer,
   Argon2PasswordHasher,
@@ -81,13 +80,7 @@ object MongoHiringRuntime {
     override def wake: IO[Unit] = IO.unit
   }
 
-  /** `embeddingService` is the test seam for the embedding provider; production uses Voyage. */
-  def resource(
-      config: AppConfig,
-      diagnostics: Diagnostics,
-      embeddingService: (VoyageConfig, EmbeddingConfig, Diagnostics) => Resource[IO, EmbeddingService] =
-        voyageEmbeddingService
-  ): Resource[IO, MongoHiringRuntime] =
+  def resource(config: AppConfig, diagnostics: Diagnostics): Resource[IO, MongoHiringRuntime] =
     for {
       passwordHashPermits <- Resource.eval(Semaphore[IO](Runtime.getRuntime.availableProcessors.toLong))
       embeddingHealth <- Resource.eval(Ref.of[IO, Boolean](config.vectorSearch == VectorSearchConfig.Disabled))
@@ -165,7 +158,14 @@ object MongoHiringRuntime {
               rerank
             ) =>
           for {
-            provider <- embeddingService(voyage, embeddingSettings, diagnostics)
+            provider <- VoyageEmbeddingService.resource(
+              voyage.apiKey,
+              voyage.endpoint,
+              voyage.model,
+              voyage.dimension,
+              embeddingSettings.timeoutMs.millis,
+              diagnostics = diagnostics
+            )
             publisher <- EmbeddingPipeline.resource(
               embeddingWork,
               users,
@@ -239,7 +239,7 @@ object MongoHiringRuntime {
         semanticSearch,
         AnalyticsReportingService(users, analyticsReports),
         Option.when(config.kafka.interview.enabled)(
-          new com.example.graphQL.cats.service.application.InterviewSchedulingService(
+          new InterviewSchedulingService(
             users,
             jobs,
             applications,
@@ -264,20 +264,6 @@ object MongoHiringRuntime {
       services,
       UserAuthenticationService(users),
       embeddingHealth.get.map(if (_) ProbeResult.Ready else ProbeResult.Unavailable)
-    )
-
-  private def voyageEmbeddingService(
-      voyage: VoyageConfig,
-      embedding: EmbeddingConfig,
-      diagnostics: Diagnostics
-  ): Resource[IO, EmbeddingService] =
-    VoyageEmbeddingService.resource(
-      voyage.apiKey,
-      voyage.endpoint,
-      voyage.model,
-      voyage.dimension,
-      embedding.timeoutMs.millis,
-      diagnostics = diagnostics
     )
 
   private def probe(

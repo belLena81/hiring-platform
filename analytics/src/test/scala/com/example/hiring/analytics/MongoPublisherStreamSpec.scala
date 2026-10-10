@@ -282,5 +282,9 @@ final class MongoPublisherStreamSpec extends FunSuite {
     assertEquals(cancellations.get(), 1)
     val empty = AnalyticsTestOperationalConfig.streams.one[IO, Void](completedPublisher).attempt.unsafeRunSync()
     assert(empty.left.exists(_.isInstanceOf[AnalyticsError.MongoConnectionFailure]))
+    assertEquals(
+      empty.left.toOption.flatMap(Option(_).map(_.getMessage)),
+      Some(AnalyticsError.MongoConnectionFailure.EmptyResultDetail)
+    )
   }
 }

@@ -164,7 +164,7 @@ final class MongoEmbeddingWorkRepository(
           )
           .subflatMap(result =>
             Either.cond(
-              result.wasAcknowledged() && result.getMatchedCount + result.getUpserts.size == 1,
+              result.getMatchedCount + result.getUpserts.size == 1,
               (),
               RepositoryError.Conflict
             )

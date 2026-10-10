@@ -38,13 +38,25 @@ lazy val analytics = (project in file("."))
     Test / jacocoReportSettings := JacocoReportSettings()
       .withFormats(JacocoReportFormats.ScalaHTML, JacocoReportFormats.XML),
     IntegrationTest / jacocoMergedReportSettings := JacocoReportSettings()
-      .withThresholds(JacocoThresholds(line = 60))
+      .withThresholds(JacocoThresholds(line = 85))
       .withFormats(JacocoReportFormats.ScalaHTML, JacocoReportFormats.XML),
     Test / unmanagedSourceDirectories += baseDirectory.value.getParentFile / "test-support" / "src" / "main" / "scala",
     Test / parallelExecution := false,
     Test / javaOptions += "--add-opens=java.base/sun.security.action=ALL-UNNAMED",
     IntegrationTest / scalaSource := baseDirectory.value / "src" / "it" / "scala",
     IntegrationTest / parallelExecution := false,
+    // sbt-jacoco hands the exec-file location to the JVM through javaOptions, so only a forked JVM records data.
+    IntegrationTest / fork := true,
+    // Defaults.testSettings above redefines fullClasspath after the plugin; restore the same definition with the
+    // jacoco-instrumented classes first (as Test has), otherwise integration tests run uninstrumented classes.
+    IntegrationTest / fullClasspath := {
+      val instrumentedDirectory = (IntegrationTest / jacocoInstrumentedDirectory).value
+      val instrumented = (Test / fullClasspath).value.filter(_.data == instrumentedDirectory)
+      instrumented ++ Classpaths
+        .concatDistinct(IntegrationTest / exportedProducts, IntegrationTest / dependencyClasspath)
+        .value
+    },
+    IntegrationTest / javaOptions += "--add-opens=java.base/sun.security.action=ALL-UNNAMED",
     scalacOptions ++= Seq(
       "-encoding",
       "utf-8",

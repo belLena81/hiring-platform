@@ -46,7 +46,8 @@ private[mongo] object MongoTransactionRunner {
           abortActiveTransaction(diagnostics, IO.delay(session.hasActiveTransaction), session.abortTransaction)
 
         def commit(session: ClientSession[IO]): IO[Unit] =
-          retrying(retryPolicy.maxCommitAttempts, MongoErrors.isUnknownCommitResult)(
+          // A transient label means the whole transaction is retried, so the commit alone is not.
+          retrying(retryPolicy.maxCommitAttempts, MongoErrors.isCommitRetriable)(
             session.commitTransaction.onError { case error =>
               MongoRepositorySupport.reportFailure(diagnostics, "transaction.commit", error)
             }

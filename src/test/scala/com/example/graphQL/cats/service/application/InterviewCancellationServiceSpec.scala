@@ -7,7 +7,13 @@ import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, ApplicationStatus, Job, User, UserRole}
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.workflow.*
-import com.example.graphQL.cats.service.{ActorContext, RepositoryError, ServiceFixtures, UseCaseError}
+import com.example.graphQL.cats.service.{
+  ActorContext,
+  AuthenticationError,
+  RepositoryError,
+  ServiceFixtures,
+  UseCaseError
+}
 import com.example.graphQL.cats.service.protocol.IdempotencyRequest
 import java.time.Instant
 import java.util.UUID
@@ -143,6 +149,7 @@ final class InterviewCancellationServiceSpec extends CatsEffectSuite {
     case Action.Cancel | Action.Request | Action.Propose  => workflowIn(InterviewWorkflowPhase.Completed)
   }
 
+  private val unauthorized = UseCaseError.Authentication(AuthenticationError.Unauthorized)
   private val forbidden = InterviewActionError.UseCase(UseCaseError.Domain(DomainError.Forbidden))
   private val notFound = InterviewActionError.UseCase(UseCaseError.Domain(DomainError.NotFound("interviewWorkflow")))
 
@@ -605,9 +612,9 @@ final class InterviewCancellationServiceSpec extends CatsEffectSuite {
           requeue <- a.service.repairNotifications(actor, workflowId, UUID.randomUUID()).value
           stored <- a.stored
         } yield {
-          assertEquals(repair, Left(UseCaseError.Domain(DomainError.Forbidden)))
-          assertEquals(listing, Left(UseCaseError.Domain(DomainError.Forbidden)))
-          assertEquals(requeue, Left(UseCaseError.Domain(DomainError.Forbidden)))
+          assertEquals(repair, Left(unauthorized))
+          assertEquals(listing, Left(unauthorized))
+          assertEquals(requeue, Left(unauthorized))
           assertEquals(stored.phase, InterviewWorkflowPhase.RepairRequired)
         }
       }

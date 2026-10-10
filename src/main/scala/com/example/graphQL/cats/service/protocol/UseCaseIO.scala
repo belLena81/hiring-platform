@@ -23,7 +23,7 @@ object UseCaseIO {
   def repository[A](value: RepositoryIO[A]): UseCaseIO[A] =
     value.leftMap {
       case RepositoryError.AuthorityRevoked =>
-        UseCaseError.Domain(com.example.graphQL.cats.domain.error.DomainError.Forbidden)
+        UseCaseError.Domain(DomainError.Forbidden)
       case error => UseCaseError.Repository(error)
     }
 

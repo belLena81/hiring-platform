@@ -666,6 +666,24 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
     assert(invalidRange.swap.toOption.exists(_.getMessage.contains("end offset must not precede start offset")))
   }
 
+  test("redaction excludes only the missing-key phrase, never a sensitive value that starts like it") {
+    import pureconfig.{ConfigReader, ConfigSource}
+    import pureconfig.error.FailureReason
+    def rejecting(text: String): ConfigReader[String] =
+      ConfigReader[String].emap(_ => Left(new FailureReason { override def description: String = text }))
+    def rendered(description: String): String =
+      AnalyticsConfigReaders
+        .decode(ConfigSource.string("value = x"), "value")(using rejecting(description))
+        .swap
+        .toOption
+        .map(_.toChain.toList.mkString(" "))
+        .getOrElse(fail("expected a decode failure"))
+
+    assert(rendered("password: Key not found: 'password'.").contains("password: Key not found: 'password'."))
+    val leaked = rendered("password = \"Key not found hunter2-synthetic\"")
+    assert(!leaked.contains("hunter2-synthetic"), leaked)
+  }
+
   test("HMAC validation accumulates short, malformed, and unpaired key settings") {
     val shortKey = Base64.getEncoder.encodeToString("short".getBytes(StandardCharsets.UTF_8))
     val validation = SubjectPseudonymizer.validateFromBase64(shortKey, " ", Some("old-key"), None)

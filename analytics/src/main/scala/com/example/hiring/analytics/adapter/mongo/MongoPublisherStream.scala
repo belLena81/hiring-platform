@@ -31,7 +31,10 @@ private[analytics] final class MongoPublisherStream(settings: AnalyticsOperation
   def one[F[_]: Async, A](publisher: => Publisher[A]): F[A] =
     optional[F, A](publisher).flatMap(
       _.liftTo[F](
-        AnalyticsError.MongoConnectionFailure(new NoSuchElementException("Mongo publisher completed without a value"))
+        AnalyticsError.MongoConnectionFailure(
+          new NoSuchElementException("Mongo publisher completed without a value"),
+          AnalyticsError.MongoConnectionFailure.EmptyResultDetail
+        )
       )
     )
 

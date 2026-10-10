@@ -21,7 +21,7 @@ A practical playground for functional Scala, GraphQL API design, MongoDB data mo
 
 Start with the `product-manager` skill (`/product-manager`) to coordinate specialist work and independent reviews. See [agent workflow and usage](docs/agent-development.md) and [project rules](AGENTS.md). Local skills cover Product Manager, Software Architect, Scala Developer, Data Engineer, Big Data Engineer, QA Engineer, Security Engineer, and Code Reviewer.
 
-The build uses Scala 3.9 LTS and Java 17+, with Cats Effect/FS2, Sangria/http4s Ember, Circe, MongoDB reactive driver, fs2-kafka, Logback, and MUnit/Testcontainers core. It serves the current hiring API with a resource-managed MongoDB client.
+The build uses Scala 3.9 LTS and Java 17+, with Cats Effect/FS2, Sangria/http4s Ember, Circe, MongoDB reactive driver, fs2-kafka, PureConfig with Iron refinements, cats-retry, Logback, and MUnit/Testcontainers core. It serves the current hiring API with a resource-managed MongoDB client.
 
 ## Trusted Admin initialization
 
@@ -31,11 +31,11 @@ Login/signup idempotency receipts use domain-separated HMAC fingerprints keyed b
 
 ## Local build
 
-`sbt run` forks a separate JVM so Cats Effect `IOApp` owns the application lifecycle. Start MongoDB locally, then run the application on `127.0.0.1:8080`:
+`sbt run` forks a separate JVM so Cats Effect `IOApp` owns the application lifecycle. The packaged configuration has no defaults for the HTTP bind address, port, MongoDB URI or JWT secret; supply them through the environment (`HTTP_HOST`, `HTTP_PORT`, `MONGODB_URI`, `AUTH_JWT_HS256_SECRET`) or an explicitly selected configuration file. `src/main/resources/local.conf` binds `127.0.0.1:8080` but is loaded only when selected by `config.resource`/`config.file`. Start MongoDB locally, then run the application:
 
 ```bash
 docker compose up -d mongodb
-sbt run
+HTTP_HOST=127.0.0.1 HTTP_PORT=8080 MONGODB_URI="mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true" AUTH_JWT_HS256_SECRET="<random secret of at least 32 bytes>" sbt run
 ```
 
 Event publication can also use the local Kafka broker:
@@ -90,7 +90,7 @@ Worker failures persist a fixed operational category and retry count; exhausted 
 
 The accelerated Compose proof scripts and their overlay files were removed; the pre-production Kafka/Delta retention proof, external-writer exclusion, guarded key retirement and operational signoff remain required before production and are tracked in the analytics specs.
 
-`GET /health` reports application liveness; `GET /ready` reports MongoDB connectivity. `POST /graphql` accepts `{"query":"{ health { status } readiness { status } }"}`. MongoDB outages leave HTTP running and readiness reports `NOT_READY`. `GET /schema.graphql` exports the current schema; GraphQL introspection supports API documentation/testing clients. See the [API reference](docs/api.md).
+`GET /health` reports application liveness; `GET /ready` reports MongoDB connectivity and, when vector search is enabled, embedding worker health. `POST /graphql` accepts `{"query":"{ health { status } readiness { status } }"}`. MongoDB outages leave HTTP running and readiness reports `NOT_READY`. `GET /schema.graphql` exports the current schema; GraphQL introspection supports API documentation/testing clients. See the [API reference](docs/api.md).
 
 See the [API reference](docs/api.md) and the [current reset specification](docs/specs/pre-mvp-contract-reset.md) for the active contract and verification evidence.
 
@@ -104,7 +104,7 @@ Use Java 17+ and sbt 1.11.1. Set `JAVA_HOME` to your installed JDK when the defa
 bash scripts/check-local.sh
 ```
 
-The command validates local skills and runs the Docker-independent MUnit suite. Run `sbt 'IntegrationTest / test'` separately for real HTTP lifecycle and disposable MongoDB tests; Docker is required for the database tests. These commands are local checks, not deployment or performance certification.
+The command validates local skills, runs formatting checks, then runs the root and analytics unit and integration suites under JaCoCo. It therefore requires Docker (through `scripts/run-local-tests.sh`) and fails when merged unit + integration line coverage is below 85%. The unit suite alone is Docker-independent: `sbt test` runs it, and `sbt 'IntegrationTest / test'` runs the real HTTP lifecycle and disposable MongoDB tests. These commands are local checks, not deployment or performance certification.
 
 For repeated local database/Kafka checks, use `scripts/run-local-tests.sh start`, then `scripts/run-local-tests.sh test` or `scripts/run-local-tests.sh analytics`. `status` inspects the owned stack and `stop` stops it. The isolated `compose.test.yaml` stack reuses pinned images and containers, binds separate loopback ports and stores service data in tmpfs. Mongo has a 2 GiB tmpfs and 3 GiB memory limit, including its native free-space reserve and 256 MiB WiredTiger cache; Kafka has a 768 MiB memory limit. These limits are not preallocated; JVM test processes and dedicated drills need additional memory. Its ignored manifest and credentials live under `.local/config/test-services/`; each run owns temporary databases, topics and groups under a locked registry. Endpoint identity must match before writes or cleanup. Ordinary test namespaces are removed on release; server restart/failpoint checks use dedicated containers. Direct sbt integration runs retain suite-owned Testcontainers when reusable mode is absent. Existing application databases and durable analytics proof volumes are outside this test stack. See [the implementation specification](docs/specs/hiring-event-and-test-reliability.md).
 
@@ -116,7 +116,7 @@ Wrapper runs cache compiler output and reports under `.local/data/test-builds/ro
 
 ## Test coverage
 
-JaCoCo coverage is available for both SBT builds. Run `sbt jacoco` from the repository root for main-project unit coverage; run `sbt 'IntegrationTest / jacoco'` to run its integration tests with coverage and merge their results. Reports are written under `target/scala-<version>/jacoco/report/test/` and `.../report/it/`, with the merged report under `.../report/merged/`. Run the same commands from `analytics/` to generate analytics unit and integration coverage. Integration coverage requires the same Docker-backed services as the integration test suite. Both builds enforce a 60% line-coverage threshold on the merged unit + integration report: `sbt jacoco 'IntegrationTest / jacoco'` fails below it, and the full runs of `scripts/run-local-tests.sh test|analytics` (used by `scripts/check-local.sh`, which therefore needs Docker) run exactly that. Unit-only `sbt jacoco` reports without a threshold. Reports are written as HTML and `jacoco.xml`.
+JaCoCo coverage is available for both SBT builds. Run `sbt jacoco` from the repository root for main-project unit coverage; run `sbt 'IntegrationTest / jacoco'` to run its integration tests with coverage and merge their results. Reports are written under `target/scala-<version>/jacoco/report/test/` and `.../report/it/`, with the merged report under `.../report/merged/`. Run the same commands from `analytics/` to generate analytics unit and integration coverage. Integration coverage requires the same Docker-backed services as the integration test suite. Both builds enforce an 85% line-coverage threshold on the merged unit + integration report (measured 2026-10-10: application 90.21%, analytics 87.93%): `sbt jacoco 'IntegrationTest / jacoco'` fails below it, and the full runs of `scripts/run-local-tests.sh test|analytics` (used by `scripts/check-local.sh`, which therefore needs Docker) run exactly that. Unit-only `sbt jacoco` reports without a threshold. Reports are written as HTML and `jacoco.xml`.
 
 ## Documentation
 
@@ -256,7 +256,7 @@ Status markers: `[x]` complete, `[~]` in progress, `[ ]` planned. Complete means
 - `[~] Phase 8 — MongoDB Access and Vector Retrieval Optimization:` [specification](docs/specs/mongodb-vector-retrieval-optimization.md). Local access correctness, projections, index recovery and operational measurements are done (MVR-01–06, 09, 10). Remaining: Atlas ANN/exact runs (MVR-07, blocked without `ATLAS_TEST_URI`) and a paired vector-optimization decision (MVR-08, open).
 - `[~] Phase 9 — Search Evaluation and Embedding Architecture:` [specification](docs/specs/hiring-search-enhancements.md#search-evaluation-and-embedding-architecture). Embedding preparation/recovery, typed evaluation, fixture replay, review export, curated capture and paired assessment are implemented. Remaining: human relevance labels, live Atlas comparisons, ranking adoption (deferred by the conservative policy).
 - `[~] Phase 10 — AI Discovery and Search Quality:` [specification](docs/specs/hiring-discovery-search-quality.md). Radius search, input validation, exact structured facets and cursor/geo index cutover are done locally (HDQ-01–03, 05, 09–11). Remaining: Atlas lexical/vector execution (HDQ-04, 06), lexical-query facets; ranker adoption (HDQ-07) and personalization (HDQ-08) are deliberately deferred.
-- `[~] Phase 11 — Kafka Workflow Contracts, Saga and State:` [specification](docs/specs/durable-hiring-workflows.md). Local scheduling, fenced recovery, compensation, account-deletion replay and broker-outage criteria (DHW-01–13) are recorded passing. Remaining: real calendar/notification providers, production redundancy, deployed retention; interview cancellation/rescheduling is an unscheduled feature.
+- `[~] Phase 11 — Kafka Workflow Contracts, Saga and State:` [specification](docs/specs/durable-hiring-workflows.md). Local scheduling, fenced recovery, compensation, account-deletion replay and broker-outage criteria (DHW-01–13) are recorded passing. Remaining: real calendar/notification providers, production redundancy, deployed retention. Interview cancellation and rescheduling mutations are implemented in source; their follow-up acceptance outcomes are recorded as Not run in the workflow specification.
 - `[~] Phase 12 — Operational Observability and Resilience:` [specification](docs/specs/hiring-observability-resilience.md). Only the pre-existing telemetry runtime and structured logging exist; the draft spec's HOR-01–11 are all Not run (thresholds, routing and exporter decisions still unmade).
 - `[ ] Phase 13 — Analytics Architecture, Reconciliation and Scale Planning:` [specification](docs/specs/analytics-reconciliation-recovery.md). Draft; ARR-01–11 Not run. Deliberately sequenced after Mongo/AI/workflow acceptance.
 - `[ ] Phase 14 — Production Hardening:` [specification](docs/specs/production-readiness.md). Draft; PRD-01–12 Not run. Provider, topology, recovery objectives and owners are unresolved. Production streaming additionally needs genuine retention, writer exclusion and guarded key retirement.
@@ -269,7 +269,7 @@ Marker legend for Phases 8–11: `[~]` means the local implementation is done fo
 | Group | Phases | What remains |
 |---|---|---|
 | Complete (local) | 1–7 | Production gates only: deployed retention, writer exclusion, key retirement, operational signoff; Phase 7 latency moves to Phase 15. |
-| Small remains | 8, 9, 10, 11 | All external or human: Atlas environment (`ATLAS_TEST_URI`), human relevance labelling, real providers. Phase 11 also has deferred interview cancellation. No further local feature work is required to reach these gates. |
+| Small remains | 8, 9, 10, 11 | All external or human: Atlas environment (`ATLAS_TEST_URI`), human relevance labelling, real providers. Phase 11 cancellation and rescheduling acceptance is still Not run. No further local feature work is required to reach these gates. |
 | Not yet covered | 12–15 | Specs exist and are reviewed as drafts, but no acceptance criterion has run. Phase 12 is the next buildable phase; 13 depends on it, 14–15 depend on deployment decisions. |
 
 Cross-cutting tracks (not roadmap phases): the [quality consolidation spec](docs/specs/hiring-platform-quality-consolidation.md) (RF-00–RF-09) is in progress, slice 0 only, with no criterion verified; the [embedding coverage report](docs/specs/embedding-coverage-report.md) is implemented and locally verified but awaits independent Code, Security and QA verdicts. Largest unblock: provision a disposable Atlas test cluster, which alone closes the open parts of Phases 8–10.
@@ -302,7 +302,7 @@ Interview scheduling is opt-in with `INTERVIEW_ENABLED=true` and separate config
 
 The [embedding and workflow boundary specification](docs/specs/embedding-workflow-boundary-reliability.md) tracks finite provider vectors, independent cleanup subject progress, explicit worker diagnostics and reuse of the pure application lifecycle for interview commits. Its functional follow-ups add bounded subject-ID cleanup sweeps with per-record failure isolation, pure interview message/admission decisions, validated canonical candidate filters, injectable scheduling effects, byte-preserving cursor encoding and named workflow/ranking/facet values. Admin repair reconciles existing effects without reopening released reservations or extending deadlines. Public contracts and stored schemas remain unchanged; follow-up acceptance is tracked separately from historical checks.
 
-For the local Compose broker, enable Kafka and use `KAFKA_INTERVIEW_ORCHESTRATOR_USERNAME=interview_command_publisher`, `KAFKA_INTERVIEW_WORKER_USERNAME=interview_result_publisher` and `KAFKA_INTERVIEW_FENCER_USERNAME=interview_fencer`. Supply their distinct `KAFKA_INTERVIEW_ORCHESTRATOR_PASSWORD`, `KAFKA_INTERVIEW_WORKER_PASSWORD` and `KAFKA_INTERVIEW_FENCER_PASSWORD` values through ignored local configuration; Compose uses those same password variables to provision its principals. The existing Kafka publisher/consumer configuration is still required. Use the configured local plaintext protocol only with loopback bootstrap addresses. Scheduling timestamps use UTC milliseconds; intervals that collapse at that precision are rejected. Executable scheduling operations are in `src/test/resources/graphql/interview-scheduling.graphql`.
+For the local Compose broker, enable Kafka and use `KAFKA_INTERVIEW_ORCHESTRATOR_USERNAME=interview_command_publisher`, `KAFKA_INTERVIEW_WORKER_USERNAME=interview_result_publisher` and `KAFKA_INTERVIEW_FENCER_USERNAME=interview_fencer`. Supply their distinct `KAFKA_INTERVIEW_ORCHESTRATOR_PASSWORD`, `KAFKA_INTERVIEW_WORKER_PASSWORD` and `KAFKA_INTERVIEW_FENCER_PASSWORD` values through ignored local configuration; Compose uses those same password variables to provision its principals. The existing Kafka publisher/consumer configuration is still required. Use the configured local plaintext protocol only with loopback bootstrap addresses. Scheduling timestamps use UTC milliseconds; intervals that collapse at that precision are rejected. Executable scheduling operations are in `src/test/resources/graphql/interview-scheduling.graphql`. Cancellation and rescheduling use the mutations in `interview-cancellation.graphql` (see the [API reference](docs/api.md#interview-scheduling-cancellation-and-rescheduling)); cancelling an interview rejects the application through the existing `Interview → Rejected` transition.
 
 ### Workflow recovery maintenance cutover
 

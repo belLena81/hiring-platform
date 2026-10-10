@@ -62,7 +62,7 @@ Run from the project root:
 bash scripts/check-local.sh
 ```
 
-The command uses Python 3.9+ to validate project-local skills, checks Java 17+ (using `JAVA_HOME` when set), then runs the current MUnit `sbt test` suite, including compilation required by sbt. It is an explicit local command, not a hook, CI job, deploy command, schema migration, or complete readiness certification. It runs without requiring a Git repository or staged files or any global skill installation.
+The command uses Python 3.9+ to validate project-local skills, checks Java 17+ (using `JAVA_HOME` when set), runs `scalafmtCheckAll scalafmtSbtCheck` in both builds, then runs the full unit and integration suites of both builds through `scripts/run-local-tests.sh test` and `scripts/run-local-tests.sh analytics` under JaCoCo. It therefore requires Docker for the integration services. Each full run fails when merged unit + integration line coverage is below 85%. It is an explicit local command, not a hook, CI job, deploy command, schema migration, or complete readiness certification. It runs without requiring a Git repository or staged files or any global skill installation.
 
 | Change | Additional evidence before completion |
 |---|---|
@@ -72,7 +72,7 @@ The command uses Python 3.9+ to validate project-local skills, checks Java 17+ (
 | Performance | Same reproducible before/after workload, query plans/counts, latency/resource/cost comparison |
 | Docs/skills | Local references, skill validation, and independent scenario review |
 
-Scala compiler warnings are checked by the build. Scalafmt is configured with standard Scalafmt rules for the Scala 3.9 application and separate Scala 3.7.4 analytics build. At the repository root, run `sbt scalafmtAll scalafmtSbt` to format the application and its build definitions, then `cd analytics && sbt scalafmtAll scalafmtSbt` to format analytics. Check them with `sbt scalafmtCheckAll scalafmtSbtCheck` in each build. The application has the explicit `sbt 'IntegrationTest / test'` task for live HTTP and disposable MongoDB checks; run it separately from the Docker-independent local unit command. GraphQL SDL and operation fixtures are checked in the unit suite. Transactions and migrations require disposable MongoDB tests; connectivity tests cannot certify those guarantees. Missing integration/migration/compatibility tests cannot be deferred to a future CI pipeline.
+Scala compiler warnings are checked by the build. Scalafmt is configured with standard Scalafmt rules for the Scala 3.9 application and separate Scala 3.7.4 analytics build. At the repository root, run `sbt scalafmtAll scalafmtSbt` to format the application and its build definitions, then `cd analytics && sbt scalafmtAll scalafmtSbt` to format analytics. Check them with `sbt scalafmtCheckAll scalafmtSbtCheck` in each build. The unit suite (`sbt test`) is Docker-independent. The application has the explicit `sbt 'IntegrationTest / test'` task for live HTTP and disposable MongoDB checks; `scripts/check-local.sh` requires Docker because it includes these suites and the merged coverage gate. Coverage can also be run directly with `sbt jacoco 'IntegrationTest / jacoco'`, which fails below 85% merged line coverage. GraphQL SDL and operation fixtures are checked in the unit suite. Transactions and migrations require disposable MongoDB tests; connectivity tests cannot certify those guarantees. Missing integration/migration/compatibility tests cannot be deferred to a future CI pipeline.
 
 ## Review before and after coding
 

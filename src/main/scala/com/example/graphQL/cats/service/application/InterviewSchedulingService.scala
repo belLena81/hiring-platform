@@ -107,13 +107,10 @@ final class InterviewSchedulingService(
       idempotencyKey: UUID
   ): UseCaseIO[InterviewWorkflow] =
     for {
-      user <- authorization.resolve(actor)
-      _ <- EitherT.fromEither[IO](
-        Either.cond(user.role == UserRole.Admin, (), UseCaseError.Domain(DomainError.Forbidden))
-      )
+      admin <- authorization.requireAdmin(actor)
       workflow <- inspect(actor, id)
       now <- EitherT.liftF(currentTime)
-      repaired <- UseCase.repository(workflows.repair(workflow, expectedRevision, idempotencyKey, now, user.id))
+      repaired <- UseCase.repository(workflows.repair(workflow, expectedRevision, idempotencyKey, now, admin.id))
     } yield repaired
 
   /** Cancelling is a rejection of the application (`Interview -> Rejected`, system-generated feedback): the candidate,
@@ -203,7 +200,7 @@ final class InterviewSchedulingService(
       id: InterviewWorkflowId
   ): UseCaseIO[List[InterviewWorkflowCommandRecord]] =
     for {
-      _ <- requireAdmin(actor)
+      _ <- authorization.requireAdmin(actor)
       records <- UseCase.repository(workflows.findNotificationRepairs(id))
     } yield records
 
@@ -214,15 +211,10 @@ final class InterviewSchedulingService(
       idempotencyKey: UUID
   ): UseCaseIO[Int] =
     for {
-      admin <- requireAdmin(actor)
+      admin <- authorization.requireAdmin(actor)
       now <- EitherT.liftF(currentTime)
       repaired <- UseCase.repository(workflows.repairNotifications(id, idempotencyKey, now, admin.id))
     } yield repaired
-
-  private def requireAdmin(actor: ActorContext): UseCaseIO[User] =
-    authorization
-      .resolve(actor)
-      .flatMap(user => UseCase.ensure(user.role == UserRole.Admin, UseCaseError.Domain(DomainError.Forbidden)).as(user))
 
   private def initiatorOf(role: UserRole): InterviewCancellationInitiator = role match {
     case UserRole.Candidate => InterviewCancellationInitiator.Candidate

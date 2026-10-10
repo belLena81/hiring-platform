@@ -375,6 +375,11 @@ private[mongo] object MongoErrors {
     case _                     => false
   }
 
+  /** Only an unknown commit result that is not also transient is retried as a commit; both labels retry the
+    * transaction.
+    */
+  def isCommitRetriable(error: Throwable): Boolean = isUnknownCommitResult(error) && !isTransient(error)
+
   def isDuplicateKey(error: Throwable): Boolean = MongoDuplicateKey.unapply(error).nonEmpty
 
   def isWriteConflict(error: MongoCommandException): Boolean =

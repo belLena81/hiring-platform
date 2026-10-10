@@ -101,11 +101,31 @@ final class MongoAccountRegistrationIntegrationSpec extends MongoIntegrationSuit
               }
             } yield ()
           }
-        conflict <- MongoHiringRuntime
+        // A drifted seed name is a no-op once the registry is initialized (README Admin seed): startup
+        // succeeds and the existing Admin and its password are preserved; no second Admin is provisioned.
+        drifted <- MongoHiringRuntime
           .resource(config.copy(adminSeed = seed.copy(name = Some("Another admin"))), Diagnostics.noop)
-          .use(_ => IO.unit)
+          .use { runtime =>
+            for {
+              original <- runtime.services.accountService
+                .login(
+                  request("drifted-original"),
+                  com.example.graphQL.cats.service.protocol.LoginInput("Synthetic admin", "synthetic-admin-password")
+                )
+                .value
+              other <- runtime.services.accountService
+                .login(
+                  request("drifted-other"),
+                  com.example.graphQL.cats.service.protocol.LoginInput("Another admin", "synthetic-admin-password")
+                )
+                .value
+            } yield (original, other)
+          }
           .attempt
-        _ <- IO(assert(conflict.isLeft))
+        _ <- IO {
+          assert(drifted.exists(_._1.exists(_._1.role == UserRole.Admin)))
+          assertEquals(drifted.map(_._2), Right(Left(UseCaseError.Account(AccountError.InvalidCredentials))))
+        }
       } yield ()
     }
   }

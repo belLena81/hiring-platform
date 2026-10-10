@@ -314,7 +314,7 @@ PY_RUN
         if (( $# > 1 )); then
           sbt "${java_args[@]}" "-Dhiring.test.buildRoot=$build_target" "it:testOnly ${*:2}"
         else
-          # Full runs merge unit and integration coverage and enforce the 60% line threshold.
+          # Full runs merge unit and integration coverage and enforce the 85% line threshold.
           sbt "${java_args[@]}" "-Dhiring.test.buildRoot=$build_target" jacoco 'it:jacoco'
         fi
         ;;
@@ -324,7 +324,7 @@ PY_RUN
         if (( $# > 1 )); then
           sbt "${java_args[@]}" "-Dhiring.test.buildRoot=$build_target" test "it:testOnly ${*:2}"
         else
-          # Full runs merge unit and integration coverage and enforce the 60% line threshold.
+          # Full runs merge unit and integration coverage and enforce the 85% line threshold.
           sbt "${java_args[@]}" "-Dhiring.test.buildRoot=$build_target" jacoco 'it:jacoco'
         fi
         ;;

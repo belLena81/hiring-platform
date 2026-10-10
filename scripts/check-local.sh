@@ -22,7 +22,7 @@ fi
 
 # Both builds: formatting gates first, then unit and integration suites under JaCoCo.
 # The integration suites need Docker; the runner owns this workspace's test services.
-# A full run fails when merged unit + integration line coverage is below 60%.
+# A full run fails when merged unit + integration line coverage is below 85%.
 sbt "${sbt_args[@]}" scalafmtCheckAll scalafmtSbtCheck
 (cd analytics && sbt "${sbt_args[@]}" scalafmtCheckAll scalafmtSbtCheck)
 export HIRING_TEST_JAVA_HOME="${HIRING_TEST_JAVA_HOME:-${JAVA_HOME:-}}"

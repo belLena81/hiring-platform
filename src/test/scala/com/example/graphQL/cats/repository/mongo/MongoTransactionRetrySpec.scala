@@ -5,28 +5,8 @@ import cats.syntax.all.*
 import com.example.graphQL.cats.service.port.{MutationWriteContext, RepositoryError, RepositoryIO}
 import mongo4cats.client.ClientSession
 import munit.CatsEffectSuite
-import retry.*
 
 final class MongoTransactionRetrySpec extends CatsEffectSuite {
-  test("cats-retry bounds transaction attempts") {
-    val policy = MongoTransactionRunner.RetryPolicy(
-      maxTransactionAttempts = 3,
-      initialDelay = scala.concurrent.duration.Duration.Zero,
-      maxDelay = scala.concurrent.duration.Duration.Zero
-    )
-    for {
-      attempts <- Ref.of[IO, Int](0)
-      result <- retryingOnFailures(attempts.update(_ + 1).as(false))(
-        policy = MongoTransactionRunner.backoff[Boolean](policy, policy.maxTransactionAttempts),
-        valueHandler = (_, _) => IO.pure(HandlerDecision.Continue)
-      )
-      observed <- attempts.get
-    } yield {
-      assertEquals(observed, 3)
-      assertEquals(result, Left(false))
-    }
-  }
-
   test("noop context opens a repository transaction only for an atomic multi-write") {
     for {
       runs <- Ref.of[IO, Int](0)

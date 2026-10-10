@@ -74,7 +74,7 @@ An optimization needs a baseline, a demonstrated bottleneck, a measured improvem
 
 ## Validation
 
-Use [local engineering quality](engineering-quality.md) for pure FP, debugging, review, and the `bash scripts/check-local.sh` command. There is no CI/CD pipeline; integration and [migration/contract checks](schema-evolution.md) must be run locally when required.
+Use [local engineering quality](engineering-quality.md) for pure FP, debugging, review, and the `bash scripts/check-local.sh` command, which needs Docker and enforces the merged 85% line-coverage gate. There is no CI/CD pipeline; integration and [migration/contract checks](schema-evolution.md) must be run locally when required.
 
 Run `sbt test` for the configured unit suite and `sbt 'IntegrationTest / test'` for live HTTP/disposable MongoDB checks when relevant. Missing Docker is blocked infrastructure, not a passing gate. Run formatting/linting when configured. `sbt run` starts the long-running hiring server; use its probe endpoints and the [startup instructions](../README.md), not process exit, to check health.
 

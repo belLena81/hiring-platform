@@ -186,7 +186,7 @@ private[analytics] object AnalyticsConfigReaders {
   }
 
   private val SensitiveAssignment =
-    "(?i)((?:previous-)?secret-base64|(?:sasl-)?(?:username|password)|mongo(?:db)?-uri)\\s*[:=]\\s*(?!Key not found)(\"(?:\\\\.|[^\"])*\"|[^,\\s}]+)".r
+    "(?i)((?:previous-)?secret-base64|(?:sasl-)?(?:username|password)|mongo(?:db)?-uri)\\s*[:=]\\s*(?!Key not found:\\s*')(\"(?:\\\\.|[^\"])*\"|[^,\\s}]+)".r
   private val MongoCredentials = "(?i)(mongodb(?:\\+srv)?://)[^/@\\s]+@".r
   private val LongEncodedSecret = "(?<![A-Za-z0-9])[A-Za-z0-9+/]{32,}={0,2}(?![A-Za-z0-9])".r
 

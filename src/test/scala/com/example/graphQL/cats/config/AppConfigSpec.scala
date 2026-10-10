@@ -569,7 +569,13 @@ class AppConfigSpec extends FunSuite {
       ("http.admission-permits", List("0", "1025", "-1", "synthetic-secret"), ConfigError.InvalidAdmissionPermits),
       (
         "mongo.uri",
-        List("https://synthetic-secret", "mongodb://", "mongodb://host:wrong"),
+        List(
+          "https://synthetic-secret",
+          "mongodb://",
+          "mongodb://host:wrong",
+          "mongodb://host/?w=0",
+          "mongodb://user:synthetic-secret@host/?w=0"
+        ),
         ConfigError.InvalidMongoUri
       ),
       ("mongo.database", List("a/b", "a.b", "a b", "a$b", "a" * 64), ConfigError.InvalidMongoDatabase)
@@ -582,6 +588,23 @@ class AppConfigSpec extends FunSuite {
         assertContainsError(result, error)
         assert(!result.toString.contains("synthetic-secret"))
       }
+    }
+  }
+
+  test("Kafka SASL credentials never appear in rendered publisher or consumer settings") {
+    val publisher = KafkaPublisherConfig("worker", 10, 30, 5, 3, 500, Some("synthetic-user"), Some("synthetic-secret"))
+    val consumer = KafkaConsumerConfig(true, 7, 14, Some("synthetic-user"), Some("synthetic-secret"))
+    List(publisher.toString, consumer.toString).foreach { rendered =>
+      assert(!rendered.contains("synthetic-secret"), rendered)
+      assert(!rendered.contains("synthetic-user"), rendered)
+    }
+  }
+
+  test("P1-AC01 accepts acknowledged write concerns in the Mongo URI") {
+    List("w=1", "w=majority", "w=1&journal=true").foreach { options =>
+      assert(
+        AppConfigFixtures.fromConfig(defaultConfig + s"mongo.uri = \"mongodb://host/?$options\"\n", Map.empty).isRight
+      )
     }
   }
 

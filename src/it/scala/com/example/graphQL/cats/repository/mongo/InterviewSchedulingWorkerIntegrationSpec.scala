@@ -35,7 +35,7 @@ final class InterviewSchedulingWorkerIntegrationSpec extends KafkaIntegrationSui
       completionTimes: Ref[IO, Map[UUID, Long]],
       startedNanos: Long,
       backlog: Ref[IO, List[Json]],
-      remaining: Int = 600
+      deadline: FiniteDuration
   ): IO[Unit] =
     for {
       states <- workflows.traverse(value => success(repository.findForAdmin(value.id)))
@@ -61,7 +61,7 @@ final class InterviewSchedulingWorkerIntegrationSpec extends KafkaIntegrationSui
       )
       _ <-
         if (finished.size == workflows.size) IO.unit
-        else if (remaining <= 0)
+        else if ((now.toNanos - startedNanos).nanos > deadline)
           backlog.get.flatMap(samples =>
             IO.blocking {
               Files.writeString(
@@ -94,7 +94,7 @@ final class InterviewSchedulingWorkerIntegrationSpec extends KafkaIntegrationSui
             completionTimes,
             startedNanos,
             backlog,
-            remaining - 1
+            deadline
           )
     } yield ()
 
@@ -171,8 +171,11 @@ final class InterviewSchedulingWorkerIntegrationSpec extends KafkaIntegrationSui
         EitherT.liftF[IO, InterviewProviderError, Unit](count("notificationLookupRequests")) *> underlyingNotifications
           .lookup(key)
     }
+    // The claim lease bounds how long a command claimed by a crashed worker stays invisible (the two simulated
+    // crashes below each wait one full lease). A short lease keeps the proof independent of machine load while the
+    // heartbeat (lease / 3) still protects live workers; production lease values are configured separately.
     val settings =
-      InterviewWorkerSettings("interview-worker-a", 100.millis, 60.seconds, 10.seconds, 5, 1.second, 30.seconds)
+      InterviewWorkerSettings("interview-worker-a", 100.millis, 6.seconds, 10.seconds, 5, 1.second, 30.seconds)
     val first = new InterviewWorkflowWorker(repository, calendar, notifications, settings, Diagnostics.noop)
     val second =
       new InterviewWorkflowWorker(
@@ -372,8 +375,20 @@ final class InterviewSchedulingWorkerIntegrationSpec extends KafkaIntegrationSui
                         .map(result => assert(result.toOption.flatten.nonEmpty))
                   )
             }
-            _ <- workers(repository, env, counters = counters)
-              .use(_ => waitCompleted(repository, workflows, completed, start.toNanos, backlog))
+            _ <- workers(repository, env, counters = counters).use { _ =>
+              // Condition-based wait: 90 s of wall clock for the final drain, measured from here, covers two
+              // 6 s lease expiries plus 32 workflows with ample margin under load.
+              IO.monotonic.flatMap(waitStart =>
+                waitCompleted(
+                  repository,
+                  workflows,
+                  completed,
+                  start.toNanos,
+                  backlog,
+                  (waitStart - start) + 90.seconds
+                )
+              )
+            }
             durations <- completed.get.map(_.values.toList.sorted)
             calendarCount <- Mongo4catsCollections
               .documents(fixture.database, MongoCollections.InterviewCalendarReservations)

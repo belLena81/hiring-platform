@@ -270,7 +270,9 @@ final case class KafkaPublisherConfig(
     pollIntervalMillis: Int,
     saslUsername: Option[String] = None,
     saslPassword: Option[String] = None
-)
+) {
+  override def toString: String = s"KafkaPublisherConfig($workerId, $batchSize, [REDACTED])"
+}
 final case class KafkaConsumerConfig(
     enabled: Boolean,
     receiptTtlDays: Int,
@@ -278,7 +280,9 @@ final case class KafkaConsumerConfig(
     saslUsername: Option[String] = None,
     saslPassword: Option[String] = None,
     partitionConcurrency: Int = KafkaConsumerConfig.DefaultPartitionConcurrency
-)
+) {
+  override def toString: String = s"KafkaConsumerConfig($enabled, $partitionConcurrency, [REDACTED])"
+}
 object KafkaConsumerConfig {
   inline val DefaultPartitionConcurrency = 4
 }

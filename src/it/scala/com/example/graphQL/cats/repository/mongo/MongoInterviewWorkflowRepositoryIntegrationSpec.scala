@@ -7,7 +7,7 @@ import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, Ap
 import com.example.graphQL.cats.domain.policy.ApplicationLifecycle
 import com.example.graphQL.cats.domain.workflow.*
 import com.example.graphQL.cats.service.Diagnostics
-import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
+import com.example.graphQL.cats.service.{ActorContext, AuthenticationError, UseCaseError}
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.service.application.InterviewSchedulingService
 import com.example.graphQL.cats.service.events.OperationalEvents
@@ -535,7 +535,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         assertEquals(scheduled.initiatedBy, own.recruiterId)
         assertEquals(candidateView.map(_.id), Right(scheduled.id))
         assertEquals(strangerView, Left(UseCaseError.Domain(DomainError.NotFound("interviewWorkflow"))))
-        assertEquals(recruiterRepair, Left(UseCaseError.Domain(DomainError.Forbidden)))
+        assertEquals(recruiterRepair, Left(UseCaseError.Authentication(AuthenticationError.Unauthorized)))
         assertEquals(replay.map(_.id), Right(scheduled.id))
         assertEquals(mismatch, Left(UseCaseError.Repository(RepositoryError.Conflict)))
       }
