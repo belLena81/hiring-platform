@@ -170,3 +170,29 @@ Owner: Scala Developer, working on the integrated tree.
   - Root unit 1041/1041 on the merged tree.
 - Analytics follow-up (journal enums, shared error text, `StreamingBatchCallback`, `StreamingCheckpointControl`, key-retirement moves, restored `MarkerStorageFailure`, `ReportState` records, validated-only `KafkaRetentionBarrier`) is still in progress in its worktree. Its coverage is being brought to baseline, and it is not in this commit.
 - Next: integrate the analytics follow-up, run `scripts/check-local.sh`, re-review the follow-up diff, and run QA on the final state.
+- 2026-10-10 analytics follow-up integrated. This supersedes the earlier analytics "Skipped" and "Partial" lists:
+  - Journal progress enum matching.
+  - `AnalyticsErrorText` (one code and label mapping; outputs unchanged).
+  - `app/StreamingBatchCallback`.
+  - `adapter/spark/StreamingCheckpointControl`. The lineage path is unchanged; it is not provably identical to `AnalyticsLakehousePaths.streamingLineage`.
+  - Key-retirement moves to `service/keyretirement` and `adapter/mongo`.
+  - `checkpointRawTableLogs` wrapper removed.
+  - `mongoStorage` restores the transient `MarkerStorageFailure` category.
+  - `ReportState` decoded at the record boundary.
+  - `KafkaRetentionBarrier` is constructible only through validation.
+- Coordinator leftovers:
+  - One `MongoBatchScan.BatchSize`.
+  - `EmbeddingWorkRepair` uses `MongoDocumentFields.byName`.
+  - `InterviewMessageCodec.RecordRejected` replaces `IllegalArgumentException`.
+- Additional behaviour notes (fail-closed; nothing stored or on the wire):
+  - An invalid search event is a typed repository failure (repository-unavailable classification) instead of an internal error.
+  - An unlisted error type renders `OtherException` instead of `[FILTERED]`.
+  - An unknown stored report control state is a `DataIntegrityViolation` instead of being treated as superseded.
+  - Stored interview command, lease and cleanup UUIDs must be canonical.
+- Re-reviews of `git diff 6a08853 -- src analytics`:
+  - Code Reviewer PASS. Findings 2, 3, 4 and 6 from the first review are addressed. Five low nits remain: spec freshness, a stray blank line, maintenance helpers in the callback companion, mixed import style, and the barrier doc wording.
+  - Security Engineer PASS. Two informational notes: the CLI label fallback prints `AnalyticsError` messages, which are all fixed strings today; and the search-event failure behaviour.
+- Still open:
+  - Root `PC-16` items stay skipped: `RawJwtAuthConfig` `derives` (deprecated API under `-Werror`, or a new dependency) and the `RawInterviewRuntimeConfig` mirror (no simplification).
+  - Analytics "one error-to-text mapping" is only partly met: `categorize` stays a separate retry policy.
+- Verification: `scripts/check-local.sh` cannot set `JAVA_HOME` under the new harness guard, so its steps run individually; sbt uses Java 17 via `.sbtopts`. Root unit 1041/1041 on the combined tree. Root integration, the analytics suites, the coverage comparison and QA are in progress at the time of this commit.

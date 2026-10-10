@@ -3,7 +3,7 @@ package com.example.hiring.analytics.service.erasure
 import com.example.hiring.analytics.config.AnalyticsErasureWorkerPolicy
 import com.example.hiring.analytics.domain.RangeFingerprint
 import com.example.hiring.analytics.domain.RunId
-import com.example.hiring.analytics.errors.AnalyticsError
+import com.example.hiring.analytics.errors.{AnalyticsError, AnalyticsErrorText}
 import com.example.hiring.analytics.service.batch.ActiveDeletionMarkerSource
 import com.example.hiring.analytics.service.batch.AnalyticsLakehouseLock
 import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
@@ -109,24 +109,12 @@ final class AnalyticsErasureWorker[F[_]: Async](
         case ErasureUpdate.Applied =>
           logger.error(
             "analytics erasure failed; persisted category=" + decision.category.persistedName +
-              ", errorCode=" + failureCode(error) + ", attempt=" + nextAttempt
+              ", errorCode=" + AnalyticsErrorText.code(error) + ", attempt=" + nextAttempt
           )
         case ErasureUpdate.LeaseLost =>
           logger.warn("analytics erasure failure could not be recorded because the lease is no longer owned")
       }
     }
-  }
-
-  /** Emits a stable, non-sensitive error code without logging exception messages or payloads. */
-  private def failureCode(error: Throwable): String = error match {
-    case _: AnalyticsError.InvalidConfiguration       => "INVALID_CONFIGURATION"
-    case _: AnalyticsError.DataIntegrityViolation     => "DATA_INTEGRITY_VIOLATION"
-    case AnalyticsError.MalformedMarker               => "MALFORMED_MARKER"
-    case AnalyticsError.InvalidSilverSchema           => "INVALID_SILVER_SCHEMA"
-    case AnalyticsError.InvalidGoldSchema             => "INVALID_GOLD_SCHEMA"
-    case AnalyticsError.PhysicalReclamationUnverified => "PHYSICAL_RECLAMATION_UNVERIFIED"
-    case _: AnalyticsError                            => "ANALYTICS_ERROR"
-    case _                                            => "UNEXPECTED_ERROR"
   }
 
   private[analytics] def renewForever(claim: ErasureClaim): F[ErasureClaimOutcome] =

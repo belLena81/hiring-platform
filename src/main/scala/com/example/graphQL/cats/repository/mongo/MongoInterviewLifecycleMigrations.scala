@@ -19,7 +19,7 @@ import scala.jdk.CollectionConverters.*
 private[mongo] object MongoInterviewLifecycleMigrations {
   private val Id: MigrationId = MigrationIds.InterviewCancellationReschedule
   val MigrationId: String = Id.value
-  private val BatchSize = 500
+  import MongoBatchScan.BatchSize
   private val CoveredProofs = List(
     MigrationIds.InterviewWorkflowStorage,
     MigrationIds.InterviewLedgerCollections,

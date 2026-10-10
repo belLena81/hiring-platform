@@ -14,7 +14,7 @@ import scala.jdk.CollectionConverters.*
   * steps: it is written without a `version` field and is never read by `MongoMigrationRunner`.
   */
 object MongoWorkflowIntegrityAudit extends IOApp {
-  private val BatchSize = 500
+  import MongoBatchScan.BatchSize
   private val Audit = MigrationId("audit_hiring_workflow_integrity")
   private val AuditId = Audit.value
 

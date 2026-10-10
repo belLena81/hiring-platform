@@ -39,7 +39,6 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
     database: MongoDatabase[F],
     operational: AnalyticsOperationalSettings
 ) extends AnalyticsReportPublisher[F] {
-  private def inStates(states: Set[ReportState], stored: String): Boolean = states.exists(_.persisted == stored)
   private val receiptPageSize = 500
   private val receiptDeletionLimit = 1000L
   private val clock = Clock[F]
@@ -174,7 +173,7 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
               reject(AnalyticsError.RunIdRangeConflict(runId.value))
             else if (!refresh && previous.expiresAt.nonEmpty)
               reject(AnalyticsError.InvalidConfiguration("pinned publication reservation has an unsafe expiry"))
-            else if (!refresh || previous.expiresAt.isEmpty || record.state != ReportState.Reserved.persisted)
+            else if (!refresh || previous.expiresAt.isEmpty || record.state != ReportState.Reserved)
               EitherT.pure[F, AnalyticsError](existing)
             else
               transactional { session =>
@@ -290,19 +289,19 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
                   now <- lift(clock.realTimeInstant)
                   isCurrent = control.exists(value =>
                     value.generation == reservation.generation &&
-                      value.state == ReportState.Published.persisted &&
+                      value.state == ReportState.Published &&
                       value.lastPublishedRevision == reservation.revision &&
                       value.lastRunId.contains(reservation.runId.value)
                   ) && snapshot.exists(value => value.matches(reservation) && value.expiresAt.exists(_.isAfter(now)))
                   superseded = control.forall(value =>
                     value.generation != reservation.generation ||
                       value.lastPublishedRevision >= reservation.revision ||
-                      !inStates(ReportState.PublishableFromControl, value.state)
+                      !ReportState.PublishableFromControl.contains(value.state)
                   )
                 } yield
-                  if (decoded.state == ReportState.Published.persisted && isCurrent)
+                  if (decoded.state == ReportState.Published && isCurrent)
                     AnalyticsReportPublicationReceipt.CurrentGeneration
-                  else if (decoded.state == ReportState.Published.persisted || superseded)
+                  else if (decoded.state == ReportState.Published || superseded)
                     AnalyticsReportPublicationReceipt.Superseded
                   else AnalyticsReportPublicationReceipt.Absent
             }
@@ -343,7 +342,7 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
           _ <- result(
             Either.cond(
               decodedState.generation == reservation.generation &&
-                inStates(ReportState.PublishableFromControl, decodedState.state),
+                ReportState.PublishableFromControl.contains(decodedState.state),
               (),
               AnalyticsError.GuardedErasurePublicationRejected
             )
@@ -355,7 +354,7 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
             decodedState.lastRunId.getOrElse("") == reservation.runId.value
           _ <- result(
             Either.cond(
-              decoded.state == ReportState.Reserved.persisted || (decoded.state == ReportState.Published.persisted && alreadyPublished),
+              decoded.state == ReportState.Reserved || (decoded.state == ReportState.Published && alreadyPublished),
               (),
               AnalyticsError.RunIdRangeConflict(reservation.runId.value)
             )
@@ -474,7 +473,7 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
           reservedValue <- result(MongoAnalyticsReportRecords.decodeRun(reservedRecord))
           _ <- result(
             Either.cond(
-              reservedValue.reservation == reservation && reservedValue.state == ReportState.Reserved.persisted,
+              reservedValue.reservation == reservation && reservedValue.state == ReportState.Reserved,
               (),
               AnalyticsError.RunIdRangeConflict(reservation.runId.value)
             )
@@ -487,7 +486,7 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
           _ <- result(
             Either.cond(
               decodedState.generation == reservation.generation &&
-                inStates(ReportState.ErasurePublishableFromControl, decodedState.state),
+                ReportState.ErasurePublishableFromControl.contains(decodedState.state),
               (),
               AnalyticsError.RunIdRangeConflict(reservation.runId.value)
             )

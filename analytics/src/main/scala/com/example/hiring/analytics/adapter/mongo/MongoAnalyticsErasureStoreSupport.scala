@@ -2,7 +2,7 @@ package com.example.hiring.analytics.adapter.mongo
 
 import com.example.hiring.analytics.domain.AccountSubjectId
 import com.example.hiring.analytics.errors.AnalyticsError
-import com.example.hiring.analytics.errors.AnalyticsErrorTranslation.translatingWith
+import com.example.hiring.analytics.errors.AnalyticsErrorTranslation.{translating, translatingWith}
 import com.example.hiring.analytics.service.erasure.*
 
 import cats.effect.Async
@@ -47,6 +47,10 @@ private[analytics] abstract class MongoAnalyticsErasureStoreSupport[F[_]: Async]
     .translatingWith { case _: MongoJsonParsingException =>
       AnalyticsError.MalformedMarker
     }(AnalyticsError.MarkerStorageFailure(_))
+
+  /** Reads whose driver JSON-parse failures stay transient storage failures rather than a malformed marker. */
+  protected def mongoStorage[A](work: => F[A]): F[A] =
+    Async[F].defer(work).translating(AnalyticsError.MarkerStorageFailure(_))
 }
 
 private[analytics] object MongoAnalyticsErasureStoreSupport {

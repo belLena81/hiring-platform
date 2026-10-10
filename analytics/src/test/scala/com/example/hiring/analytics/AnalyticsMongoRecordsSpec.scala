@@ -138,6 +138,15 @@ final class AnalyticsMongoRecordsSpec extends FunSuite {
     )
   }
 
+  test("report control decodes stored states into ReportState and rejects unknown values") {
+    def control(state: String) = AnalyticsMongoRecords.ReportControl("analytics-report", 1L, None, 0L, None, state)
+    assertEquals(
+      MongoAnalyticsReportRecords.decodeControl(control("Hidden")).map(_.state),
+      Right(MongoAnalyticsReportRecords.ReportState.Hidden)
+    )
+    assert(MongoAnalyticsReportRecords.decodeControl(control("Active")).isLeft)
+  }
+
   test("report reservation derived codec keeps small revision counters as BSON Int64") {
     val record = AnalyticsMongoRecords.ReportRun("batch-2", "b" * 64, 1L, 2L, "Reserved")
     val (decoded, bson) = roundTrip(

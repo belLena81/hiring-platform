@@ -14,7 +14,7 @@ private[mongo] object MongoWorkflowIntegrityMigrations {
     * `MigrationIds.HiringWorkflowIntegrity`.
     */
   val MigrationId: String = Id.value
-  private val BatchSize = 500
+  import MongoBatchScan.BatchSize
   private val CoveredProofs = List(MigrationIds.EventOutboxSubjectReferences, MigrationIds.InterviewWorkflowAttempts)
 
   /** The definition this migration installed and audited; later cutovers extend it and are accepted by its proof. */

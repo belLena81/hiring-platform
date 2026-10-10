@@ -2,7 +2,7 @@ package com.example.hiring.analytics.cli
 
 import com.example.hiring.analytics.app.AppModule
 import com.example.hiring.analytics.config.AnalyticsRuntimeConfig
-import com.example.hiring.analytics.errors.AnalyticsError
+import com.example.hiring.analytics.errors.AnalyticsErrorText
 
 import cats.effect.{ExitCode, IO}
 import com.monovore.decline.Opts
@@ -21,19 +21,7 @@ private[cli] object AnalyticsCliProgram {
       .flatten
       .map(_.getClass.getSimpleName)
       .toList
-    val label = error match {
-      case _: AnalyticsError.InvalidInput              => "analytics input is invalid"
-      case _: AnalyticsError.InvalidConfiguration      => "analytics configuration is invalid"
-      case _: AnalyticsError.InvalidSourceSchema       => "analytics source schema is invalid"
-      case _: AnalyticsError.EmptyRequestedRange       => "requested analytics range is empty"
-      case _: AnalyticsError.ExpiredOffsetRange        => "requested analytics range expired"
-      case _: AnalyticsError.MissingOffsetRange        => "requested analytics range is incomplete"
-      case _: AnalyticsError.UnexpectedOffsetPartition => "analytics source returned an unrequested partition"
-      case _: AnalyticsError.RunIdRangeConflict        => "analytics run ID conflicts with existing ranges"
-      case _: AnalyticsError.MarkerLimitExceeded       => "analytics erasure marker limit exceeded"
-      case analyticsError: AnalyticsError              => analyticsError.getMessage
-      case _ => s"analytics program failed unexpectedly: ${error.getClass.getSimpleName}"
-    }
+    val label = AnalyticsErrorText.label(error)
     if (causes.isEmpty) label else s"$label; cause types: ${causes.mkString(" -> ")}"
   }
 

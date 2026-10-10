@@ -36,7 +36,7 @@ import io.github.iltotore.iron.constraint.string.Blank
 
 /** Resource-managed composition for analytics command-line applications. */
 object AppModule {
-  private final case class Shared[F[_]](
+  private[app] final case class Shared[F[_]](
       paths: AnalyticsLakehousePaths,
       spark: SparkSession,
       client: MongoClient[F],
@@ -97,12 +97,8 @@ object AppModule {
       }
     }
 
-  private def timed[F[_], A](cost: Option[StreamingBatchCost[F]], stage: StreamingBatchCost.Stage)(
-      work: F[A]
-  ): F[A] = cost.fold(work)(_.timed(stage)(work))
-
   /** The ingestion and Silver stages share one wiring; only the writer and manifest store differ per program. */
-  private def batchStages[F[_]: Async](
+  private[app] def batchStages[F[_]: Async](
       shared: Shared[F],
       common: AnalyticsCommonSettings,
       manifestStore: AnalyticsRunManifestStore[F],
@@ -206,68 +202,7 @@ object AppModule {
             observedLock,
             common.lakehouseRoot,
             checkpoint,
-            (rawFrame, batchId, lineage, sourceEndOffsets, authorize) => {
-              val callback = for {
-                observedAt <- Async[F].realTimeInstant
-                _ <- timed(cost, StreamingBatchCost.Stage.HmacValidation)(
-                  shared.maintenance.validateHmacConfigurationLocked
-                )
-                parsed <- shared.lakehouseExecution(OperationalEventTransforms.parseKafkaRecords(rawFrame))
-                preparing = StreamingBatchPreparation(
-                  shared.lakehouseExecution,
-                  parsed,
-                  lineage,
-                  batchId,
-                  observedAt,
-                  sourceEndOffsets,
-                  observedJournal
-                )
-                preparation <- timed(cost, StreamingBatchCost.Stage.Prepare)(preparing)
-                observedWriter = observer.fold[DeltaWriter[F]](shared.writer)(value =>
-                  StreamingDurableBoundaryObserver.writer(shared.writer, shared.paths, preparation.identity, value)
-                )
-                (ingestion, silver) = batchStages(
-                  shared,
-                  common,
-                  new DeltaManifestStore[F](shared.spark, shared.paths, shared.sparkExecution),
-                  observedWriter
-                )
-                _ <- SparkStreamingBatchStages
-                  .resource(
-                    shared.spark,
-                    parsed,
-                    shared.paths,
-                    common.pseudonymizer,
-                    shared.lakehouseExecution,
-                    ingestion,
-                    silver,
-                    new AnalyticsLateFactStage[F](shared.paths, shared.lakehouseExecution, observedWriter),
-                    observedWriter,
-                    shared.reader,
-                    shared.publisher,
-                    common.operational.retention,
-                    shared.maintenance.configureRawTables,
-                    shared.maintenance.purgeMarkedSubjects,
-                    authorize
-                  )
-                  .use(stages =>
-                    new StreamingBatchCoordinator[F](
-                      observer.fold[StreamingBatchJournal[F]](observedJournal)(value =>
-                        StreamingDurableBoundaryObserver.journal(observedJournal, value)
-                      ),
-                      shared.markers,
-                      observer.fold[StreamingBatchStages[F]](cost.fold(stages)(_.wrap(stages)))(value =>
-                        StreamingDurableBoundaryObserver.stages(cost.fold(stages)(_.wrap(stages)), value)
-                      ),
-                      checkpoint,
-                      authorize
-                    )
-                      .process(preparation)
-                      .void
-                  )
-              } yield ()
-              timed(cost, StreamingBatchCost.Stage.Callback)(callback)
-            },
+            new StreamingBatchCallback[F](shared, common, observedJournal, checkpoint, cost, observer).apply,
             () => KafkaOffsetRangeSource.sourceIdentity(common.kafka, settings.topic, shared.sparkExecution),
             maintenance = Some((identity, lineage, retainedCheckpoint, authorize) =>
               new AnalyticsStreamingMaintenance[F](
@@ -276,19 +211,9 @@ object AppModule {
                 settings.streaming.maintenanceInterval,
                 at => {
                   val maintaining = maintenanceTick.run(identity, lineage, retainedCheckpoint, authorize, at)
-                  timed(cost, StreamingBatchCost.Stage.Maintenance)(maintaining)
+                  StreamingBatchCallback.timed(cost, StreamingBatchCost.Stage.Maintenance)(maintaining)
                 },
-                Some(observation =>
-                  Slf4jLogger
-                    .getLoggerFromName[F]("com.example.hiring.analytics.streaming.maintenance")
-                    .info(
-                      s"STREAMING_MAINTENANCE outcome=${observation.outcome.fold("none")(_.toString)} " +
-                        s"elapsedSinceSuccessMillis=${observation.elapsedSinceSuccess.toMillis} " +
-                        s"maximumElapsedSinceSuccessMillis=${observation.maximumElapsedSinceSuccess.toMillis} " +
-                        s"consecutiveDeferrals=${observation.consecutiveDeferrals} " +
-                        s"lastSuccess=${observation.lastSuccess.fold("none")(_.toString)}"
-                    )
-                )
+                Some(StreamingBatchCallback.logMaintenance[F])
               ).resource
             )
           )

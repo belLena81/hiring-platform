@@ -57,7 +57,7 @@ final class MongoAnalyticsErasureQueue[F[_]: Async: UUIDGen] private (
     if (limit <= 0 || limit > MaximumClaimPageSize)
       Async[F].raiseError(AnalyticsError.InvalidConfiguration("repair inspection limit is out of bounds"))
     else
-      mongo {
+      mongoStorage {
         streams
           .stream { capacity =>
             requests
@@ -312,7 +312,7 @@ final class MongoAnalyticsErasureQueue[F[_]: Async: UUIDGen] private (
 
   def hasNonReadyOtherRequests(requestId: AccountSubjectId): F[Boolean] = {
     val filter = nonReadyOtherRequests(requestId.value)
-    mongo {
+    mongoStorage {
       streams
         .stream(capacity =>
           requests

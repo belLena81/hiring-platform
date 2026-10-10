@@ -15,7 +15,7 @@ private[mongo] object MongoProducerRegistrationMigrations {
     * `MigrationIds.AttributableProducerRegistrations`.
     */
   val MigrationId: String = Id.value
-  private val BatchSize = 500
+  import MongoBatchScan.BatchSize
   private val LegacyAttributionFields = Vector("transactionalIds", MongoFields.InterviewTransactionalIds)
 
   def registrationValidator: Document = {

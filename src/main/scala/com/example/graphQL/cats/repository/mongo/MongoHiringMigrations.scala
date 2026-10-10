@@ -19,7 +19,7 @@ import scala.jdk.CollectionConverters.*
 private[mongo] object MongoHiringMigrations {
   import MongoHiringSetup.{SetupCollection, SetupDatabase}
 
-  private val BatchSize = 500
+  import MongoBatchScan.BatchSize
 
   val ownedCollections: Set[String] = Set(
     MongoCollections.Users,
@@ -237,7 +237,6 @@ private[mongo] object MongoHiringMigrations {
   private def backfillOutboxSubjectReferences(
       run: MigrationRun,
       document: Document,
-
       diagnostics: Diagnostics
   ): IO[Unit] = {
     val outbox = run.database.getCollection(MongoCollections.EventOutbox)

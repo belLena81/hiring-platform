@@ -13,7 +13,7 @@ object EmbeddingWorkRepair extends IOApp {
     case admin :: kind :: entity :: tail if tail.isEmpty || tail.size == 1 =>
       for {
         actor <- parse(admin)(UserId.apply).toRight("Invalid Admin identifier")
-        selected <- EmbeddingWorkKind.values.find(_.toString == kind).toRight("Invalid work kind")
+        selected <- MongoDocumentFields.byName(EmbeddingWorkKind.values)(kind).toRight("Invalid work kind")
         id <- parse(entity)(UserId.apply).toRight("Invalid entity identifier")
         expected <- tail.headOption.traverse(
           _.toLongOption

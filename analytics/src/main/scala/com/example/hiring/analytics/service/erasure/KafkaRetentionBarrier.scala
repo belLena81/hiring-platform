@@ -10,7 +10,11 @@ trait KafkaRetention[F[_]] {
   def retentionPassed(barrier: KafkaRetentionBarrier): F[Boolean]
 }
 
-final case class KafkaRetentionBarrier(topic: AnalyticsTopic, partitions: Vector[KafkaRetentionBarrier.Partition])
+/** Only `from` constructs a barrier (and `validate` normalizes one), so every barrier in circulation is validated. */
+final case class KafkaRetentionBarrier private (
+    topic: AnalyticsTopic,
+    partitions: Vector[KafkaRetentionBarrier.Partition]
+)
 
 object KafkaRetentionBarrier {
   final case class Partition(number: AnalyticsPartition, endOffsetExclusive: AnalyticsOffset)

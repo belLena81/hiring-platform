@@ -64,7 +64,7 @@ private[mongo] object MongoCandidateResidenceIntegrityMigrations {
     * `MigrationIds.CandidateResidenceIntegrity`.
     */
   val MigrationId: String = Id.value
-  private val BatchSize = 500
+  import MongoBatchScan.BatchSize
 
   private def requireValidator(database: MongoHiringSetup.SetupDatabase): IO[Unit] =
     MongoHiringValidators.assertStrictValidators(

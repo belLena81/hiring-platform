@@ -199,7 +199,7 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends AnalyticsMongoIntegra
         _ = assert(!evidencePauseTimedOut.get(), "test synchronization expired before releasing the file write")
         staleBarrier <- store.barrier.persistBarrier(
           checkpoint,
-          barrier.copy(topic = AnalyticsTopic.from("wrong-topic").toOption.get),
+          KafkaRetentionBarrier.from("wrong-topic", Vector(0 -> 21L, 1 -> 14L)).toOption.get,
           staleWorkerNow
         )
         staleFiles <- store.progress.persistDeltaFiles(

@@ -21,6 +21,37 @@ final class ErasureFailurePolicySpec extends FunSuite {
     assertEquals(exhausted.retryAfter, None)
   }
 
+  test("error codes are stable and never derive from exception messages") {
+    assertEquals(AnalyticsErrorText.code(AnalyticsError.MalformedMarker), "MALFORMED_MARKER")
+    assertEquals(AnalyticsErrorText.code(AnalyticsError.DataIntegrityViolation("secret")), "DATA_INTEGRITY_VIOLATION")
+    assertEquals(AnalyticsErrorText.code(AnalyticsError.ReportNotSingular), "ANALYTICS_ERROR")
+    assertEquals(AnalyticsErrorText.code(new RuntimeException("secret")), "UNEXPECTED_ERROR")
+  }
+
+  test("CLI labels are fixed text that never echoes dynamic error payloads") {
+    val labels = Vector(
+      AnalyticsError.InvalidInput.one("secret") -> "analytics input is invalid",
+      AnalyticsError.InvalidConfiguration("secret") -> "analytics configuration is invalid",
+      AnalyticsError.InvalidSourceSchema(Vector("x")) -> "analytics source schema is invalid",
+      AnalyticsError.EmptyRequestedRange("t", 0, 1L) -> "requested analytics range is empty",
+      AnalyticsError.ExpiredOffsetRange("t", 0, 1L, 2L) -> "requested analytics range expired",
+      AnalyticsError.MissingOffsetRange("t", 0, 1L, 0L) -> "requested analytics range is incomplete",
+      AnalyticsError.UnexpectedOffsetPartition("t", 0) -> "analytics source returned an unrequested partition",
+      AnalyticsError.RunIdRangeConflict("r") -> "analytics run ID conflicts with existing ranges",
+      AnalyticsError.MarkerLimitExceeded(1) -> "analytics erasure marker limit exceeded",
+      AnalyticsError.ReportNotSingular -> "time-to-hire report is not singular"
+    )
+    labels.foreach((error, label) => assertEquals(AnalyticsErrorText.label(error), label))
+    assert(AnalyticsErrorText.label(new IllegalStateException("secret")).endsWith("IllegalStateException"))
+    assertEquals(AnalyticsErrorText.code(AnalyticsError.InvalidConfiguration("x")), "INVALID_CONFIGURATION")
+    assertEquals(AnalyticsErrorText.code(AnalyticsError.InvalidSilverSchema), "INVALID_SILVER_SCHEMA")
+    assertEquals(AnalyticsErrorText.code(AnalyticsError.InvalidGoldSchema), "INVALID_GOLD_SCHEMA")
+    assertEquals(
+      AnalyticsErrorText.code(AnalyticsError.PhysicalReclamationUnverified),
+      "PHYSICAL_RECLAMATION_UNVERIFIED"
+    )
+  }
+
   test("unexpected failures are translated once and typed errors pass through") {
     import AnalyticsErrorTranslation.*
     val cause = new IllegalStateException("x")

@@ -15,7 +15,7 @@ private[mongo] object MongoInterviewCleanupIntegrityMigrations {
     * `MigrationIds.InterviewCleanupIntegrity`.
     */
   val MigrationId: String = Id.value
-  private val BatchSize = 500
+  import MongoBatchScan.BatchSize
   private val CoveredProofs =
     List(MigrationIds.InterviewPublicationFencing, MigrationIds.AttributableProducerRegistrations)
 

@@ -1,6 +1,8 @@
 package com.example.hiring.analytics
 import com.example.hiring.analytics.domain.*
+import com.example.hiring.analytics.adapter.mongo.MongoKeyRetirementScan.*
 import com.example.hiring.analytics.adapter.spark.*
+import com.example.hiring.analytics.service.keyretirement.KeyRetirementEvidence.*
 
 import munit.ScalaCheckSuite
 import org.scalacheck.Gen
@@ -191,5 +193,53 @@ class AnalyticsKeyRetirementSpec extends ScalaCheckSuite {
 
       next.count == count + 1L && next.activeSubjects == active && next.blockers == blockers && collectionDocuments == 1
     }
+  }
+
+  test("per-partition Kafka retention evidence must be unique, non-negative and passed") {
+    def kafka(partitions: Vector[(Int, Long, Long)], reference: String = "kafka-barrier-evidence") =
+      passedRetention.copy(kafka = KafkaRetentionEvidence(None, None, reference, partitions))
+    assert(validateRetention(kafka(Vector((0, 5L, 5L), (1, 3L, 9L))), now).isValid)
+    assert(validateRetention(kafka(Vector((0, 5L, 4L))), now).isInvalid)
+    assert(validateRetention(kafka(Vector((0, 5L, 5L), (0, 5L, 5L))), now).isInvalid)
+    val missingReference = messages(validateRetention(kafka(Vector((0, 5L, 5L)), reference = " "), now))
+    assert(missingReference.exists(_.contains("evidence reference is missing")))
+  }
+
+  test("Mongo observation reducer blocks key references, bounds, completed requests and active fences") {
+    import com.example.hiring.analytics.adapter.mongo.AnalyticsCollections as C
+    val start = MongoScanState(0L, Set.empty, cats.data.Chain.empty)
+    def reduce(state: MongoScanState, collection: String, document: Document, seen: Int = 0) =
+      reduceMongoObservation(state, collection, document, "key-1", now, seen)
+    def reasons(state: MongoScanState) = state.blockers.toList
+
+    assert(reasons(reduce(start, "other", new Document("payload", "key-1_x"))._1).exists(_.contains("retiring-key")))
+
+    val bounded = reduce(start, C.ErasureRequests, new Document("_id", "s").append("state", "Pending"), 100000)._1
+    assert(reasons(bounded).exists(_.contains("exceeds its audit bound")))
+    val full = start.copy(activeSubjects = (1 to 100000).map(_.toString).toSet)
+    val saturated = reduce(full, C.ErasureRequests, new Document("_id", "s").append("state", "Pending"))._1
+    assert(reasons(saturated).exists(_.contains("malformed or exceeds")))
+
+    val past = Date.from(now.minusSeconds(1))
+    val expired = reduce(
+      start,
+      C.ErasureRequests,
+      new Document("_id", "s").append("state", "Complete").append("expiresAt", past)
+    )._1
+    assert(reasons(expired).isEmpty)
+    val unknown = reduce(start, C.ErasureRequests, new Document("_id", "s").append("state", "Bogus"))._1
+    assert(reasons(unknown) == List("erasure request has an unknown state"))
+
+    val incomplete = reduce(start, C.EventOutbox, new Document("subjectIds", java.util.Arrays.asList("s")))._1
+    assert(reasons(incomplete).exists(_.contains("incomplete")))
+    val clear = reduce(
+      start,
+      C.EventOutbox,
+      new Document("subjectIds", java.util.Arrays.asList("s")).append("subjectRefsVersion", 1)
+    )._1
+    assert(reasons(clear).isEmpty)
+
+    val live = new Document("leaseUntil", Date.from(now.plusSeconds(60)))
+    assert(reasons(reduce(start, C.OutboxSubjectFences, live)._1).exists(_.contains("active operational outbox")))
   }
 }

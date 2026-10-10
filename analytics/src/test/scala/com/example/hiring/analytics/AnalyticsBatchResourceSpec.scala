@@ -205,4 +205,9 @@ class AnalyticsBatchResourceSpec extends FunSuite {
     assert(result.isLeft)
     assert(acquired.get().exists(_.isShutdown))
   }
+
+  test("an invalid connection string becomes a configuration error") {
+    val bad = SparkRuntime.mongoClient[IO]("not-a-mongo-uri").use(_ => IO.unit).attempt.unsafeRunSync()
+    assert(bad.left.exists(_.isInstanceOf[AnalyticsError.InvalidConfiguration]))
+  }
 }

@@ -5,24 +5,23 @@ import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.batch.AnalyticsLakehouseLock
 import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
 import com.example.hiring.analytics.service.batch.{AnalyticsStorageInventory, AnalyticsStorageKind}
-import com.example.hiring.analytics.service.erasure.ErasureRequestState
 
-import cats.data.{Chain, NonEmptyChain, ValidatedNec}
+import cats.data.{Chain, NonEmptyChain}
 import cats.effect.kernel.Async
 import cats.syntax.all.*
-import com.example.hiring.analytics.adapter.mongo.{AnalyticsCollections, MongoPublisherStream}
+import com.example.hiring.analytics.adapter.mongo.{MongoKeyRetirementScan, MongoPublisherStream}
+import com.example.hiring.analytics.service.keyretirement.KeyRetirementEvidence
 import com.mongodb.reactivestreams.client.MongoDatabase
 import org.apache.hadoop.fs.Path
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.functions.{col, struct, to_json}
-import org.bson.Document
 
 import java.time.Instant
-import scala.jdk.CollectionConverters.*
 import scala.util.control.NonFatal
 
 /** Read-only audit of repo-controlled data plus explicit operator evidence for every Delta writer. */
 private[analytics] object AnalyticsKeyRetirement {
+  export com.example.hiring.analytics.service.keyretirement.KeyRetirementEvidence.ScanResult
   export com.example.hiring.analytics.domain.{
     KafkaRetentionEvidence,
     RetentionEvidence,
@@ -44,82 +43,11 @@ private[analytics] object AnalyticsKeyRetirement {
 
   private val RegistryIdPattern = "[A-Za-z0-9-]{1,40}".r
   private val VerifierPattern = "[A-Za-z0-9_-]{43}".r
-  private[analytics] final case class ScanResult(count: Long, blockers: Chain[String] = Chain.empty)
-  private[analytics] final case class MongoScanState(count: Long, activeSubjects: Set[String], blockers: Chain[String])
 
   private[analytics] def validRegistryRows(rows: Vector[(String, String)]): Boolean =
     rows.nonEmpty && rows.forall { case (id, verifier) =>
       Option(id).exists(RegistryIdPattern.matches) && Option(verifier).exists(VerifierPattern.matches)
     } && rows.map(_._1).distinct.size == rows.size
-
-  /** Purely assesses one fetched Mongo row, retaining scan bounds and cross-collection active-subject tracking. */
-  private[analytics] def reduceMongoObservation(
-      state: MongoScanState,
-      collectionName: String,
-      document: Document,
-      keyId: String,
-      now: Instant,
-      collectionDocuments: Int
-  ): (MongoScanState, Int) = {
-    val collectionCount = state.count + 1L
-    val isErasure = collectionName == AnalyticsCollections.ErasureRequests
-    val nextCollectionDocuments = collectionDocuments + 1
-    val overflow =
-      if (isErasure && nextCollectionDocuments > MaximumAuditedErasureSubjects)
-        Chain.one("active erasure subject inventory exceeds its audit bound; no retirement decision is available")
-      else Chain.empty[String]
-    val keyReference =
-      if (containsKeyReferenceInValue(document, keyId))
-        Chain.one(s"Mongo collection '$collectionName' contains a retiring-key reference")
-      else Chain.empty[String]
-    val (activeSubjects, erasureBlockers) = if (isErasure) erasureRequestActivity(document, now) match {
-      case Right(true) => {
-        requiredString(document, AnalyticsCollections.Fields.Id) match {
-          case Some(subjectId) if state.activeSubjects.size < MaximumAuditedErasureSubjects =>
-            (state.activeSubjects + subjectId, Chain.one("an active or unexpired erasure marker/request remains"))
-          case _ =>
-            (
-              state.activeSubjects,
-              Chain(
-                "active erasure subject inventory is malformed or exceeds its audit bound",
-                "an active or unexpired erasure marker/request remains"
-              )
-            )
-        }
-      }
-      case Right(false) => (state.activeSubjects, Chain.empty[String])
-      case Left(reason) => (state.activeSubjects, Chain.one(reason))
-    }
-    else (state.activeSubjects, Chain.empty[String])
-    val outboxBlockers = if (collectionName == AnalyticsCollections.EventOutbox) {
-      val decodedSubjectIds = for {
-        rows <- requiredStringList(document, AnalyticsCollections.Fields.SubjectIds)
-        version <- requiredInt32(document, AnalyticsCollections.Fields.SubjectRefsVersion)
-      } yield (rows.toSet, version)
-      if (decodedSubjectIds.forall(_._2 != 1))
-        Chain.one("outbox subject-reference migration or a stored row is incomplete")
-      else if (decodedSubjectIds.exists(_._1.exists(state.activeSubjects.contains)))
-        Chain.one("outbox contains replay work for an active or unexpired erasure subject")
-      else Chain.empty[String]
-    } else Chain.empty[String]
-    val fenceLease = if (collectionName == AnalyticsCollections.OutboxSubjectFences) {
-      optionalDate(document, AnalyticsCollections.Fields.LeaseUntil)
-    } else Right(None)
-    val fenceBlockers = fenceLease match {
-      case Left(_) => Chain.one("an operational outbox publication fence has a malformed lease")
-      case Right(Some(until)) if until.toInstant.isAfter(now) =>
-        Chain.one("an active operational outbox publication fence remains")
-      case _ => Chain.empty[String]
-    }
-    (
-      state.copy(
-        count = collectionCount,
-        activeSubjects = activeSubjects,
-        blockers = state.blockers ++ overflow ++ keyReference ++ erasureBlockers ++ outboxBlockers ++ fenceBlockers
-      ),
-      nextCollectionDocuments
-    )
-  }
 
   private val unverifiedSurface = NonEmptyChain.one("key retirement audit could not verify every required surface")
 
@@ -182,13 +110,13 @@ private[analytics] object AnalyticsKeyRetirement {
         Chain.one("retiring key ID is invalid")
       else Chain.empty[String]
     val evidenceBlockers =
-      (validateRetention(retention, now), validateWriters(writers, now))
+      (KeyRetirementEvidence.validateRetention(retention, now), KeyRetirementEvidence.validateWriters(writers, now))
         .mapN((_, _) => ())
         .fold(_.toChain, _ => Chain.empty[String])
     DeltaPurgeRewrite.verifyRecovered(
       paths.root,
       spark.sparkContext.hadoopConfiguration,
-      MaximumAuditedErasureSubjects,
+      MongoKeyRetirementScan.MaximumAuditedErasureSubjects,
       sparkExecution
     ) *> sparkExecution {
       val inventory = storageInventory.getOrElse(paths.inventory)
@@ -235,82 +163,16 @@ private[analytics] object AnalyticsKeyRetirement {
     }
       .adaptError { case NonFatal(cause) => AnalyticsError.KeyRetirementAuditUnverified(cause) }
       .flatMap { case (delta, registryBlockers) =>
-        scanMongo[F](database, retiringKeyId, now, streams, paths.inventory.mongo.map(_.location)).map { mongo =>
-          val blockers = keyBlockers ++ evidenceBlockers ++ delta.blockers ++ mongo.blockers ++ registryBlockers
-          val errors = blockers.toList.toVector
-          if (errors.nonEmpty) Left(NonEmptyChain.fromSeq(errors).get)
-          else Right(AuditSummary(now, delta.count, mongo.count))
-        }
+        MongoKeyRetirementScan
+          .scan[F](database, retiringKeyId, now, streams, paths.inventory.mongo.map(_.location))
+          .map { mongo =>
+            val blockers = keyBlockers ++ evidenceBlockers ++ delta.blockers ++ mongo.blockers ++ registryBlockers
+            val errors = blockers.toList.toVector
+            if (errors.nonEmpty) Left(NonEmptyChain.fromSeq(errors).get)
+            else Right(AuditSummary(now, delta.count, mongo.count))
+          }
       }
   }
-
-  private[analytics] def validateRetention(evidence: RetentionEvidence, now: Instant): ValidatedNec[String, Unit] = {
-    val kafkaReasons =
-      if (evidence.kafka.partitions.nonEmpty) {
-        val parts = evidence.kafka.partitions
-        if (
-          parts.map(_._1).distinct.size == parts.size &&
-          parts.forall { case (number, barrier, earliest) => number >= 0 && barrier >= 0L && earliest >= barrier }
-        )
-          Chain.empty[String]
-        else Chain.one("Kafka retention partition barrier is missing, invalid, or not yet passed")
-      } else
-        (evidence.kafka.barrierOffset, evidence.kafka.earliestAvailableOffset) match {
-          case (Some(barrier), Some(earliest)) if barrier >= 0L && earliest >= barrier => Chain.empty[String]
-          case _ => Chain.one("Kafka retention barrier is missing, invalid, or not yet passed")
-        }
-    val horizonReasons = Vector(
-      "Delta data-file" -> evidence.deltaData,
-      "Delta transaction-log" -> evidence.deltaLogs,
-      "report" -> evidence.reports
-    ).foldLeft(Chain.empty[String]) {
-      case (reasons, (_, horizon))
-          if horizon.retainedUntil.exists(deadline => !now.isBefore(deadline)) &&
-            horizon.evidenceReference.trim.nonEmpty =>
-        reasons
-      case (reasons, (name, _)) =>
-        reasons.append(s"$name retention horizon or its evidence reference is missing or has not elapsed")
-    }
-    val evidenceReasons =
-      if (evidence.kafka.evidenceReference.trim.isEmpty)
-        Chain.one("Kafka retention barrier evidence reference is missing")
-      else Chain.empty[String]
-    accumulate(kafkaReasons ++ horizonReasons ++ evidenceReasons)
-  }
-
-  private[analytics] def validateWriters(inventory: WriterInventory, now: Instant): ValidatedNec[String, Unit] = {
-    val freshnessReasons = inventory.observedAt match {
-      case Some(observedAt)
-          if !observedAt.isAfter(now) && !observedAt.isBefore(now.minus(MaximumWriterEvidenceAge)) &&
-            inventory.coverageReference.trim.nonEmpty =>
-        Chain.empty[String]
-      case _ =>
-        Chain.one("managed and unmanaged Delta writer inventory lacks fresh operator-attested coverage evidence")
-    }
-    val all = inventory.managed ++ inventory.unmanaged
-    val identityReasons =
-      if (all.isEmpty) Chain.one("writer inventory contains no individually accounted writer identities")
-      else Chain.empty[String]
-    val writerReasons = all.foldLeft(Chain.empty[String]) { (reasons, writer) =>
-      val missing =
-        if (writer.identity.trim.isEmpty || writer.evidenceReference.trim.isEmpty)
-          Chain.one("a Delta writer identity or evidence reference is missing")
-        else Chain.empty[String]
-      val disposition = writer.disposition match {
-        case WriterDisposition.Stopped | WriterDisposition.AccessRevoked => Chain.empty[String]
-        case WriterDisposition.Active                                    => Chain.one("a Delta writer remains active")
-        case WriterDisposition.Unknown => Chain.one("a Delta writer is not accounted for as stopped or access-revoked")
-      }
-      reasons ++ missing ++ disposition
-    }
-    accumulate(freshnessReasons ++ identityReasons ++ writerReasons)
-  }
-
-  private def accumulate(reasons: Chain[String]): ValidatedNec[String, Unit] =
-    NonEmptyChain.fromSeq(reasons.toList) match {
-      case Some(errors) => errors.invalid
-      case None         => ().validNec[String]
-    }
 
   private def scanDelta(spark: SparkSession, paths: AnalyticsLakehousePaths, keyId: String): ScanResult = {
     // Permanent key verifiers intentionally retain the retiring key ID and are validated separately.
@@ -388,18 +250,6 @@ private[analytics] object AnalyticsKeyRetirement {
     walk(List(root), ScanResult(0L))
   }
 
-  private val MongoCollections = Vector(
-    AnalyticsCollections.ReportSnapshots,
-    AnalyticsCollections.ReportRuns,
-    AnalyticsCollections.ReportControl,
-    AnalyticsCollections.ErasureRequests,
-    AnalyticsCollections.ErasureCompletions,
-    AnalyticsCollections.ErasureDeltaFiles,
-    AnalyticsCollections.EventOutbox,
-    AnalyticsCollections.HiringMigrationLedger,
-    AnalyticsCollections.OutboxSubjectFences
-  )
-
   private def scanCheckpoints(spark: SparkSession, inventory: AnalyticsStorageInventory, keyId: String): ScanResult =
     inventory.surfaces.filter(_.kind == AnalyticsStorageKind.SparkCheckpoint).foldLeft(ScanResult(0L)) {
       (total, surface) =>
@@ -469,114 +319,6 @@ private[analytics] object AnalyticsKeyRetirement {
           else ScanResult(1L, Chain.one("permanent streaming lineage metadata is malformed or incomplete"))
         }
       }
-  }
-
-  private val MaximumWriterEvidenceAge = java.time.Duration.ofHours(1)
-
-  private def scanMongo[F[_]: Async](
-      database: MongoDatabase,
-      keyId: String,
-      now: Instant,
-      streams: MongoPublisherStream,
-      inventoriedCollections: Vector[String]
-  ): F[ScanResult] = {
-    streams.stream[F, String](database.listCollectionNames()).compile.toVector.map(_.toSet).flatMap { names =>
-      val missing = MongoCollections.toSet -- names
-      val missingBlockers =
-        if (missing.nonEmpty)
-          Chain.one("one or more required Mongo report, erasure, or replay collections are unavailable")
-        else Chain.empty[String]
-      val initial = MongoScanState(0L, Set.empty, missingBlockers)
-      val optionalControls = inventoriedCollections.filterNot(MongoCollections.contains).filter(names.contains)
-      (MongoCollections.filter(names.contains) ++ optionalControls)
-        .foldM(initial) { (state, collectionName) =>
-          streams
-            .stream {
-              val find = database.getCollection(collectionName, classOf[Document]).find()
-              if (collectionName == AnalyticsCollections.ErasureRequests)
-                find.limit(MaximumAuditedErasureSubjects + 1)
-              else find
-            }
-            .compile
-            .fold((state, 0)) { case ((current, collectionDocuments), document) =>
-              reduceMongoObservation(current, collectionName, document, keyId, now, collectionDocuments)
-            }
-            .map(_._1)
-        }
-        .flatMap { scanned =>
-          if (names.contains(AnalyticsCollections.HiringMigrationLedger))
-            streams
-              .optional {
-                database
-                  .getCollection(AnalyticsCollections.HiringMigrationLedger, classOf[Document])
-                  .find(
-                    new Document(
-                      AnalyticsCollections.Fields.Id,
-                      AnalyticsCollections.MigrationIds.OutboxSubjectReferences
-                    )
-                  )
-                  .first()
-              }
-              .map { migration =>
-                val migrationBlockers =
-                  if (
-                    migration.forall { row =>
-                      !requiredString(row, AnalyticsCollections.Fields.State).contains("Complete")
-                    }
-                  )
-                    Chain.one("outbox subject-reference migration is not complete")
-                  else Chain.empty[String]
-                ScanResult(scanned.count, scanned.blockers ++ migrationBlockers)
-              }
-          else Async[F].pure(ScanResult(scanned.count, scanned.blockers))
-        }
-    }
-  }
-
-  private val MaximumAuditedErasureSubjects = 100000
-
-  private def requiredString(document: Document, field: String): Option[String] =
-    Option(document.get(field)).collect { case value: String => value }
-
-  private def requiredInt32(document: Document, field: String): Option[Int] =
-    Option(document.get(field)).collect { case value: java.lang.Integer => value.intValue() }
-
-  private def requiredStringList(document: Document, field: String): Option[Vector[String]] =
-    Option(document.get(field))
-      .collect { case values: java.util.List[?] => values.asScala.toVector }
-      .flatMap(_.traverse { case text: String => Some(text); case _ => None })
-
-  private def optionalDate(document: Document, field: String): Either[Unit, Option[java.util.Date]] =
-    Option(document.get(field)) match {
-      case None                        => Right(None)
-      case Some(value: java.util.Date) => Right(Some(value))
-      case Some(_)                     => Left(())
-    }
-
-  private[analytics] def erasureRequestActivity(document: Document, now: Instant): Either[String, Boolean] = {
-    requiredString(document, AnalyticsCollections.Fields.State)
-      .toRight("erasure request has no state")
-      .flatMap(state => ErasureRequestState.fromString(state).toRight("erasure request has an unknown state"))
-      .flatMap {
-        case ErasureRequestState.Pending | ErasureRequestState.Processing => Right(true)
-        case ErasureRequestState.Complete                                 =>
-          requiredDate(document, AnalyticsCollections.Fields.ExpiresAt)
-            .toRight("completed erasure request has a missing or invalid retention expiry")
-            .map(_.toInstant.isAfter(now))
-      }
-  }
-
-  private def requiredDate(document: Document, field: String): Option[java.util.Date] =
-    Option(document.get(field)).collect { case value: java.util.Date => value }
-
-  private[analytics] def containsKeyReferenceInValue(value: Any, keyId: String): Boolean = value match {
-    case text: String                  => text.contains(keyId + "_")
-    case document: Document            => document.values().asScala.exists(containsKeyReferenceInValue(_, keyId))
-    case map: java.util.Map[?, ?]      => map.values().asScala.exists(containsKeyReferenceInValue(_, keyId))
-    case values: java.lang.Iterable[?] => values.asScala.exists(containsKeyReferenceInValue(_, keyId))
-    case values: Iterable[?]           => values.exists(containsKeyReferenceInValue(_, keyId))
-    case values: Array[?]              => values.exists(containsKeyReferenceInValue(_, keyId))
-    case _                             => false
   }
 
   private def validateRegistry(spark: SparkSession, paths: AnalyticsLakehousePaths, keyId: String): Chain[String] =

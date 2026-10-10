@@ -18,6 +18,9 @@ private[mongo] object MongoBoundedResults {
 /** Pages a collection in ascending `_id` order so migrations and audits resume from a checkpoint. */
 private[mongo] object MongoBatchScan {
 
+  /** Page size shared by every migration and audit scan. */
+  val BatchSize = 500
+
   /** `fetch` returns at most `batchSize` documents after the given key; `handle` runs per page and a full page
     * continues from `next` of its last document.
     */

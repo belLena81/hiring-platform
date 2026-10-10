@@ -24,6 +24,7 @@ import io.circe.syntax.*
 
 import java.nio.charset.StandardCharsets
 import scala.concurrent.duration.*
+import scala.util.control.NoStackTrace
 
 object InterviewMessageCodec {
   given Encoder[InterviewStep] = Encoder.encodeString.contramap(_.toString)
@@ -43,6 +44,9 @@ object InterviewMessageCodec {
   /** The wire bytes of an outgoing message, refused when they exceed the record limit. */
   def encode(message: InterviewMessage): Either[String, Array[Byte]] =
     Some(bytes(message)).filter(_.length <= MaxRecordBytes).toRight("interview record exceeds size limit")
+
+  /** An outgoing message the transport refuses to produce. */
+  final case class RecordRejected(reason: String) extends RuntimeException(reason) with NoStackTrace
 
   def parse(bytes: Array[Byte]): Either[String, InterviewMessage] =
     if (Option(bytes).isEmpty) Left("invalid null interview message")
@@ -134,14 +138,15 @@ object InterviewKafkaRuntime {
     } yield new InterviewTransport {
       def generationFor(_message: InterviewMessage): InterviewPublisherGeneration = generation
       def publish(message: InterviewMessage): IO[Unit] =
-        IO.fromEither(InterviewMessageCodec.encode(message).leftMap(new IllegalArgumentException(_))).flatMap { bytes =>
-          producer
-            .produceWithoutOffsets(ProducerRecords.one(ProducerRecord(output, message.workflowId.toString, bytes)))
-            .void
-            .adaptError {
-              case error if KafkaRuntimeSupport.isProducerFenced(error) =>
-                InterviewProducerGenerationFenced(error)
-            }
+        IO.fromEither(InterviewMessageCodec.encode(message).leftMap(InterviewMessageCodec.RecordRejected(_))).flatMap {
+          bytes =>
+            producer
+              .produceWithoutOffsets(ProducerRecords.one(ProducerRecord(output, message.workflowId.toString, bytes)))
+              .void
+              .adaptError {
+                case error if KafkaRuntimeSupport.isProducerFenced(error) =>
+                  InterviewProducerGenerationFenced(error)
+              }
         }
     }
   }

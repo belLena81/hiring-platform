@@ -72,7 +72,7 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]](
       withProgress(Vector.empty[StreamingJournalState]) {
         val retained =
           if (retainedBatchIds.isEmpty) lit(false) else col(BatchIdColumn).isin(retainedBatchIds.toSeq.map(_.value)*)
-        val unfinished = col(OutcomeColumn).isin(PreparedName, IngestionCommittedName)
+        val unfinished = col(OutcomeColumn).isin(UnfinishedNames*)
         val rows = DeltaTables
           .read(spark, paths.streamingProgress)
           .filter(col(LineageColumn) === lit(lineage.value) && (retained || unfinished))
@@ -128,19 +128,13 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]](
             .filter(col(LineageColumn) === lit(lineage.value))
           val malformed = progress
             .filter(
-              col(OutcomeColumn).isNull || !col(OutcomeColumn).isin(
-                PreparedName,
-                IngestionCommittedName,
-                QualityBlockedName,
-                ErasurePendingName,
-                PublishedName
-              )
+              col(OutcomeColumn).isNull || !col(OutcomeColumn).isin(AllNames*)
             )
             .limit(1)
             .count() > 0L
           if (malformed) Left(malformedProgress)
           else {
-            val unfinished = col(OutcomeColumn).isin(PreparedName, IngestionCommittedName)
+            val unfinished = col(OutcomeColumn).isin(UnfinishedNames*)
             val terminal = progress.filter(!unfinished)
             val latestTerminal = terminal.orderBy(col(BatchIdColumn).desc).limit(1).select(col(BatchIdColumn))
             val latestWatermark = progress
@@ -234,11 +228,11 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]](
       ensureProgressTable()
       val current = readProgress(identity).toRight(preparationConflict)
       current.flatMap { row =>
-        val status = row.getAs[String](OutcomeColumn)
-        if (status == IngestionCommittedName) Right(())
-        else if (status != PreparedName) Left(progressConflict)
-        else {
-          updateProgress(identity, IngestionCommittedName, None, None)(_ => true)
+        progressOf(row) match {
+          case Some(StreamingJournalProgress.IngestionCommitted) => Right(())
+          case Some(StreamingJournalProgress.Prepared)           =>
+            updateProgress(identity, StreamingJournalProgress.IngestionCommitted, None, None)(_ => true)
+          case _ => Left(progressConflict)
         }
       }
     }
@@ -249,8 +243,7 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]](
       ensureDecisionTable()
       val progress = readProgress(decision.identity).toRight(preparationConflict)
       progress.flatMap { row =>
-        val status = row.getAs[String](OutcomeColumn)
-        if (status != PreparedName && status != IngestionCommittedName) Left(progressConflict)
+        if (!progressOf(row).exists(p => !p.isInstanceOf[StreamingJournalProgress.Terminal])) Left(progressConflict)
         else if (!validDecision(decision, row)) Left(malformedProgress)
         else {
           readDecision(decision.identity, decision.revision).flatMap {
@@ -290,12 +283,16 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]](
       ensureProgressTable()
       if (outcome == StreamingTerminalOutcome.Published) Left(progressConflict)
       else
+        val terminal = StreamingJournalProgress.Terminal(outcome)
         readProgress(identity) match {
-          case None                                                                    => Left(preparationConflict)
-          case Some(row) if row.getAs[String](OutcomeColumn) == outcome.toString       => Right(())
-          case Some(row) if row.getAs[String](OutcomeColumn) == IngestionCommittedName =>
-            updateProgress(identity, outcome.toString, None, Some(Timestamp.from(nowMicros(completedAt))))(_ => true)
-          case Some(_) => Left(progressConflict)
+          case None      => Left(preparationConflict)
+          case Some(row) =>
+            progressOf(row) match {
+              case Some(`terminal`)                                  => Right(())
+              case Some(StreamingJournalProgress.IngestionCommitted) =>
+                updateProgress(identity, terminal, None, Some(Timestamp.from(nowMicros(completedAt))))(_ => true)
+              case _ => Left(progressConflict)
+            }
         }
     }
 
@@ -314,17 +311,17 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]](
           (),
           progressConflict
         )
-        result <- row.getAs[String](OutcomeColumn) match {
-          case PublishedName =>
+        result <- progressOf(row) match {
+          case Some(PublishedProgress) =>
             Either.cond(
               readOptionalInstant(row, CandidateWatermarkColumn).contains(decision.candidateWatermark),
               (),
               progressConflict
             )
-          case IngestionCommittedName =>
+          case Some(StreamingJournalProgress.IngestionCommitted) =>
             updateProgress(
               decision.identity,
-              PublishedName,
+              PublishedProgress,
               decision.candidateWatermark.map(value => Timestamp.from(nowMicros(value))),
               Some(Timestamp.from(nowMicros(completedAt)))
             )(persisted =>
@@ -387,26 +384,16 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]](
         .leftMap(_ => malformedProgress)
       sourceEndOffsets <- decodeRows(row, SourceEndOffsetsColumn)(decodeEndOffset)
       offsets <- decodeRows(row, DeliveredOffsetsColumn)(decodeOffset)
-      status <- Option(row.getAs[String](OutcomeColumn)).toRight(malformedProgress)
-      state <- status match {
-        case PreparedName           => Right(StreamingJournalProgress.Prepared)
-        case IngestionCommittedName => Right(StreamingJournalProgress.IngestionCommitted)
-        case QualityBlockedName     =>
-          Right(StreamingJournalProgress.Terminal(StreamingTerminalOutcome.QualityBlocked))
-        case ErasurePendingName =>
-          Right(StreamingJournalProgress.Terminal(StreamingTerminalOutcome.ErasurePending))
-        case PublishedName => Right(StreamingJournalProgress.Terminal(StreamingTerminalOutcome.Published))
-        case _             => Left(malformedProgress)
-      }
+      state <- progressOf(row).toRight(malformedProgress)
       completedAt <- readOptionalInstant(row, CompletedAtColumn).leftMap(_ => malformedProgress)
       candidate <- readOptionalInstant(row, CandidateWatermarkColumn).leftMap(_ => malformedProgress)
-      _ <- status match {
-        case PreparedName | IngestionCommittedName =>
+      _ <- state match {
+        case StreamingJournalProgress.Prepared | StreamingJournalProgress.IngestionCommitted =>
           Either.cond(completedAt.isEmpty && candidate.isEmpty, (), malformedProgress)
-        case QualityBlockedName | ErasurePendingName =>
+        case StreamingJournalProgress.Terminal(StreamingTerminalOutcome.Published) =>
+          Either.cond(completedAt.nonEmpty, (), malformedProgress)
+        case StreamingJournalProgress.Terminal(_) =>
           Either.cond(completedAt.nonEmpty && candidate.isEmpty, (), malformedProgress)
-        case PublishedName => Either.cond(completedAt.nonEmpty, (), malformedProgress)
-        case _             => Left(malformedProgress)
       }
     } yield StreamingJournalState(
       StreamingInputPreparation(
@@ -538,7 +525,7 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]](
           summary.deliveredRecordCount
         )
       },
-      PreparedName,
+      storedName(StreamingJournalProgress.Prepared),
       null,
       null
     )
@@ -558,23 +545,23 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]](
 
   private def updateProgress(
       identity: StreamingBatchIdentity,
-      status: String,
+      target: StreamingJournalProgress,
       candidateWatermark: Option[Timestamp],
       completedAt: Option[Timestamp]
   )(verify: Row => Boolean): Either[AnalyticsError, Unit] = {
     DeltaTables
       .forPath(spark, paths.streamingProgress)
       .update(
-        identityFilter(identity) && col(OutcomeColumn).isin(PreparedName, IngestionCommittedName),
+        identityFilter(identity) && col(OutcomeColumn).isin(UnfinishedNames*),
         Map(
-          OutcomeColumn -> lit(status),
+          OutcomeColumn -> lit(storedName(target)),
           CandidateWatermarkColumn -> lit(candidateWatermark.orNull).cast(TimestampType),
           CompletedAtColumn -> lit(completedAt.orNull).cast(TimestampType)
         ).asJava
       )
     // Read back so a concurrent writer that won the transition is reported as a conflict.
     Either.cond(
-      readProgress(identity).exists(row => row.getAs[String](OutcomeColumn) == status && verify(row)),
+      readProgress(identity).exists(row => progressOf(row).contains(target) && verify(row)),
       (),
       progressConflict
     )
@@ -643,11 +630,25 @@ private object DeltaStreamingBatchJournal {
   private val PublicationRangeFingerprintColumn = "publicationRangeFingerprint"
   private val PublicationGenerationColumn = "publicationGeneration"
   private val PublicationRevisionColumn = "publicationRevision"
-  private val PreparedName = "Prepared"
-  private val IngestionCommittedName = "IngestionCommitted"
-  private val QualityBlockedName = "QualityBlocked"
-  private val ErasurePendingName = "ErasurePending"
-  private val PublishedName = "Published"
+
+  // The single persisted-name mapping for journal progress; terminal names are the outcome enum names.
+  private def storedName(progress: StreamingJournalProgress): String = progress match {
+    case StreamingJournalProgress.Prepared           => "Prepared"
+    case StreamingJournalProgress.IngestionCommitted => "IngestionCommitted"
+    case StreamingJournalProgress.Terminal(outcome)  => outcome.toString
+  }
+  private val AllProgress: Vector[StreamingJournalProgress] =
+    Vector(StreamingJournalProgress.Prepared, StreamingJournalProgress.IngestionCommitted) ++
+      StreamingTerminalOutcome.values.toVector.map(StreamingJournalProgress.Terminal(_))
+  private val ProgressByName: Map[String, StreamingJournalProgress] = AllProgress.map(p => storedName(p) -> p).toMap
+  private val AllNames = AllProgress.map(storedName)
+  private val UnfinishedNames =
+    Vector(StreamingJournalProgress.Prepared, StreamingJournalProgress.IngestionCommitted).map(storedName)
+  private val PublishedProgress = StreamingJournalProgress.Terminal(StreamingTerminalOutcome.Published)
+  private val PublishedName = storedName(PublishedProgress)
+
+  private def progressOf(row: Row): Option[StreamingJournalProgress] =
+    Option(row.getAs[String](OutcomeColumn)).flatMap(ProgressByName.get)
 
   // Delta cannot enforce NOT NULL inside arrays. Required values are checked by the typed journal decoder.
   private val OffsetType = StructType(

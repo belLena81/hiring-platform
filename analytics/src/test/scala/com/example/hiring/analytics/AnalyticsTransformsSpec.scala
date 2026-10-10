@@ -2302,12 +2302,11 @@ class AnalyticsTransformsSpec extends FunSuite {
       baselineFiles.exists(_.getPath.getName.contains("checkpoint")),
       "purge must establish a clean checkpoint baseline"
     )
-    val oldTimestamp = System.currentTimeMillis() - 3L * 24L * 60L * 60L * 1000L
+    val oldTimestamp = System.currentTimeMillis() - 31L * 24L * 60L * 60L * 1000L
     (legacyLogs ++ retiredLogs ++ baselineFiles.map(_.getPath.toString)).distinct.foreach { value =>
       val logPath = new org.apache.hadoop.fs.Path(value)
       fileSystem.setTimes(logPath, oldTimestamp, -1L)
     }
-    spark.sql(s"ALTER TABLE delta.`$rawPath` SET TBLPROPERTIES ('delta.logRetentionDuration' = 'interval 1 day')")
     spark
       .createDataFrame(
         Vector(Row("retained-after-erasure", Timestamp.from(Instant.parse("2026-09-24T12:00:00Z")))).asJava,
@@ -2317,7 +2316,7 @@ class AnalyticsTransformsSpec extends FunSuite {
       .format("delta")
       .mode("append")
       .save(rawPath)
-    maintenance.checkpointRawTableLogs.unsafeRunSync()
+    maintenance.reclaimExpiredFiles.unsafeRunSync()
     maintenance.verifyFilesAbsent(retiredLogs).unsafeRunSync()
     assert(fileSystem.exists(new org.apache.hadoop.fs.Path(legacyJson)) == false)
   }

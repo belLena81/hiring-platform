@@ -14,7 +14,7 @@ private[mongo] object MongoDeletedAccountEmbeddingMigrations {
     * `MigrationIds.DeletedAccountEmbeddings`.
     */
   val MigrationId: String = Id.value
-  private val BatchSize = 500
+  import MongoBatchScan.BatchSize
 
   private val affected = Filters.and(
     Filters.eq(MongoFields.AccountStatus, "Deleted"),

@@ -84,9 +84,6 @@ private[analytics] final class DeltaAnalyticsErasureLakehouse[F[_]: Async: UUIDG
   override def verifyFilesAbsent(files: Vector[String]): F[Unit] =
     erasure.verifyFilesAbsent(spark, files)
 
-  def checkpointRawTableLogs: F[Unit] =
-    erasure.checkpointRawTableLogs(spark)
-
   override def applyDeletionMarkers(markerTokens: Vector[SubjectToken]): F[Unit] =
     retention.configureRawTablePrivacy(spark) *> applyActiveDeletions(markerTokens)
 

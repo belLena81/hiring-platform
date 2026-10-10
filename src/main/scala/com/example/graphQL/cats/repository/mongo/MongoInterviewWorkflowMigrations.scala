@@ -10,7 +10,7 @@ import java.util.{UUID, Date}
 
 /** Maintenance cutover preserves identities, receipts and conservatively charged execution budgets. */
 private[mongo] object MongoInterviewWorkflowMigrations {
-  private val BatchSize = 500
+  import MongoBatchScan.BatchSize
   private val ExecutableKinds = Set(
     "reserveCalendar",
     "lookupCalendar",
