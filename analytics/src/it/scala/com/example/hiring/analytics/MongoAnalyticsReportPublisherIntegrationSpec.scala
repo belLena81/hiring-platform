@@ -183,6 +183,62 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends AnalyticsMongoIntegra
     }
   }
 
+  test("HCS-01.3 the stored analytics report snapshot equals the shared canonical contract document") {
+    val relative =
+      java.nio.file.Path.of("test-support", "src", "main", "resources", "analytics-report-snapshot-contract.json")
+    val fixture = Iterator
+      .iterate(Option(java.nio.file.Path.of(System.getProperty("user.dir")).toAbsolutePath))(
+        _.flatMap(dir => Option(dir.getParent))
+      )
+      .flatten
+      .map(_.resolve(relative))
+      .find(java.nio.file.Files.isRegularFile(_))
+      .map(java.nio.file.Files.readString(_))
+      .getOrElse(fail("Analytics report snapshot contract fixture is missing"))
+    val client: MongoClient = MongoClients.create(endpointUri)
+    val reactiveClient = AnalyticsMongo4catsTestSupport.client(endpointUri)
+    try {
+      val database = client.getDatabase(testDatabaseName)
+      database
+        .getCollection("analytics_report_control")
+        .insertOne(
+          new Document("_id", "analytics-report")
+            .append("generation", 3L)
+            .append("state", "Unpublished")
+            .append("nextRevision", 6L)
+            .append("lastPublishedRevision", 0L)
+            .append("lastRunId", "")
+        )
+      val publisher = new MongoAnalyticsReportPublisher[IO](
+        reactiveClient,
+        AnalyticsMongo4catsTestSupport.database(reactiveClient, database.getName),
+        operational = AnalyticsTestOperationalConfig.operational
+      )
+      val day = Instant.ofEpochMilli(1789516800000L)
+      val report = AnalyticsReportOutput(
+        Instant.ofEpochMilli(1789632000000L),
+        Vector(AnalyticsFunnelDayOutput(day, 12L, 5L, 1L, 3L, 2L, 1L)),
+        Some(AnalyticsTimeToHireOutput(24.5, 48.0, 72.25, 96.0, 2L, 1L)),
+        Vector(AnalyticsSkillPostingDayOutput(day, "scala", 12L))
+      )
+      val stored = (for {
+        reservation <- publisher.reserve(
+          asRunId("report-run-contract-1"),
+          asFingerprint("contract-range"),
+          Instant.now()
+        )
+        _ <- publisher.publish(reservation, report, Instant.ofEpochMilli(1792224000000L))
+        document <- IO.blocking(
+          database.getCollection("analytics_report_snapshots").find(new Document("_id", "current")).first()
+        )
+      } yield document).unsafeRunSync()
+      assertEquals(stored, Document.parse(fixture))
+    } finally {
+      AnalyticsMongo4catsTestSupport.close(reactiveClient)
+      client.close()
+    }
+  }
+
   test("ambiguous duplicate acknowledgement reconciles majority ownership and releases the real Mongo mutex") {
     val sync = MongoClients.create(endpointUri)
     val reactive = AnalyticsMongo4catsTestSupport.client(endpointUri)

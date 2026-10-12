@@ -10,11 +10,13 @@ import com.example.hiring.analytics.adapter.mongo.{
 }
 import com.example.hiring.analytics.adapter.spark.{
   DeltaAnalyticsErasureLakehouse,
+  DeltaLogFactory,
   LakehouseOperation,
   SparkBlockingExecution
 }
 import com.example.hiring.analytics.config.{
   AnalyticsErasureWorkerPolicy,
+  AnalyticsOperationalSettings,
   AnalyticsErasureWorkerTimings,
   KafkaConnection
 }
@@ -75,7 +77,9 @@ private[analytics] object AnalyticsErasureWorkerTestSupport {
       pollInterval: FiniteDuration = 5.seconds,
       producerFencer: TransactionalProducerFencer[IO] =
         KafkaProducerFencer[IO](AnalyticsBatchTestSupport.driverExecution),
-      kafkaRetention: Option[KafkaRetention[IO]] = None
+      kafkaRetention: Option[KafkaRetention[IO]] = None,
+      operational: AnalyticsOperationalSettings = AnalyticsTestOperationalConfig.operational,
+      deltaLogs: DeltaLogFactory = DeltaLogFactory.system
   ): AnalyticsErasureWorker[IO] = {
     val lock = new MongoAnalyticsLakehouseLock[IO](database, AnalyticsTestOperationalConfig.streams, clock)
     val markers =
@@ -93,10 +97,11 @@ private[analytics] object AnalyticsErasureWorkerTestSupport {
       pseudonymizer,
       lock,
       new MongoHmacKeyRetirementAuthorizationStore[IO](database, AnalyticsTestOperationalConfig.streams),
-      AnalyticsTestOperationalConfig.operational,
+      operational,
       lakehouseExecution,
       Slf4jLogger.getLogger[IO],
-      clock
+      clock,
+      deltaLogs
     )
     val refinedTopic = AnalyticsTopic
       .from(topic)
@@ -123,7 +128,7 @@ private[analytics] object AnalyticsErasureWorkerTestSupport {
       lock,
       Slf4jLogger.getLogger[IO],
       AnalyticsErasureWorkerPolicy(
-        AnalyticsTestOperationalConfig.operational.retention,
+        operational.retention,
         AnalyticsErasureWorkerTimings(leaseDuration, deliveryTimeout, pollInterval)
       ),
       clock

@@ -172,7 +172,7 @@ private[analytics] object StreamingIngestionFixtures {
   }
 
   /** Real activation grant document in the collection the production gate reads. */
-  def grantActivation(fixture: Fixture, settings: AnalyticsStreamingRuntimeSettings): IO[Unit] =
+  def grantActivation(fixture: Fixture, settings: AnalyticsStreamingRuntimeSettings): IO[StreamingActivationIdentity] =
     for {
       sourceTopicId <- topicId(fixture.namespace)
       identity <- IO.fromEither(
@@ -184,7 +184,7 @@ private[analytics] object StreamingIngestionFixtures {
         )
       )
       _ <- insertGrant(fixture, identity)
-    } yield ()
+    } yield identity
 
   private def insertGrant(fixture: Fixture, identity: StreamingActivationIdentity): IO[Unit] = IO.blocking {
     val now = Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MILLIS)
