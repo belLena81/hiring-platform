@@ -1,0 +1,134 @@
+# Hiring analytics verification
+
+## Identity and scope
+
+- Task: re-establish Phase 6 (HAL) and Phase 7 (HCS) acceptance evidence on current source with tests that run in the normal local suite, replacing the standalone proof programs and scripts removed in commit `3755455`.
+- Status: ready (2026-10-12). Baseline HEAD `358aa30`.
+- Coordinator: Product Manager.
+- Implementation owners:
+  - Big Data Engineer: analytics build tests, the trigger seam, shared test support (track A).
+  - Scala Developer: root-build test retags and the shared report-snapshot fixture reader (track R).
+  - Technical Writer: documentation reconciliation, only after test evidence exists (track W).
+- Reviews: Code Reviewer and Security Engineer (erasure, Kafka ACL and key-retirement tests touch security behaviour), then independent QA on the final state.
+- User outcome: every Phase 6/7 criterion that can be proven locally has criterion-tagged tests which run under `scripts/check-local.sh` (or a named `scripts/run-local-tests.sh` mode) and re-check themselves after every refactor. README and milestones state only what those tests show.
+- User decision (2026-10-12): no standalone harness. Prove criteria with integration and unit tests; at most one forked-JVM suite for real process signals.
+- Non-goals:
+  - No change to Kafka event, Delta table, Mongo document or GraphQL shapes.
+  - No change to analytics runtime behaviour, apart from seam S1 below.
+  - No latency/throughput qualification (Phase 15), no deployed retention, writer exclusion or production key retirement (Phase 14).
+  - No new dependencies.
+- Dependencies: Java 17+ for every build/test command (the session's default `java` is 11; the guard hook blocks overriding `JAVA_HOME`). Docker test services from `compose.test.yaml`.
+
+## Source context
+
+Verified by static reading at `358aa30` (gap analysis 2026-10-12; nothing below is a pass claim):
+
+- Commit `3755455` removed `HiringAnalyticsStreamingScenariosMain`, the streaming process-recovery, grant-expiry, active-termination, maintenance, checkpoint-startup and activation proof mains, `AnalyticsRetentionProofIntegrationSpec`, the HMAC rotation/retirement proof mains and eight `run-*-proof.sh` scripts with their compose overlays. HCS evidence cells cite run identifiers from those programs only.
+- Commits `5dfe319..358aa30` changed 186 analytics files, including `SparkHiringAnalyticsStream`, `SparkStreamingBatchStages`, `DeltaStreamingBatchJournal`, `StreamingBatchCoordinator`, `AnalyticsErasureWorker`, `MongoAnalyticsErasureQueue`, `AnalyticsDeltaRetention` and `KafkaRetentionBarrier`.
+- No current test drives the real Kafka source through `SparkHiringAnalyticsStream`, `AppModule.streamingObserved` and `StreamingBatchCallback` into Delta/Mongo. Only `HiringAnalyticsStreamingCancellationIntegrationSpec` starts the real stream, with one record and a replaced callback.
+- Untested on real adapters: `MongoAnalyticsStreamingRegistry` batch denial, `StreamingMaintenanceTick`, checkpoint identity/loss handling against a real checkpoint, physical absence of reclaimed Delta files, real Kafka retention passage (all current tests fake it).
+- Silently skipped suites in a default run: `AnalyticsKeyRetirementIntegrationSpec` (not registered without `ANALYTICS_KEY_RETIREMENT_MONGO_URI`), `AccountDeletionComposeIntegrationSpec`, `KafkaPublisherAccessIntegrationSpec`, root `OperationalEventAnalyticsReportComposeIntegrationSpec`. `AccountDeletionRecoveryIntegrationSpec` runs only under `scripts/run-local-tests.sh recovery`.
+- `SparkHiringAnalyticsStream.scala:158` hard-codes `Trigger.ProcessingTime`.
+- Existing seams: `StreamingDurableBoundaryObserver` (seven durable boundaries), injectable clocks (`StreamingMaintenanceTick.run(..., at)`, worker `Clock`, `DeltaLogFactory` with `HiringAnalyticsRetentionClock`), fake `StreamingActivationGate`.
+- Reusable test support: `HiringAnalyticsRecoveryTestSupport`, `AnalyticsErasureWorkerTestSupport`, `AnalyticsMongoIntegrationSuite`, `TestPartitionOffsetRange`, `AnalyticsTestClocks`, `HiringAnalyticsRetentionClock`, test-support `LocalTestServices`, `KafkaTestNamespace`, `KafkaRetentionProof` (shortened-retention recipe).
+- No existing test name carries an HCS/HAL tag.
+
+## Decisions
+
+| # | Decision | Basis |
+|---|---|---|
+| D1 | Seam S1: `SparkHiringAnalyticsStream` takes `trigger: Option[Trigger] = None`, resolved at the query start (`SparkHiringAnalyticsStream.scala:158`) with `.getOrElse(Trigger.ProcessingTime(settings.triggerInterval))`; `AppModule.streamingObserved` gets the same parameter last. Not a configuration key. These two signatures plus line 158 are the entire production diff (HAV-03). Only run-to-completion tests pass `AvailableNow`: HCS-01, HCS-02, HCS-07.8, HCS-13.1. Live-query tests (HCS-08.5, 08.6, 12.2, 12.3) and the forked child (real `HiringAnalyticsStreamingMain`) keep the default trigger. | Tests must run a stream to completion; production behaviour unchanged. Spark 4.0.1 Kafka source supports `AvailableNow` with `maxOffsetsPerTrigger`; the query identity gate is order-safe (architect review). |
+| D2 | One forked-JVM suite. Real SIGTERM and SIGKILL are sent to child processes; SIGINT is covered by the existing fake-signal `StreamingProcessTerminationSpec`, because one handler is installed for both signals. | One process takes one terminal signal; a real INT run adds cost without new behaviour. |
+| D3 | `AccountDeletionRecoveryIntegrationSpec` stays in `scripts/run-local-tests.sh recovery`; it forks the root API, a pre-existing test, not a new harness. It is a required verification command of this spec. | Avoids duplicating a working end-to-end test. |
+| D4 | Delete `AccountDeletionComposeIntegrationSpec` and root `OperationalEventAnalyticsReportComposeIntegrationSpec`; their prerequisites no longer exist and the new suites cover their behaviour. | No silent dead tests. |
+| D5 | `AnalyticsKeyRetirementIntegrationSpec` and the reader/fencer cases of `KafkaPublisherAccessIntegrationSpec` run by default on the manifest test services. Broker-outage cases stay opt-in and are reported NOT RUN. | Default run must produce evidence. |
+| D6 | Phase-7 crash recovery at durable boundaries is proven at coordinator level with fault injection plus two full-stream restarts over a real checkpoint, plus one real SIGKILL. | Idempotent boundaries and atomic Delta commits are the property; a real kill adds one end-to-end check. |
+| D7 | Shortened retention: Kafka topic `retention.ms=1500`, `segment.ms=1000`, `file.delete.delay.ms=1000`; Delta through shifted `DeltaLogFactory` clock and `deltaVacuumSafety = 1 s`. Polling with bounded deadlines, never fixed sleeps. | Real horizons are days; deployed retention is Phase 14. |
+| D8 | HCS-13 storage bounds are structural (data files ≤ batches × k plus an absolute cap; k and cap recorded here after the first measured run, with margin), not exact measured counts. Latency stays DEFERRED. | AGENTS.md performance rules; avoids flaky exact ceilings. |
+| D10 | Spark session rule: a suite is either COORD (one suite-level shared session) or STREAM (fresh session per stream, nothing held across tests), because `SparkRuntime` uses `getOrCreate()` and its release calls `session.stop()`. Crash recovery is two suites; the cancellation IT and checkpoint ownership suite acquire sessions per test. | Prevents a STREAM run stopping a session a COORD harness holds. |
+| D11 | The lakehouse mutex has no expiry or automatic takeover (`MongoAnalyticsLakehouseLock.scala:23`). After SIGKILL the test supervisor deletes the killed owner's rows from `analytics_lakehouse_mutexes`, mirroring the documented manual recovery. Contention tests assert "does not acquire within N seconds, then cancel, first owner intact", never the 2-minute `WaitTimeout`. | Real ownership policy. |
+| D12 | Integration suites fail, not skip, when `HIRING_TEST_MANIFEST` is absent. | HAV-01. |
+| D9 | Test-side classes with process words (`StreamingProofIsolation`, `HmacKeyRetirementCoordinator`, `LocalHmacKeyWriterExclusion`, `HiringAnalyticsBatchDiagnosticMain`) are renamed to capability terms or deleted when unused. `HiringAnalyticsStreamingWorkloadMain` stays for Phase 15. | Naming rule. |
+
+## Domain language
+
+- Context: Hiring analytics (lakehouse). Aggregates touched: analytics stream progress (journal), erasure request, report snapshot. Invariants: deleted subjects never reappear in a published report; a batch publishes at most once per input; watermark advances only after durable terminal commit; checkpoint identity mismatch fails closed.
+- Terms added to [domain language](../domain-language.md) in this change: late fact, candidate watermark, erasure marker, durable boundary, stream owner, activation grant.
+
+## Acceptance and evidence
+
+Criterion IDs reuse the owning specs ([HCS](continuous-hiring-analytics.md), [HAL](hiring-analytics-lakehouse.md)); example tags `HCS-nn.m` / `HAL-nn.m` appear at the start of each test name. HAV IDs cover this task's own verification rules. Mechanism shorthand: COORD = `HiringAnalyticsRecoveryTestSupport` (real Delta/Mongo, synthetic source); STREAM = real Kafka via `KafkaTestNamespace` + `AppModule.streamingObserved` with `Trigger.AvailableNow`.
+
+### Continuous analytics (Phase 7)
+
+| ID | Rule | Examples (tag: Given / When / Then) | Suite | Outcome |
+|---|---|---|---|---|
+| HCS-01 | Committed events flow to the Admin report; other roles denied | .1 12 committed JOB_CREATED events (skill Scala) in one transaction, `maxOffsetsPerTrigger` 13 (12 records + commit marker) → Bronze 12, Silver 12, snapshot Published, Scala postings 12. .2 second AvailableNow run on the same checkpoint → callback count 0, progress rows and snapshot revision unchanged. .3 report snapshot contract: canonical Extended JSON fixture in `test-support/src/main/resources/` (fixed timestamps, BSON Date/Int64 preserved), read with the same walk-up lookup as `kafka-client-settings-contract.json`; analytics encodes a known value and equals the fixture, root `AnalyticsReportSnapshotDocument.read` decodes it to the expected snapshot. .4 root forbidden-role tests retagged | new `HiringAnalyticsStreamingIngestionIntegrationSpec` (STREAM); root `HiringGraphQLAccessSpec`, `AnalyticsReportingServiceSpec` | Not run |
+| HCS-02 | Retries, duplicates, aborted transactions and offset gaps converge | .1 fresh topic: tx1 commits 4 records (offsets 0–3, marker 4), tx2 aborts 3 records (5–7, marker 8), tx3 commits 3 records (9–11, marker 12) → Bronze 7 (committed offsets only), no data-loss failure, checkpoint acknowledges past the gaps. .2 Given HCS-01.1 data, the same 12 event IDs re-published at new offsets → Silver 12, Bronze 24. .3 restart after a completed batch → callback count 0, progress rows unchanged. .4–.6 retag existing recovery/coordinator/journal tests | ingestion spec; `HiringAnalyticsStreamingRecoveryIntegrationSpec`, `StreamingBatchCoordinatorSpec`, `DeltaStreamingBatchJournalSpec` | Not run |
+| HCS-03 | UTC, out-of-order, future and idle batches follow watermark policy | .1 retag calendar test (closed-day, +301 s future QualityBlocked, +299 s admitted with capped watermark). .2 events at 23:59:59.999999Z and 00:00:00Z of consecutive UTC days fall in different daily windows (COORD). .3 an empty (idle) batch neither publishes nor moves the watermark (COORD, empty frame; under AvailableNow no callback runs, so STREAM cannot observe it) | recovery spec | Not run |
+| HCS-04 | Open windows provisional; closed-day arrivals become late facts, reports unchanged | .1, .2 retag existing. .3 late facts (12) and watermark survive two restarts after LateFactsCommitted | recovery spec; new `HiringAnalyticsStreamingBoundaryRecoveryIntegrationSpec` | Not run |
+| HCS-05 | Time-to-hire formulas, retention and suppression intact | .1, .2 retag existing (p50–p95 = 1.0 h, eligible 12; suppressed-only). .3 batch containing only deleted subject S's 12 events → report, watermark and publication revision unchanged, S absent from Silver | recovery spec; new `HiringAnalyticsStreamingErasureRaceIntegrationSpec` | Not run |
+| HCS-06 | Conflicting event IDs quarantine; quality-blocked batches preserve report and watermark | .1 batch 1 repeats `job-event-0` with skill Rust after publication → quarantine +1, Silver row still Scala, revision and watermark unchanged. .2 same against a retained late fact. .3 retag malformed-source quarantine test | erasure race spec; recovery spec | Not run |
+| HCS-07 | Faults at each durable boundary recover deterministically | .1–.7 one per boundary (Prepared, BronzeCommitted, SilverCommitted, LateFactsCommitted, IngestionCommitted, PublicationCommitted, TerminalCommitted): fail once, retry twice → Published, one progress row, Bronze 12, Silver 12, same candidate watermark. .8 stream fails at BronzeCommitted (and separately PublicationCommitted): `StreamingQueryException` cause chain contains the injected failure, no `commits/<n>` file for that batch; restart over the same checkpoint converges (STREAM). .9 child blocked after PublicationCommitted is SIGKILLed; supervisor deletes the killed owner's mutex rows (D11); restart converges (Bronze 12, Silver 12, one progress row). .10 restart without clearing the rows does not acquire the lakehouse within 10 s and is cancelled (fail closed) | new `HiringAnalyticsStreamingBoundaryRecoveryIntegrationSpec` (COORD, .1–.7, HCS-04.3); new `HiringAnalyticsStreamingRestartIntegrationSpec` (STREAM, .8); forked suite (.9, .10) | Not run |
+| HCS-08 | Checkpoint loss, corruption, identity drift fail closed; shutdown releases resources | Checkpoint validation runs inside stream start; no new seam. A STREAM run in `beforeAll` creates a processed checkpoint; each case restores that backup to the same absolute paths, serially, on a fresh Mongo database baseline. .1 checkpoint directory deleted while lineage progress exists → typed refusal, `spark.streams.active` empty, Delta versions unchanged (Mongo registry/owner rows may exist; not asserted unchanged). .2 the latest `offsets/<n>` file removed → refusal from checkpoint log reconciliation. .3 different stream id, topic identity or lakehouse root → the checkpoint-identity error specifically (not a topic/partition validation error). .4 restored backup resumes and reprocesses nothing. .5 real `MongoStreamingActivationGate` with an immutable grant expiring 30 s after start: query observed active (bounded poll), then stopped after expiry; a restart under the same grant is denied. .6 cancellation releases mutexes, stream owner and owned local Spark directory. .7 real SIGTERM during an active callback → exit 0, mutexes released, no Spark commit for the in-flight batch. .8 SIGINT: retag `StreamingProcessTerminationSpec` (D2) | new `HiringAnalyticsStreamingCheckpointOwnershipIntegrationSpec`; cancellation IT; forked suite | Not run |
+| HCS-09 | Bounded replay idempotent, preserves expiry, rejects expired and deleted facts | .1–.4 retag replay recovery IT. .5 same replay request twice publishes once and returns the stored outcome. .6 selection above cap 1 rejected before journal preparation. .7 fact past its 30-day expiry (clock +31 d) rejected | `HiringAnalyticsLateFactReplayRecoveryIntegrationSpec` | Not run |
+| HCS-10 | Deletion races keep reports hidden and refresh marker checks on retry | .1 marker before preparation applied to Bronze/Silver writes. .2 marker after Silver merge hides report and purges subject on retry. .3 retry recomputes candidate watermark from remaining subjects. .4 marker during replay merge honoured on retry. .5, .6 retag existing publication-race tests | erasure race spec; recovery spec | Not run |
+| HCS-11 | Erasure, retention, reclamation, checkpoint inspection, spill cleanup cover every storage surface | .1 maintenance at +31 d expires Bronze, Silver and late facts and their data/log files are physically absent; control tables intact. .2 maintenance with an active marker purges the subject, report hidden. .3 progress older than 60 s pruned; unfinished and checkpoint-retained batches kept. .4 with `settings.common.sparkLocalDirectory` set to a temp base, no `streaming-*` child remains after the stream resource closes. .5 Kafka retention barrier passes after shortened topic retention. .6 storage inventory lists every dataset a full run created | new `HiringAnalyticsStreamingStorageMaintenanceIntegrationSpec` | Not run |
+| HCS-12 | Ownership safe under contention; cancellation does not deadlock | .1 `HiringAnalyticsBatch.run` with the real `MongoAnalyticsStreamingRegistry` and fake lakehouse ports rejects a one-shot batch on a registered streaming lakehouse before any batch work, also after the stream stops. .2 a second stream does not acquire the stream owner within 10 s, is cancelled, and the first owner is intact (D11). .3 an erasure worker claim waits for the active callback and then runs. .4 retag cancellation IT | checkpoint ownership spec | Not run |
+| HCS-13 | Lag, storage and maintenance bounded (latency DEFERRED) | .1 one AvailableNow run over 240 records with `maxOffsetsPerTrigger` 13 (≈20 batches) keeps Delta data files and bytes within the structural bounds of D8, and a maintenance tick reduces data files. .2 retag "maximum maintenance age includes a slow successful body" | storage maintenance spec; `AnalyticsStreamingMaintenanceSpec` | Not run; latency DEFERRED to Phase 15 |
+
+### Lakehouse batch and erasure (Phase 6)
+
+| ID | Examples | Suite | Outcome |
+|---|---|---|---|
+| HAL-01 | .1 committed range of 100 events with transaction markers, run twice → 100 Bronze, 100 valid, 0 quarantine each time, Silver 100 distinct. .2 stored snapshot carries the published range fingerprint | new `HiringAnalyticsBatchKafkaRangeIntegrationSpec` | Not run |
+| HAL-02, 07, 09, 10, 13, 14 | Retag existing tests (`AnalyticsTransformsSpec`, `HiringAnalyticsWorkloadSpec`, `AnalyticsPrivacyAndErasurePropertySpec`, `AnalyticsBatchResourceSpec`, `AnalyticsRuntimeConfigSpec` and others named in the gap analysis); HAL-14 grant expiry evidence points to HCS-08.5 | existing | Not run |
+| HAL-03 | Retag root Admin-only/30-day/sanitized tests; snapshot fixture shared with HCS-01.3 | root | Not run |
+| HAL-04 | .1 worker cancelled at DeltaPurged, new worker resumes, owner receipt COMPLETE (clock +31 d). .2 captured Delta data and log paths absent after completion, unrelated control row survives. .3 retag root owner-only status tests. .4 `AccountDeletionRecoveryIntegrationSpec` (D3) | new `AnalyticsErasureRetentionIntegrationSpec`; recovery mode | Not run |
+| HAL-05 | .1 retag fencer IT. .2 reader cannot write the events topic or fence. .3 fencer fences a recorded transactional id. .4 broker outage: opt-in, NOT RUN | `KafkaProducerFencerIntegrationSpec`, `KafkaPublisherAccessIntegrationSpec` | Not run |
+| HAL-05-FENCE-01 | .1 worker fences the transactional id recorded on the erasure request; the held commit fails. .2 retag fencer IT | erasure retention spec | Not run |
+| HAL-05-FENCE-02, 04 | Retag existing root/fencer tests | existing | Not run |
+| HAL-05-FENCE-03 | .1 retag failed-fence test. .2 fencer fences then times out → phase stays pending, retry reaches PublisherDrained | erasure retention spec | Not run |
+| HAL-05-FENCE-05 | Pre-cutover publisher | — | Out of scope (Phase 14) |
+| HAL-05-FENCE-06 | .1 reader write and fence denied. .2 wrong password rejected. Retired identity: opt-in NOT RUN | access spec | Not run |
+| HAL-06 | .1–.5 `AnalyticsKeyRetirementIntegrationSpec` on manifest Mongo (audit blocks live marker or old-key row; mutex excludes second client; malformed erasure state fails closed; authorization preserves BSON Date; retirement persists and old primary rejected at restart). .6 active marker created under the old key still matches after rotation | converted suite | Not run |
+| HAL-08 | .1 erasure completes only after topic earliest offset passes the captured barrier (shortened retention, real `KafkaRetentionAdapter`) | erasure retention spec | Not run |
+| HAL-11 | .1 range starting below earliest offset after retention is reported expired | batch range spec | Not run |
+| HAL-12 | Covered by HAL-04.1 (cancellation as crash-equivalent) and existing publisher/replay ITs, retagged | — | Not run |
+
+### Verification rules
+
+| ID | Rule | Check | Outcome |
+|---|---|---|---|
+| HAV-01 | No HCS/HAL test silently skips in a default run; every opt-in case is listed here as NOT RUN; integration suites fail without `HIRING_TEST_MANIFEST` (D12) | grep for `if (enabled)`, `munit.Ignore`, `assume(` in analytics/root IT; compare with this spec | Not run |
+| HAV-02 | Every locally provable example tag above names at least one passing test | `grep -rhoE '"(HCS\|HAL)-[0-9]+(-FENCE-[0-9]+)?\.[0-9]+' ` against this table (presence) plus test reports (pass) | Not run |
+| HAV-03 | Production behaviour unchanged except seam S1 (default trigger identical) | Code review of `analytics/src/main` diff | Not run |
+| HAV-04 | README, milestones, HCS/HAL specs, big-data architecture and analytics-review-remediation cite only existing tests/scripts; harness-era evidence kept as dated history | grep deleted names; Technical Writer + QA | Not run |
+| HAV-05 | `scripts/check-local.sh` passes on Java 17 (formatting, units, integrations, 85% merged coverage), plus `run-local-tests.sh recovery` and `retention` | command output | Not run |
+
+### Out of scope (production gates)
+
+Real 7/30/31-day horizons and production Kafka retention passage; unmanaged-writer exclusion and storage revocation; FENCE-05 cutover; production HMAC retirement and new-key-only restart; real broker outage; HTTP through a deployed API → Phase 14. Bronze p95 < 30 s, Admin report p95 ≤ 120 s, burst drain, throughput → Phase 15 (`HiringAnalyticsStreamingWorkloadMain` retained).
+
+## Implementation handoff
+
+Order (each slice verified with `scripts/run-local-tests.sh analytics '<suite>'` before the next):
+
+1. A1: seam S1 + HCS-01.1 alone, to confirm `AvailableNow` works with `maxOffsetsPerTrigger`, `foreachBatch` and the query identity gate. If it does not, stop and return to the coordinator; P1–P3 depend on it.
+2. A2: suite-level shared Spark session in `HiringAnalyticsRecoveryTestSupport` for COORD suites only (D10); retag existing analytics tests; COORD additions HCS-03.2, 03.3, 06, 09.5–.7.
+3. A3: erasure race suite (HCS-05.3, 06, 10), boundary recovery suite (COORD: HCS-04.3, 07.1–.7) and restart suite (STREAM: HCS-07.8).
+4. A4: extract the shortened-retention helper from `KafkaRetentionProof`; storage maintenance suite (HCS-11, 13); erasure retention suite (HAL-04, 05-FENCE-01/03, 08); batch range suite (HAL-01, 11).
+5. A5: convert key retirement suite (HAL-06), un-gate access subset (HAL-05, FENCE-06), deletions per D4, renames per D9.
+6. A6: ingestion completion (HCS-01, 02), checkpoint ownership (HCS-08, 12; sessions per test), forked signal suite `HiringAnalyticsStreamingProcessSignalIntegrationSpec` (HCS-07.9, 07.10, 08.7) with a test-only child entry point in `analytics/src/it` that runs `AppModule.streamingObserved` with an observer that writes a marker file and blocks at a boundary chosen by a system property; the SIGTERM case runs the real `HiringAnalyticsStreamingMain` configured through system properties.
+   - HCS-11 storage maintenance suite lives in package `com.example.hiring.analytics.app` because `StreamingMaintenanceTick` is `private[app]`.
+7. R1 (parallel with A): root retags (HCS-01.4, HAL-03, HAL-04.3, FENCE-02), shared snapshot fixture reader test (HCS-01.3), delete root compose readback spec (D4). Write scope: `src/test`, `src/it`, `test-support/src/main/resources` fixture only.
+8. W1 (after A and R pass): documentation per HAV-04, glossary already updated.
+
+Write scopes: track A `analytics/src/**` (main only for S1), `test-support/src/main/scala/com/example/hiring/testing/` (retention helper); track R as above; track W `README.md`, `docs/**` except this spec.
+
+Risks: `AvailableNow` with `read_committed` across transaction-marker gaps (A1 gate, assumed not verified); forked suite flakiness (marker files and Mongo counts, bounded deadlines, never sleeps); added IT runtime estimated 18–22 min, likely higher with fresh STREAM sessions (re-estimate after A1).
+
+## Checkpoint
+
+- 2026-10-12: spec drafted from a static gap analysis. Architect review FAIL on spec text (F1–F12: trigger default form, AvailableNow scope, Spark session sharing, mutex has no expiry, grant-expiry race, checkpoint case observability, idle-batch observability, marker offsets, tag grep, two-sided snapshot fixture); all folded into D1, D8, D10–D12 and the example rows. Status ready. Java 17 now default. Baseline `bash scripts/check-local.sh` on HEAD `358aa30` exited 0 (formatting, both builds' units and integrations, merged coverage); root 1,041 units passed, 298 integrations (288 passed, 10 opt-in skips). This re-confirms the existing suites only; no HCS/HAL criterion in this spec has run. `scripts/check-local.sh` is committed without the executable bit (mode 100644). Removed the forwarding-only `scripts/run-interview-kafka-proof.sh`. Next action: slice A1.
+- Code Reviewer: pending. Security Engineer: pending. QA: pending.

@@ -22,6 +22,12 @@ Add a term here in the same change that introduces it, and only when it is new o
 | Interview workflow | Durable, conditional scheduling around Accepted→Interview; it adds no statuses | The status `Interview` | `domain/workflow` |
 | Embedding | Derived search data on a Job or Candidate; never operational truth | A user-visible field | embedding work |
 | Consent | Candidate's recruiter-search opt-in; governs candidate matching visibility | Authentication | `CandidateProfile` |
+| Late fact | Analytics event that arrives after its UTC day is closed; retained with an expiry and excluded from published reports until replayed | A quarantined (invalid or conflicting) event | `AnalyticsLateFactStage` |
+| Candidate watermark | Event-time bound a streaming batch proposes; becomes the report watermark only after the batch's terminal commit | Kafka offset or Spark checkpoint position | `candidateWatermark` |
+| Erasure marker | Durable record that a deleted account's subject must be excluded from every analytics write and report | The account tombstone in operational MongoDB | active deletion marker |
+| Durable boundary | One of seven persisted points in a streaming batch (Prepared … TerminalCommitted) from which recovery resumes | A Spark micro-batch commit | `StreamingDurableBoundary` |
+| Stream owner | Exclusive Mongo-held ownership of one lakehouse by one running stream | The per-callback lakehouse mutex | `MongoAnalyticsStreamingRegistry` |
+| Activation grant | Immutable, expiring authorization that permits a streaming process to start | A user role or JWT | `StreamingActivationGate` |
 
 ## Bounded contexts
 

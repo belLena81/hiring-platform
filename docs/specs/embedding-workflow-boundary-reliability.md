@@ -57,11 +57,13 @@ Reproducible final root checks (Java 17):
 sbt scalafmtAll scalafmtSbt scalafmtCheckAll scalafmtSbtCheck test 'IntegrationTest / compile'
 ```
 
-The integration selection uses disposable Mongo replica sets and an isolated SASL Kafka broker started by `scripts/run-interview-kafka-proof.sh start` with `INTERVIEW_KAFKA_PROOF_ROOT=.local/data/embedding-workflow-proof`, `INTERVIEW_KAFKA_PROOF_PROJECT=hiring-embedding-workflow-proof` and an unused explicit test subnet. Export the ignored fixture's `runtime.env` and its proof-root selector, then run:
+The integration selection runs on the shared local test services (Mongo replica set and SASL Kafka from `compose.test.yaml`), which the runner starts and isolates per run:
 
 ```bash
-sbt 'IntegrationTest / testOnly com.example.graphQL.cats.repository.mongo.MongoInterviewWorkflowRepositoryIntegrationSpec com.example.graphQL.cats.repository.mongo.InterviewWorkflowRecoveryIntegrationSpec com.example.graphQL.cats.repository.mongo.MongoInterviewSubjectCleanupIntegrationSpec com.example.graphQL.cats.repository.mongo.MongoEmbeddingWorkIntegrationSpec com.example.graphQL.cats.repository.mongo.MongoHiringRepositoryTransactionIntegrationSpec com.example.graphQL.cats.infrastructure.kafka.InterviewKafkaRestartIntegrationSpec com.example.graphQL.cats.repository.mongo.InterviewPublicationFencingIntegrationSpec com.example.graphQL.cats.repository.mongo.InterviewSchedulingWorkerIntegrationSpec'
+scripts/run-local-tests.sh test '*MongoInterviewWorkflowRepositoryIntegrationSpec' '*InterviewWorkflowRecoveryIntegrationSpec' '*MongoInterviewSubjectCleanupIntegrationSpec' '*MongoEmbeddingWorkIntegrationSpec' '*MongoHiringRepositoryTransactionIntegrationSpec' '*InterviewKafkaRestartIntegrationSpec' '*InterviewPublicationFencingIntegrationSpec' '*InterviewSchedulingWorkerIntegrationSpec'
 ```
+
+The October 6 execution below used the former isolated-broker wrapper (`scripts/run-interview-kafka-proof.sh`), since removed.
 
 Integration output: `.local/logs/embedding-workflow-integration.log`. Credentials and generated fixture data remain ignored; normal Kafka/Mongo data is not mounted into the fixture.
 
