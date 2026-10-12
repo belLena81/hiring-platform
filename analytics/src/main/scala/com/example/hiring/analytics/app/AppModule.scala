@@ -93,7 +93,6 @@ object AppModule {
         )
 
         job.run(settings.manifest)
-
       }
     }
 
@@ -213,7 +212,7 @@ object AppModule {
                   val maintaining = maintenanceTick.run(identity, lineage, retainedCheckpoint, authorize, at)
                   StreamingBatchCallback.timed(cost, StreamingBatchCost.Stage.Maintenance)(maintaining)
                 },
-                Some(StreamingBatchCallback.logMaintenance[F])
+                Some(AnalyticsStreamingMaintenance.logObservation[F])
               ).resource
             )
           )
@@ -284,7 +283,6 @@ object AppModule {
             sparkExecution
           )
         )
-
       }
     }
 

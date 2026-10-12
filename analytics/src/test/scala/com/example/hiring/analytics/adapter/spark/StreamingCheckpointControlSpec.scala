@@ -2,6 +2,7 @@ package com.example.hiring.analytics.adapter.spark
 
 import com.example.hiring.analytics.domain.StreamingActivationIdentity
 import com.example.hiring.analytics.errors.AnalyticsError
+import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
 
 import munit.FunSuite
 import org.apache.hadoop.conf.Configuration
@@ -32,6 +33,18 @@ final class StreamingCheckpointControlSpec extends FunSuite {
     fileSystem.mkdirs(new Path(l.checkpoint, "commits"))
     fileSystem.create(new Path(l.checkpoint, "metadata")).close()
     fileSystem.create(new Path(l.checkpoint, "commits/0")).close()
+  }
+
+  test("the lineage directory is the lakehouse streaming lineage location for plain and file roots") {
+    val plain = new Path(Files.createTempDirectory("lineage-root").toString, "lake")
+    val roots = Seq(plain.toString, plain.toUri.toString + "/", s"file://${plain.toUri.getPath}")
+    roots.foreach { root =>
+      val paths = AnalyticsLakehousePaths.from(root).toOption.get
+      assertEquals(
+        StreamingCheckpointControl.lineageDirectory(root).toString,
+        SparkPhysicalLocation.resolve(paths.streamingLineage)
+      )
+    }
   }
 
   test("a new checkpoint is claimed once and a different identity is rejected afterwards") {

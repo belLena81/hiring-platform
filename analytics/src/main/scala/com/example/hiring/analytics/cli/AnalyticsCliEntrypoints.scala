@@ -32,7 +32,6 @@ private[cli] object AnalyticsCliProgram {
       case Right(code) => IO.pure(code)
       case Left(error) => logger.error(safeFailureSummary(error)).as(ExitCode.Error)
     }
-
 }
 
 /** Commands configured only through HOCON. Decline rejects any command-line argument, option or help flag, so no

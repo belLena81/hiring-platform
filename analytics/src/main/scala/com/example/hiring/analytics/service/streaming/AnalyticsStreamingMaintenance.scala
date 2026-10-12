@@ -5,6 +5,7 @@ import cats.effect.syntax.all.*
 import cats.syntax.all.*
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.batch.AnalyticsLakehouseLock
+import org.typelevel.log4cats.slf4j.Slf4jLogger
 
 import java.time.Instant
 import scala.concurrent.duration.FiniteDuration
@@ -121,4 +122,15 @@ object AnalyticsStreamingMaintenance {
   )
 
   final case class Runtime[F[_]](join: F[Unit], observation: F[Observation])
+
+  /** The sanitized maintenance observation as one structured log line. */
+  def logLine(observation: Observation): String =
+    s"STREAMING_MAINTENANCE outcome=${observation.outcome.fold("none")(_.toString)} " +
+      s"elapsedSinceSuccessMillis=${observation.elapsedSinceSuccess.toMillis} " +
+      s"maximumElapsedSinceSuccessMillis=${observation.maximumElapsedSinceSuccess.toMillis} " +
+      s"consecutiveDeferrals=${observation.consecutiveDeferrals} " +
+      s"lastSuccess=${observation.lastSuccess.fold("none")(_.toString)}"
+
+  def logObservation[F[_]: Async](observation: Observation): F[Unit] =
+    Slf4jLogger.getLoggerFromName[F]("com.example.hiring.analytics.streaming.maintenance").info(logLine(observation))
 }

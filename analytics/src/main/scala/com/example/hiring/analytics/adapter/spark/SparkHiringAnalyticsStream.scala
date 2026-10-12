@@ -1,6 +1,7 @@
 package com.example.hiring.analytics.adapter.spark
 
 import com.example.hiring.analytics.adapter.kafka.KafkaClientProperties
+import com.example.hiring.analytics.adapter.spark.StreamingCheckpointControl.*
 import com.example.hiring.analytics.config.{AnalyticsStreamingSettings, KafkaConnection}
 import com.example.hiring.analytics.domain.{
   AnalyticsDigest,
@@ -14,9 +15,11 @@ import com.example.hiring.analytics.domain.{
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.errors.AnalyticsErrorTranslation.translating
 import com.example.hiring.analytics.service.batch.{AnalyticsLakehouseLock, AnalyticsStreamingRegistry}
-import com.example.hiring.analytics.service.streaming.StreamingActivationGate
-import com.example.hiring.analytics.service.streaming.{StreamingCheckpointAcknowledgement, StreamingCheckpointBatch}
-import com.example.hiring.analytics.adapter.spark.StreamingCheckpointControl.*
+import com.example.hiring.analytics.service.streaming.{
+  StreamingActivationGate,
+  StreamingCheckpointAcknowledgement,
+  StreamingCheckpointBatch
+}
 
 import cats.effect.{Async, Deferred, Resource}
 import cats.effect.syntax.all.*

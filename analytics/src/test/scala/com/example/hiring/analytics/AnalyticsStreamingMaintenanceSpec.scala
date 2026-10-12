@@ -8,6 +8,7 @@ import com.example.hiring.analytics.service.streaming.AnalyticsStreamingMaintena
 import com.example.hiring.analytics.errors.AnalyticsError
 import munit.CatsEffectSuite
 
+import java.time.Instant
 import scala.concurrent.duration.*
 
 final class AnalyticsStreamingMaintenanceSpec extends CatsEffectSuite {
@@ -370,4 +371,25 @@ final class AnalyticsStreamingMaintenanceSpec extends CatsEffectSuite {
     }
   }
 
+  test("maintenance observations render one sanitized structured line") {
+    val observation = AnalyticsStreamingMaintenance.Observation(
+      Some(Instant.parse("2026-10-10T00:00:00Z")),
+      None,
+      Some(AnalyticsStreamingMaintenance.TickOutcome.Succeeded),
+      2L,
+      5.seconds,
+      9.seconds
+    )
+    assertEquals(
+      AnalyticsStreamingMaintenance.logLine(observation),
+      "STREAMING_MAINTENANCE outcome=Succeeded elapsedSinceSuccessMillis=5000 maximumElapsedSinceSuccessMillis=9000 " +
+        "consecutiveDeferrals=2 lastSuccess=2026-10-10T00:00:00Z"
+    )
+    assert(
+      AnalyticsStreamingMaintenance
+        .logLine(observation.copy(outcome = None, lastSuccess = None))
+        .endsWith("lastSuccess=none")
+    )
+    AnalyticsStreamingMaintenance.logObservation[IO](observation)
+  }
 }
