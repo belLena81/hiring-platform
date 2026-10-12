@@ -570,7 +570,7 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends AnalyticsMongoIntegra
     }
   }
 
-  test("a failed publisher fence leaves deletion pending without a barrier or outbox purge") {
+  test("HAL-05-FENCE-03.1 a failed publisher fence leaves deletion pending without a barrier or outbox purge") {
     val client: MongoClient = syncClient(
       endpointUri
     )

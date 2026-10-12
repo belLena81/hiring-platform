@@ -254,17 +254,19 @@ private[analytics] object HiringAnalyticsRecoveryTestSupport {
     def replayJournal = new MongoAnalyticsLateFactReplayJournal[IO](database, streams, paths.root)
     def replay(
         request: AnalyticsLateFactReplayRequest,
-        publication: AnalyticsReportPublisher[IO] = publisher
+        publication: AnalyticsReportPublisher[IO] = publisher,
+        clock: cats.effect.Clock[IO] = cats.effect.Clock[IO],
+        stages: AnalyticsLateFactReplayStages[IO] = replayStages
     ): IO[AnalyticsLateFactReplayOutcome] =
       replayJournal.ensureIndexes *> new AnalyticsLateFactReplayService[IO](
         paths.root,
         replayJournal,
         markers,
-        replayStages,
+        stages,
         publication,
         lock,
         operational.retention,
-        cats.effect.Clock[IO]
+        clock
       ).run(request)
   }
 
@@ -285,4 +287,17 @@ private[analytics] object HiringAnalyticsRecoveryTestSupport {
         completed: Instant
     ) = delegate.publishErasure(reservation, report, expiry, claim, completed)
   }
+}
+
+/** Suite-level shared Delta/Mongo/Spark runtime for suites that never stop the Spark session themselves. Suites that
+  * run `AppModule.streamingObserved` or release a Spark session per scenario must not mix with it.
+  */
+abstract class SharedRecoveryRuntimeSuite extends AnalyticsMongoIntegrationSuite {
+  private val runtimeFixture = ResourceSuiteLocalFixture(
+    "analytics-shared-recovery-runtime",
+    Resource.eval(IO.delay(mongoEndpoint)).flatMap(HiringAnalyticsRecoveryTestSupport.resource(_))
+  )
+  override def munitFixtures: List[munit.AnyFixture[?]] = super.munitFixtures :+ runtimeFixture
+  protected def resource: Resource[IO, HiringAnalyticsRecoveryTestSupport.Runtime] =
+    Resource.eval(IO.delay(runtimeFixture()))
 }

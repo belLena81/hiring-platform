@@ -332,7 +332,7 @@ final class AnalyticsStreamingMaintenanceSpec extends CatsEffectSuite {
     }
   }
 
-  test("maximum maintenance age includes a slow successful body before its age resets") {
+  test("HCS-13.2 maximum maintenance age includes a slow successful body before its age resets") {
     TestControl.executeEmbed {
       AnalyticsTestLakehouseLocks.processLocal[IO].use { lock =>
         new AnalyticsStreamingMaintenance[IO]("hiring", lock, 60.seconds, _ => IO.sleep(250.seconds)).observedResource

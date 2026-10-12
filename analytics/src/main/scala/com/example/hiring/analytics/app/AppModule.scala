@@ -29,6 +29,7 @@ import cats.syntax.all.*
 import mongo4cats.client.MongoClient
 import mongo4cats.database.MongoDatabase
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.streaming.Trigger
 import org.typelevel.log4cats.slf4j.Slf4jLogger
 import io.github.iltotore.iron.*
 import io.github.iltotore.iron.constraint.any.Not
@@ -164,7 +165,8 @@ object AppModule {
   private[analytics] def streamingObserved[F[_]: Async](
       settings: AnalyticsStreamingRuntimeSettings,
       observer: Option[StreamingDurableBoundaryObserver[F]],
-      costObserver: Option[StreamingBatchCost.Summary => F[Unit]] = None
+      costObserver: Option[StreamingBatchCost.Summary => F[Unit]] = None,
+      trigger: Option[Trigger] = None
   ): Resource[F, F[Unit]] =
     withSecureUuids[F, F[Unit]] {
       for {
@@ -214,7 +216,8 @@ object AppModule {
                 },
                 Some(AnalyticsStreamingMaintenance.logObservation[F])
               ).resource
-            )
+            ),
+            trigger = trigger
           )
           shared.publisher.ensurePinnedRetentionIndex.as(stream.resource.use(_ => Async[F].unit))
         }

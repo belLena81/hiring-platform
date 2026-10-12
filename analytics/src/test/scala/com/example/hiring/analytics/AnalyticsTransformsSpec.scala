@@ -175,7 +175,7 @@ class AnalyticsTransformsSpec extends FunSuite {
     )
   }
 
-  test("silver keeps identical event retries and quarantines conflicting event ids") {
+  test("HAL-02.1 silver keeps identical event retries and quarantines conflicting event ids") {
     val same = event("fdc3f116-9f99-3ce6-b429-3eac7ddbba73", "APPLICATION_CREATED")
     val conflict = event("fdc3f116-9f99-3ce6-b429-3eac7ddbba73", "APPLICATION_STATUS_CHANGED")
     val parsed = OperationalEventTransforms.parseKafkaRecords(
@@ -265,7 +265,7 @@ class AnalyticsTransformsSpec extends FunSuite {
     assertEquals(OperationalEventTransforms.malformedEvents(parsed).count(), 6L)
   }
 
-  test("funnel excludes the duplicate candidate hired event and suppresses groups below ten") {
+  test("HAL-09.1 funnel excludes the duplicate candidate hired event and suppresses groups below ten") {
     val events = (1 to 10).map(index =>
       (
         "hiring.operational-events",
@@ -967,7 +967,7 @@ class AnalyticsTransformsSpec extends FunSuite {
     )
   }
 
-  test("same-range retry completes the manifest after Mongo publication succeeds") {
+  test("HAL-10.1 same-range retry completes the manifest after Mongo publication succeeds") {
     val lakehouse = Files.createTempDirectory("hiring-analytics-manifest-retry").toUri.toString.stripSuffix("/")
     val paths = TestAnalyticsLakehousePaths.unsafe(lakehouse)
     val input = records(

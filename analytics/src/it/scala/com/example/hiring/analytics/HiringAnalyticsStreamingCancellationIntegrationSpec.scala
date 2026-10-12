@@ -131,7 +131,7 @@ final class HiringAnalyticsStreamingCancellationIntegrationSpec extends Analytic
   )
 
   test(
-    "active Spark callback cancellation releases query, contended maintenance, driver and Mongo ownership without acknowledging input"
+    "HCS-08.6 HCS-12.4 active Spark callback cancellation releases query, contended maintenance, driver and Mongo ownership without acknowledging input"
   ) {
     (resource, kafka).tupled.use { case (runtime, broker) =>
       for {

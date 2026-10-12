@@ -67,7 +67,7 @@ final class StreamingProcessTerminationSpec extends CatsEffectSuite {
     }
   }
 
-  test("repeated TERM and INT requests join program cleanup before restoring handlers") {
+  test("HCS-08.8 repeated TERM and INT requests join program cleanup before restoring handlers") {
     fixture().flatMap { case (signals, callbacks, events) =>
       for {
         started <- Deferred[IO, Unit]

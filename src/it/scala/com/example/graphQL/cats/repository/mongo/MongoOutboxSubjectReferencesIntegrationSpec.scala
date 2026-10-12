@@ -445,7 +445,9 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
     }
   }
 
-  test("account deletion returns and replays a durable pending receipt with status independent of the account") {
+  test(
+    "HAL-04.3 account deletion returns and replays a durable pending receipt with status independent of the account"
+  ) {
     replicaSet.use { instance =>
       MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
         LocalTestServices.database(client).use { database =>
@@ -651,7 +653,9 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
     }
   }
 
-  test("an outbox lease is reclaimable at exactly its expiry instant and held one millisecond earlier") {
+  test(
+    "HAL-05-FENCE-02.1 an outbox lease is reclaimable at exactly its expiry instant and held one millisecond earlier"
+  ) {
     replicaSet.use { instance =>
       MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
         LocalTestServices.database(client).use { database =>
@@ -710,7 +714,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
     }
   }
 
-  test("expired-lease reclaim and account deletion serialize the publisher subject fence") {
+  test("HAL-05-FENCE-02.2 expired-lease reclaim and account deletion serialize the publisher subject fence") {
     replicaSet.use { instance =>
       MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
         LocalTestServices.database(client).use { database =>

@@ -154,7 +154,7 @@ class AnalyticsBatchResourceSpec extends FunSuite {
     assert(cancelledWaiterDidNotEnter)
   }
 
-  test("application resources close Spark and Mongo after a failed run") {
+  test("HAL-13.1 application resources close Spark and Mongo after a failed run") {
     val acquired = new AtomicReference[
       Option[(SparkSession, MongoClient[IO], com.example.hiring.analytics.adapter.spark.SparkBlockingExecution[IO])]
     ](None)

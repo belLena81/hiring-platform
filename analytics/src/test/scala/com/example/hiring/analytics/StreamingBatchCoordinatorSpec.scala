@@ -54,7 +54,7 @@ final class StreamingBatchCoordinatorSpec extends CatsEffectSuite {
     }
   }
 
-  test("interrupted publication reuses immutable preparation and the same persisted decision revision") {
+  test("HCS-02.6 interrupted publication reuses immutable preparation and the same persisted decision revision") {
     for {
       state <- Ref.of[IO, FakeState](FakeState(failPublishCount = 1))
       harness = new Harness(state)

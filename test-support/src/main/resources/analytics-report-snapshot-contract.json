@@ -1,0 +1,35 @@
+{
+  "_id": "current",
+  "state": "Published",
+  "generation": { "$numberLong": "3" },
+  "revision": { "$numberLong": "7" },
+  "runId": "report-run-contract-1",
+  "asOf": { "$date": { "$numberLong": "1789632000000" } },
+  "expiresAt": { "$date": { "$numberLong": "1792224000000" } },
+  "funnel": [
+    {
+      "day": { "$date": { "$numberLong": "1789516800000" } },
+      "created": { "$numberLong": "12" },
+      "accepted": { "$numberLong": "5" },
+      "declined": { "$numberLong": "1" },
+      "interview": { "$numberLong": "3" },
+      "hired": { "$numberLong": "2" },
+      "rejected": { "$numberLong": "1" }
+    }
+  ],
+  "skillPostingActivity": [
+    {
+      "day": { "$date": { "$numberLong": "1789516800000" } },
+      "skill": "scala",
+      "postings": { "$numberLong": "12" }
+    }
+  ],
+  "timeToHire": {
+    "p50Hours": { "$numberDouble": "24.5" },
+    "p75Hours": { "$numberDouble": "48.0" },
+    "p90Hours": { "$numberDouble": "72.25" },
+    "p95Hours": { "$numberDouble": "96.0" },
+    "eligibleCount": { "$numberLong": "2" },
+    "excludedCount": { "$numberLong": "1" }
+  }
+}

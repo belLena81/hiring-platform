@@ -126,7 +126,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     }
   }
 
-  test("deletion receipt status requires an authenticated actor") {
+  test("HAL-04.3 deletion receipt status requires an authenticated actor") {
     val query =
       """query { accountDeletionStatus(receiptId: "00000000-0000-0000-0000-000000000001") }"""
 
@@ -140,7 +140,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     }
   }
 
-  test("analytics report requires authentication") {
+  test("HCS-01.4 analytics report requires authentication") {
     execute(
       """query { analyticsReport(from: "2026-09-16T00:00:00Z", to: "2026-09-17T00:00:00Z") { asOf } }""",
       None
@@ -149,7 +149,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     }
   }
 
-  test("analytics report failures use a sanitized analytics error") {
+  test("HAL-03.4 analytics report failures use a sanitized analytics error") {
     val reporting = new AnalyticsReportingUseCases {
       override def report(
           actor: ActorContext,
@@ -170,7 +170,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       }
   }
 
-  test("an active Admin can read a published report with its asOf timestamp") {
+  test("HAL-03.5 an active Admin can read a published report with its asOf timestamp") {
     val asOf = Instant.parse("2026-09-17T08:00:00Z")
     val snapshot = AnalyticsReportSnapshot(asOf, Nil, None, Nil)
     val reporting = new AnalyticsReportingUseCases {

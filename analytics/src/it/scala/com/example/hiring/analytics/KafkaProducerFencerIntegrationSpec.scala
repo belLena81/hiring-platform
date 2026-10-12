@@ -115,7 +115,9 @@ class KafkaProducerFencerIntegrationSpec extends FunSuite {
       allowPlaintext = true
     )
 
-  test("the production fencer fences an open transaction and read_committed hides its record") {
+  test(
+    "HAL-05.1 HAL-05-FENCE-01.2 HAL-05-FENCE-04.1 the production fencer fences an open transaction and read_committed hides its record"
+  ) {
     val kafka = kafkaContainer
     kafka.start()
     val topic = "fencer-it-" + UUID.randomUUID().toString

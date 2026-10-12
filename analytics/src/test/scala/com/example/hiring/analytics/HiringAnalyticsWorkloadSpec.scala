@@ -213,7 +213,7 @@ class HiringAnalyticsWorkloadSpec extends FunSuite {
     } yield ()
   }
 
-  test("fixed 100000 record hiring analytics workload reports reconciliation and resource use") {
+  test("HAL-07.1 fixed 100000 record hiring analytics workload reports reconciliation and resource use") {
     rootResource
       .flatMap(root => sparkResource.map(spark => (root, spark)))
       .use { case (root, spark) =>

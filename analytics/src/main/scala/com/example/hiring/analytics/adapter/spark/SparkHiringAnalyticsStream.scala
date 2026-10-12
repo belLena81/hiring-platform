@@ -64,7 +64,8 @@ private[analytics] final class SparkHiringAnalyticsStream[F[_]: Async](
           F[Unit]
       ) => Resource[F, F[Unit]]
     ] = None,
-    queryFactoryOverride: Option[StreamingQueryFactory[F]] = None
+    queryFactoryOverride: Option[StreamingQueryFactory[F]] = None,
+    trigger: Option[Trigger] = None
 ) {
   private val effect = Async[F]
   private val activeCallbackCancellation = new AtomicReference[Option[() => Future[Unit]]](None)
@@ -155,7 +156,7 @@ private[analytics] final class SparkHiringAnalyticsStream[F[_]: Async](
           .writeStream
           .queryName(settings.streamId)
           .option("checkpointLocation", SparkPhysicalLocation.resolve(settings.checkpointLocation))
-          .trigger(Trigger.ProcessingTime(settings.triggerInterval))
+          .trigger(trigger.getOrElse(Trigger.ProcessingTime(settings.triggerInterval)))
           .foreachBatch((frame: DataFrame, batchNumber: Long) =>
             runCallback(dispatcher, frame, batchNumber, lineage, activationIdentity, queryIdentityReady)
           )

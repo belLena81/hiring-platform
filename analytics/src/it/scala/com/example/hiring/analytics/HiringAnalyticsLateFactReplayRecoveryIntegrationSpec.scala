@@ -1,78 +1,27 @@
 package com.example.hiring.analytics
 
 import cats.effect.IO
-import com.example.hiring.analytics.adapter.spark.*
 import com.example.hiring.analytics.domain.*
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.batch.*
 import com.example.hiring.analytics.HiringAnalyticsRecoveryTestSupport.*
 import io.delta.tables.DeltaTable
-import org.apache.spark.sql.Row
 import org.bson.Document
 
-import java.sql.Timestamp
 import java.time.Instant
-import java.time.temporal.ChronoUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import scala.concurrent.duration.*
-import scala.jdk.CollectionConverters.*
 
 /** Composes the production replay service, Delta stages, Mongo journal, report publisher and lakehouse lock. */
-final class HiringAnalyticsLateFactReplayRecoveryIntegrationSpec extends AnalyticsMongoIntegrationSuite {
-  private def resource = HiringAnalyticsRecoveryTestSupport.resource(mongoEndpoint)
+final class HiringAnalyticsLateFactReplayRecoveryIntegrationSpec extends SharedRecoveryRuntimeSuite {
 
   override val munitIOTimeout: FiniteDuration = 15.minutes
 
-  private def seed(harness: Harness): IO[(AnalyticsLateFactReplayRequest, Instant, Instant)] = {
-    val observed = Instant.now().minusSeconds(25L * 86400L).truncatedTo(ChronoUnit.MICROS)
-    val expiry = observed.plusSeconds(30L * 86400L)
-    val request = AnalyticsLateFactReplayRequest
-      .from("selected-old-day", (0 until 12).toVector.map(n => (harness.topic, n % 3, (n / 3).toLong)))
-      .toOption
-      .get
-    harness.lock
-      .resource(harness.paths.root)
-      .use { _ =>
-        harness.maintenance.validateHmacConfigurationLocked *> harness
-          .execution {
-            val rows = (0 until 12).map { n =>
-              val event = s"late-event-$n"
-              val token = AnalyticsTestSubjectPseudonymizer.tokenValue(harness.keys, harness.subjects(n))
-              Row(
-                event,
-                AnalyticsDigest.sha256Hex(event.getBytes("UTF-8")),
-                "APPLICATION_CREATED",
-                harness.topic,
-                n % 3,
-                (n / 3).toLong,
-                Timestamp.from(observed.minusSeconds(86400L)),
-                "Application",
-                s"application-$n",
-                s"application-$n",
-                "job-1",
-                "Created",
-                Vector("Scala"),
-                token,
-                Vector(token),
-                "CLOSED_DAY",
-                Timestamp.from(observed),
-                Timestamp.from(expiry)
-              )
-            }
-            harness.spark.createDataFrame(rows.asJava, AnalyticsTableSchemas.struct(AnalyticsTableSchemas.lateFacts))
-          }
-          .flatMap(frame =>
-            harness.writer.merge(
-              frame,
-              harness.paths.lateFacts,
-              "target.topic = source.topic AND target.partition = source.partition AND target.offset = source.offset"
-            )
-          )
-      }
-      .as((request, observed, expiry))
-  }
+  private def seed(harness: Harness) = LateFactReplayFixtures.seed(harness)
 
-  test("replay reconstructs every real adapter after merged facts and publishes exactly once with original expiry") {
+  test(
+    "HCS-09.1 replay reconstructs every real adapter after merged facts and publishes exactly once with original expiry"
+  ) {
     resource
       .use { runtime =>
         for {
@@ -129,7 +78,7 @@ final class HiringAnalyticsLateFactReplayRecoveryIntegrationSpec extends Analyti
       .unsafeRunSync()
   }
 
-  test("committed Mongo publication recovers before selected facts must still exist") {
+  test("HCS-09.2 committed Mongo publication recovers before selected facts must still exist") {
     resource
       .use { runtime =>
         for {
@@ -173,7 +122,7 @@ final class HiringAnalyticsLateFactReplayRecoveryIntegrationSpec extends Analyti
       .unsafeRunSync()
   }
 
-  test("deletion generation changes after Gold while empty markers cannot refresh the replay reservation") {
+  test("HCS-09.3 deletion generation changes after Gold while empty markers cannot refresh the replay reservation") {
     resource
       .use { runtime =>
         for {
@@ -220,7 +169,7 @@ final class HiringAnalyticsLateFactReplayRecoveryIntegrationSpec extends Analyti
       .unsafeRunSync()
   }
 
-  test("actual Mongo deletion marker rejects a selected retained fact before replay writes") {
+  test("HCS-09.4 actual Mongo deletion marker rejects a selected retained fact before replay writes") {
     resource
       .use { runtime =>
         for {
@@ -241,6 +190,67 @@ final class HiringAnalyticsLateFactReplayRecoveryIntegrationSpec extends Analyti
           _ = assertEquals(recorded, None)
           facts <- harness.count(harness.paths.silver)
           _ = assertEquals(facts, 0L)
+          snapshots <- harness.sync(_.getCollection("analytics_report_snapshots").countDocuments())
+          _ = assertEquals(snapshots, 0L)
+        } yield ()
+      }
+      .unsafeRunSync()
+  }
+
+  test("HCS-09.5 the same replay request twice publishes once and returns the stored outcome") {
+    resource
+      .use { runtime =>
+        for {
+          harness <- runtime.harness("replay-repeated-request")
+          seeded <- seed(harness)
+          request = seeded._1
+          first <- harness.replay(request)
+          second <- harness.replay(request)
+          _ = assertEquals(first, AnalyticsLateFactReplayOutcome.Published)
+          _ = assertEquals(second, AnalyticsLateFactReplayOutcome.AlreadyPublished)
+          reservations <- harness.sync(_.getCollection("analytics_report_runs").countDocuments())
+          snapshots <- harness.sync(_.getCollection("analytics_report_snapshots").countDocuments())
+          facts <- harness.count(harness.paths.silver)
+          _ = assertEquals(reservations, 1L)
+          _ = assertEquals(snapshots, 1L)
+          _ = assertEquals(facts, 12L)
+        } yield ()
+      }
+      .unsafeRunSync()
+  }
+
+  test("HCS-09.6 a selection above the configured limit is rejected before any journal preparation") {
+    resource
+      .use { runtime =>
+        for {
+          harness <- runtime.harness("replay-selection-cap")
+          coordinates = (0 until 2).toVector.map(n => (harness.topic, 0, n.toLong))
+          rejected = AnalyticsLateFactReplayRequest.from("selected-above-cap", coordinates, 1)
+          _ = assert(rejected.isInvalid, "two coordinates above a limit of one must not form a request")
+          _ = assert(
+            rejected.fold(_.toNonEmptyList.toList.exists(_.contains("exceeds its configured limit of 1")), _ => false)
+          )
+          recorded <- harness.replayJournal.load(
+            AnalyticsReplayRequestId.from("selected-above-cap").toOption.get
+          )
+          _ = assertEquals(recorded, None)
+          reservations <- harness.sync(_.getCollection("analytics_report_runs").countDocuments())
+          _ = assertEquals(reservations, 0L)
+        } yield ()
+      }
+      .unsafeRunSync()
+  }
+
+  test("HCS-09.7 a selected fact past its thirty-day expiry is rejected when the clock passes it") {
+    resource
+      .use { runtime =>
+        for {
+          harness <- runtime.harness("replay-expired-fact")
+          seeded <- seed(harness)
+          (request, _, expiresAt) = seeded
+          afterExpiry = AnalyticsTestClocks.fixed(expiresAt.plusSeconds(86400L))
+          rejected <- harness.replay(request, harness.publisher, afterExpiry).attempt
+          _ = assertEquals(rejected.left.toOption, Some(AnalyticsError.LateFactReplayRejected))
           snapshots <- harness.sync(_.getCollection("analytics_report_snapshots").countDocuments())
           _ = assertEquals(snapshots, 0L)
         } yield ()

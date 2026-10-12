@@ -7,13 +7,12 @@ import com.example.hiring.analytics.domain.*
 import com.example.hiring.analytics.service.batch.*
 import com.example.hiring.analytics.service.streaming.*
 import com.example.hiring.analytics.HiringAnalyticsRecoveryTestSupport.*
-import org.apache.spark.sql.{DataFrame, Row}
-import org.apache.spark.sql.functions.{col, encode, lit}
-import org.apache.spark.sql.types.*
+import com.example.hiring.analytics.StreamingCalendarFixtures.*
+import org.apache.spark.sql.DataFrame
+import org.apache.spark.sql.functions.{col, lit}
 import org.bson.Document
 
 import java.time.Instant
-import java.sql.Timestamp
 import java.time.temporal.ChronoUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import scala.concurrent.duration.*
@@ -21,12 +20,13 @@ import scala.jdk.CollectionConverters.*
 
 /** Actual Delta/Mongo recovery; broker admission, Spark checkpoint ownership and process restart have separate proofs.
   */
-final class HiringAnalyticsStreamingRecoveryIntegrationSpec extends AnalyticsMongoIntegrationSuite {
-  private def resource = HiringAnalyticsRecoveryTestSupport.resource(mongoEndpoint)
+final class HiringAnalyticsStreamingRecoveryIntegrationSpec extends SharedRecoveryRuntimeSuite {
 
   override val munitIOTimeout: FiniteDuration = 15.minutes
 
-  test("reconstructed coordinator converges after Bronze, Silver, Gold and committed Mongo boundary failures") {
+  test(
+    "HCS-02.4 reconstructed coordinator converges after Bronze, Silver, Gold and committed Mongo boundary failures"
+  ) {
     resource
       .use { runtime =>
         Vector("bronze", "silver", "gold", "mongo").traverse_ { boundary =>
@@ -96,7 +96,7 @@ final class HiringAnalyticsStreamingRecoveryIntegrationSpec extends AnalyticsMon
       .unsafeRunSync()
   }
 
-  test("a completed deletion generation with unchanged marker view forces a fresh pinned publication") {
+  test("HCS-10.6 a completed deletion generation with unchanged marker view forces a fresh pinned publication") {
     resource
       .use { runtime =>
         for {
@@ -143,7 +143,9 @@ final class HiringAnalyticsStreamingRecoveryIntegrationSpec extends AnalyticsMon
       .unsafeRunSync()
   }
 
-  test("mixed new facts and a newer preexisting duplicate preserve only the original eligible watermark on retry") {
+  test(
+    "HCS-02.5 mixed new facts and a newer preexisting duplicate preserve only the original eligible watermark on retry"
+  ) {
     resource
       .use { runtime =>
         for {
@@ -195,7 +197,7 @@ final class HiringAnalyticsStreamingRecoveryIntegrationSpec extends AnalyticsMon
       .unsafeRunSync()
   }
 
-  test("changed deletion markers keep actual publication hidden and do not advance watermark") {
+  test("HCS-10.5 changed deletion markers keep actual publication hidden and do not advance watermark") {
     resource
       .use { runtime =>
         for {
@@ -246,7 +248,7 @@ final class HiringAnalyticsStreamingRecoveryIntegrationSpec extends AnalyticsMon
       .unsafeRunSync()
   }
 
-  test("malformed source writes real sanitized quarantine and cannot publish or advance watermark") {
+  test("HCS-06.3 malformed source writes real sanitized quarantine and cannot publish or advance watermark") {
     resource
       .use { runtime =>
         for {
@@ -264,7 +266,9 @@ final class HiringAnalyticsStreamingRecoveryIntegrationSpec extends AnalyticsMon
       }
       .unsafeRunSync()
   }
-  test("closed-day, future, suppressed and idle batches retain their actual report and watermark boundaries") {
+  test(
+    "HCS-03.1 HCS-04.1 HCS-05.2 closed-day, future, suppressed and idle batches retain their actual report and watermark boundaries"
+  ) {
     resource
       .use { runtime =>
         for {
@@ -345,7 +349,7 @@ final class HiringAnalyticsStreamingRecoveryIntegrationSpec extends AnalyticsMon
       .unsafeRunSync()
   }
 
-  test("open application windows update provisionally and publish the shared time-to-hire formulas") {
+  test("HCS-04.2 HCS-05.1 open application windows update provisionally and publish the shared time-to-hire formulas") {
     resource
       .use { runtime =>
         for {
@@ -382,6 +386,132 @@ final class HiringAnalyticsStreamingRecoveryIntegrationSpec extends AnalyticsMon
       .unsafeRunSync()
   }
 
+  private def control(harness: Harness): IO[Document] =
+    harness.sync(_.getCollection("analytics_report_control").find(new Document("_id", "analytics-report")).first())
+
+  private def revision(harness: Harness): IO[Long] =
+    control(harness).map(_.getLong("lastPublishedRevision").longValue())
+
+  private def storedSkills(harness: Harness, path: String): IO[Vector[String]] =
+    harness.execution(
+      harness.spark.read
+        .format("delta")
+        .load(path)
+        .select("jobSkills")
+        .collect()
+        .toVector
+        .flatMap(_.getSeq[String](0))
+        .distinct
+    )
+
+  test("HCS-03.2 events at the last microsecond of a UTC day and at midnight fall in different daily windows") {
+    resource
+      .use { runtime =>
+        for {
+          harness <- runtime.harness("stream-utc-day-boundary")
+          observed = harness.at.truncatedTo(ChronoUnit.MICROS)
+          midnight = observed.truncatedTo(ChronoUnit.DAYS)
+          lastOfDay = midnight.minus(1L, ChronoUnit.MICROS)
+          before <- timedFrame(harness, 0L, lastOfDay)
+          after <- timedFrame(harness, 1L, midnight)
+          first <- processAt(harness, before, 0L, observed)
+          second <- processAt(harness, after, 1L, observed)
+          _ = assertEquals(first.outcome, StreamingTerminalOutcome.Published)
+          _ = assertEquals(second.outcome, StreamingTerminalOutcome.Published)
+          report <- snapshot(harness)
+          days = skillPostingRows(report).filter(_.skill == "scala").map(row => row.day -> row.postings).toMap
+          _ = assertEquals(days.get(midnight.minusSeconds(86400L)), Some(12L), days.toString)
+          _ = assertEquals(days.get(midnight), Some(12L), days.toString)
+        } yield ()
+      }
+      .unsafeRunSync()
+  }
+
+  test("HCS-03.3 an idle batch moves neither the watermark nor the report content") {
+    resource
+      .use { runtime =>
+        for {
+          harness <- runtime.harness("stream-idle-batch")
+          observed = harness.at.truncatedTo(ChronoUnit.MICROS)
+          initial <- timedFrame(harness, 0L, observed)
+          _ <- processAt(harness, initial, 0L, observed)
+          lineage = harness.preparation().identity.lineage
+          watermark <- harness.journal.latestWatermark(lineage)
+          publishedRevision <- revision(harness)
+          reports <- snapshot(harness)
+          empty <- harness.execution(initial.filter(lit(false)))
+          idle <- processAt(harness, empty, 1L, observed.plusSeconds(60L), records = 0)
+          _ = assertEquals(idle.candidateWatermark, None)
+          after <- harness.journal.latestWatermark(lineage)
+          _ = assertEquals(after, watermark)
+          afterRevision <- revision(harness)
+          _ = assertEquals(afterRevision, publishedRevision + 1L, "idle batch publication revision")
+          current <- snapshot(harness)
+          _ = assertEquals(skillPostingRows(current), skillPostingRows(reports))
+        } yield ()
+      }
+      .unsafeRunSync()
+  }
+
+  test("HCS-06.1 a conflicting repeat of a published event quarantines and leaves report and watermark unchanged") {
+    resource
+      .use { runtime =>
+        for {
+          harness <- runtime.harness("stream-conflicting-repeat")
+          observed = harness.at.truncatedTo(ChronoUnit.MICROS)
+          initial <- timedFrame(harness, 0L, observed)
+          _ <- processAt(harness, initial, 0L, observed)
+          lineage = harness.preparation().identity.lineage
+          watermark <- harness.journal.latestWatermark(lineage)
+          publishedRevision <- revision(harness)
+          quarantinedBefore <- harness.count(harness.paths.quarantine)
+          conflicting <- timedFrame(harness, 1L, observed, skill = "Rust", eventKey = Some(0L))
+          result <- processAt(harness, conflicting, 1L, observed.plusSeconds(60L))
+          quarantinedAfter <- harness.count(harness.paths.quarantine)
+          _ = assertEquals(result.candidateWatermark, None, result.toString)
+          _ = assert(quarantinedAfter > quarantinedBefore, s"quarantine $quarantinedBefore -> $quarantinedAfter")
+          skills <- storedSkills(harness, harness.paths.silver)
+          _ = assertEquals(skills, Vector("Scala"))
+          after <- harness.journal.latestWatermark(lineage)
+          _ = assertEquals(after, watermark)
+          afterRevision <- revision(harness)
+          _ = assertEquals(afterRevision, publishedRevision)
+        } yield ()
+      }
+      .unsafeRunSync()
+  }
+
+  test("HCS-06.2 a conflicting repeat of a retained late fact quarantines and keeps the stored late fact") {
+    resource
+      .use { runtime =>
+        for {
+          harness <- runtime.harness("stream-conflicting-late-fact")
+          observed = harness.at.truncatedTo(ChronoUnit.MICROS)
+          initial <- timedFrame(harness, 0L, observed)
+          _ <- processAt(harness, initial, 0L, observed)
+          closedAt = observed.truncatedTo(ChronoUnit.DAYS).minus(5L, ChronoUnit.DAYS)
+          late <- timedFrame(harness, 1L, closedAt, skill = "ClosedOnly")
+          _ <- processAt(harness, late, 1L, observed.plusSeconds(60L))
+          retained <- harness.count(harness.paths.lateFacts)
+          _ = assertEquals(retained, 12L)
+          lineage = harness.preparation().identity.lineage
+          watermark <- harness.journal.latestWatermark(lineage)
+          quarantinedBefore <- harness.count(harness.paths.quarantine)
+          conflicting <- timedFrame(harness, 2L, closedAt, skill = "Rust", eventKey = Some(1L))
+          _ <- processAt(harness, conflicting, 2L, observed.plusSeconds(120L))
+          quarantinedAfter <- harness.count(harness.paths.quarantine)
+          _ = assert(quarantinedAfter > quarantinedBefore, s"quarantine $quarantinedBefore -> $quarantinedAfter")
+          skills <- storedSkills(harness, harness.paths.lateFacts)
+          _ = assertEquals(skills, Vector("ClosedOnly"))
+          retainedAfter <- harness.count(harness.paths.lateFacts)
+          _ = assertEquals(retainedAfter, 12L)
+          after <- harness.journal.latestWatermark(lineage)
+          _ = assertEquals(after, watermark)
+        } yield ()
+      }
+      .unsafeRunSync()
+  }
+
   private def snapshot(harness: Harness): IO[Document] =
     harness.sync(_.getCollection("analytics_report_snapshots").find(new Document("_id", "current")).first())
 
@@ -398,110 +528,4 @@ final class HiringAnalyticsStreamingRecoveryIntegrationSpec extends AnalyticsMon
         )
       )
       .sortBy(row => (row.day.toEpochMilli, row.skill, row.postings))
-
-  private def processAt(
-      harness: Harness,
-      frame: DataFrame,
-      index: Long,
-      observed: Instant,
-      records: Int = 12
-  ): IO[StreamingCoordinatorResult] =
-    harness.lock.resource(harness.paths.root).use { _ =>
-      for {
-        _ <- harness.maintenance.validateHmacConfigurationLocked
-        store = harness.journal
-        prior <- store.latestWatermark(harness.preparation().identity.lineage)
-        preparation = harness
-          .preparation(index)
-          .copy(
-            observedAt = observed,
-            priorWatermark = prior,
-            inputFingerprint = RangeFingerprint
-              .from(AnalyticsDigest.sha256Hex(s"calendar-source-$index-$records".getBytes("UTF-8")))
-              .toOption
-              .get,
-            sourceEndOffsets = (0 until 3).toVector
-              .map(p => StreamingPartitionEndOffset.from(harness.topic, p, index * 4L + records / 3L).toOption.get),
-            deliveredOffsets =
-              if (records == 0) Vector.empty
-              else
-                (0 until 3).toVector.map(p =>
-                  StreamingPartitionSummary
-                    .from(harness.topic, p, index * 4L, index * 4L + records / 3L - 1L, records / 3L)
-                    .toOption
-                    .get
-                )
-          )
-        result <- harness
-          .streamingStages(frame)
-          .use(stages =>
-            new StreamingBatchCoordinator[IO](store, harness.markers, stages, harness.checkpoint(store), IO.unit)
-              .process(preparation)
-          )
-      } yield result
-    }
-
-  private def timedFrame(
-      harness: Harness,
-      batch: Long,
-      occurred: Instant,
-      eventType: String = "JOB_CREATED",
-      skill: String = "Scala",
-      distinctSubjects: Int = 12
-  ): IO[DataFrame] = harness.execution {
-    val rows = (0 until 12).map { n =>
-      val application = AnalyticsOperationalEventFixtures.id(s"calendar-application-$n")
-      val aggregate =
-        if (eventType == "JOB_CREATED") AnalyticsOperationalEventFixtures.id(s"calendar-job-$batch-$n")
-        else application
-      val aggregateType = if (eventType == "JOB_CREATED") "Job" else "Application"
-      val actor = harness.subjects(n % distinctSubjects)
-      val job = AnalyticsOperationalEventFixtures.id("calendar-job")
-      val eventId = AnalyticsOperationalEventFixtures.id(s"calendar-event-$batch-$n")
-      val payload = eventType match {
-        case "JOB_CREATED" =>
-          io.circe.Json.obj(
-            "job" -> io.circe.Json.obj(
-              "jobId" -> io.circe.Json.fromString(aggregate),
-              "status" -> io.circe.Json.fromString("Open"),
-              "skills" -> io.circe.Json.arr(io.circe.Json.fromString(skill))
-            )
-          )
-        case "APPLICATION_CREATED" | "APPLICATION_STATUS_CHANGED" =>
-          val identity = io.circe.Json.obj(
-            "applicationId" -> io.circe.Json.fromString(application),
-            "candidateId" -> io.circe.Json.fromString(actor),
-            "jobId" -> io.circe.Json.fromString(job)
-          )
-          if (eventType == "APPLICATION_CREATED")
-            identity.deepMerge(
-              io.circe.Json.obj("status" -> io.circe.Json.fromString("Created"))
-            )
-          else
-            identity.deepMerge(
-              io.circe.Json.obj(
-                "previousStatus" -> io.circe.Json.fromString("Interview"),
-                "newStatus" -> io.circe.Json.fromString("Hired")
-              )
-            )
-        case unsupported => fail(s"Unsupported timed fixture event: $unsupported")
-      }
-      val raw =
-        s"""{"eventId":"$eventId","eventType":"$eventType","occurredAt":"$occurred","aggregateType":"$aggregateType","aggregateId":"$aggregate","actorId":"$actor","payload":${payload.noSpaces}}"""
-      Row(harness.topic, n % 3, batch * 4L + n / 3L, raw)
-    }
-    val schema = StructType(
-      Vector(
-        StructField("topic", StringType, false),
-        StructField("partition", IntegerType, false),
-        StructField("offset", LongType, false),
-        StructField("value", StringType, true)
-      )
-    )
-    val source = harness.spark
-      .createDataFrame(rows.asJava, schema)
-      .withColumn("value", encode(col("value"), "UTF-8"))
-      .withColumn("timestamp", lit(Timestamp.from(occurred)))
-    OperationalEventTransforms.parseKafkaRecords(source)
-  }
 }

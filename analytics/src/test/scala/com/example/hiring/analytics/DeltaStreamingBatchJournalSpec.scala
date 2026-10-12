@@ -293,7 +293,9 @@ final class DeltaStreamingBatchJournalSpec extends CatsEffectSuite {
     } finally removeTree(incompatibleRoot)
   }
 
-  test("pruning retains Spark recovery, every unfinished batch, watermark, latest terminal and recent progress") {
+  test(
+    "HCS-11.3 pruning retains Spark recovery, every unfinished batch, watermark, latest terminal and recent progress"
+  ) {
     val pruningLineage = right(StreamingLineage.from("hiring-pruning"))
     val at = publishedAt.plusSeconds(10L * 86400L)
     val ids =

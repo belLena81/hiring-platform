@@ -113,7 +113,7 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
   private def operational(overrides: Map[String, String]): Either[AnalyticsError, AnalyticsOperationalSettings] =
     AnalyticsConfigFixtures.batch(hocon, settings ++ overrides).map(_.common.operational)
 
-  test("batch settings load service and run inputs through HOCON substitutions") {
+  test("HAL-14.1 batch settings load service and run inputs through HOCON substitutions") {
     val loaded =
       AnalyticsConfigFixtures.batch(hocon, settings).toOption.getOrElse(fail("expected valid batch config"))
     assertEquals(loaded.manifest.runId.value, "run-local-1")
