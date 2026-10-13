@@ -319,6 +319,7 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.CatsEffectSuite 
     } finally markerDatabase._2.unsafeRunSync()
   }
 
+  // Keep this test last: it stops the shared Spark session to prove a durable restart.
   test("HAL-06.5 isolated calendar cleanup persists retirement and rejects old-primary restart") {
     // There are two synthetic facts and no Kafka records. Calendar and writer inventory are simulated;
     // captured-file deletion, checkpoint/spill rejection, Mongo authorization and both Spark restarts are actual.

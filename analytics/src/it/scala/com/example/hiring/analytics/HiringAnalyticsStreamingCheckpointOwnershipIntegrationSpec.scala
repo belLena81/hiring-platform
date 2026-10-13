@@ -304,7 +304,10 @@ final class HiringAnalyticsStreamingCheckpointOwnershipIntegrationSpec extends C
         } yield {
           assert(outcome.isError, s"the stream must fail when its grant expires: $outcome")
           assert(
-            restart.left.exists(_.isInstanceOf[AnalyticsError.InvalidConfiguration]),
+            restart.left.exists(error =>
+              error.isInstanceOf[AnalyticsError.InvalidConfiguration] &&
+                error.getMessage.contains("activation is absent, malformed, or does not match")
+            ),
             s"the same grant must not authorize a restart: $restart"
           )
         }

@@ -106,7 +106,8 @@ final class HiringAnalyticsStreamingErasureRaceIntegrationSpec extends SharedRec
         silverSubject <- subjectRows(harness, harness.paths.silver, deleted)
         _ = assertEquals(silverSubject, 0L)
         _ = assertEquals(silver, 11L)
-        _ = assert(bronze <= 11L, s"Bronze kept the deleted subject's event: $bronze $bronzeSubject")
+        _ = assertEquals(bronze, 11L, "Bronze excludes the deleted subject's event")
+        _ = assertEquals(bronzeSubject.toOption, Some(0L), s"marked subject rows in Bronze: $bronzeSubject")
         published <- snapshots(harness)
         _ = assertEquals(published, 0L)
       } yield ()
@@ -145,17 +146,16 @@ final class HiringAnalyticsStreamingErasureRaceIntegrationSpec extends SharedRec
     }
   }
 
-  test("HCS-10.3 the retry reassesses the batch against the marker and does not advance the watermark") {
+  test(
+    "HCS-10.3 with the marker still pending the retry is reassessed as ErasurePending and the watermark does not advance"
+  ) {
     resource.use { runtime =>
       for {
         harness <- runtime.harness("erasure-watermark-recomputed")
         observed = harness.at.truncatedTo(ChronoUnit.MICROS)
         lineage = harness.preparation().identity.lineage
-        newest = 11
-        deleted = harness.subjects(newest)
-        eventTime = (n: Int) => if (n == newest) observed else observed.minusSeconds(3600L)
-        frame <- timedFrame(harness, 0L, observed, occurredAt = Some(eventTime))
-        // The clean outcome for the same events, to compare against, comes from a separate lineage.
+        deleted = harness.subjects(11)
+        frame <- timedFrame(harness, 0L, observed)
         prior = Some(Option.empty[Instant])
         raced <- processAt(
           harness,

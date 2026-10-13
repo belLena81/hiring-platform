@@ -15,7 +15,7 @@ Run the suites with:
 |---|---|---|
 | HCS-01 | `HiringAnalyticsStreamingIngestionIntegrationSpec` (.1, .2; STREAM); `MongoAnalyticsReportPublisherIntegrationSpec` (.3, analytics half); `AnalyticsReportSnapshotContractSpec` (.3, root half); `HiringGraphQLAccessSpec` and `AnalyticsReportingServiceSpec` (.4, root) | .1 1/1 (A1); ingestion suite 4/4 (A2/A3); .3 analytics 9/9 (A4) and root PASS (R1); .4 retagged (R1) |
 | HCS-02 | ingestion suite (.1–.3); `HiringAnalyticsStreamingRecoveryIntegrationSpec` (.4, .5); `StreamingBatchCoordinatorSpec` (.6, unit) | ingestion 4/4 and recovery suite 11/11 (A2/A3) |
-| HCS-03 | `HiringAnalyticsStreamingRecoveryIntegrationSpec` (.1–.3, COORD) | recovery suite 11/11 (A2/A3) |
+| HCS-03 | `HiringAnalyticsStreamingRecoveryIntegrationSpec` (.1–.3, COORD). An idle (empty, valid) batch does not move the watermark or report content but republishes at a new revision, by design: the revision is allocated at reservation, one per terminal batch | recovery suite 11/11 (A2/A3) |
 | HCS-04 | recovery suite (.1, .2); `HiringAnalyticsStreamingBoundaryRecoveryIntegrationSpec` (.3, COORD) | boundary suite 8/8 (A2/A3) |
 | HCS-05 | recovery suite (.1, .2); `HiringAnalyticsStreamingErasureRaceIntegrationSpec` (.3) | erasure race suite 5/5 (A3) |
 | HCS-06 | recovery suite (.1–.3) | recovery suite 11/11 (A2/A3) |

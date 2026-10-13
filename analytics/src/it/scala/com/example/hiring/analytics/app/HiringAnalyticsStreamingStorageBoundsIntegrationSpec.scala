@@ -69,7 +69,9 @@ final class HiringAnalyticsStreamingStorageBoundsIntegrationSpec extends CatsEff
     } finally entries.close()
   }
 
-  test("HCS-11.4 the stream removes its owned Spark scratch directory when its resource closes") {
+  test(
+    "HCS-11.4 HCS-11.6 the stream removes its owned scratch directory and every Delta table it created is inventoried"
+  ) {
     fixture.use { fixture =>
       val observedDuringRun = new AtomicBoolean(false)
       for {
