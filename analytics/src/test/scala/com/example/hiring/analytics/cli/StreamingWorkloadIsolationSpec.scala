@@ -1,6 +1,6 @@
 package com.example.hiring.analytics.cli
 
-final class StreamingProofIsolationSpec extends munit.FunSuite {
+final class StreamingWorkloadIsolationSpec extends munit.FunSuite {
   private val nonce = "0123456789abcdef"
   private val database = "hiring_streaming_proof_" + nonce
   private val topic = "hiring.streaming.proof." + nonce
@@ -15,7 +15,7 @@ final class StreamingProofIsolationSpec extends munit.FunSuite {
       checkpoint: String = checkpointPath,
       spill: String = spillPath
   ) =
-    StreamingProofIsolation.validate(db, source, root, checkpoint, spill)
+    StreamingWorkloadIsolation.validate(db, source, root, checkpoint, spill)
 
   test("isolated source and owned filesystem namespace must share the exact nonce") {
     assert(validate().isRight)
@@ -40,25 +40,25 @@ final class StreamingProofIsolationSpec extends munit.FunSuite {
 
   test("an activation review cannot omit changed files, exclude files or approve its author's own scope") {
     val scope = Vector("src/main/scala/Report.scala", "src/test/scala/ReportSpec.scala")
-    assert(StreamingProofIsolation.independentCoverage(scope, scope, Vector.empty, Vector.empty))
-    assert(!StreamingProofIsolation.independentCoverage(scope, scope.take(1), Vector.empty, Vector.empty))
-    assert(!StreamingProofIsolation.independentCoverage(scope, scope, scope.take(1), Vector.empty))
-    assert(!StreamingProofIsolation.independentCoverage(scope, scope, Vector.empty, scope.take(1)))
-    assert(!StreamingProofIsolation.independentCoverage(Vector.empty, scope, Vector.empty, Vector.empty))
+    assert(StreamingWorkloadIsolation.independentCoverage(scope, scope, Vector.empty, Vector.empty))
+    assert(!StreamingWorkloadIsolation.independentCoverage(scope, scope.take(1), Vector.empty, Vector.empty))
+    assert(!StreamingWorkloadIsolation.independentCoverage(scope, scope, scope.take(1), Vector.empty))
+    assert(!StreamingWorkloadIsolation.independentCoverage(scope, scope, Vector.empty, scope.take(1)))
+    assert(!StreamingWorkloadIsolation.independentCoverage(Vector.empty, scope, Vector.empty, Vector.empty))
   }
 
   test("a role may aggregate independent cross reviews while each author excludes their own files") {
     val first = Vector("src/main/scala/Reports.scala")
     val second = Vector("src/main/scala/Erasure.scala")
     assert(
-      StreamingProofIsolation.independentCoverageUnion(
+      StreamingWorkloadIsolation.independentCoverageUnion(
         first ++ second,
         Vector((first, second, second), (second, first, first))
       )
     )
-    assert(!StreamingProofIsolation.independentCoverageUnion(first ++ second, Vector((first, second, second))))
+    assert(!StreamingWorkloadIsolation.independentCoverageUnion(first ++ second, Vector((first, second, second))))
     assert(
-      !StreamingProofIsolation.independentCoverageUnion(
+      !StreamingWorkloadIsolation.independentCoverageUnion(
         first ++ second,
         Vector((first, Vector.empty, first), (second, Vector.empty, Vector.empty))
       )

@@ -321,7 +321,7 @@ PY_RUN
         fi
         ;;
       interview) sbt "${java_args[@]}" "-Dhiring.test.buildRoot=$build_target" 'it:testOnly *InterviewKafkaRestartIntegrationSpec *InterviewPublicationFencingIntegrationSpec *InterviewSchedulingWorkerIntegrationSpec' ;;
-      retention) sbt "${java_args[@]}" "-Dhiring.test.buildRoot=$build_target" 'Test / runMain com.example.hiring.testing.KafkaRetentionProof' ;;
+      retention) sbt "${java_args[@]}" "-Dhiring.test.buildRoot=$build_target" 'Test / runMain com.example.hiring.testing.KafkaTopicRetentionCheck' ;;
       test)
         if (( $# > 1 )); then
           sbt "${java_args[@]}" "-Dhiring.test.buildRoot=$build_target" test "it:testOnly ${*:2}"

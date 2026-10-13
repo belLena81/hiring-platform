@@ -96,10 +96,8 @@ final class AnalyticsLayeringSpec extends FunSuite {
     val productionRoot = Paths.get("src/main/scala/com/example/hiring/analytics")
     val testRoot = Paths.get("src/test/scala/com/example/hiring/analytics")
     val files = List(
-      "adapter/local/LocalHmacKeyWriterExclusion.scala",
       "adapter/local/LocalProcess.scala",
-      "adapter/mongo/HmacKeyRetirementPreparation.scala",
-      "adapter/spark/HmacKeyRetirementCoordinator.scala"
+      "adapter/mongo/HmacKeyRetirementPreparation.scala"
     )
 
     files.foreach { file =>

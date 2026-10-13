@@ -10,7 +10,7 @@ import org.bson.codecs.{Codec, DecoderContext, EncoderContext}
 import java.time.Instant
 
 final class AnalyticsMongoRecordsSpec extends FunSuite {
-  test("migration proof rejects BSON int versions and preserves long versions") {
+  test("migration marker rejects BSON int versions and preserves long versions") {
     val codec = AnalyticsMongoRecords.migrationEntryRegistry.get(classOf[AnalyticsMongoRecords.MigrationEntry])
     val marker = new BsonDocument("_id", new org.bson.BsonString("012_attributable_producer_registrations"))
       .append("state", new org.bson.BsonString("Complete"))

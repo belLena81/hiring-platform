@@ -4,7 +4,7 @@ import cats.effect.{IO, IOApp}
 import cats.syntax.all.*
 
 /** Real physical retention on the exact command and result topics of one isolated Kafka namespace. */
-object KafkaRetentionProof extends IOApp.Simple {
+object KafkaTopicRetentionCheck extends IOApp.Simple {
   def run: IO[Unit] = KafkaTestNamespace.resource.use { optional =>
     IO.fromOption(optional)(new IllegalArgumentException("An isolated test service manifest is required")).flatMap {
       namespace =>

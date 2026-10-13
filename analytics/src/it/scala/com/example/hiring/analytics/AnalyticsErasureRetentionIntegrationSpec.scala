@@ -299,7 +299,7 @@ final class AnalyticsErasureRetentionIntegrationSpec extends SharedRecoveryRunti
     }
 
   test(
-    "HAL-05-FENCE-01.1 the worker fences the transactional ID recorded on the erasure request and the held commit fails"
+    "HAL-05.3 HAL-05-FENCE-01.1 the worker fences the transactional ID recorded on the erasure request and the held commit fails"
   ) {
     KafkaTestNamespace.resource.use { optional =>
       val namespace = optional.getOrElse(fail("HIRING_TEST_MANIFEST is required"))

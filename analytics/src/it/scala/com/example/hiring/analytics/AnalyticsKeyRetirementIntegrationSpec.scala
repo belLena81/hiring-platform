@@ -4,6 +4,7 @@ import com.example.hiring.analytics.service.batch.*
 import com.example.hiring.analytics.domain.*
 import com.example.hiring.analytics.adapter.spark.*
 import com.example.hiring.analytics.adapter.mongo.*
+import com.example.hiring.testing.LocalTestServices
 
 import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
 import cats.effect.{Deferred, IO, Resource}
@@ -26,11 +27,12 @@ import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 import scala.util.Try
 
-/** Opt-in read-only audit proof using local Delta files and a disposable replica-set database. */
+/** Key retirement audit, authorization and restart behaviour over local Delta files and the isolated Mongo replica set.
+  */
 final class AnalyticsKeyRetirementIntegrationSpec extends munit.CatsEffectSuite {
   // Structural retention/restart proof, not a latency SLO; physical Spark cleanup can contend with other local builds.
   override val munitIOTimeout: FiniteDuration = 15.minutes
-  private val enabled = sys.env.get("ANALYTICS_KEY_RETIREMENT_MONGO_URI").exists(_.nonEmpty)
+  private var releaseDatabase: IO[Unit] = IO.unit
   private var mongo: MongoClient = uninitialized
   private var peerMongo: MongoClient = uninitialized
   private var reactiveMongo: ReactiveMongoClient = uninitialized
@@ -45,23 +47,29 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.CatsEffectSuite 
   private val now = Instant.parse("2026-10-26T00:00:00Z")
   private val oldKeyId = "retiring-key"
 
-  override def beforeAll(): Unit = if (enabled) {
-    mongo = MongoClients.create(sys.env("ANALYTICS_KEY_RETIREMENT_MONGO_URI"))
-    peerMongo = MongoClients.create(sys.env("ANALYTICS_KEY_RETIREMENT_MONGO_URI"))
-    reactiveMongo = ReactiveMongoClients.create(sys.env("ANALYTICS_KEY_RETIREMENT_MONGO_URI"))
+  override def beforeAll(): Unit = {
+    val mongoUri = LocalTestServices.manifest
+      .unsafeRunSync()
+      .getOrElse(throw new IllegalStateException("HIRING_TEST_MANIFEST is required for key retirement"))
+      .mongoUri
+    mongo = MongoClients.create(mongoUri)
+    peerMongo = MongoClients.create(mongoUri)
+    reactiveMongo = ReactiveMongoClients.create(mongoUri)
     val (catsClient, releaseCatsClient) = CatsMongoClient
-      .fromConnectionString[IO](sys.env("ANALYTICS_KEY_RETIREMENT_MONGO_URI"))
+      .fromConnectionString[IO](mongoUri)
       .allocated
       .unsafeRunSync()
     catsMongo = catsClient
     releaseCatsMongo = releaseCatsClient
     val (catsPeerClient, releaseCatsPeerClient) = CatsMongoClient
-      .fromConnectionString[IO](sys.env("ANALYTICS_KEY_RETIREMENT_MONGO_URI"))
+      .fromConnectionString[IO](mongoUri)
       .allocated
       .unsafeRunSync()
     catsPeerMongo = catsPeerClient
     releaseCatsPeerMongo = releaseCatsPeerClient
-    database = mongo.getDatabase(s"analytics_key_retirement_${java.util.UUID.randomUUID().toString.replace('-', '_')}")
+    val (ownedDatabase, release) = LocalTestServices.database(catsMongo).allocated.unsafeRunSync()
+    releaseDatabase = release
+    database = mongo.getDatabase(ownedDatabase.name)
     reactiveDatabase = reactiveMongo.getDatabase(database.getName)
     spark = SparkSession
       .builder()
@@ -92,8 +100,8 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.CatsEffectSuite 
     seedRegistry(IntegrationAnalyticsLakehousePaths.unsafe(lakehouseRoot.toUri.toString))
   }
 
-  override def afterAll(): Unit = if (enabled) {
-    Try(database.drop())
+  override def afterAll(): Unit = {
+    Try(releaseDatabase.unsafeRunSync())
     Try(mongo.close())
     Try(peerMongo.close())
     Try(reactiveMongo.close())
@@ -103,7 +111,7 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.CatsEffectSuite 
     if (lakehouseRoot != null) deleteTree(lakehouseRoot)
   }
 
-  if (enabled) test("audit passes empty verified surfaces and blocks a live marker or old-key Delta row") {
+  test("HAL-06.1 audit passes empty verified surfaces and blocks a live marker or old-key Delta row") {
     val paths = IntegrationAnalyticsLakehousePaths.unsafe(lakehouseRoot.toUri.toString)
     val passed = audit(paths)
     assert(passed.isRight, passed.swap.toOption.toString)
@@ -141,7 +149,7 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.CatsEffectSuite 
     )
   }
 
-  if (enabled) test("Mongo lakehouse mutex excludes a second independent client until owner release") {
+  test("HAL-06.2 Mongo lakehouse mutex excludes a second independent client until owner release") {
     val root = s"s3a://analytics-test/${java.util.UUID.randomUUID()}"
     val firstLock =
       new com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock[IO](
@@ -171,7 +179,7 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.CatsEffectSuite 
     assertEquals(result, None)
   }
 
-  if (enabled) test("audit fails closed on malformed erasure state and permits unrelated outbox replay") {
+  test("HAL-06.3 audit fails closed on malformed erasure state and permits unrelated outbox replay") {
     database
       .getCollection("event_outbox")
       .insertOne(
@@ -253,16 +261,16 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.CatsEffectSuite 
       )
       .unsafeRunSync()
 
-  if (enabled) test("HMAC retirement authorization preserves every field through native BSON Date") {
+  test("HAL-06.4 HMAC retirement authorization preserves every field through native BSON Date") {
     val paths =
-      IntegrationAnalyticsLakehousePaths.unsafe(lakehouseRoot.resolve("authorization-date-proof").toUri.toString)
+      IntegrationAnalyticsLakehousePaths.unsafe(lakehouseRoot.resolve("authorization-date-roundtrip").toUri.toString)
     val measured = Instant.parse("2026-10-01T09:52:06.123456789Z")
     val facts = "synthetic native BSON Date retirement authorization roundtrip"
-    val verifiedAt = HmacKeyRetirementCoordinator.persistedAuthorizationTime(measured)
+    val verifiedAt = measured.truncatedTo(java.time.temporal.ChronoUnit.MILLIS)
     val lakehouseId = MongoAnalyticsLakehouseLock.lockId(paths.root).toOption.get
     val record = HmacKeyRetirementAuthorization(
       lakehouseId,
-      "native-time-proof",
+      "native-time-roundtrip",
       "A" * 43,
       facts,
       HmacKeyRetirementAuthorization.digest(facts),
@@ -281,19 +289,43 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.CatsEffectSuite 
     assertEquals(loaded, Vector(record))
     val stored = database
       .getCollection("analytics_hmac_key_retirements")
-      .find(new Document("_id", s"$lakehouseId:native-time-proof"))
+      .find(new Document("_id", s"$lakehouseId:native-time-roundtrip"))
       .first()
     assertEquals(stored.getDate("authorizedAt").toInstant, record.authorizedAt)
     assertEquals(stored.get("authorizedAt").getClass, classOf[java.util.Date])
   }
 
-  if (enabled) test("isolated calendar cleanup persists retirement and rejects old-primary restart") {
+  test("HAL-06.6 an active marker created under the old key still matches stored rows after rotation") {
+    val oldKey = Array.fill[Byte](32)(61)
+    val newKey = Array.fill[Byte](32)(62)
+    val beforeRotation = AnalyticsTestSubjectPseudonymizer.fromKeyRing("rotation-old", oldKey, Vector.empty)
+    val afterRotation =
+      AnalyticsTestSubjectPseudonymizer.fromKeyRing("rotation-new", newKey, Vector("rotation-old" -> oldKey))
+    val subject = java.util.UUID.randomUUID().toString
+    val storedUnderOldKey = AnalyticsTestSubjectPseudonymizer.tokenValue(beforeRotation, subject)
+    val markerDatabase = LocalTestServices.database(catsMongo).allocated.unsafeRunSync()
+    try {
+      mongo
+        .getDatabase(markerDatabase._1.name)
+        .getCollection("analytics_erasure_requests")
+        .insertOne(new Document("_id", subject).append("state", "Pending"))
+      val active = new MongoActiveDeletionMarkerSource[IO](
+        markerDatabase._1,
+        afterRotation,
+        AnalyticsTestOperationalConfig.streams
+      ).activeSubjectTokens.unsafeRunSync().map(_.value)
+      assert(active.contains(storedUnderOldKey), "the rotated key ring must still match rows stored under the old key")
+      assert(active.size >= 2, "the marker also matches rows written under the new key")
+    } finally markerDatabase._2.unsafeRunSync()
+  }
+
+  test("HAL-06.5 isolated calendar cleanup persists retirement and rejects old-primary restart") {
     // There are two synthetic facts and no Kafka records. Calendar and writer inventory are simulated;
     // captured-file deletion, checkpoint/spill rejection, Mongo authorization and both Spark restarts are actual.
     for {
       db <- catsMongo.getDatabase(database.getName)
       at <- IO.realTimeInstant
-      paths = IntegrationAnalyticsLakehousePaths.unsafe(lakehouseRoot.resolve("restart-proof").toUri.toString)
+      paths = IntegrationAnalyticsLakehousePaths.unsafe(lakehouseRoot.resolve("restart-retirement").toUri.toString)
       old = AnalyticsTestSubjectPseudonymizer.fromKeyRing(
         "restart-old",
         Array.fill[Byte](32)(41),
@@ -448,14 +480,14 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.CatsEffectSuite 
                 )
                 _ <- IO(assert(result.isRight, result.swap.toOption.toString))
                 lakehouseId <- IO.fromEither(MongoAnalyticsLakehouseLock.lockId(paths.root))
-                facts = "isolated integration proof; physical Delta cleanup; simulated calendar and writer inventory; no Kafka source"
+                facts = "isolated integration check; physical Delta cleanup; simulated calendar and writer inventory; no Kafka source"
                 record = HmacKeyRetirementAuthorization(
                   lakehouseId,
                   "restart-old",
                   old.keyVerifiers.toMap.apply("restart-old"),
                   facts,
                   HmacKeyRetirementAuthorization.digest(facts),
-                  HmacKeyRetirementCoordinator.persistedAuthorizationTime(shifted)
+                  shifted.truncatedTo(java.time.temporal.ChronoUnit.MILLIS)
                 )
                 _ <- store.insert(paths.root, record)
                 loaded <- store.list(paths.root)

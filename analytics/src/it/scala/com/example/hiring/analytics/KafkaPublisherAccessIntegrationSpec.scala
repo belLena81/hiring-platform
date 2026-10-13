@@ -22,6 +22,7 @@ import org.apache.kafka.common.errors.{
 }
 import org.apache.kafka.common.serialization.StringSerializer
 import org.bson.Document
+import com.example.hiring.testing.KafkaTestNamespace
 import munit.FunSuite
 import org.testcontainers.kafka.KafkaContainer
 import org.testcontainers.utility.DockerImageName
@@ -39,7 +40,7 @@ import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 import scala.util.control.NonFatal
 
-/** Opt-in authorization proof against the authenticated local Compose Kafka broker. */
+/** Publisher, reader and fencer authorization on the isolated test broker; Compose-only cases stay opt-in. */
 class KafkaPublisherAccessIntegrationSpec extends FunSuite {
   private def assert(condition: Boolean, clue: => Any): Unit =
     if (!condition) throw new AssertionError(clue.toString)
@@ -523,8 +524,79 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
     }
   }
 
+  private def isolatedKafka[A](use: KafkaTestNamespace.Namespace => A): A =
+    KafkaTestNamespace.resource
+      .use(optional =>
+        IO.blocking(
+          use(optional.getOrElse(throw new IllegalStateException("HIRING_TEST_MANIFEST is required for Kafka access")))
+        )
+      )
+      .unsafeRunSync()
+
+  private def isolatedProperties(
+      namespace: KafkaTestNamespace.Namespace,
+      username: String,
+      password: String,
+      transactionalId: Option[String] = None
+  ): Properties = properties(username, password, transactionalId, servers = namespace.manifest.kafkaBootstrap)
+
+  private def isolatedConnection(namespace: KafkaTestNamespace.Namespace, username: String, password: String) =
+    localKafkaConnection(namespace.manifest.kafkaBootstrap, username, password)
+
   test(
-    new munit.TestOptions("Compose permits the current publisher and rejects retired publisher authentication")
+    "HAL-05.2 HAL-05-FENCE-06.1 the reader can neither write the events topic nor fence a publisher's transactional ID"
+  ) {
+    isolatedKafka { namespace =>
+      val manifest = namespace.manifest
+      val transactionalId = "hiring-publisher-reader-denied-" + UUID.randomUUID().toString
+      val publisher = new KafkaProducer[String, String](
+        isolatedProperties(namespace, "hiring_publisher_v2", manifest.publisherPassword, Some(transactionalId))
+      )
+      try {
+        publisher.initTransactions()
+        publisher.beginTransaction()
+        publisher.send(new ProducerRecord(namespace.events, "held", "publisher-write")).get(30, TimeUnit.SECONDS)
+
+        val readerProperties = isolatedProperties(namespace, "analytics_reader", manifest.readerPassword)
+        readerProperties.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, java.lang.Boolean.FALSE)
+        val reader = new KafkaProducer[String, String](readerProperties)
+        val write =
+          try {
+            reader.send(new ProducerRecord(namespace.events, "denied", "reader-write")).get(30, TimeUnit.SECONDS)
+            Right(())
+          } catch { case NonFatal(error) => Left(error) }
+          finally reader.close(Duration.ofSeconds(5))
+        assert(write.swap.toOption.exists(hasTopicAuthorizationFailure), clues(write))
+
+        val fence = KafkaProducerFencer[IO](AnalyticsBatchTestSupport.driverExecution)
+          .fence(isolatedConnection(namespace, "analytics_reader", manifest.readerPassword), Vector(transactionalId))
+          .attempt
+          .unsafeRunSync()
+        assert(fence.swap.toOption.exists(hasKafkaAuthorizationFailure), clues(fence))
+
+        // The denied reader neither wrote nor fenced: the publisher's open transaction still commits.
+        publisher.commitTransaction()
+      } finally publisher.close(Duration.ofSeconds(5))
+    }
+  }
+
+  test("HAL-05-FENCE-06.2 a fencer with the wrong password is rejected before it can fence") {
+    isolatedKafka { namespace =>
+      val outcome = KafkaProducerFencer[IO](AnalyticsBatchTestSupport.driverExecution)
+        .fence(
+          isolatedConnection(namespace, "analytics_fencer", namespace.manifest.fencerPassword + "-invalid"),
+          Vector("hiring-publisher-wrong-password-" + UUID.randomUUID().toString)
+        )
+        .attempt
+        .unsafeRunSync()
+      assert(outcome.swap.toOption.exists(hasAuthenticationFailure), clues(outcome))
+    }
+  }
+
+  test(
+    new munit.TestOptions(
+      "HAL-05-FENCE-06.3 Compose permits the current publisher and rejects retired publisher authentication (opt-in)"
+    )
       .withTags(if (enabled) Set.empty else Set(munit.Ignore))
   ) {
     if (!enabled) ()
@@ -629,7 +701,9 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
   }
 
   test(
-    new munit.TestOptions("the erasure worker poll loop recovers after a refused transport connection")
+    new munit.TestOptions(
+      "HAL-05.4 the erasure worker poll loop recovers after a refused transport connection (opt-in)"
+    )
       .withTags(if (transportRecoveryEnabled) Set.empty else Set(munit.Ignore))
   ) {
     if (transportRecoveryEnabled) {
@@ -640,7 +714,9 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
   }
 
   test(
-    new munit.TestOptions("the erasure worker retries after Kafka interrupts an in-flight AdminClient fencing request")
+    new munit.TestOptions(
+      "HAL-05.4 the erasure worker retries after Kafka interrupts an in-flight AdminClient fencing request (opt-in)"
+    )
       .withTags(if (adminOutageRecoveryEnabled) Set.empty else Set(munit.Ignore))
   ) {
     if (adminOutageRecoveryEnabled) {

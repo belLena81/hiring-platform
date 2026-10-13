@@ -149,7 +149,7 @@ object HiringAnalyticsStreamingWorkloadMain extends IOApp {
         val entries = Files.walk(root)
         try
           entries.iterator().asScala.filter(Files.isRegularFile(_)).foldLeft((0L, 0L)) { case ((count, bytes), path) =>
-            require(count < 100000L, "proof storage inventory must remain bounded")
+            require(count < 100000L, "workload storage inventory must remain bounded")
             val size = try Files.size(path)
             catch { case _: java.nio.file.NoSuchFileException => 0L }
             (count + 1L, bytes + size)
@@ -161,7 +161,10 @@ object HiringAnalyticsStreamingWorkloadMain extends IOApp {
 
   private def query(api: ApiSettings, token: String): org.bson.Document = {
     val uri = URI.create(api.url)
-    require(uri.getScheme == "http" && Set("127.0.0.1", "localhost").contains(uri.getHost), "local proof API required")
+    require(
+      uri.getScheme == "http" && Set("127.0.0.1", "localhost").contains(uri.getHost),
+      "local workload API required"
+    )
     val day = Instant.now().truncatedTo(java.time.temporal.ChronoUnit.DAYS)
     val operation = s"""{ analyticsReport(from: "${day.minusSeconds(86400)}", to: "${day.plusSeconds(
         86400
@@ -175,7 +178,7 @@ object HiringAnalyticsStreamingWorkloadMain extends IOApp {
       .POST(HttpRequest.BodyPublishers.ofString(body))
       .build()
     val response = HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
-    require(response.statusCode() == 200, "proof GraphQL endpoint must respond")
+    require(response.statusCode() == 200, "workload GraphQL endpoint must respond")
     org.bson.Document.parse(response.body())
   }
 
@@ -191,10 +194,13 @@ object HiringAnalyticsStreamingWorkloadMain extends IOApp {
 
   private[cli] def login(api: ApiSettings, role: String): String = {
     val uri = URI.create(api.url)
-    require(uri.getScheme == "http" && Set("127.0.0.1", "localhost").contains(uri.getHost), "local proof API required")
-    require(api.nonce.matches("[a-f0-9]{16}"), "isolated proof account nonce required")
+    require(
+      uri.getScheme == "http" && Set("127.0.0.1", "localhost").contains(uri.getHost),
+      "local workload API required"
+    )
+    require(api.nonce.matches("[a-f0-9]{16}"), "isolated workload account nonce required")
     val input = new org.bson.Document("idempotencyKey", UUID.randomUUID().toString)
-      .append("name", s"Proof $role ${api.nonce}")
+      .append("name", s"Workload $role ${api.nonce}")
       .append("password", api.password)
     val body = new org.bson.Document(
       "query",
@@ -209,15 +215,15 @@ object HiringAnalyticsStreamingWorkloadMain extends IOApp {
       .POST(HttpRequest.BodyPublishers.ofString(body))
       .build()
     val response = HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
-    require(response.statusCode() == 200, "proof login endpoint must respond")
+    require(response.statusCode() == 200, "workload login endpoint must respond")
     val json = org.bson.Document.parse(response.body())
     val result = Option(json.get("data", classOf[org.bson.Document]))
       .flatMap(data => Option(data.get("login", classOf[org.bson.Document])))
-      .getOrElse(throw new IllegalStateException("proof login failed"))
-    require(result.getString("__typename") == "AuthSuccess", "proof login must succeed")
+      .getOrElse(throw new IllegalStateException("workload login failed"))
+    require(result.getString("__typename") == "AuthSuccess", "workload login must succeed")
     Option(result.getString("accessToken"))
       .filter(_.nonEmpty)
-      .getOrElse(throw new IllegalStateException("proof login token is absent"))
+      .getOrElse(throw new IllegalStateException("workload login token is absent"))
   }
 
   private def percentile(values: Vector[Long], quantile: Double): Long = {
@@ -234,7 +240,7 @@ object HiringAnalyticsStreamingWorkloadMain extends IOApp {
       (for {
         settings <- AnalyticsRuntimeConfig.loadStreaming[IO]
         _ <- IO.fromEither(
-          StreamingProofIsolation
+          StreamingWorkloadIsolation
             .validate(
               settings.common.mongoDatabase,
               AnalyticsTopic.unwrap(settings.topic),
@@ -255,7 +261,9 @@ object HiringAnalyticsStreamingWorkloadMain extends IOApp {
         api <- IO
           .blocking(ConfigSource.default.at("analytics.workload-api").load[ApiSettings])
           .flatMap(value =>
-            IO.fromEither(value.leftMap(_ => new IllegalArgumentException("authenticated proof API settings required")))
+            IO.fromEither(
+              value.leftMap(_ => new IllegalArgumentException("authenticated workload API settings required"))
+            )
           )
         _ <- IO.raiseUnless(
           api.nonce.matches("[a-f0-9]{16}") && settings.common.mongoDatabase == "hiring_streaming_proof_" + api.nonce

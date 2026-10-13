@@ -11,7 +11,7 @@ import fs2.text
 
 import scala.concurrent.duration.*
 
-/** Runs bounded host commands for local analytics operator proofs. */
+/** Runs bounded host commands for local analytics operator tooling. */
 private[analytics] object LocalProcess {
   final case class Result(exitCode: Int, output: String)
 

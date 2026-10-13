@@ -6,7 +6,7 @@ import scala.util.Try
 import scala.jdk.CollectionConverters.*
 
 /** Pure identity checks shared by test activation and workload entrypoints. */
-private[analytics] object StreamingProofIsolation {
+private[analytics] object StreamingWorkloadIsolation {
   def independentCoverage(
       scope: Vector[String],
       covered: Vector[String],

@@ -66,7 +66,7 @@ class AnalyticsEventTimeSpec extends FunSuite {
         grantId,
         validFrom,
         expiresAt,
-        Vector("hal-audit", "retention-proof"),
+        Vector("hal-audit", "retention-evidence"),
         Vector("security-review", "qa-review")
       )
       .toOption
@@ -98,12 +98,12 @@ class AnalyticsEventTimeSpec extends FunSuite {
     )
     assert(
       StreamingActivationAuthorization
-        .fromEvidence(identity, grantId, expiresAt, expiresAt, Vector("retention-proof"), Vector("one-review"))
+        .fromEvidence(identity, grantId, expiresAt, expiresAt, Vector("retention-evidence"), Vector("one-review"))
         .isLeft
     )
     assert(
       StreamingActivationAuthorization
-        .fromEvidence(identity, grantId, validFrom, expiresAt, Vector("retention-proof"), Vector("one-review"))
+        .fromEvidence(identity, grantId, validFrom, expiresAt, Vector("retention-evidence"), Vector("one-review"))
         .isLeft
     )
     assert(
@@ -113,7 +113,7 @@ class AnalyticsEventTimeSpec extends FunSuite {
           grantId,
           validFrom,
           expiresAt,
-          Vector("retention-proof"),
+          Vector("retention-evidence"),
           Vector("same-review", "same-review")
         )
         .isLeft

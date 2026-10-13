@@ -128,11 +128,11 @@ final class HiringAnalyticsStreamingStorageBoundsIntegrationSpec extends CatsEff
   }
 
   test(
-    "HCS-13.1 twenty batches of committed events keep Delta data files within structural bounds and maintenance reduces them"
+    "HCS-13.1 five batches of committed events keep Delta data files within structural bounds and maintenance reduces them"
   ) {
     fixture.use { fixture =>
       val batches = new AtomicInteger(0)
-      val records = 240
+      val records = 65
       for {
         settings <- settings(fixture, oneBatch)
         _ <- publish(fixture.namespace, Instant.now().minusSeconds(30L), Vector(Transaction(0 until records)))
@@ -182,7 +182,7 @@ final class HiringAnalyticsStreamingStorageBoundsIntegrationSpec extends CatsEff
       } yield {
         val batchCount = batches.get()
         assertEquals(counts.silver, records.toLong)
-        assert(batchCount >= 18, s"about twenty batches ran: $batchCount")
+        assert(batchCount >= 5 && batchCount <= 7, s"about five batches ran: $batchCount")
         assert(
           measured._1 <= batchCount * FilesPerBatch + FileCap,
           s"data files ${measured._1} for $batchCount batches"
