@@ -15,7 +15,7 @@ Account-deletion recovery runs through `scripts/run-local-tests.sh recovery` usi
 
 ## Current delivery status
 
-Phase 6 local implementation is complete. Phase 7 local functional closure is complete with source-qualified functional scenarios, seven process-loss boundaries, active-callback termination/grant-expiry components and accelerated pruning evidence; current-source validation passes 470 units, 45 executed integrations and formatting, with final independent Code, Security and whole-phase QA PASS. The custom acquired-maintenance signal probe is supplemental and unverified. The [continuous analytics current summary](specs/continuous-hiring-analytics.md#current-evidence-summary--october-5) records the controlling evidence and limitations. Production activation is not established by these local results.
+Phase 6 local acceptance is being re-established by criterion-tagged tests on current source; the [verification specification](specs/hiring-analytics-verification.md) maps each criterion to its suite. Phase 7 criteria are tagged for every HCS item except the slice A6 checkpoint-ownership and process-signal items, which are pending. Independent Code, Security and QA verdicts on the re-established evidence are pending. The October proof-program results were produced by programs removed in commit `3755455`; they are historical and kept as dated history in the [continuous analytics specification](specs/continuous-hiring-analytics.md#historical-evidence-removed-proof-programs-commit-3755455). Production activation is not established by these local results.
 
 ## Boundary
 

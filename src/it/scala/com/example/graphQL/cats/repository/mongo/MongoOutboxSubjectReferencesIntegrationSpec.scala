@@ -554,7 +554,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
       IO.raiseError(new AssertionError("Deletion receipt replay must not issue an account token"))
   }
 
-  test("deletion request captures every publisher transactional ID from its subject fence") {
+  test("HAL-05-FENCE-01.3 deletion request captures every publisher transactional ID from its subject fence") {
     replicaSet.use { instance =>
       MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
         LocalTestServices.database(client).use { database =>
@@ -608,7 +608,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
     }
   }
 
-  test("outbox claim records its transactional publisher ID on every subject fence") {
+  test("HAL-05-FENCE-01.4 outbox claim records its transactional publisher ID on every subject fence") {
     replicaSet.use { instance =>
       MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
         LocalTestServices.database(client).use { database =>

@@ -128,6 +128,18 @@ Default preparation uses existing local Compose/tests and small synthetic fixtur
 
 Future runtime implementation requires root `sbt test`, affected root/analytics integration suites and configured formatting checks. Local proof outputs, actual elapsed retention and deployed signoff are separate evidence rows. A skipped opt-in test remains skipped.
 
+### Out-of-scope gates carried from the Phase 6/7 verification specification
+
+The [hiring analytics verification specification](hiring-analytics-verification.md#out-of-scope-production-gates) keeps the following out of local acceptance. Each remains open until its own deployed or real-environment evidence exists; local tests do not close them:
+
+- Real 7-, 30- and 31-day horizons and production Kafka retention passage (see PRD-05 and PRD-06).
+- Unmanaged-writer exclusion and storage revocation (see PRD-07).
+- The FENCE-05 cutover: stopping pre-transactional publisher binaries and revoking their credentials in the deployed environment (HAL-05-FENCE-05).
+- Production HMAC retirement and a new-key-only restart (see PRD-08).
+- Real broker outage behaviour. The local broker-outage cases are opt-in and reported NOT RUN.
+- HTTP through a deployed API.
+- Bronze p95 under 30 seconds, Admin report p95 at most 120 seconds, burst drain time and throughput: Phase 15 deployed analytics optimization. `HiringAnalyticsStreamingWorkloadMain` is retained for that phase.
+
 ## Ordered handoff and checkpoint
 
 1. Architect/Security/operations resolve topology, principal inventory, deletion-authority recovery and objectives; produce sanitized runbooks/config examples. Do not provision from this spec alone.

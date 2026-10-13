@@ -1,6 +1,39 @@
 # Continuous Hiring Analytics
 
-## Functional closure — October 5
+## Current evidence (verification specification, 2026-10-13)
+
+Status: **in progress; not closed.** Phase 7 criteria are covered by criterion-tagged tests in `analytics/src/it`, `analytics/src/test`, and the root `src/test` and `src/it`. The [hiring analytics verification specification](hiring-analytics-verification.md) owns the plan, decisions and per-slice results. Slices A1–A5 record passing runs for the new and retagged suites named below, except where the table says no result is recorded. Slice A6 is **pending (slice A6)**: checkpoint ownership (HCS-08.1–08.5, HCS-12.1–12.3) and the forked process-signal suite (HCS-07.9, 07.10, 08.7). Independent Code Reviewer, Security Engineer and QA verdicts are pending, and the HAV-05 full local run is not yet recorded. Production gates (deployed retention, external-writer exclusion, guarded key retirement, operational signoff) are unchanged. Latency and burst drain-time qualification are DEFERRED to Phase 15 (HCS-13 latency).
+
+Run the suites with:
+
+- `scripts/run-local-tests.sh analytics '*<SuiteName>'` runs analytics integration suites by name (`it:testOnly`). Example: `'*HiringAnalyticsStreamingBoundaryRecoveryIntegrationSpec'`.
+- `cd analytics && sbt test` and `sbt test` in the root run the unit suites (no Docker).
+- `scripts/check-local.sh` runs formatting, both builds' unit and integration suites under JaCoCo with the 85% merged threshold (Docker, Java 17+).
+- `scripts/run-local-tests.sh retention` runs `KafkaTopicRetentionCheck` (a `runMain`, not a munit suite) for the shortened Kafka topic retention.
+
+| Criterion | Tagged tests (suite, tag) | Recorded result (verification specification) |
+|---|---|---|
+| HCS-01 | `HiringAnalyticsStreamingIngestionIntegrationSpec` (.1, .2; STREAM); `MongoAnalyticsReportPublisherIntegrationSpec` (.3, analytics half); `AnalyticsReportSnapshotContractSpec` (.3, root half); `HiringGraphQLAccessSpec` and `AnalyticsReportingServiceSpec` (.4, root) | .1 1/1 (A1); ingestion suite 4/4 (A2/A3); .3 analytics 9/9 (A4) and root PASS (R1); .4 retagged (R1) |
+| HCS-02 | ingestion suite (.1–.3); `HiringAnalyticsStreamingRecoveryIntegrationSpec` (.4, .5); `StreamingBatchCoordinatorSpec` (.6, unit) | ingestion 4/4 and recovery suite 11/11 (A2/A3) |
+| HCS-03 | `HiringAnalyticsStreamingRecoveryIntegrationSpec` (.1–.3, COORD) | recovery suite 11/11 (A2/A3) |
+| HCS-04 | recovery suite (.1, .2); `HiringAnalyticsStreamingBoundaryRecoveryIntegrationSpec` (.3, COORD) | boundary suite 8/8 (A2/A3) |
+| HCS-05 | recovery suite (.1, .2); `HiringAnalyticsStreamingErasureRaceIntegrationSpec` (.3) | erasure race suite 5/5 (A3) |
+| HCS-06 | recovery suite (.1–.3) | recovery suite 11/11 (A2/A3) |
+| HCS-07 | `HiringAnalyticsStreamingBoundaryRecoveryIntegrationSpec` (.1–.7, COORD); `HiringAnalyticsStreamingRestartIntegrationSpec` (.8, STREAM, at BronzeCommitted and PublicationCommitted); .9, .10: **pending (slice A6)**, forked process-signal suite | boundary suite 8/8 and restart suite 2/2 (A3) |
+| HCS-08 | .1–.5, .7: **pending (slice A6)**, checkpoint ownership and forked process-signal suites (not yet in source); .6: `HiringAnalyticsStreamingCancellationIntegrationSpec` (tag shared with HCS-12.4); .8: `StreamingProcessTerminationSpec` (unit, fake signal) | No result recorded for .6 or .8; its owned-directory part is covered by HCS-11.4 (A4) |
+| HCS-09 | `HiringAnalyticsLateFactReplayRecoveryIntegrationSpec` (.1–.7) | replay recovery suite 7/7 (A2/A3) |
+| HCS-10 | erasure race suite (.1–.4); recovery suite (.5, .6) | erasure race suite 5/5 (A3). .3 asserts the retry is reassessed against the marker and does not advance the watermark (C6); the unit property "a superseded fence drops the original candidate…" is in `StreamingBatchCoordinatorSpec` |
+| HCS-11 | `app/HiringAnalyticsStreamingStorageMaintenanceIntegrationSpec` (.1–.3, COORD); `app/HiringAnalyticsStreamingStorageBoundsIntegrationSpec` (.4–.6, STREAM); `DeltaStreamingBatchJournalSpec` (.3, unit) | maintenance suite 3/3 and bounds suite 3/3 (A4) |
+| HCS-12 | .1–.3: **pending (slice A6)**, checkpoint ownership suite; .4: `HiringAnalyticsStreamingCancellationIntegrationSpec` | No result recorded for .4 |
+| HCS-13 | .1: `app/HiringAnalyticsStreamingStorageBoundsIntegrationSpec` (structural bounds, D8 and D13); .2: `AnalyticsStreamingMaintenanceSpec` (unit) | .1 3/3 with the bounds suite (A5). **Latency DEFERRED to Phase 15**, not run |
+
+Outside the default run: no HCS criterion is opt-in. The `AccountDeletionRecoveryIntegrationSpec` (HAL-04.4) runs only under `scripts/run-local-tests.sh recovery`.
+
+## Historical evidence (removed proof programs, commit 3755455)
+
+The sections from here through the historical implementation checkpoints record runs of proof programs, Compose overlays and scripts removed in commit `3755455`. Their commands cannot be re-run. Their run identifiers and counts (for example 470 analytics units and 45 integrations) are not current evidence. They are kept as dated history.
+
+### Functional closure — October 5 (historical)
 
 Status: local Phase 7 functional closure COMPLETE. Final independent Code Reviewer, Security Engineer and QA verdicts PASS on source `8c01e`. The user approved local functional closure and explicitly deferred analytics latency optimization, SLO qualification and burst drain-time qualification to the final phase after deployment to the real environment. Local Phase 6 remains complete. Phase 7 closure requires HCS-01–HCS-12 and the backlog, storage, and maintenance portions of HCS-13; deferred latency is not a passing result or production-readiness claim.
 
@@ -27,7 +60,9 @@ Minimal local scope (user decision): independent Code, Security and QA review co
 The final [Deployed Analytics Optimization](../development-milestones.md#deployed-analytics-optimization-phase-15-final-phase) stage owns both Bronze and Admin-report latency qualification on the real environment, followed by measured tuning. The existing targets and failed measurements remain visible. This scheduling decision does not authorize deployment or alter activation prerequisites.
 
 
-## Current evidence summary — October 5
+<a id="current-evidence-summary--october-5"></a>
+
+### Current evidence summary — October 5 (historical)
 
 This summary and the acceptance table control current status. The dated execution record below preserves earlier failures and source-specific results; its uses of “current”, “latest”, or “pending” describe those checkpoints, not a new verdict on the working tree.
 
@@ -40,7 +75,7 @@ This summary and the acceptance table control current status. The dated executio
 
 Evidence inspected for this documentation reconciliation: ignored `.local/logs/hiring-local-closure/functional-scenarios-997c89ab88419fc3.functional_qa.json`, `recovery-all7-13bbfbfffd0ab021.functional_qa.json`, `maintenance-9e9ed6bbdb3eed09.functional_qa.json`, and `acquired-maintenance-termination-witness-diagnostics-review.functional_qa.json`. Reading these artifacts is not a fresh runtime execution or independent rehash of their references.
 
-## Dated functional execution record — October 5
+### Dated functional execution record — October 5 (historical)
 
 - Latest scenario terminal **FAIL**: nonce `272775d92eee3663`, owning execution `99754` exits 1; public stop `51646` exits 0 and preserves 41 hashed evidence references. Independent QA verifies those references and records FAIL. The worker finishes its row purge before the separately started observer commits its cohort, so the strict post-commit ownership/revision witness times out. Native offset/commit 13 exists, but wrapper cohort/journal assertions and the later 180-second suppression check do not execute. Independently, final maintenance success age is **414,544 ms**, exceeding the unchanged 300,000-ms functional limit; this failure is not deferred latency. Actual worker exit 0 and clean strict stream/worker scans retain only their narrow shutdown evidence.
 - Bounded repair in progress: routine marked-subject maintenance expires rows once at its supplied timestamp, removes marked rows and rebuilds Gold, then uses existing ordinary reclamation. Full erasure-worker rewrite, retention horizons and physical-absence evidence remain intact. A native regression checks removal across Bronze/Silver/late/quarantine, Gold rebuild and retained file identities over repeated ticks. Reuse the already warm, owned replay-race context to prepare the coexistence baseline/producer before actual deletion and run strict observation immediately after replay rejection; preserve the 300-second operation deadline and independent original 180-second post-worker check. Fresh native evidence, final suites and independent closure verdicts are still required.
@@ -127,6 +162,8 @@ Fresh healthy execution on `9cddf` / `bcce9c56dac5e8d6` (actual identity `07c926
 
 ## Status and dependency
 
+Current status (2026-10-13): in progress; slice A6 pending; production gates unchanged. See [current evidence](#current-evidence-verification-specification-2026-10-13). The status paragraph below is the historical harness-era record.
+
 Status: in progress. The query may be built and wired now, but startup must fail closed unless an immutable activation authorization exists and matches the configured stream, source, lakehouse, contract, and settings. Provisioning that authorization requires independently reviewed Phase 6 evidence for its environment. The October 1 execution charter below permits unused nonce-scoped synthetic test resources with accelerated physical retention and explicitly simulated calendar boundaries. The current gate record in [Hiring Analytics Lakehouse](hiring-analytics-lakehouse.md) still requires actual Kafka earliest-offset passage, post-horizon Delta data/log reclamation after `2026-10-26T00:00:00Z`, external-writer exclusion, guarded HMAC retirement, the HAL-01–HAL-14 audit, and independent signoff. Production Phase 6 gates remain intact.
 
 Implementation is present for immutable generation-pinned publication, bounded replay with a durable Mongo journal and concrete Delta stages, permanent lineage and checkpoint identity, safe progress/receipt retention, complete storage inventory, resource-owned 60-second maintenance, and isolated operator provisioning. Actual replay composition, corrected journal8, Spark replay5, publisher7, callback cancellation1, streaming recovery7 and the guarded isolated HMAC wrapper pass within their recorded execution scopes. Isolated independently bound HAL readiness passes. Acceptance remains in progress for activated source-to-Admin workload, live streaming scenarios and final Phase7 QA. Current suites, integrations, formatting, bounded batch/Admin and broker proofs pass within the recorded isolated scopes. Isolated immutable grant provisioning passes. Historical early activated attempts fail with lock timeouts or measured SLO failures. Source efb8 / nonce 81379 passes two bounded 1,000-record source-to-Admin bursts and graceful restart readback, then preparation fails on a harness conflict assertion. No healthy 7,500-record acceptance PASS exists. Corrected harness source563e passes five focused tests and all354 analytics units plus formatting; parent efb8 integration45 actual (six ignored bodies excluded) retains its unchanged-production applicability, with no new integration rerun claimed. Current script-only follow-up source 6c79 binds 14 HAL criteria/147 physical references. Fresh nonce 4916c4e0f259a73b passes two 1,000-record bursts, admission, lifecycle, native replay/readback, 65-second contention and checkpoint denial/restoration/continuation components, then exits 1 before the replay/deletion merge barrier. Its first live TERM also fails the strict clean-log gate. Healthy SLOs are NOT MEASURED. Production activation remains gated.
@@ -175,7 +212,7 @@ These refinements are implemented design requirements whose runtime acceptance i
 
 ## Acceptance criteria
 
-| ID | Observable acceptance | Required checks | Evidence |
+| ID | Observable acceptance | Required checks | Historical evidence (removed proof programs, commit 3755455); current tests are in the table above |
 |---|---|---|---|
 | HCS-01 | Committed operational events flow continuously through Delta to the existing Admin report query; other roles remain denied. | Raw/parsed frame boundary regression for batch and streaming; actual source-to-report and forbidden-role queries. | Functional scenario component PASS on source `8c01e` / nonce `997c89ab88419fc3`: complete 12-record authenticated Admin seed/restart readbacks and full wrapper exit 0 with independent scoped QA. Earlier real Delta/Mongo and forbidden-role checks retain their recorded scope. Final required local acceptance QA PASS; healthy latency and burst drain-time qualification are deferred to Phase 15. |
 | HCS-02 | Retries, overlap, duplicates, aborted transactions, and offset gaps converge with correct reconciliation. | Progress codec roundtrips, idempotent/conflicting preparations, and actual Kafka/Delta retry convergence. | Functional scenario component PASS on nonce `997c89ab88419fc3`: live admission, canonical-preserving conflict handling, replay and repeated replay, native acknowledgements and full wrapper exit 0. Seven actual process-loss components separately pass on nonce `13bbfbfffd0ab021`. Independent component QA passes; Final required local acceptance QA PASS. |
@@ -204,7 +241,9 @@ The 10-second trigger default does not establish either latency target. Per the 
 
 Phase 7 activation requires completed and independently signed Phase 6 evidence for its environment; production retains genuine deployed horizon requirements. Query code may exist before activation, but missing, malformed, expired, or identity-mismatched authorization must prevent query start. Verification will run serially on Java 17: root and analytics unit suites, relevant integration suites, formatting, isolated Compose proofs, physical-retention evidence, and representative workload measurements. Report these evidence classes separately.
 
-## Historical implementation checkpoints
+## Historical implementation checkpoints (removed proof programs, commit 3755455)
+
+Everything from this heading to the end of the file is harness-era history. Commands, scripts and runs named here, including the "proof launcher" and its modes, cannot be re-run, and their results are not current evidence.
 
 These checkpoints record earlier source states. The acceptance table and October 1 status below supersede their open-work lists and any journal counts withdrawn by later review.
 
