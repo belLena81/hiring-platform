@@ -38,7 +38,9 @@ final class MongoSearchAuthorizationIntegrationSpec extends MongoIntegrationSuit
       )
       .flatMap(result => IO(assertEquals(result.get("n", classOf[Number]).intValue(), 1)))
 
-  test("Mongo final eligibility joins gate current actor, open ownership and query source after prechecks") {
+  test(
+    "MVR-02 MVR-05 Mongo final eligibility joins gate current actor, open ownership and query source after prechecks"
+  ) {
     mongoResource.use { fixture =>
       val db = fixture.database
       val users = new MongoUserRepository(

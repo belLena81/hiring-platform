@@ -216,7 +216,9 @@ final class MongoHiringSetupStateIntegrationSpec extends MongoIntegrationSuite {
     }
   }
 
-  test("validator drift behind a completed proof fails closed with the drifted collection and is not overwritten") {
+  test(
+    "MVR-09 validator drift behind a completed proof fails closed with the drifted collection and is not overwritten"
+  ) {
     mongoResource.use { fixture =>
       recording(fixture).use { case (database, _) =>
         for {
@@ -258,7 +260,7 @@ final class MongoHiringSetupStateIntegrationSpec extends MongoIntegrationSuite {
     }
   }
 
-  test("restart on a completed ledger re-verifies without re-running or rewriting any migration") {
+  test("MVR-10 restart on a completed ledger re-verifies without re-running or rewriting any migration") {
     mongoResource.use { fixture =>
       recording(fixture).use { case (database, commands) =>
         for {

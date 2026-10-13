@@ -59,7 +59,9 @@ class MongoSearchFusionPipelineSpec extends FunSuite {
   private def bsonJson(value: org.bson.conversions.Bson): String =
     value.toBsonDocument(classOf[org.bson.BsonDocument], MongoClientSettings.getDefaultCodecRegistry).toJson()
 
-  test("production job fusion branches retain their vector and lexical constraints and validation candidate limit") {
+  test(
+    "MVR-04 MVR-06 production job fusion branches retain their vector and lexical constraints and validation candidate limit"
+  ) {
     val repo = repository()
     val stages = repo.nativeJobFusionStages(
       searchQuery,
@@ -94,7 +96,7 @@ class MongoSearchFusionPipelineSpec extends FunSuite {
     assert(stages.exists(_.containsKey("$rerank")))
   }
 
-  test("production fusion keeps branch result limits separate from ANN exploration") {
+  test("MVR-06 production fusion keeps branch result limits separate from ANN exploration") {
     val repo = repository(branchLimit = 30)
     val stages = repo.nativeJobFusionStages(
       searchQuery,
@@ -115,7 +117,7 @@ class MongoSearchFusionPipelineSpec extends FunSuite {
     assertEquals(stages(4).get("$rerank", classOf[Document]).getInteger("numDocsToRerank").intValue(), 30)
   }
 
-  test("production candidate fusion branches apply account, skill and opt-in private filters before ranking") {
+  test("MVR-04 production candidate fusion branches apply account, skill and opt-in private filters before ranking") {
     val repo = repository(branchLimit = 30)
     val filter = repo.candidateFilter(searchQuery, includeEmbeddingModel = true)
     val stages = repo.nativeCandidateFusionStages(searchQuery, List(0.3f, 0.4f), filter)

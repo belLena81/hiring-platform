@@ -413,7 +413,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
     }
   }
 
-  test("candidate matching rechecks recruiter ownership and open status after retrieval") {
+  test("MVR-05 candidate matching rechecks recruiter ownership and open status after retrieval") {
     val owned = openJob.copy(embedding = Some(jobEmbedding))
     val hit = RankedCandidate(
       CandidateSearchHit(candidateWithProfile.id, candidateWithProfile.name, profile.skills, profile.experienceSummary),
@@ -451,7 +451,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
     } yield assertEquals(result.left.toOption, Some(UseCaseError.Domain(DomainError.JobMustBeOpen)))
   }
 
-  test("candidate hit validation applies consent and private filters while preserving survivor order") {
+  test("MVR-05 candidate hit validation applies consent and private filters while preserving survivor order") {
     val owned = openJob.copy(embedding = Some(jobEmbedding))
     val country = CandidateResidence("Cyprus", Some("Nicosia"))
     val optedOut = profile.copy(currentResidence = None, availabilityStatus = None, recruiterSearchOptIn = false)
@@ -550,7 +550,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
     )
   }
 
-  test("job search drops a result whose job closes after retrieval") {
+  test("MVR-05 job search drops a result whose job closes after retrieval") {
     val embeddedJob = openJob.copy(embedding = Some(jobEmbedding))
     val hit = RankedJob(embeddedJob, 0.9d, SearchMode.HYBRID, jobMeta, searchId)
     for {
@@ -698,7 +698,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
     } yield assertEquals(result.map(_.map(_.candidate.id)), Right(List(eligible.id)))
   }
 
-  test("search rechecks the persisted actor when the request carries a cached authenticated viewer") {
+  test("MVR-05 search rechecks the persisted actor when the request carries a cached authenticated viewer") {
     val owned = openJob.copy(embedding = Some(jobEmbedding))
     val cachedRecruiter = new AuthenticatedActor(ActorContext(recruiterId, UserRole.Recruiter), recruiter)
     for {
@@ -804,7 +804,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
     }
   }
 
-  test("candidate validation observes synchronized deletion, private changes and embedding changes") {
+  test("MVR-05 candidate validation observes synchronized deletion, private changes and embedding changes") {
     val original = candidateWithProfile.copy(embedding = Some(embedding))
     val mutations: List[(String, Map[Identifiers.UserId, User] => Map[Identifiers.UserId, User])] = List(
       "deletion" -> (_.removed(candidateId)),
@@ -880,7 +880,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
     }
   }
 
-  test("job validation observes synchronized deletion and source or model changes") {
+  test("MVR-05 job validation observes synchronized deletion and source or model changes") {
     val original = openJob.copy(embedding = Some(jobEmbedding))
     val mutations: List[Map[Identifiers.JobId, Job] => Map[Identifiers.JobId, Job]] = List(
       _.removed(jobId),
@@ -926,7 +926,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
     }
   }
 
-  test("candidate validation rechecks synchronized ownership reassignment") {
+  test("MVR-05 candidate validation rechecks synchronized ownership reassignment") {
     val owned = openJob.copy(embedding = Some(jobEmbedding))
     for {
       usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map(recruiterId -> recruiter))
@@ -958,7 +958,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
     } yield assertEquals(result, Left(UseCaseError.Domain(DomainError.Forbidden)))
   }
 
-  test("authoritative eligibility failures are sanitized and canceled reads release their resources") {
+  test("MVR-05 MVR-10 authoritative eligibility failures are sanitized and canceled reads release their resources") {
     for {
       usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map(candidateId -> candidateWithProfile))
       jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map.empty)

@@ -9,7 +9,7 @@ import java.util.concurrent.TimeUnit
 class MongoHiringIndexSetupSpec extends FunSuite {
   private val registry = MongoClientSettings.getDefaultCodecRegistry
 
-  test("ordinary index definition verification accepts ordered keys and declared options") {
+  test("MVR-09 ordinary index definition verification accepts ordered keys and declared options") {
     val spec = IndexSpec(
       "applications",
       Indexes.compoundIndex(Indexes.ascending("candidateId"), Indexes.descending("createdAt", "_id")),
@@ -22,7 +22,7 @@ class MongoHiringIndexSetupSpec extends FunSuite {
     assertEquals(MongoHiringIndexSetup.definitionMismatch(spec, actual(spec)), None)
   }
 
-  test("ordinary index definition verification rejects key order and direction changes") {
+  test("MVR-09 ordinary index definition verification rejects key order and direction changes") {
     val spec = IndexSpec(
       "applications",
       Indexes.compoundIndex(Indexes.ascending("candidateId"), Indexes.descending("createdAt", "_id")),
@@ -39,7 +39,7 @@ class MongoHiringIndexSetupSpec extends FunSuite {
     assertEquals(MongoHiringIndexSetup.definitionMismatch(spec, directionChanged), Some("ordered keys"))
   }
 
-  test("ordinary index definition verification checks unique and sparse flags") {
+  test("MVR-09 ordinary index definition verification checks unique and sparse flags") {
     val uniqueSpec = IndexSpec("users", Indexes.ascending("email"), new IndexOptions().name("users_email").unique(true))
     val sparseSpec = IndexSpec("users", Indexes.ascending("email"), new IndexOptions().name("users_email").sparse(true))
 
@@ -55,7 +55,7 @@ class MongoHiringIndexSetupSpec extends FunSuite {
     )
   }
 
-  test("ordinary index definition verification checks partial predicates and TTL seconds") {
+  test("MVR-09 ordinary index definition verification checks partial predicates and TTL seconds") {
     val partialSpec = IndexSpec(
       "event_outbox",
       Indexes.ascending("state"),

@@ -691,7 +691,7 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends MongoIntegrationSu
       Some(UserProfile.Recruiter(RecruiterProfile("Hiring Co", Some("Lead Recruiter")))),
       now
     )
-  test("authorized application selection preserves tied pagination and rejects changed relationships") {
+  test("MVR-02 MVR-03 authorized application selection preserves tied pagination and rejects changed relationships") {
     import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, ApplicationStatus}
     import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, ApplicationEventId}
     import com.example.graphQL.cats.domain.pagination.*

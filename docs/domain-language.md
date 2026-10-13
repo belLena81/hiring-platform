@@ -28,6 +28,8 @@ Add a term here in the same change that introduces it, and only when it is new o
 | Durable boundary | One of seven persisted points in a streaming batch (Prepared … TerminalCommitted) from which recovery resumes | A Spark micro-batch commit | `StreamingDurableBoundary` |
 | Stream owner | Exclusive Mongo-held ownership of one lakehouse by one running stream | The per-callback lakehouse mutex | `MongoAnalyticsStreamingRegistry` |
 | Activation grant | Immutable, expiring authorization that permits a streaming process to start | A user role or JWT | `StreamingActivationGate` |
+| Atlas-compatible local gate | Search acceptance evidence from the $0 Atlas Local container (`compose.atlas-local.yaml`, mongot, loopback). Criterion suffix `.L`. Proves branch behavior and runs a rehearsal; never Atlas acceptance, never adopts a tuning change | Atlas cloud gate | `MVR-xx.L`, `DisposableAtlas.deployment = local-container` |
+| Atlas cloud gate | Search acceptance evidence from an authorized disposable cloud Atlas deployment: native `$rerank`, cloud-scale recall/latency, index memory/storage, telemetry. Criterion suffix `.C`; the only gate that can adopt a vector tuning change | Atlas-compatible local gate | `MVR-xx.C` |
 
 ## Bounded contexts
 

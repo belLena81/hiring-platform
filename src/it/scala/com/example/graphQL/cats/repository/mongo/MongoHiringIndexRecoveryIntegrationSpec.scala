@@ -64,7 +64,7 @@ final class MongoHiringIndexRecoveryIntegrationSpec extends MongoIntegrationSuit
     )
   )
 
-  test("repeated ordinary index setup preserves every definition and integrity constraint") {
+  test("MVR-10 repeated ordinary index setup preserves every definition and integrity constraint") {
     mongoResource.use { fixture =>
       for {
         _ <- MongoHiringIndexSetup.create(fixture.database)
@@ -77,7 +77,7 @@ final class MongoHiringIndexRecoveryIntegrationSpec extends MongoIntegrationSuit
   }
 
   mismatches.zipWithIndex.foreach { case (spec, position) =>
-    test(s"ordinary index mismatch fails closed and preserves existing definitions: variant $position") {
+    test(s"MVR-09 ordinary index mismatch fails closed and preserves existing definitions: variant $position") {
       mongoResource.use { fixture =>
         for {
           _ <- MongoHiringIndexSetup.create(fixture.database)
@@ -101,7 +101,7 @@ final class MongoHiringIndexRecoveryIntegrationSpec extends MongoIntegrationSuit
     }
   }
 
-  test("interrupted ordinary index creation resumes from preserved integrity indexes") {
+  test("MVR-10 interrupted ordinary index creation resumes from preserved integrity indexes") {
     mongoResource.use { fixture =>
       for {
         coll <- MongoRepositoryTestSupport.collection(fixture.database, MongoCollections.Applications)

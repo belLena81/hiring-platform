@@ -10,6 +10,7 @@ import com.example.graphQL.cats.service.{ActorContext, Diagnostics}
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.search.*
 import com.example.graphQL.cats.shared.crypto.SourceHash
+import com.example.hiring.testing.DisposableAtlas
 import mongo4cats.database.MongoDatabase
 import munit.CatsEffectSuite
 import java.time.Instant
@@ -198,7 +199,9 @@ final class AtlasHiringSearchIntegrationSpec extends CatsEffectSuite {
     poll(120)
   }
 
-  test("production vector and application RRF branches enforce the consent truth table and current eligibility") {
+  test(
+    "MVR-04.L MVR-05.L production vector and application RRF branches enforce the consent truth table and current eligibility"
+  ) {
     live { (db, policy) =>
       for {
         // Production order: indexes and migrations run on the empty database before any account exists.
@@ -273,7 +276,7 @@ final class AtlasHiringSearchIntegrationSpec extends CatsEffectSuite {
   }
 
   List(SearchFusionStrategy.MongoRankFusion, SearchFusionStrategy.MongoScoreFusion).foreach { strategy =>
-    test(s"explicit production $strategy capability gate") {
+    test(s"MVR-04.L explicit production $strategy capability gate") {
       live { (db, policy) =>
         for {
           _ <- MongoHiringSetup.initialize(db, Some(indexes), Diagnostics.noop)
@@ -286,8 +289,15 @@ final class AtlasHiringSearchIntegrationSpec extends CatsEffectSuite {
       }
     }
   }
-  test("explicit production native rerank capability gate") {
-    live { (db, policy) =>
+  test("MVR-04.C explicit production native rerank capability gate") {
+    IO.defer {
+      // Skip only for an explicit local-container deployment; any other deployment fails closed below.
+      sys.env
+        .get("ATLAS_TEST_URI")
+        .flatMap(DisposableAtlas.nativeRerankSkipReason)
+        .foreach(reason => assume(false, reason))
+      IO.unit
+    } *> live { (db, policy) =>
       for {
         _ <- MongoHiringSetup.initialize(db, Some(indexes), Diagnostics.noop)
         seeded <- fixture(db)

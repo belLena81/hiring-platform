@@ -3,7 +3,7 @@
 ## Identity and scope
 
 - Roadmap: Phase 8 in [development milestones](../development-milestones.md).
-- Status: local correctness and bounded operational measurements are complete for the evaluated workloads. Overall retrieval acceptance remains partial because live Atlas behavior, ANN/exact quality evidence, and a paired vector-retrieval optimization decision are still open. The local write/storage limits are recorded below.
+- Status: local correctness and bounded operational measurements are complete for the evaluated workloads. Overall retrieval acceptance remains partial. As of 2026-10-13 each Atlas-dependent criterion is split into an Atlas-compatible local gate (`.L`, evidence pending on current HEAD) and a deferred Atlas cloud gate (`.C`); see [Local closure split](#local-closure-split-2026-10-13), which supersedes the "BLOCKED without ATLAS_TEST_URI" wording in the table below. The local write/storage limits are recorded below.
 - Coordinator: Product Manager. Design: Software Architect and Data Engineer; Scala Developer owns services/adapters; independent Code Reviewer, Security Engineer and QA own verdicts.
 - Outcome: candidates discover eligible open jobs and recruiters retrieve permitted matches with bounded database and application work; evidence explains the quality, latency and cost of every adopted optimization.
 - Scope: operational access inventory, typed query shaping, projections, pagination, batching, index verification and bounded vector retrieval comparison.
@@ -191,3 +191,67 @@ UC01 p99 was 112.85 / 34.37 ms at concurrency 1/8 against its < 300 ms reference
 Independent final QA: **PASS** for the scoped local measurement refinement, after independently checking final command exit/results, generated reports, source fingerprints, durable reconciliation, resource limits, forbidden responses and documentation. Code Reviewer and separate Security Engineer verdicts remain **PASS**.
 
 Status: local measurement refinement complete with full local validation and independent reviews passed. Paired operational measurements and rejected-index comparisons are now cross-referenced in MVR-08. Actual Atlas gates, ANN/exact Recall@7, representative retrieval workload decisions and vector optimization evidence remain open. No production query, index, embedding budget or ranking change was adopted from the descriptive retrieval measurements.
+
+## Local closure split (2026-10-13)
+
+Historical sections above are unchanged. Where they say Atlas parts are "BLOCKED without ATLAS_TEST_URI", this section governs from 2026-10-13.
+
+### Decisions
+
+1. Each Atlas-dependent criterion (MVR-04, 05, 06, 07, 08, 09, 10) keeps its parent ID and is split into `.L` (Atlas-compatible local gate, evidence from Atlas Local) and `.C` (Atlas cloud gate, deferred to the Atlas integration slice). Terms are defined in [domain language](../domain-language.md).
+2. Atlas Local (`compose.atlas-local.yaml`, mongot, 127.0.0.1:27018, $0) is the `.L` environment. `DisposableAtlas.deployment` labels loopback URIs `local-container`; those figures are never Atlas acceptance. Prior local run: [search evaluation](../search-evaluation.md#local-atlas-compatible-run) (`AtlasHiringSearchIntegrationSpec` 3 of 4 passed, native `$rerank` absent; `SearchEvaluationAtlasRunner` 500 documents / 20 queries ANN/ENN; closure lag observed). That run predates this table and is not evidence for it.
+3. Cloud-only items appear only in `.C` rows: native `$rerank`, Atlas-scale recall/latency, index memory and storage, telemetry, dedicated capacity.
+4. MVR-08 retrieval limits (deployment owner, 2026-10-13), evaluated per filter bucket (broad, selective, empty) at concurrency 1 and 8 on identical corpus, seed, filters, model and metric:
+   - Recall@7 of ANN against exact (ENN) >= 0.95.
+   - ANN p95 <= baseline p95 + 10%.
+   - Existing ceilings: write p95 regression <= 10%, index-byte growth <= 25% (see Local measurement refinement), zero unexpected errors.
+5. Only MVR-08.C can adopt a change to `numCandidates`, quantization or index definition. MVR-08.L can only conclude "retain current settings" or "candidate for cloud confirmation".
+
+### Criteria
+
+Evidence for every `.L` row is **Pending evidence run on current HEAD**; no `.L` row is claimed as passed. Tests carry the tag in their name (for example `MVR-04.L ...`). `.C` rows are DEFERRED to the Atlas integration slice; none implied by this section.
+
+| ID | Given / When / Then | Method and expected test tag | Evidence |
+|---|---|---|---|
+| MVR-04.L | Given opted-in/out/absent consent and missing private fields, when vector and lexical branches run on Atlas Local, then the private-filter rule holds before branch truncation. | `AtlasHiringSearchIntegrationSpec`, tag `MVR-04.L` | Pending evidence run on current HEAD |
+| MVR-04.C | Given the same truth table, when vector, lexical and native fusion/`$rerank` branches run on cloud Atlas, then the rule holds. | Same suite against cloud, tag `MVR-04.C` | DEFERRED |
+| MVR-05.L | Given indexed hits and synchronized deletion, closure, consent or source/model change, when authoritative validation runs against Atlas Local, then revoked/stale hits disappear; index-closure lag is recorded as observed or not observed. | Atlas Local lag scenario, tag `MVR-05.L` | Pending evidence run on current HEAD |
+| MVR-05.C | Given the same changes, when run on cloud Atlas, then revoked hits disappear and cloud index lag is measured. | Tag `MVR-05.C` | DEFERRED |
+| MVR-06.L | Given final and branch budgets, when broad/selective/empty searches run on Atlas Local, then validation candidates <= `branchResultLimit`, results <= `first`, and no refill or per-hit fetch occurs. | No instrumented Atlas Local test exists yet; evidence comes from the runner's per-bucket bounded result counts, tag `MVR-06.L` | Pending evidence run on current HEAD; stays OPEN if those counts cannot show the validation-candidate bound |
+| MVR-06.C | Given the same budgets, when run on cloud Atlas including native stages, then the same bounds hold. | Tag `MVR-06.C` | DEFERRED |
+| MVR-07.L | Given identical bounded inputs, when ANN and ENN are paired per filter bucket at concurrency 1 and 8 on Atlas Local, then Recall@7, latency, errors and environment are recorded, labeled `local-container`, with no human-relevance claim. | `SearchEvaluationAtlasRunner`, record tag `MVR-07.L` | Pending evidence run on current HEAD |
+| MVR-07.C | Given the same inputs, when run on cloud Atlas, then Atlas-scale Recall@7, latency, errors and telemetry are recorded. | Runner against cloud, tag `MVR-07.C` | DEFERRED |
+| MVR-08.L | Given the rehearsal sweep below on Atlas Local, then the outcome is "retain current settings" or "candidate for cloud confirmation" with per-bucket figures against the decision-4 limits. No change is adopted. | Sweep records, tag `MVR-08.L` | Pending evidence run on current HEAD |
+| MVR-08.C | Given the same sweep on cloud Atlas, when limits in decision 4 are met against the cloud baseline and independent review passes, then the change may be adopted; otherwise current settings stay. | Sweep records plus telemetry, tag `MVR-08.C` | DEFERRED |
+| MVR-09.L | Given index mismatch, readiness timeout or unavailable authoritative reads on Atlas Local, then search fails closed with sanitized errors and existing indexes are preserved; the four index readiness gates pass. | Setup tests, tag `MVR-09.L` | Pending evidence run on current HEAD |
+| MVR-09.C | Given the same faults on cloud Atlas, then fail-closed behavior and readiness hold, including native-stage unsupported outcomes. | Tag `MVR-09.C` | DEFERRED |
+| MVR-10.L | Given cancellation or interrupted setup against Atlas Local, when retried, then owned resources and evaluation databases/indexes are cleaned and setup resumes without weakening constraints. | Resource tests, tag `MVR-10.L` | Pending evidence run on current HEAD |
+| MVR-10.C | Given the same interruption on cloud Atlas, then cleanup of cloud-side search indexes and databases is verified. | Tag `MVR-10.C` | DEFERRED |
+
+Tag scope: bare tags (`MVR-04`, `MVR-05`, `MVR-06`, `MVR-09`, `MVR-10`) are plain-MongoDB local evidence for the parent rows; `.L` tags are reserved for Atlas Local runs. `RetrievalLimitsSpec` (tests named `MVR-08 retrieval limits rule ...`) unit-tests the decision rule and is not `.L` evidence.
+
+Parent criteria MVR-04..10 close only when both `.L` and `.C` are recorded; until then the parent status is "local pending/partial, cloud deferred". `.L` closure does not satisfy `.C`.
+
+### MVR-08.L rehearsal procedure and decision rule
+
+1. Start Atlas Local; use the runner's isolated `search_evaluation_` database and output beneath `.local/data`. Fix seed `20261005`, one corpus, `--dimensions`, `--documents`/`--queries` as in the prior local run, `--page-size 7`.
+2. Baseline: the current setting (`--num-candidates 100` with `--branch-limit 100`, matching production `num-candidates = 100` in `src/main/resources/application.conf`). Run with `--concurrency 1` and `8`, `--temperature cold` then `warm`.
+3. Sweep `numCandidates` in {current, half, double}; `half` must still be >= `--branch-limit` (lower `--branch-limit` equally if needed and record it; then compare against a baseline re-run at that same branch limit so only one variable changes). Optionally repeat with `--quantization scalar` at the same three values.
+4. Per filter bucket (broad/selective/empty) and concurrency record Recall@7 versus ENN, ANN p50/p95/p99, errors, index build time and bytes where available, and write p95 if an index change is involved.
+5. Decision: a setting is a candidate for cloud confirmation only if every bucket and concurrency meets Recall@7 >= 0.95 and ANN p95 <= baseline p95 + 10%, and it improves at least one measured dimension (latency, index bytes or build time) over current. Otherwise the outcome is "retain current settings". Write the outcome in this spec with record paths and `local-container` labels.
+
+### Cloud runbook for `.C` rows (deferred)
+
+Authorization required before any run, none implied by this spec: a named disposable cloud Atlas deployment (isolated, with version and tier recorded), an explicit budget ceiling and cleanup owner, and credentials supplied only through the environment variable the runner reads (via `DisposableAtlas.authorizedUri`), never committed or logged. `.C` runs must use the direct cloud URI, never a loopback tunnel or port-forward: loopback hosts are labelled `local-container`, which skips the native `$rerank` gate and would mislabel cloud evidence. Absent these, `.C` rows stay DEFERRED.
+
+Run the integration suite for MVR-04/05/06/09/10 against the cloud URI, then the runner per bucket and concurrency. Exact flags: `--database` (must start `search_evaluation_`), `--output` (beneath `.local/data`), `--source-revision`, `--documents`, `--queries`, `--dimensions`, `--num-candidates`, `--branch-limit`, `--stored-source`, `--quantization none|scalar`, `--page-size`, `--concurrency 1|8`, `--temperature cold|warm`, `--seed`.
+
+```
+sbt 'IntegrationTest / runMain com.example.graphQL.cats.repository.mongo.SearchEvaluationAtlasRunner \
+  --database search_evaluation_cloud --output .local/data/search-evaluation-cloud \
+  --source-revision <git HEAD> --seed 20261005 --page-size 7 \
+  --num-candidates <current|half|double> [--quantization scalar] \
+  --concurrency 1|8 --temperature cold|warm'
+```
+
+Run the baseline and each sweep point at both concurrencies and both temperatures; use the corpus size authorized for the budget (runner bounds: documents <= 10000, queries <= 100). Telemetry to capture where Atlas exposes it, otherwise record "unavailable": vector index memory and storage bytes, index build time, index status/readiness and replication lag, CPU and memory of the search nodes, query latency percentiles, provider/Atlas usage cost, and native `$rerank` availability and result. Apply decision-4 limits against the cloud baseline; only a pass with independent review adopts a change, and any adopted index change follows the migration and recovery rules in Public and persistence contracts. Dedicated search capacity needs a separately measured bottleneck and cost ceiling.

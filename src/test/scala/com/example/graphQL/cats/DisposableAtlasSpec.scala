@@ -26,6 +26,13 @@ final class DisposableAtlasSpec extends FunSuite {
     assertEquals(DisposableAtlas.deployment("mongodb+srv://cluster.example.mongodb.net/"), "atlas")
     assertEquals(DisposableAtlas.deployment("not-a-uri"), "atlas")
   }
+  test("native rerank skip reason applies only to loopback Atlas Local deployments") {
+    val local = DisposableAtlas.nativeRerankSkipReason("mongodb://localhost:27018/?directConnection=true")
+    assert(local.exists(_.contains("MVR-04.C cloud-only")))
+    assertEquals(DisposableAtlas.nativeRerankSkipReason("mongodb+srv://cluster.example.mongodb.net/"), None)
+    assertEquals(DisposableAtlas.nativeRerankSkipReason("mongodb://127.0.0.1:27018,test.example:27017/"), None)
+    assertEquals(DisposableAtlas.nativeRerankSkipReason("not-a-uri"), None)
+  }
   test("rejects missing authorization, host ambiguity and an application database before connection") {
     val rejected = List(
       environment - "ATLAS_TEST_DISPOSABLE",

@@ -17,6 +17,14 @@ object DisposableAtlas {
       )
       .fold("atlas")(_ => "local-container")
 
+  /** MVR-04.C: native `$rerank` is Atlas cloud only. Only an explicit local-container deployment skips; every other
+    * deployment must still fail closed when the stage is unsupported.
+    */
+  def nativeRerankSkipReason(uri: String): Option[String] =
+    Option.when(deployment(uri) == "local-container")(
+      "MVR-04.C cloud-only: native $rerank is unavailable on Atlas Local"
+    )
+
   def authorizedUri(environment: Map[String, String]): Either[String, String] = {
     val failure =
       "Disposable Atlas requires ATLAS_TEST_URI, ATLAS_TEST_DISPOSABLE=true and exact ATLAS_TEST_ALLOWED_HOSTS"

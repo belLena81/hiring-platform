@@ -116,7 +116,7 @@ final class MongoOperationalAccessEvaluationIntegrationSpec extends MongoIntegra
   )
   private final case class Observation(latencyMillis: Double, returned: Int, error: Option[String])
 
-  test("production operational access records bounded commands, plans and reproducible local baselines") {
+  test("MVR-01 production operational access records bounded commands, plans and reproducible local baselines") {
     mongoResource.use { fixture =>
       val database = fixture.database
       val users = new MongoUserRepository(
@@ -460,7 +460,7 @@ final class MongoOperationalAccessEvaluationIntegrationSpec extends MongoIntegra
     }
   }
 
-  test("explain evidence preserves metric locations and separates selected rejected and executed indexes") {
+  test("MVR-01 explain evidence preserves metric locations and separates selected rejected and executed indexes") {
     val tree = Json.obj(
       "queryPlanner" -> Json.obj(
         "winningPlan" -> Json.obj(
@@ -522,7 +522,7 @@ final class MongoOperationalAccessEvaluationIntegrationSpec extends MongoIntegra
     assertEquals(scan.head.hcursor.get[Vector[String]]("winningStages"), Right(Vector("COLLSCAN")))
   }
 
-  test("production candidate predicates execute the true false absent consent truth table on Mongo") {
+  test("MVR-04 production candidate predicates execute the true false absent consent truth table on Mongo") {
     mongoResource.use { fixture =>
       val model = "synthetic-model"
       val optedIn = CandidateProfile(
