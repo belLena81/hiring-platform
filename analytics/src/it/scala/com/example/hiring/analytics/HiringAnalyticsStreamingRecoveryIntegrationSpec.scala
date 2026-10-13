@@ -96,7 +96,9 @@ final class HiringAnalyticsStreamingRecoveryIntegrationSpec extends SharedRecove
       .unsafeRunSync()
   }
 
-  test("HCS-10.6 a completed deletion generation with unchanged marker view forces a fresh pinned publication") {
+  test(
+    "HCS-10.6 HAL-12.6 a completed deletion generation with unchanged marker view forces a fresh pinned publication"
+  ) {
     resource
       .use { runtime =>
         for {

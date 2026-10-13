@@ -69,23 +69,34 @@ private[analytics] object StreamingIngestionFixtures {
       checkpoint <- Resource.make(IO.pure(owned.resolve("checkpoints").resolve("ingestion-" + UUID.randomUUID())))(
         deleteTree
       )
-      _ <- Resource.eval(IO.blocking {
-        val sync = MongoClients.create(manifest.mongoUri)
-        try {
-          val db = sync.getDatabase(database.name)
-          db.createCollection("analytics_erasure_requests")
-          db.getCollection("analytics_report_control")
-            .insertOne(
-              new Document("_id", "analytics-report")
-                .append("generation", 0L)
-                .append("state", "Unpublished")
-                .append("nextRevision", 0L)
-                .append("lastPublishedRevision", 0L)
-                .append("lastRunId", "")
-            )
-        } finally sync.close()
-      })
+      _ <- Resource.eval(initializeDatabase(manifest.mongoUri, database.name))
     } yield Fixture(namespace, root, sparkTemp, checkpoint, database.name)
+
+  private def initializeDatabase(mongoUri: String, name: String): IO[Unit] = IO.blocking {
+    val sync = MongoClients.create(mongoUri)
+    try {
+      val db = sync.getDatabase(name)
+      db.createCollection("analytics_erasure_requests")
+      val _ = db
+        .getCollection("analytics_report_control")
+        .insertOne(
+          new Document("_id", "analytics-report")
+            .append("generation", 0L)
+            .append("state", "Unpublished")
+            .append("nextRevision", 0L)
+            .append("lastPublishedRevision", 0L)
+            .append("lastRunId", "")
+        )
+    } finally sync.close()
+  }
+
+  /** A new owned Mongo database on the same Kafka namespace, lakehouse and checkpoint paths. */
+  def freshDatabase(base: Fixture): Resource[IO, Fixture] =
+    for {
+      client <- MongoClient.fromConnectionString[IO](base.namespace.manifest.mongoUri)
+      database <- LocalTestServices.database(client)
+      _ <- Resource.eval(initializeDatabase(base.namespace.manifest.mongoUri, database.name))
+    } yield base.copy(databaseName = database.name)
 
   def event(index: Int, at: Instant): String = {
     val eventId = AnalyticsOperationalEventFixtures.id(s"ingestion-event-$index")
@@ -138,7 +149,16 @@ private[analytics] object StreamingIngestionFixtures {
     finally admin.close()
   }
 
-  def settings(fixture: Fixture, maxOffsetsPerTrigger: Int): IO[AnalyticsStreamingRuntimeSettings] = {
+  def settings(fixture: Fixture, maxOffsetsPerTrigger: Int): IO[AnalyticsStreamingRuntimeSettings] =
+    IO.fromEither(AnalyticsConfigFixtures.streamingRuntime(configurationText(fixture, maxOffsetsPerTrigger)))
+
+  /** The complete HOCON a process would load: the packaged defaults plus this fixture's endpoints and paths. */
+  def configurationText(
+      fixture: Fixture,
+      maxOffsetsPerTrigger: Int,
+      streamId: String = StreamId,
+      lakehouseDirectory: String = "lakehouse"
+  ): String = {
     val manifest = fixture.namespace.manifest
     val key = Base64.getEncoder.encodeToString(Array.fill[Byte](32)(23))
     val packaged = new String(getClass.getClassLoader.getResourceAsStream("application.conf").readAllBytes(), "UTF-8")
@@ -155,12 +175,12 @@ private[analytics] object StreamingIngestionFixtures {
          |    security-protocol = "SASL_PLAINTEXT"
          |    allow-plaintext = true
          |  }
-         |  lakehouse { root = "${fixture.root.resolve("lakehouse").toUri}" }
+         |  lakehouse { root = "${fixture.root.resolve(lakehouseDirectory).toUri.toString.stripSuffix("/")}" }
          |  hmac { secret-base64 = "$key", key-id = "hmac-v1" }
          |  streaming {
-         |    stream-id = "$StreamId"
+         |    stream-id = "$streamId"
          |    activation-grant-id = "$GrantId"
-         |    checkpoint-location = "${fixture.checkpoint.toUri}"
+         |    checkpoint-location = "${fixture.checkpoint.toUri.toString.stripSuffix("/")}"
          |    trigger-interval = 1 second
          |    max-offsets-per-trigger = $maxOffsetsPerTrigger
          |    maximum-replay-records = 1000
@@ -168,7 +188,7 @@ private[analytics] object StreamingIngestionFixtures {
          |  }
          |}
          |""".stripMargin
-    IO.fromEither(AnalyticsConfigFixtures.streamingRuntime(packaged + overrides))
+    packaged + overrides
   }
 
   /** Real activation grant document in the collection the production gate reads. */
@@ -183,25 +203,32 @@ private[analytics] object StreamingIngestionFixtures {
           settings.common.lakehouseRoot
         )
       )
-      _ <- insertGrant(fixture, identity)
+      _ <- insertGrant(fixture.namespace.manifest.mongoUri, fixture.databaseName, identity)
     } yield identity
 
-  private def insertGrant(fixture: Fixture, identity: StreamingActivationIdentity): IO[Unit] = IO.blocking {
+  /** Inserts an immutable activation grant that is valid for the given time from now. */
+  def insertGrant(
+      mongoUri: String,
+      databaseName: String,
+      identity: StreamingActivationIdentity,
+      lifetime: scala.concurrent.duration.FiniteDuration = scala.concurrent.duration.DurationInt(30).minutes,
+      grantId: String = GrantId
+  ): IO[Unit] = IO.blocking {
     val now = Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MILLIS)
     val grant = StreamingActivationAuthorization
       .fromEvidence(
         identity,
-        GrantId,
+        grantId,
         now.minusSeconds(1),
-        now.plusSeconds(1800),
+        now.plusMillis(lifetime.toMillis),
         Vector("ingestion-fixture"),
         Vector("ingestion-review-a", "ingestion-review-b")
       )
       .fold(problem => throw new IllegalStateException(problem), value => value)
-    val sync = MongoClients.create(fixture.namespace.manifest.mongoUri)
+    val sync = MongoClients.create(mongoUri)
     try
       sync
-        .getDatabase(fixture.databaseName)
+        .getDatabase(databaseName)
         .getCollection("analytics_streaming_activation")
         .insertOne(
           new Document("_id", grant.grantId)
@@ -250,6 +277,30 @@ private[analytics] object StreamingIngestionFixtures {
           )
         (count(paths.bronze), count(paths.silver), count(paths.streamingProgress)).mapN(Stored.apply)
       }
+  }
+
+  /** Newest Delta commit version of every table below the lakehouse, to prove a refusal wrote nothing. */
+  def deltaVersions(lakehouse: Path): IO[Map[String, Long]] = IO.blocking {
+    val entries = Files.walk(lakehouse)
+    try
+      entries
+        .iterator()
+        .asScala
+        .filter(path => Files.isDirectory(path) && path.getFileName.toString == "_delta_log")
+        .map { log =>
+          val versions = Files.list(log)
+          try
+            lakehouse.relativize(log.getParent).toString -> versions
+              .iterator()
+              .asScala
+              .map(_.getFileName.toString)
+              .filter(_.endsWith(".json"))
+              .map(_.stripSuffix(".json").toLong)
+              .max
+          finally versions.close()
+        }
+        .toMap
+    finally entries.close()
   }
 
   def reportSnapshot(fixture: Fixture): IO[Option[Document]] = IO.blocking {

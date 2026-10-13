@@ -33,7 +33,7 @@ import java.util.Properties
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
-/** Opt-in local proof that a failed producer fence recovers in the running worker and reaches the public receipt. */
+/** Opt-in local check that a failed producer fence recovers in the running worker and reaches the public receipt. */
 final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
   override val munitTimeout: FiniteDuration = 10.minutes
 
@@ -347,7 +347,9 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
     read.flatMap(value => if (matches(value)) IO.pure(value) else IO.sleep(200.millis) *> eventually(read)(matches))
 
   test(
-    new munit.TestOptions("running worker retries a failed fence and completes the same public deletion receipt")
+    new munit.TestOptions(
+      "HAL-04.4 running worker retries a failed fence and completes the same public deletion receipt"
+    )
       .withTags(if (enabled) Set.empty else Set(munit.Ignore))
   ) {
     if (enabled) {

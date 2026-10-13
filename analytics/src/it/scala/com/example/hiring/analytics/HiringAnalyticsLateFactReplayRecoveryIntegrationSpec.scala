@@ -122,7 +122,9 @@ final class HiringAnalyticsLateFactReplayRecoveryIntegrationSpec extends SharedR
       .unsafeRunSync()
   }
 
-  test("HCS-09.3 deletion generation changes after Gold while empty markers cannot refresh the replay reservation") {
+  test(
+    "HCS-09.3 HAL-12.5 deletion generation changes after Gold while empty markers cannot refresh the replay reservation"
+  ) {
     resource
       .use { runtime =>
         for {

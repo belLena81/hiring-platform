@@ -1,15 +1,14 @@
 package com.example.hiring.analytics
 
-import cats.effect.{Clock, IO, Resource}
+import cats.effect.{IO, Resource}
 import cats.syntax.all.*
 import com.example.hiring.analytics.HiringAnalyticsRecoveryTestSupport.*
-import com.example.hiring.analytics.ShortRetentionFixtures.*
+import com.example.hiring.analytics.ErasureRequestFixtures.*
 import com.example.hiring.analytics.StreamingCalendarFixtures.*
 import com.example.hiring.analytics.StreamingIngestionFixtures.Transaction
 import com.example.hiring.analytics.adapter.kafka.{KafkaProducerFencer, KafkaRetentionAdapter}
-import com.example.hiring.analytics.adapter.mongo.MongoAnalyticsErasureStores
 import com.example.hiring.analytics.config.{KafkaConnection, KafkaSecurityProtocol}
-import com.example.hiring.analytics.domain.{AccountSubjectId, AnalyticsTopic, RangeFingerprint, RunId}
+import com.example.hiring.analytics.domain.AnalyticsTopic
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.erasure.*
 import com.example.hiring.testing.{KafkaShortRetention, KafkaTestNamespace}
@@ -28,121 +27,6 @@ import scala.concurrent.duration.*
 /** Account erasure against a populated lakehouse, real producer fencing and real Kafka retention. */
 final class AnalyticsErasureRetentionIntegrationSpec extends SharedRecoveryRuntimeSuite {
   override val munitIOTimeout: FiniteDuration = 30.minutes
-
-  private val Unused = KafkaConnection("unused:9092")
-
-  private final class Request(
-      val harness: Harness,
-      val stores: MongoAnalyticsErasureStores[IO],
-      val subject: String,
-      val receiptId: String
-  ) {
-    val id: AccountSubjectId = AnalyticsErasureWorkerTestSupport.accountSubjectId(subject)
-    val runId: RunId = AnalyticsErasureWorkerTestSupport.runId("analytics-erasure-" + subject)
-    val fingerprint: RangeFingerprint = AnalyticsErasureWorkerTestSupport.fingerprint("erasure:" + subject)
-    def document(collection: String): IO[Document] =
-      harness.sync(_.getCollection(collection).find(new Document("_id", subject)).first())
-  }
-
-  /** The durable rows a committed account deletion leaves for the worker, with its recorded producer registrations. */
-  private def seedRequest(
-      harness: Harness,
-      runtime: Runtime,
-      subject: String,
-      transactionalIds: Vector[String],
-      at: Instant
-  ): IO[Request] = {
-    val receiptId = UUID.randomUUID().toString
-    harness
-      .sync { db =>
-        db.getCollection("analytics_erasure_requests")
-          .insertOne(
-            new Document("_id", subject)
-              .append("state", "Pending")
-              .append("fencingVersion", 1)
-              .append("producerRegistry", true)
-              .append("requestedAt", Date.from(at))
-              .append("receiptId", receiptId)
-          )
-        db.getCollection("outbox_subject_fences").insertOne(new Document("_id", subject).append("deleted", true))
-        db.getCollection("users").insertOne(new Document("_id", subject).append("accountStatus", "Deleted"))
-        db.getCollection("hiring_migration_ledger")
-          .insertOne(new Document("_id", "003_event_outbox_subject_references").append("state", "Complete"))
-        db.createCollection("producer_registrations")
-        db.getCollection("hiring_migration_ledger")
-          .insertOne(
-            new Document("_id", "012_attributable_producer_registrations")
-              .append("state", "Complete")
-              .append("version", Long.box(1L))
-          )
-        transactionalIds.foreach { transactionalId =>
-          db.getCollection("producer_registrations")
-            .insertOne(
-              new Document("_id", s"$subject:$transactionalId")
-                .append("subjectId", subject)
-                .append("transactionalId", transactionalId)
-                .append("kind", "Operational")
-                .append("state", "Active")
-                .append("registeredAt", Date.from(at))
-            )
-        }
-        db.getCollection("analytics_report_control")
-          .updateOne(
-            new Document("_id", "analytics-report"),
-            new Document("$set", new Document("state", "Hidden").append("generation", 1L))
-          )
-      }
-      .as(
-        new Request(
-          harness,
-          AnalyticsErasureWorkerTestSupport.stores(runtime.client, harness.database),
-          subject,
-          receiptId
-        )
-      )
-  }
-
-  private def worker(
-      request: Request,
-      clock: Clock[IO],
-      retention: KafkaRetention[IO],
-      fencer: TransactionalProducerFencer[IO] = (_, _) => IO.unit,
-      fencerKafka: KafkaConnection = Unused
-  ): AnalyticsErasureWorker[IO] =
-    AnalyticsErasureWorkerTestSupport.worker(
-      request.harness.spark,
-      request.harness.database,
-      request.stores,
-      Unused,
-      fencerKafka,
-      "hiring.operational-events",
-      request.harness.paths,
-      request.harness.keys,
-      request.harness.publisher,
-      clock = clock,
-      leaseDuration = 60.days,
-      producerFencer = fencer,
-      kafkaRetention = Some(retention),
-      operational = shortRetention(request.harness.operational),
-      deltaLogs = shiftedLogs(32L)
-    )
-
-  private def fixedRetention(passed: AtomicBoolean): KafkaRetention[IO] = new KafkaRetention[IO] {
-    private val barrier = KafkaRetentionBarrier.from("hiring.operational-events", Vector(0 -> 0L)).toOption.get
-    override def capture(): IO[KafkaRetentionBarrier] = IO.pure(barrier)
-    override def retentionPassed(value: KafkaRetentionBarrier): IO[Boolean] = IO(passed.get())
-  }
-
-  private def claimAt(request: Request, at: Instant) =
-    request.stores.queue.claim(at, at.plus(1L, ChronoUnit.DAYS), 1).map(_.head)
-
-  private def processing(
-      request: Request,
-      at: Instant,
-      worker: AnalyticsErasureWorker[IO],
-      claim: ErasureClaim
-  ): IO[ErasureClaimOutcome] =
-    request.harness.publisher.reserve(request.runId, request.fingerprint, at).flatMap(worker.process(claim, _))
 
   /** Delta only vacuums a removal once it is older than the one-second safety horizon, so unverified files retry. */
   private def processUntilReclaimed(

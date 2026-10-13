@@ -30,7 +30,9 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends AnalyticsMongoIntegra
 
   override val munitIOTimeout: FiniteDuration = 5.minutes
 
-  test("production report publisher reserves revisions, rejects hidden publication, and restores expired payload") {
+  test(
+    "HAL-12.1 production report publisher reserves revisions, rejects hidden publication, and restores expired payload"
+  ) {
     val client: MongoClient = MongoClients.create(
       endpointUri
     )
@@ -320,7 +322,7 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends AnalyticsMongoIntegra
     }
   }
 
-  test("pinned reservation survives TTL policy and never refreshes across a completed deletion generation") {
+  test("HAL-12.2 pinned reservation survives TTL policy and never refreshes across a completed deletion generation") {
     val uri = endpointUri
     val client = MongoClients.create(uri)
     val reactive = AnalyticsMongo4catsTestSupport.client(uri)
@@ -505,7 +507,7 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends AnalyticsMongoIntegra
     }
   }
 
-  test("erasure publication reveals the report and writes the TTL independent completion ledger atomically") {
+  test("HAL-12.3 erasure publication reveals the report and writes the TTL independent completion ledger atomically") {
     val client = MongoClients.create(
       endpointUri
     )
@@ -624,7 +626,7 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends AnalyticsMongoIntegra
     }
   }
 
-  test("guarded erasure publication rejects another request that has not passed retention") {
+  test("HAL-12.4 guarded erasure publication rejects another request that has not passed retention") {
     val client = MongoClients.create(
       endpointUri
     )

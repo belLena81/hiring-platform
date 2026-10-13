@@ -58,7 +58,9 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends AnalyticsMongoIntegra
     override def monotonic: IO[FiniteDuration] = IO.pure(0.nanos)
   }
 
-  test("expired worker lease resumes its checkpoint across client restart and fences in-flight evidence writes") {
+  test(
+    "HAL-12.7 expired worker lease resumes its checkpoint across client restart and fences in-flight evidence writes"
+  ) {
     val connectionString =
       endpointUri
     val databaseName = testDatabaseName
@@ -340,7 +342,7 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends AnalyticsMongoIntegra
     }
   }
 
-  test("erasure processing restarts from the durable Delta checkpoint and publishes completion") {
+  test("HAL-12.8 erasure processing restarts from the durable Delta checkpoint and publishes completion") {
     val connectionString =
       endpointUri
     val databaseName = testDatabaseName
@@ -736,7 +738,7 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends AnalyticsMongoIntegra
     }
   }
 
-  test("a failure write paused before Mongo cannot overwrite a reclaimed lease or its repair state") {
+  test("HAL-12.9 a failure write paused before Mongo cannot overwrite a reclaimed lease or its repair state") {
     val connectionString =
       endpointUri
     val databaseName = testDatabaseName
