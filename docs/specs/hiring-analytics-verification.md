@@ -3,7 +3,7 @@
 ## Identity and scope
 
 - Task: re-establish Phase 6 (HAL) and Phase 7 (HCS) acceptance evidence on current source with tests that run in the normal local suite, replacing the standalone proof programs and scripts removed in commit `3755455`.
-- Status: ready (2026-10-12). Baseline HEAD `358aa30`.
+- Status: done (2026-10-13). Baseline HEAD `358aa30`; verified HEAD `1834236`; independent Code Reviewer, Security Engineer and final QA PASS.
 - Coordinator: Product Manager.
 - Implementation owners:
   - Big Data Engineer: analytics build tests, the trigger seam, shared test support (track A).
@@ -57,7 +57,7 @@ Verified by static reading at `358aa30` (gap analysis 2026-10-12; nothing below 
 
 ## Acceptance and evidence
 
-Criterion IDs reuse the owning specs ([HCS](continuous-hiring-analytics.md), [HAL](hiring-analytics-lakehouse.md)); example tags `HCS-nn.m` / `HAL-nn.m` appear at the start of each test name. HAV IDs cover this task's own verification rules. Mechanism shorthand: COORD = `HiringAnalyticsRecoveryTestSupport` (real Delta/Mongo, synthetic source); STREAM = real Kafka via `KafkaTestNamespace` + `AppModule.streamingObserved` with `Trigger.AvailableNow`.
+Criterion IDs reuse the owning specs ([HCS](continuous-hiring-analytics.md), [HAL](hiring-analytics-lakehouse.md)); example tags `HCS-nn.m` / `HAL-nn.m` appear at the start of each test name. HAV IDs cover this task's own verification rules. Outcome cells reading "Not run" are the pre-implementation state; final outcomes are in the Checkpoint: every locally provable example tag passed in the final QA run on `1834236` (113 distinct tags), except the opt-in HAL-05-FENCE-06.3 and HAL-05.4 cases (NOT RUN by design), HAL-05-FENCE-05 (out of scope), and the HCS-08.3 topic-identity case (gap C11). Mechanism shorthand: COORD = `HiringAnalyticsRecoveryTestSupport` (real Delta/Mongo, synthetic source); STREAM = real Kafka via `KafkaTestNamespace` + `AppModule.streamingObserved` with `Trigger.AvailableNow`.
 
 ### Continuous analytics (Phase 7)
 
@@ -161,4 +161,13 @@ Risks: `AvailableNow` with `read_committed` across transaction-marker gaps (A1 g
   - C15 HCS-08.7 "active callback" = two mutex rows (stream owner + callback).
 - 2026-10-13 Security Engineer: PASS (static, `358aa30..93b3490`). Seam S1 is not reachable from configuration, CLI or environment; only `AppModule.streaming` calls `streamingObserved` in main, with no trigger. Q1 resolved, ordering intended: every path to a published report applies deletions first and refuses publication while any marker is active, and the erasure worker purges and verifies absence before republishing, so the rows left after a rejected replay are never published. C8 resolved: a real account deletion hides the report and increments the generation in the deletion transaction (`MongoAnalyticsErasureRequestRepository.createRequest`; hidden result asserted at `MongoOutboxSubjectReferencesIntegrationSpec.scala:355`); HCS-11.2 claims only what it proves. Credentials come from the manifest or generated config files under ignored paths, never argv. Low follow-ups (non-blocking): assert the generation increment next to line 355; move system-temp directories in three ITs under `.local/`; rebuild lineage-mismatch tests with production key-retirement tooling (Phase 14); a topic-identity checkpoint test (C11) when a deployed environment exists.
 - 2026-10-13 Code Reviewer: PASS conditional on test-only fixes (`358aa30..93b3490`; analytics `Test/compile IntegrationTest/compile scalafmtCheckAll` rerun by reviewer). HAV-03 confirmed: production diff is exactly seam S1. HAL-12.7–.9 tags match their bodies. C1 judged intended: an empty valid batch takes the normal reserve/publish path, `candidateWatermark` of an empty set is None, and the revision is allocated at reservation (one revision per terminal batch). Required: (1) HCS-11.6 was only in a comment; (2) HCS-06.1/.2 and HCS-10.1 assertions too weak; (3) HCS-10.3 stale comment. Returned to the Big Data Engineer. Optional follow-ups not taken: fold the three HOCON override builders and repeated Mongo helpers; reduce HCS-13.1 further; deterministic block for HCS-08.7. Full analytics run is ≈130 min.
-- QA: pending.
+- 2026-10-13 Code Reviewer conditions resolved in `1834236` (HCS-11.6 in a title; exact HCS-06.1/.2 and HCS-10.1 assertions; HCS-10.3 retitled; HAL-06.5 ordering comment; HCS-08.5 message match); affected suites 30/30.
+- 2026-10-13 Final QA: PASS on `1834236`, clean tree.
+  - HAV-05: `bash scripts/check-local.sh` exit 0 (≈2 h 18 min; analytics step 6,465 s): root 1,042 units; 297 integrations (288 passed, 9 opt-in skips outside HCS/HAL per D14); analytics 458 units, 102 integrations passed, 4 ignored; merged coverage gate passed. `scripts/run-local-tests.sh recovery` exit 0 (HAL-04.4 1/1); `retention` exit 0 (both topics).
+  - HAV-02: 113 distinct tags have a passing test, parsed from this run's reports; no locally provable tag lacks one.
+  - HAV-01: only the listed opt-ins are ignored; new suites fail without the manifest.
+  - HAV-03: production diff is exactly seam S1.
+  - HAV-04: README, milestones, HCS and HAL specs cite only existing tests and scripts; removed names appear only under historical headings or removal notes.
+  - Phases 1–5 regression: none. Root units +1 (R1 contract spec); integrations −1 (deleted D4 compose spec, previously skipped).
+  - Adversarial reads of HCS-02.1, HCS-08.1–.4 and HCS-07.9/.10/08.7 confirm they fail if the guarded behaviour breaks.
+- Open follow-ups (not blocking): C11 topic-identity checkpoint test (deployed environment); Security low items (generation-increment assertion, `.local/` temp dirs, lineage-mismatch tests with production key-retirement tooling); Code Reviewer optional items (fold HOCON override builders and Mongo helpers, smaller HCS-13.1, deterministic block for HCS-08.7); D14 root manifest-absent skips; `scripts/check-local.sh` lacks the executable bit; label lines 139–141 of the lakehouse spec's review-remediation section as historical.
