@@ -5,7 +5,7 @@
 
 ## Identity and scope
 
-- Status: Phase 6 local evidence is being re-established by criterion-tagged tests (see [Current criterion evidence](#current-criterion-evidence-verification-specification-2026-10-13)); independent Code, Security and QA verdicts on that re-established evidence are pending. Historical status (October 3, removed proof programs): Phase 6 local implementation complete; independent final QA passed HAL-01–HAL-14 on source `bd342489a784e5e76a42857d3a2582278e360304129a9509691f7cd3302bc53f`. Production activation remains gated by genuine deployed retention, writer exclusion, guarded key retirement and operational signoff. Phase 7 runtime acceptance is tracked separately in the continuous analytics specification.
+- Status: Phase 6 local evidence is re-established by criterion-tagged tests (see [Current criterion evidence](#current-criterion-evidence-verification-specification-2026-10-13)); independent Code, Security and QA verdicts on that re-established evidence are pending. Historical status (October 3, removed proof programs): Phase 6 local implementation complete; independent final QA passed HAL-01–HAL-14 on source `bd342489a784e5e76a42857d3a2582278e360304129a9509691f7cd3302bc53f`. Production activation remains gated by genuine deployed retention, writer exclusion, guarded key retirement and operational signoff. Phase 7 runtime acceptance is tracked separately in the continuous analytics specification.
 - Current safety review: [Analytics erasure safety](analytics-erasure-safety.md) tracks cancellation ownership, reusable driver effects, abandoned rewrite recovery, malformed marker rejection, and final-source verification. Historical checkpoints below retain their original scope; they do not certify later source changes.
 - User outcome: Admin can query bounded, aggregate hiring analytics produced from local Kafka events without coupling request handling to Spark.
 - Authorized scope: a local Scala 3.7.4 Spark/Delta analytics module using Spark/Delta's Scala 2.13 artifacts, Compose integration, Bronze/Silver/Gold datasets, an Admin GraphQL read model, account-deletion erasure requests, tests, and canonical documentation.
@@ -21,7 +21,7 @@
 
 ## Current criterion evidence (verification specification, 2026-10-13)
 
-Status: **HAL-01–HAL-14 are being re-established by criterion-tagged tests on current source.** Slice runs A1–A5 are recorded in the [verification specification](hiring-analytics-verification.md). Pending: slice A6 (HAL-14 grant-expiry evidence points to HCS-08.5, which is pending), independent Code Reviewer, Security Engineer and QA verdicts, and the HAV-05 full local run. The October 3 QA verdicts are historical. Production gates are unchanged: genuine 7-, 30- and 31-day horizons, unmanaged-writer exclusion and storage revocation, guarded HMAC retirement with a new-key-only restart, and operational signoff.
+Status: **HAL-01–HAL-14 are re-established by criterion-tagged tests on current source.** Slice runs A1–A6 are recorded in the [verification specification](hiring-analytics-verification.md). HAL-14 grant-expiry evidence is recorded under HCS-08.5 (slice A6, 90-second grant, C12). Pending: independent Code Reviewer, Security Engineer and QA verdicts, and the HAV-05 `check-local.sh` run. The October 3 QA verdicts are historical. Production gates are unchanged: genuine 7-, 30- and 31-day horizons, unmanaged-writer exclusion and storage revocation, guarded HMAC retirement with a new-key-only restart, and operational signoff.
 
 Run the tests with `scripts/run-local-tests.sh analytics '*<SuiteName>'` (integration suites by name), `scripts/run-local-tests.sh recovery` (`AccountDeletionRecoveryIntegrationSpec`, HAL-04.4), `scripts/run-local-tests.sh retention` (`KafkaTopicRetentionCheck`), `sbt test` in `analytics/` for unit suites, and `scripts/check-local.sh` for the full local gate. The closest current coverage of the removed AC-SMOKE-01 smoke is `AnalyticsErasureRetentionIntegrationSpec` (HAL-04.1, 04.2, 05-FENCE-01.1, 05-FENCE-03.2, 08.1).
 
@@ -30,7 +30,7 @@ Run the tests with `scripts/run-local-tests.sh analytics '*<SuiteName>'` (integr
 | HAL-01 | `HiringAnalyticsBatchKafkaRangeIntegrationSpec` (.1, .2) | 3/3 with HAL-11.1 (A4) |
 | HAL-02 | `AnalyticsTransformsSpec` (.1); other named suites are retagged in the verification plan | No separate result recorded |
 | HAL-03 | `AnalyticsReportingServiceSpec` (.1–.3); `HiringGraphQLAccessSpec` (.4, .5, root `src/test`) | Retagged (R1) |
-| HAL-04 | `AnalyticsErasureRetentionIntegrationSpec` (.1, .2); `HiringGraphQLAccessSpec` (.3, root); `MongoOutboxSubjectReferencesIntegrationSpec` (.3, root IT); .4 `AccountDeletionRecoveryIntegrationSpec`, **no tag in source**, runs only under `recovery` | Erasure retention suite 5/5 (A4); .3 retagged (R1); .4 no recorded result |
+| HAL-04 | `AnalyticsErasureRetentionIntegrationSpec` (.1, .2); `HiringGraphQLAccessSpec` (.3, root); `MongoOutboxSubjectReferencesIntegrationSpec` (.3, root IT); .4 `AccountDeletionRecoveryIntegrationSpec` (tagged in A6; runs only under `recovery`) | Erasure retention suite 5/5 (A4); .3 retagged (R1); .4 recovery mode 1/1 (A6, 65 s) |
 | HAL-05 | `KafkaProducerFencerIntegrationSpec` (.1); `KafkaPublisherAccessIntegrationSpec` (.2, default); `AnalyticsErasureRetentionIntegrationSpec` (.3); .4 broker outage in `KafkaPublisherAccessIntegrationSpec` (opt-in) | .2 default case recorded (A5); .4 NOT RUN |
 | HAL-05-FENCE-01 | `AnalyticsErasureRetentionIntegrationSpec` (.1); `KafkaProducerFencerIntegrationSpec` (.2); `MongoOutboxSubjectReferencesIntegrationSpec` (.3, .4, root) | .1 in erasure suite 5/5 (A4) |
 | HAL-05-FENCE-02 | `MongoOutboxSubjectReferencesIntegrationSpec` (.1, .2, root) | Retagged (R1); outbox IT 7/7 (R1) |
@@ -44,9 +44,9 @@ Run the tests with `scripts/run-local-tests.sh analytics '*<SuiteName>'` (integr
 | HAL-09 | `AnalyticsTransformsSpec` (.1) | Retagged; no separate result recorded |
 | HAL-10 | `AnalyticsTransformsSpec` (.1) | Retagged; no separate result recorded |
 | HAL-11 | `HiringAnalyticsBatchKafkaRangeIntegrationSpec` (.1) | 3/3 (A4) |
-| HAL-12 | **No tag in source.** The plan covers it through HAL-04.1 and the existing publisher and replay suites | Gap: no HAL-12 tag exists |
+| HAL-12 | .1–.4 `MongoAnalyticsReportPublisherIntegrationSpec`; .5 `HiringAnalyticsLateFactReplayRecoveryIntegrationSpec`; .6 `HiringAnalyticsStreamingRecoveryIntegrationSpec`; .7–.9 `MongoAnalyticsErasureAdaptersIntegrationSpec` (tagged in A6) | Tagged in A6; HAL-12.7–.9 tagged from test names, reviewer to confirm (A6 note) |
 | HAL-13 | `AnalyticsBatchResourceSpec` (.1) | Retagged; no separate result recorded |
-| HAL-14 | `AnalyticsRuntimeConfigSpec` (.1); grant-expiry evidence points to HCS-08.5 | Retagged; grant-expiry evidence **pending (slice A6)** |
+| HAL-14 | `AnalyticsRuntimeConfigSpec` (.1); grant-expiry evidence points to HCS-08.5 | Retagged; grant-expiry evidence recorded under HCS-08.5 (A6 ownership suite 8/8, 90-second grant, C12) |
 
 Opt-in or out-of-scope cases are reported as not run, not passed (HAV-01): HAL-05.4 (transport recovery and admin outage, gated by their own environment variables), HAL-05-FENCE-06.3 (retired publisher, gated by the ACL evidence variable), HAL-04.4 (recovery mode only), and HAL-05-FENCE-05 (Phase 14).
 
