@@ -104,7 +104,7 @@ final class MongoInterviewLifecycleCodecSpec extends FunSuite {
     )
   }
 
-  test("workflow lifecycle fields decode their defaults and reject combinations the phase cannot hold") {
+  test("DHW-27 workflow lifecycle fields decode their defaults and reject combinations the phase cannot hold") {
     import InterviewWorkflowPhase as Phase
     val codecs = MongoInterviewWorkflowLifecycleCodec
     assertEquals(
@@ -124,7 +124,7 @@ final class MongoInterviewLifecycleCodecSpec extends FunSuite {
     assert(codecs.decode(new Document("generation", Long.box(1L)), Phase.Completed).isLeft)
   }
 
-  test("skipped generations default to zero, must be non-negative integers and fit under the live generation") {
+  test("DHW-27 skipped generations default to zero, must be non-negative integers and fit under the live generation") {
     import InterviewWorkflowPhase as Phase
     val codecs = MongoInterviewWorkflowLifecycleCodec
     assertEquals(codecs.decode(new Document(), Phase.Completed).map(_.skippedGenerations), Right(0))

@@ -28,7 +28,7 @@ class ApplicationLifecycleSpec extends FunSuite {
     assertEquals(result.map(_._2.actorId), Right(recruiterId))
   }
 
-  test("transition matrix allows exactly the documented lifecycle edges") {
+  test("DHW-16 transition matrix allows exactly the documented lifecycle edges") {
     val statuses = List(Created, Accepted, Declined, Interview, Hired, Rejected)
     val expected = Set(
       Created -> Accepted,

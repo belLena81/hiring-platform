@@ -85,6 +85,68 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
     } yield assert(count >= 2)
   }
 
+  test(
+    "DHW-28 a failed cancellation, reschedule, expiry or informational notification record restarts the consumer; only the failed head record is replayed and the others are delivered once in order"
+  ) {
+    assume(enabled, "BLOCKED: isolated Kafka restart proof credentials absent")
+    val workflowId = UUID.randomUUID()
+    val steps = List(
+      InterviewStep.CancelSlot,
+      InterviewStep.LookupCancellation,
+      InterviewStep.HoldReplacement,
+      InterviewStep.LookupReplacementHold,
+      InterviewStep.CommitReschedule,
+      InterviewStep.LookupRescheduleCommit,
+      InterviewStep.ExpireProposal,
+      InterviewStep.NotifyCandidate,
+      InterviewStep.NotifyRecruiter,
+      InterviewStep.LookupNotifyCandidate
+    )
+    val messages = steps.zipWithIndex.map { case (step, index) =>
+      InterviewMessage(
+        UUID.randomUUID(),
+        workflowId,
+        s"lifecycle-restart-$index",
+        step,
+        index.toLong,
+        UUID.randomUUID(),
+        Instant.now().plusSeconds(300),
+        None,
+        Instant.now()
+      )
+    }
+    // The first record of the lifecycle fails once (its durable write is unavailable), then succeeds on replay.
+    val failing = messages.head
+    for {
+      failures <- Ref.of[IO, Int](0)
+      durable <- Ref.of[IO, Vector[(String, InterviewStep)]](Vector.empty)
+      _ <- InterviewKafkaRuntime
+        .resource(config(worker = true), Diagnostics.noop)(durably {
+          case Right(message) if message.workflowId == workflowId =>
+            if (message.stepId == failing.stepId) failures.updateAndGet(_ + 1).flatMap {
+              case 1 => IO.pure(false)
+              case _ => durable.update(_ :+ (message.stepId -> message.step)).as(true)
+            }
+            else durable.update(_ :+ (message.stepId -> message.step)).as(true)
+          case _ => IO.pure(true)
+        })
+        .use { _ =>
+          InterviewKafkaRuntime
+            .resource(config(worker = false), Diagnostics.noop)(_ => RepositoryIO.lift(IO.unit))
+            .use { publisher =>
+              messages.traverse_(publisher.publish) *>
+                awaitDurable(durable, messages.size).timeout(60.seconds)
+            }
+        }
+      count <- failures.get
+      seen <- durable.get
+    } yield {
+      assert(count >= 2, clue(count))
+      // The failed head blocks its partition: no later step is durable before it, and none is lost or reordered.
+      assertEquals(seen, messages.map(m => m.stepId -> m.step).toVector)
+    }
+  }
+
   test("a null record is quarantined before the next valid record is acknowledged") {
     assume(enabled, "BLOCKED: isolated Kafka restart proof credentials absent")
     val workflowId = UUID.randomUUID()
@@ -403,6 +465,11 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
     mongoResource
       .map(_.database)
       .evalTap(database => MongoHiringSetup.initialize(database, Diagnostics.noop, interviewTopics))
+
+  private def awaitDurable[A](seen: Ref[IO, Vector[A]], expected: Int): IO[Unit] =
+    seen.get.flatMap { values =>
+      if (values.size >= expected) IO.unit else IO.sleep(100.millis) *> awaitDurable(seen, expected)
+    }
 
   private def committed(config: KafkaConfig, partition: TopicPartition): IO[Option[Long]] = IO.blocking {
     val properties = new Properties()

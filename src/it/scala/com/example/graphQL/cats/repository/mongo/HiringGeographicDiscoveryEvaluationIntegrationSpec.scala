@@ -162,7 +162,9 @@ final class HiringGeographicDiscoveryEvaluationIntegrationSpec extends MongoInte
                             .append("maxDistance", 1000d)
                             .append(
                               "query",
-                              MongoJobRepository.discoveryFilter(queries.head.filter).append("location.remote", false)
+                              MongoJobRepository
+                                .discoveryFilter(queries.head.filter, None)
+                                .append("location.remote", false)
                             )
                         ),
                         new Document("$sort", new Document("_distanceKm", 1).append("_id", 1)),

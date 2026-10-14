@@ -51,7 +51,7 @@ final class InterviewProposalExpiryIntegrationSpec extends MongoIntegrationSuite
       row.occurredAt
     )
 
-  test("a publisher that gives up on the expiry expires the proposal and leaves nothing to claim again") {
+  test("DHW-20 a publisher that gives up on the expiry expires the proposal and leaves nothing to claim again") {
     scenario { s =>
       for {
         open <- proposed(s)
@@ -79,7 +79,7 @@ final class InterviewProposalExpiryIntegrationSpec extends MongoIntegrationSuite
     }
   }
 
-  test("an expiry row whose give-up resolved the workflow is superseded, not left in repair") {
+  test("DHW-20 an expiry row whose give-up resolved the workflow is superseded, not left in repair") {
     scenario { s =>
       for {
         open <- proposed(s)
@@ -94,7 +94,7 @@ final class InterviewProposalExpiryIntegrationSpec extends MongoIntegrationSuite
     }
   }
 
-  test("an expiry message older than the replay window expires the proposal instead of being quarantined") {
+  test("DHW-20 an expiry message older than the replay window expires the proposal instead of being quarantined") {
     scenario { s =>
       for {
         open <- proposed(s)
@@ -116,7 +116,7 @@ final class InterviewProposalExpiryIntegrationSpec extends MongoIntegrationSuite
     }
   }
 
-  test("an expiry message that arrives too early is acknowledged and its row requeued for its due time") {
+  test("DHW-20 an expiry message that arrives too early is acknowledged and its row requeued for its due time") {
     scenario { s =>
       for {
         open <- proposed(s)
@@ -145,7 +145,9 @@ final class InterviewProposalExpiryIntegrationSpec extends MongoIntegrationSuite
     }
   }
 
-  test("a deferral while the publisher still holds the row requeues it and a later markPublished cannot resurrect it") {
+  test(
+    "DHW-20 a deferral while the publisher still holds the row requeues it and a later markPublished cannot resurrect it"
+  ) {
     scenario { s =>
       for {
         open <- proposed(s)
@@ -179,7 +181,7 @@ final class InterviewProposalExpiryIntegrationSpec extends MongoIntegrationSuite
     }
   }
 
-  test("a proposal whose expiry has not run yet can still be withdrawn after its expiry time") {
+  test("DHW-20 a proposal whose expiry has not run yet can still be withdrawn after its expiry time") {
     scenario { s =>
       for {
         open <- proposed(s)

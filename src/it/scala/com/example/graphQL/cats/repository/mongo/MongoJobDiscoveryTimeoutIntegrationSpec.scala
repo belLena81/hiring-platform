@@ -37,7 +37,7 @@ final class MongoJobDiscoveryTimeoutIntegrationSpec extends MongoJobDiscoveryFix
           .use { _ =>
             for {
               nearby <- repository.nearbyJobs(scope, NearbyJobsQuery(center, 10d, filter), 2).value
-              facets <- repository.jobDiscoveryFacets(scope, JobFacetQuery(filter, None)).value
+              facets <- repository.jobDiscoveryFacets(scope, JobFacetQuery(filter, None), None, None).value
               _ = assertEquals(nearby, Left(RepositoryError.Unavailable))
               _ = assertEquals(facets, Left(RepositoryError.Unavailable))
             } yield ()

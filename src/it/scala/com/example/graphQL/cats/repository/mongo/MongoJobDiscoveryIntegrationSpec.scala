@@ -30,7 +30,7 @@ final class MongoJobDiscoveryIntegrationSpec extends MongoJobDiscoveryFixture {
       for {
         empty <- repository.nearbyJobs(scope, base, 2).value
         beyondEmpty <- repository.nearbyJobs(scope, beyond, 2).value
-        facets <- repository.jobDiscoveryFacets(scope, JobFacetQuery(filter, None)).value
+        facets <- repository.jobDiscoveryFacets(scope, JobFacetQuery(filter, None), None, None).value
         _ = assertEquals(empty, Right(Nil))
         _ = assertEquals(beyondEmpty, Right(Nil))
         _ = assertEquals(facets, Right(JobDiscoveryFacets(Nil, Nil, Nil, Nil, truncated = false)))
@@ -38,7 +38,7 @@ final class MongoJobDiscoveryIntegrationSpec extends MongoJobDiscoveryFixture {
         _ <- users.deleteOne(Filters.eq(MongoFields.Id, scope.userId.value.toString))
         revoked <- repository.nearbyJobs(scope, base, 2).value
         revokedBeyond <- repository.nearbyJobs(scope, beyond, 2).value
-        revokedFacets <- repository.jobDiscoveryFacets(scope, JobFacetQuery(filter, None)).value
+        revokedFacets <- repository.jobDiscoveryFacets(scope, JobFacetQuery(filter, None), None, None).value
         _ = assertEquals(revoked, Left(RepositoryError.AuthorityRevoked))
         _ = assertEquals(revokedBeyond, Left(RepositoryError.AuthorityRevoked))
         _ = assertEquals(revokedFacets, Left(RepositoryError.AuthorityRevoked))
@@ -115,21 +115,28 @@ final class MongoJobDiscoveryIntegrationSpec extends MongoJobDiscoveryFixture {
           Filters.eq("_id", job(1).id.value.toString),
           Updates.set("skills", List("Scala", "Scala", "Skill1").asJava)
         )
-        all <- success(repository.jobDiscoveryFacets(scope, JobFacetQuery(filter, None)))
+        all <- success(repository.jobDiscoveryFacets(scope, JobFacetQuery(filter, None), None, None))
         _ = assertEquals(all.skills.head, JobFacetBucket("Scala", 26L))
         _ = assertEquals(all.skills.size, 20)
         _ = assert(all.truncated)
-        nearby <- success(repository.jobDiscoveryFacets(scope, JobFacetQuery(filter, Some(NearbyRadius(center, 10d)))))
+        nearby <- success(
+          repository.jobDiscoveryFacets(scope, JobFacetQuery(filter, Some(NearbyRadius(center, 10d))), None, None)
+        )
         _ = assertEquals(nearby.skills.head, JobFacetBucket("Scala", 24L))
         _ = assertEquals(nearby.remote, List(JobFacetBucket("false", 24L)))
         filtered <- success(
-          repository.jobDiscoveryFacets(scope, JobFacetQuery(filter.copy(skills = Set("Scala", "Skill1")), None))
+          repository.jobDiscoveryFacets(
+            scope,
+            JobFacetQuery(filter.copy(skills = Set("Scala", "Skill1")), None),
+            None,
+            None
+          )
         )
         _ = assertEquals(filtered.cities, List(JobFacetBucket("Nicosia", 1L)))
         dateFilter = filter.copy(city = Some("Nicosia"), skills = Set("Scala"), createdAfter = Some(now.plusSeconds(1)))
         dated <- success(repository.nearbyJobs(scope, NearbyJobsQuery(center, 10d, dateFilter), 30))
         _ = assertEquals(dated, Nil)
-        datedFacets <- success(repository.jobDiscoveryFacets(scope, JobFacetQuery(dateFilter, None)))
+        datedFacets <- success(repository.jobDiscoveryFacets(scope, JobFacetQuery(dateFilter, None), None, None))
         _ = assertEquals(datedFacets.cities, Nil)
       } yield ()
     }
@@ -189,7 +196,7 @@ final class MongoJobDiscoveryIntegrationSpec extends MongoJobDiscoveryFixture {
           )
           hits <- success(repository.nearbyJobs(scope, NearbyJobsQuery(origin, radius, filter), 10))
           facets <- success(
-            repository.jobDiscoveryFacets(scope, JobFacetQuery(filter, Some(NearbyRadius(origin, radius))))
+            repository.jobDiscoveryFacets(scope, JobFacetQuery(filter, Some(NearbyRadius(origin, radius))), None, None)
           )
           _ = assertEquals(hits.map(_.job.id), values.take(2).map(_.id))
           _ = assertEquals(facets.skills.find(_.value == "Scala").map(_.count), Some(hits.size.toLong))
@@ -230,7 +237,9 @@ final class MongoJobDiscoveryIntegrationSpec extends MongoJobDiscoveryFixture {
           MongoRepositoryTestSupport.insertOne(fixture.database, MongoCollections.Jobs, MongoHiringCodecs.job(value))
         )
         hits <- pages(None, 6)
-        facets <- success(repository.jobDiscoveryFacets(scope, JobFacetQuery(filter, Some(NearbyRadius(center, 10d)))))
+        facets <- success(
+          repository.jobDiscoveryFacets(scope, JobFacetQuery(filter, Some(NearbyRadius(center, 10d))), None, None)
+        )
         _ = assertEquals(hits.map(_.job.id), values.map(_.id))
         _ = assert(hits.forall(_.distanceKm == 0d))
         _ = assertEquals(facets.skills.find(_.value == "Scala").map(_.count), Some(24L))

@@ -27,6 +27,8 @@ enum ConfigError(val key: String, val paths: Set[String] = Set.empty) {
   case InvalidDiscoveryMaxTime extends ConfigError("DISCOVERY_MAX_TIME_MILLIS", Set("mongo.discovery.max-time-millis"))
   case InvalidDiscoveryPermits extends ConfigError("DISCOVERY_PERMITS", Set("mongo.discovery.permits"))
   case InvalidDiscoveryMaxRoots extends ConfigError("DISCOVERY_MAX_ROOTS", Set("mongo.discovery.max-roots"))
+  case InvalidDiscoveryLexicalFacetMatchLimit
+      extends ConfigError("DISCOVERY_LEXICAL_FACET_MATCH_LIMIT", Set("mongo.discovery.lexical-facet-match-limit"))
   case InvalidDiscoveryDeadline extends ConfigError("DISCOVERY_DEADLINE")
   case InvalidMaskSensitive extends ConfigError("LOG_MASK_SENSITIVE", Set("logging.mask-sensitive"))
   case InvalidAdminSeed
@@ -338,6 +340,7 @@ type PartitionConcurrency = Int :| Interval.Closed[1, 64]
 type DiscoveryMaxTimeMs = Int :| GreaterEqual[100]
 type DiscoveryPermits = Int :| Interval.Closed[1, 64]
 type DiscoveryMaxRoots = Int :| Interval.Closed[1, 64]
+type DiscoveryLexicalFacetMatchLimit = Int :| Interval.Closed[1, 5000]
 type EmbeddingDurableRetryAttempts = Int :| Interval.Closed[1, 100]
 type EmbeddingDurableRetryMs = Int :| Interval.Closed[100, 3600000]
 type EmbeddingWorkerRestartDelayMs = Int :| Interval.Closed[100, 60000]
@@ -386,7 +389,12 @@ final case class InterviewRuntimeConfig(
   def proposalTtl: java.time.Duration = java.time.Duration.ofSeconds(proposalTtlSeconds.toLong)
 }
 
-final case class DiscoveryConfig(maxTimeMillis: Int = 2000, permits: Int = 4, maxRoots: Int = 4)
+final case class DiscoveryConfig(
+    maxTimeMillis: Int = 2000,
+    permits: Int = 4,
+    maxRoots: Int = 4,
+    lexicalFacetMatchLimit: Int = 1000
+)
 
 final case class AdminSeedConfig(
     enabled: Boolean = false,

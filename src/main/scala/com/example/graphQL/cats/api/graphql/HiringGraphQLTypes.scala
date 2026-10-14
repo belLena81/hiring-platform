@@ -119,6 +119,8 @@ private[graphql] object HiringGraphQLTypes {
         simple("count", LongType)(_.count)
       )
     )
+  lazy val facetCoverageType: EnumType[String] =
+    HiringGraphQLInputs.enumType("FacetCoverage", List("ALL_MATCHES", "TOP_MATCHES"))
   lazy val jobDiscoveryFacetsType
       : ObjectType[RequestContext, com.example.graphQL.cats.service.search.JobDiscoveryFacets] =
     ObjectType(
@@ -128,7 +130,23 @@ private[graphql] object HiringGraphQLTypes {
         simple("countries", ListType(jobFacetBucketType))(_.countries),
         simple("cities", ListType(jobFacetBucketType))(_.cities),
         simple("remote", ListType(jobFacetBucketType))(_.remote),
-        simple("truncated", BooleanType)(_.truncated)
+        simple("truncated", BooleanType)(_.truncated),
+        Field(
+          "coverage",
+          facetCoverageType,
+          resolve = _.value.coverage match {
+            case FacetCoverage.AllMatches    => "ALL_MATCHES"
+            case FacetCoverage.TopMatches(_) => "TOP_MATCHES"
+          }
+        ),
+        Field(
+          "coverageLimit",
+          OptionType(IntType),
+          resolve = _.value.coverage match {
+            case FacetCoverage.AllMatches        => None
+            case FacetCoverage.TopMatches(limit) => Some(limit)
+          }
+        )
       )
     )
   lazy val candidateProfileType: ObjectType[RequestContext, CandidateProfileView] = ObjectType(

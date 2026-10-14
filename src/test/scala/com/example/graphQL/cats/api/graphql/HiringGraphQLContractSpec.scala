@@ -48,7 +48,9 @@ final class HiringGraphQLContractSpec extends CatsEffectSuite {
     }
   }
 
-  test("interview cancellation operations match the active public schema, including every action's DomainError") {
+  test(
+    "DHW-31 interview cancellation operations match the active public schema, including every action's DomainError"
+  ) {
     fixture("interview-cancellation.graphql").map { operation =>
       val document = sangria.parser.QueryParser.parse(operation).get
       val violations =
@@ -98,7 +100,7 @@ final class HiringGraphQLContractSpec extends CatsEffectSuite {
     )
   }
 
-  test("served SDL matches the deterministic contract fixture") {
+  test("DHW-31 served SDL matches the deterministic contract fixture") {
     fixture("hiring.graphql").map(expected => assertEquals(HiringGraphQLSchema.sdl, expected))
   }
 

@@ -290,4 +290,100 @@ final class HiringGraphQLDiscoveryContractSpec extends CatsEffectSuite {
         fixture.calls.get.map(calls => assertEquals(calls, JobDiscoveryTestSupport.Calls()))
     }
   }
+
+  private val facetFields = "skills { value count } truncated coverage coverageLimit"
+  private def lexicalJobs = (1 to 4).toList.map(n =>
+    ServiceFixtures.openJob.copy(
+      id = com.example.graphQL.cats.domain.model.Identifiers.JobId(new java.util.UUID(0L, n.toLong)),
+      skills = Set(s"Skill$n")
+    )
+  )
+  private def lexicalScores = lexicalJobs.map(job => job.id -> (10d - job.id.value.getLeastSignificantBits)).toMap
+
+  test("HDQ-12.11 the SDL fixture declares the query argument, FacetCoverage and both coverage fields") {
+    val sdl = scala.io.Source.fromResource("graphql/hiring.graphql").mkString
+    assert(
+      sdl.contains(
+        "jobDiscoveryFacets(query: String, filter: NearbyJobsFilter, center: GeoPointInput, radiusKm: Float): JobDiscoveryFacets!"
+      )
+    )
+    assert(sdl.contains("enum FacetCoverage {\n  ALL_MATCHES\n  TOP_MATCHES\n}"))
+    assert(sdl.contains("  truncated: Boolean!\n  coverage: FacetCoverage!\n  coverageLimit: Int\n"))
+  }
+
+  test("HDQ-12.11 the facet operation fixture validates against the active schema") {
+    val operation = scala.io.Source.fromResource("graphql/job-discovery-facets.graphql").mkString
+    val document = QueryParser.parse(operation).fold(error => fail(error.getMessage), identity)
+    assertEquals(
+      QueryValidator.default.validateQuery(HiringGraphQLSchema.schema, document, Map.empty, None).toList,
+      Nil
+    )
+  }
+
+  test("HDQ-12.11 and 12.12 facets execute with and without query and label coverage") {
+    val lexical = s"query($$q: String) { jobDiscoveryFacets(query: $$q) { $facetFields } }"
+    for {
+      matcher <- JobDiscoveryTestSupport.matcher(lexicalScores)
+      fixture <- JobDiscoveryTestSupport.fixture(List(candidate), lexicalJobs, Some(matcher), 3)
+      structured <- execute(s"query { jobDiscoveryFacets { $facetFields } }", Json.obj(), fixture)
+      topped <- execute(lexical, Json.obj("q" -> Json.fromString("scala")), fixture)
+      calls <- matcher.calls.get
+    } yield {
+      def facets(result: Json) = result.hcursor.downField("data").downField("jobDiscoveryFacets")
+      assert(!structured.hcursor.downField("errors").succeeded, structured.noSpaces)
+      assertEquals(facets(structured).get[String]("coverage"), Right("ALL_MATCHES"))
+      assertEquals(facets(structured).downField("coverageLimit").focus, Some(Json.Null))
+      assertEquals(facets(structured).downField("skills").values.map(_.size), Some(4))
+      assertEquals(facets(topped).get[String]("coverage"), Right("TOP_MATCHES"))
+      assertEquals(facets(topped).get[Int]("coverageLimit"), Right(3))
+      assertEquals(facets(topped).downField("skills").values.map(_.size), Some(3))
+      assertEquals(calls.map(_._1), List("scala"))
+    }
+  }
+
+  test("HDQ-12.11 executed query validation, forbidden and unavailable errors use stable sanitized codes") {
+    val operation = s"query($$q: String) { jobDiscoveryFacets(query: $$q) { truncated } }"
+    def run(
+        user: com.example.graphQL.cats.domain.model.User,
+        text: String,
+        matcher: IO[JobDiscoveryTestSupport.FakeLexicalMatcher]
+    ) =
+      for {
+        m <- matcher
+        fixture <- JobDiscoveryTestSupport.fixture(List(user), lexicalJobs, Some(m))
+        result <- execute(
+          operation,
+          Json.obj("q" -> Json.fromString(text)),
+          fixture,
+          Some(ActorContext(user.id, user.role))
+        )
+        calls <- m.calls.get
+      } yield (result, calls)
+    for {
+      blank <- run(candidate, "  ", JobDiscoveryTestSupport.matcher(lexicalScores))
+      tooLarge <- run(candidate, "a" * 2049, JobDiscoveryTestSupport.matcher(lexicalScores))
+      forbidden <- run(ServiceFixtures.recruiter, "scala", JobDiscoveryTestSupport.matcher(lexicalScores))
+      down <- run(candidate, "scala", JobDiscoveryTestSupport.matcher(lexicalScores, Left(RepositoryError.Unavailable)))
+    } yield {
+      assertEquals(errorCode(blank._1), Right("INVALID_SEARCH_FILTER"))
+      assertEquals(errorCode(tooLarge._1), Right("INPUT_TOO_LARGE"))
+      assertEquals(errorCode(forbidden._1), Right("FORBIDDEN"))
+      assertEquals(List(blank, tooLarge, forbidden).map(_._2), List(Nil, Nil, Nil))
+      assertEquals(errorCode(down._1), Right("FACETS_UNAVAILABLE"))
+      assertEquals(
+        down._1.hcursor.downField("errors").downArray.downField("extensions").get[String]("reason"),
+        Right("SEARCH_UNAVAILABLE")
+      )
+      assertEquals(errorMessage(down._1), Right("Facets unavailable"))
+      assert(!down._1.noSpaces.contains("scala"), "query text must not echo in errors")
+    }
+  }
+
+  test("HDQ-12.8 a lexical-query request without a configured matcher fails closed") {
+    val operation = "query { jobDiscoveryFacets(query: \"scala\") { truncated } }"
+    JobDiscoveryTestSupport.fixture(List(candidate), lexicalJobs).flatMap { fixture =>
+      execute(operation, Json.obj(), fixture)
+        .map(result => assertEquals(errorCode(result), Right("FACETS_UNAVAILABLE")))
+    }
+  }
 }

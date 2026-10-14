@@ -28,13 +28,19 @@ private object HttpMongoReaders {
         .leftMap(_ => CannotConvert("[redacted]", "MongoUri", "invalid"))
     )
   given ConfigReader[DiscoveryConfig] =
-    ConfigReader.forProduct3("max-time-millis", "permits", "max-roots")(
-      (maxTime: Option[DiscoveryMaxTimeMs], permits: Option[DiscoveryPermits], roots: Option[DiscoveryMaxRoots]) =>
+    ConfigReader.forProduct4("max-time-millis", "permits", "max-roots", "lexical-facet-match-limit")(
+      (
+          maxTime: Option[DiscoveryMaxTimeMs],
+          permits: Option[DiscoveryPermits],
+          roots: Option[DiscoveryMaxRoots],
+          facetLimit: Option[DiscoveryLexicalFacetMatchLimit]
+      ) =>
         val defaults = DiscoveryConfig()
         DiscoveryConfig(
           maxTime.getOrElse(defaults.maxTimeMillis),
           permits.getOrElse(defaults.permits),
-          roots.getOrElse(defaults.maxRoots)
+          roots.getOrElse(defaults.maxRoots),
+          facetLimit.getOrElse(defaults.lexicalFacetMatchLimit)
         )
     )
   given ConfigReader[TrustedProxyConfig] =

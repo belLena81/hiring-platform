@@ -520,7 +520,7 @@ class InterviewCancellationSpec extends FunSuite {
     assertEquals(rejected.map(_.commands), Left(InterviewWorkflowError.InterviewAlreadyCancelled))
   }
 
-  test("cancellation feedback is a fixed, non-blank, initiator-specific text without identifiers") {
+  test("DHW-16 cancellation feedback is a fixed, non-blank, initiator-specific text without identifiers") {
     val texts = InterviewCancellationInitiator.values.toList.map(InterviewCancellationFeedback.text)
     assertEquals(texts.distinct.size, InterviewCancellationInitiator.values.length)
     texts.foreach { text =>

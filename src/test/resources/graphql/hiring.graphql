@@ -266,6 +266,11 @@ enum EmbeddingRepairState {
   FAILED
 }
 
+enum FacetCoverage {
+  ALL_MATCHES
+  TOP_MATCHES
+}
+
 type GeoPoint {
   latitude: Float!
   longitude: Float!
@@ -347,6 +352,8 @@ type JobDiscoveryFacets {
   cities: [JobFacetBucket!]!
   remote: [JobFacetBucket!]!
   truncated: Boolean!
+  coverage: FacetCoverage!
+  coverageLimit: Int
 }
 
 type JobEdge {
@@ -472,7 +479,7 @@ type Query {
   users(first: Int!, after: String, role: UserRole, status: UserStatus): UserConnection!
   jobs(first: Int!, after: String, city: String, skills: [String!], createdAfter: Instant, searchId: UUID): JobConnection!
   nearbyJobs(center: GeoPointInput!, radiusKm: Float!, filter: NearbyJobsFilter, first: Int!, after: String): NearbyJobsConnection!
-  jobDiscoveryFacets(filter: NearbyJobsFilter, center: GeoPointInput, radiusKm: Float): JobDiscoveryFacets!
+  jobDiscoveryFacets(query: String, filter: NearbyJobsFilter, center: GeoPointInput, radiusKm: Float): JobDiscoveryFacets!
   semanticJobSearch(query: String!, filter: JobFilter, first: Int!, searchId: UUID): RankedJobResults!
   recommendedJobs(first: Int!, searchId: UUID): RankedJobResults!
   candidateMatches(jobId: JobID!, query: String, filter: CandidateMatchFilter, first: Int!, searchId: UUID): RankedCandidateResults!

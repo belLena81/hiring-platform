@@ -50,6 +50,7 @@ private[graphql] object GraphQLFailureCatalog {
     case InvalidSearchFilter extends FailureMetadata("INVALID_SEARCH_FILTER", exceptional = false)
     case ProviderUnavailable extends FailureMetadata("PROVIDER_UNAVAILABLE", exceptional = true)
     case VectorSearchUnavailable extends FailureMetadata("VECTOR_SEARCH_UNAVAILABLE", exceptional = true)
+    case FacetsUnavailable extends FailureMetadata("FACETS_UNAVAILABLE", exceptional = true)
     case ValidationFailed extends FailureMetadata("VALIDATION_FAILED", exceptional = false)
     case AnalyticsUnavailable extends FailureMetadata("ANALYTICS_UNAVAILABLE", exceptional = true)
     case AnalyticsInvalidPeriod extends FailureMetadata("INVALID_ANALYTICS_PERIOD", exceptional = false)
@@ -235,6 +236,13 @@ private[graphql] object GraphQLFailureCatalog {
         failure(FailureMetadata.ProviderUnavailable, "Embedding provider unavailable")
       case SearchError.VectorSearchUnavailable =>
         failure(FailureMetadata.VectorSearchUnavailable, "Vector search unavailable")
+      case SearchError.FacetsUnavailable =>
+        GraphQLFailure(
+          FailureMetadata.FacetsUnavailable.code,
+          "Facets unavailable",
+          FailureMetadata.FacetsUnavailable.exceptional,
+          Some("SEARCH_UNAVAILABLE")
+        )
     }
 
   /** A short password as the only violation is `INVALID_PASSWORD`; combined with other violations the failure stays

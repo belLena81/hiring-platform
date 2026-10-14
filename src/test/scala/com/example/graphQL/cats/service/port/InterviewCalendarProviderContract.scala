@@ -53,7 +53,7 @@ trait InterviewCalendarProviderContract { self: CatsEffectSuite =>
       None
     )
 
-  test("reserve is idempotent and lookup finds the reservation by its reserve key and its cancel key") {
+  test("DHW-25 reserve is idempotent and lookup finds the reservation by its reserve key and its cancel key") {
     withSubject { subject =>
       for {
         workflow <- subject.newWorkflow(user(), user(), slot(0))
@@ -74,7 +74,7 @@ trait InterviewCalendarProviderContract { self: CatsEffectSuite =>
     }
   }
 
-  test("cancel is confirmed, idempotent and visible through lookup") {
+  test("DHW-25 cancel is confirmed, idempotent and visible through lookup") {
     withSubject { subject =>
       for {
         arranged <- subject.newWorkflow(user(), user(), slot(0))
@@ -93,7 +93,7 @@ trait InterviewCalendarProviderContract { self: CatsEffectSuite =>
     }
   }
 
-  test("cancelling a reservation that was never made reports an unknown reservation") {
+  test("DHW-25 cancelling a reservation that was never made reports an unknown reservation") {
     withSubject { subject =>
       for {
         workflow <- subject.newWorkflow(user(), user(), slot(0))
@@ -105,7 +105,7 @@ trait InterviewCalendarProviderContract { self: CatsEffectSuite =>
   }
 
   test(
-    "overlapping holds of another workflow conflict, adjacent half-open intervals do not, and cancel frees the slot"
+    "DHW-25 overlapping holds of another workflow conflict, adjacent half-open intervals do not, and cancel frees the slot"
   ) {
     withSubject { subject =>
       val candidate = user()
@@ -129,7 +129,9 @@ trait InterviewCalendarProviderContract { self: CatsEffectSuite =>
     }
   }
 
-  test("a workflow's own holds never conflict and the old reservation is cancelled after the replacement is held") {
+  test(
+    "DHW-25 a workflow's own holds never conflict and the old reservation is cancelled after the replacement is held"
+  ) {
     withSubject { subject =>
       for {
         original <- subject.newWorkflow(user(), user(), slot(0, 2))

@@ -1,8 +1,8 @@
 package com.example.graphQL.cats.service.search
 
-import cats.data.ValidatedNec
+import cats.data.{Validated, ValidatedNec}
 import cats.syntax.all.*
-import com.example.graphQL.cats.domain.model.{FieldLimits, GeoPoint}
+import com.example.graphQL.cats.domain.model.{FieldLimits, GeoPoint, SearchableText}
 import com.example.graphQL.cats.service.SearchError
 
 /** Pure normalization shared by discovery requests, cursor binding and service calls. */
@@ -38,9 +38,20 @@ object JobDiscoveryValidation {
         .as(normalized)
     }
 
+  /** Lexical query text is trimmed; blank is invalid (never absent) and the length is bounded before any I/O. */
+  def queryText(value: Option[String]): ValidatedNec[SearchError, Option[String]] =
+    value.traverse[[A] =>> ValidatedNec[SearchError, A], String] { raw =>
+      val text = raw.trim
+      if (text.isEmpty) Validated.invalidNec(SearchError.InvalidFilter("query"))
+      else if (text.length > SearchableText.QueryMaxChars)
+        Validated.invalidNec(SearchError.InputTooLarge("query", SearchableText.QueryMaxChars))
+      else Validated.validNec(text)
+    }
+
   def facets(value: JobFacetQuery): ValidatedNec[SearchError, JobFacetQuery] =
     (
       Either.cond(value.radius.forall(_.isValid), (), SearchError.InvalidFilter("radius")).toValidatedNec,
-      filter(value.filter)
-    ).mapN((_, normalizedFilter) => value.copy(filter = normalizedFilter))
+      filter(value.filter),
+      queryText(value.text)
+    ).mapN((_, normalizedFilter, text) => value.copy(filter = normalizedFilter, text = text))
 }

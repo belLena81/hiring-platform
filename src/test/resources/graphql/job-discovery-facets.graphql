@@ -1,0 +1,22 @@
+query StructuredFacets($filter: NearbyJobsFilter) {
+  jobDiscoveryFacets(filter: $filter) {
+    skills { value count }
+    countries { value count }
+    cities { value count }
+    remote { value count }
+    truncated
+    coverage
+    coverageLimit
+  }
+}
+
+query LexicalQueryFacets($query: String, $filter: NearbyJobsFilter, $center: GeoPointInput, $radiusKm: Float) {
+  jobDiscoveryFacets(query: $query, filter: $filter, center: $center, radiusKm: $radiusKm) {
+    skills { value count }
+    cities { value count }
+    remote { value count }
+    truncated
+    coverage
+    coverageLimit
+  }
+}

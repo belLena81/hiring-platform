@@ -1454,8 +1454,10 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
     ) = delegate.nearbyJobs(scope, query, limit)
     override def jobDiscoveryFacets(
         scope: com.example.graphQL.cats.service.read.HiringReadScope,
-        query: JobFacetQuery
-    ) = delegate.jobDiscoveryFacets(scope, query)
+        query: JobFacetQuery,
+        matchedIds: Option[Set[Identifiers.JobId]],
+        maxTime: Option[scala.concurrent.duration.FiniteDuration]
+    ) = delegate.jobDiscoveryFacets(scope, query, matchedIds, maxTime)
 
     override def findAll(page: JobPageRequest): RepositoryIO[List[Job]] = delegate.findAll(page)
 

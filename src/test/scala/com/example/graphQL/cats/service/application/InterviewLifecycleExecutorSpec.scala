@@ -382,7 +382,7 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
     }
   }
 
-  test("a notification receipt lookup is a read: found, absent or unknown") {
+  test("DHW-24 a notification receipt lookup is a read: found, absent or unknown") {
     val lookup =
       C.LookupNotificationReceipt(InterviewNotificationKind.Cancelled, InterviewParticipant.Candidate, cancelledKey)
     val receipt = receiptFor(InterviewNotificationKind.Cancelled, InterviewParticipant.Candidate, cancelledKey)

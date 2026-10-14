@@ -42,8 +42,14 @@ private[graphql] object HiringGraphQLSchemaAssembly {
     (_, args, child) => 1d + args.arg(firstArgument) * child
   private val expensivePageComplexity: (RequestContext, Args, Double) => Double =
     (_, args, child) => 100d + args.arg(firstArgument) * (1d + child)
+  // A lexical-query facet request runs `$search` plus an aggregation, so it costs at least a semanticJobSearch page.
+  // 25 is the page-size equivalent: 100 + 25 * (1 + child) is at least a semanticJobSearch(first: 25) page, close to
+  // the default page, and with the typical facet selection stays well under MaxQueryComplexity (1000).
+  private val LexicalFacetPageEquivalent = 25d
   private val facetComplexity: (RequestContext, Args, Double) => Double =
-    (_, _, child) => 100d + child
+    (_, args, child) =>
+      if (args.arg(optionalFacetQueryArgument).isDefined) 100d + LexicalFacetPageEquivalent * (1d + child)
+      else 100d + child
   private val expensiveRoots =
     Set(
       "nearbyJobs",
@@ -132,7 +138,7 @@ private[graphql] object HiringGraphQLSchemaAssembly {
       resultField(
         "jobDiscoveryFacets",
         jobDiscoveryFacetsType,
-        nearbyFilterArgument :: optionalNearbyCenterArgument :: optionalRadiusKmArgument :: Nil,
+        optionalFacetQueryArgument :: nearbyFilterArgument :: optionalNearbyCenterArgument :: optionalRadiusKmArgument :: Nil,
         complexity = Some(facetComplexity)
       )(jobDiscoveryFacets),
       resultField(

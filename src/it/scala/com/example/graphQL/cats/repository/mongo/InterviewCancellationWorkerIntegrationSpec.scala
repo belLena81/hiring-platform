@@ -27,7 +27,9 @@ final class InterviewCancellationWorkerIntegrationSpec extends MongoIntegrationS
 
   private val key = InterviewWorkflow.cancellationKey(_, 0)
 
-  test("the slot is released only after the provider confirms, then both participants are told and the workflow ends") {
+  test(
+    "DHW-17 the slot is released only after the provider confirms, then both participants are told and the workflow ends"
+  ) {
     scenario { s =>
       for {
         _ <- cancel(s)
@@ -65,7 +67,7 @@ final class InterviewCancellationWorkerIntegrationSpec extends MongoIntegrationS
     }
   }
 
-  test("a crash after the cancellation commit and before any provider call resumes on restart") {
+  test("DHW-18 a crash after the cancellation commit and before any provider call resumes on restart") {
     scenario { s =>
       for {
         _ <- cancel(s)
@@ -89,7 +91,9 @@ final class InterviewCancellationWorkerIntegrationSpec extends MongoIntegrationS
     }
   }
 
-  test("a crash after the provider confirmed the cancel and before the workflow records it converges with one effect") {
+  test(
+    "DHW-18 a crash after the provider confirmed the cancel and before the workflow records it converges with one effect"
+  ) {
     scenario { s =>
       for {
         _ <- cancel(s)
@@ -118,7 +122,7 @@ final class InterviewCancellationWorkerIntegrationSpec extends MongoIntegrationS
     }
   }
 
-  test("an unknown cancel outcome is answered by a lookup and a retry of the same key, never by an assumption") {
+  test("DHW-18 an unknown cancel outcome is answered by a lookup and a retry of the same key, never by an assumption") {
     scenario { s =>
       for {
         _ <- cancel(s)
@@ -138,7 +142,9 @@ final class InterviewCancellationWorkerIntegrationSpec extends MongoIntegrationS
     }
   }
 
-  test("a permanently failing provider leaves visible repair with the application rejected and the slot still held") {
+  test(
+    "DHW-18 a permanently failing provider leaves visible repair with the application rejected and the slot still held"
+  ) {
     scenario { s =>
       for {
         _ <- cancel(s)
@@ -156,7 +162,32 @@ final class InterviewCancellationWorkerIntegrationSpec extends MongoIntegrationS
     }
   }
 
-  test("a crash after the provider recorded a notification is answered by the lookup, not by a second delivery") {
+  test(
+    "DHW-18 a provider that reports an unknown reservation on cancel fails closed in visible repair, with one call and no notification"
+  ) {
+    scenario { s =>
+      for {
+        _ <- cancel(s)
+        _ <- s.faults.cancelUnknownReservation.set(true)
+        end <- s.drive(List(s.worker()), _.phase == InterviewWorkflowPhase.RepairRequired)
+        status <- s.applicationStatus
+        held <- s.isHeld(0)
+        calls <- s.faults.cancelCalls.get
+        delivered <- s.faults.deliveries.get
+      } yield {
+        assertEquals(end._1.phase, InterviewWorkflowPhase.RepairRequired)
+        assertEquals(end._1.repairOrigin, Some(InterviewWorkflowPhase.CancelPending))
+        assertEquals(status, Some("Rejected"))
+        assert(held, "an unconfirmed cancel is never treated as a released slot")
+        assertEquals(calls, List(key(s.id)), "a definitive answer is not retried or looked up in a loop")
+        assertEquals(delivered, Nil)
+      }
+    }
+  }
+
+  test(
+    "DHW-24 a crash after the provider recorded a notification is answered by the lookup, not by a second delivery"
+  ) {
     scenario { s =>
       for {
         _ <- cancel(s)
@@ -179,7 +210,9 @@ final class InterviewCancellationWorkerIntegrationSpec extends MongoIntegrationS
     }
   }
 
-  test("a crash before the provider recorded a notification sends it again: a duplicate attempt, never a silent loss") {
+  test(
+    "DHW-24 a crash before the provider recorded a notification sends it again: a duplicate attempt, never a silent loss"
+  ) {
     scenario { s =>
       for {
         _ <- cancel(s)

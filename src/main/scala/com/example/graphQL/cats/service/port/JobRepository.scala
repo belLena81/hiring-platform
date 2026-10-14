@@ -21,7 +21,16 @@ trait JobRepository {
   def findSubmissionSnapshot(id: JobId): RepositoryIO[Option[JobSubmissionSnapshot]]
   def findOpen(filter: JobSearchFilter, page: JobPageRequest): RepositoryIO[List[Job]]
   def nearbyJobs(scope: HiringReadScope, query: NearbyJobsQuery, limit: Int): RepositoryIO[List[NearbyJob]]
-  def jobDiscoveryFacets(scope: HiringReadScope, query: JobFacetQuery): RepositoryIO[JobDiscoveryFacets]
+
+  /** `matchedIds`, when present, restricts the counted jobs to that set in addition to the eligibility predicate.
+    * `maxTime`, when present, is the remaining shared time budget and may only shorten the configured query deadline.
+    */
+  def jobDiscoveryFacets(
+      scope: HiringReadScope,
+      query: JobFacetQuery,
+      matchedIds: Option[Set[JobId]],
+      maxTime: Option[scala.concurrent.duration.FiniteDuration]
+  ): RepositoryIO[JobDiscoveryFacets]
   def findAll(page: JobPageRequest): RepositoryIO[List[Job]]
   def findByRecruiter(recruiterId: UserId, page: JobPageRequest): RepositoryIO[List[Job]]
   def createWithEvents(

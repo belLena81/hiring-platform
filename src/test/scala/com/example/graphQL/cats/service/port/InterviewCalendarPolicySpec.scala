@@ -7,7 +7,7 @@ import munit.FunSuite
 final class InterviewCalendarPolicySpec extends FunSuite {
   private val id = workflowId
 
-  test("reserve and cancel keys map to their generation and to the reservation they address") {
+  test("DHW-25 reserve and cancel keys map to their generation and to the reservation they address") {
     assertEquals(InterviewCalendarKeys.reservationGeneration(id, InterviewWorkflow.reservationKey(id, 0)), Some(0))
     assertEquals(InterviewCalendarKeys.reservationGeneration(id, InterviewWorkflow.reservationKey(id, 3)), Some(3))
     assertEquals(InterviewCalendarKeys.cancellationGeneration(id, InterviewWorkflow.cancellationKey(id, 0)), Some(0))
@@ -18,7 +18,7 @@ final class InterviewCalendarPolicySpec extends FunSuite {
     )
   }
 
-  test("non-canonical, foreign and malformed keys address nothing") {
+  test("DHW-25 non-canonical, foreign and malformed keys address nothing") {
     val other = InterviewWorkflowId(java.util.UUID.randomUUID())
     List(
       s"${id.value}:reserve:g0",

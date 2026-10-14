@@ -949,6 +949,28 @@ class AppConfigSpec extends FunSuite {
     )
   }
 
+  test("HDQ-12 lexical facet match limit defaults to 1000 and is validated to 1..5000") {
+    assertEquals(
+      AppConfigFixtures.fromConfig(defaultConfig, Map.empty).map(_.discovery.lexicalFacetMatchLimit),
+      Right(1000)
+    )
+    List(1, 5000).foreach { value =>
+      assertEquals(
+        AppConfigFixtures
+          .fromConfig(defaultConfig + s"mongo.discovery.lexical-facet-match-limit = $value\n", Map.empty)
+          .map(_.discovery.lexicalFacetMatchLimit),
+        Right(value)
+      )
+    }
+    List("0", "5001", "-1", "\"many\"").foreach { value =>
+      assertContainsError(
+        AppConfigFixtures
+          .fromConfig(defaultConfig + s"mongo.discovery.lexical-facet-match-limit = $value\n", Map.empty),
+        ConfigError.InvalidDiscoveryLexicalFacetMatchLimit
+      )
+    }
+  }
+
   test("durable embedding settings name each violated field and the retry window") {
     assertEquals(
       enabledVectorSearch().embedding.durableRetryAttempts,

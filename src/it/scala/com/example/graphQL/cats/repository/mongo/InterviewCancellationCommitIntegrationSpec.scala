@@ -142,7 +142,7 @@ final class InterviewCancellationCommitIntegrationSpec extends MongoIntegrationS
     }
 
   test(
-    "candidate cancellation rejects the application, appends generated history and records the provider intent atomically"
+    "DHW-16 candidate cancellation rejects the application, appends generated history and records the provider intent atomically"
   ) {
     arranged() { a =>
       val origin = actor(UserRole.Candidate, a.workflow.candidateId)
@@ -180,7 +180,9 @@ final class InterviewCancellationCommitIntegrationSpec extends MongoIntegrationS
     }
   }
 
-  test("recruiter cancellation records the recruiter text and rejects initiator and role mismatches without writes") {
+  test(
+    "DHW-16 recruiter cancellation records the recruiter text and rejects initiator and role mismatches without writes"
+  ) {
     arranged() { a =>
       for {
         mismatch <- apply(
@@ -207,7 +209,9 @@ final class InterviewCancellationCommitIntegrationSpec extends MongoIntegrationS
     }
   }
 
-  test("a non-participant, a stale revision, a started interview and a non-Interview application write nothing") {
+  test(
+    "DHW-16 a non-participant, a stale revision, a started interview and a non-Interview application write nothing"
+  ) {
     arranged() { a =>
       val cancel = InterviewLifecycleEvent.Cancel(InterviewCancellationInitiator.Candidate, now)
       for {
@@ -244,7 +248,7 @@ final class InterviewCancellationCommitIntegrationSpec extends MongoIntegrationS
     }
   }
 
-  test("a failure after the application and workflow writes rolls the whole cancellation back") {
+  test("DHW-16 a failure after the application and workflow writes rolls the whole cancellation back") {
     arranged() { a =>
       val eventId = UUID.nameUUIDFromBytes(s"${a.workflow.id.value}:cancel:status".getBytes("UTF-8"))
       val collision = ApplicationEvent(
@@ -278,7 +282,7 @@ final class InterviewCancellationCommitIntegrationSpec extends MongoIntegrationS
   }
 
   test(
-    "a proposal persists its state, expiry intent and notification, leaves retention and is cleared by cancellation"
+    "DHW-20 a proposal persists its state, expiry intent and notification, leaves retention and is cleared by cancellation"
   ) {
     arranged() { a =>
       val proposer = actor(UserRole.Recruiter, a.workflow.recruiterId, input = "propose")
@@ -332,7 +336,7 @@ final class InterviewCancellationCommitIntegrationSpec extends MongoIntegrationS
     }
   }
 
-  test("a reused request key with different input is a conflict and writes nothing") {
+  test("DHW-23 a reused request key with different input is a conflict and writes nothing") {
     arranged() { a =>
       val key = UUID.randomUUID()
       for {
@@ -373,7 +377,9 @@ final class InterviewCancellationCommitIntegrationSpec extends MongoIntegrationS
       expected
     )
 
-  test("evidence of a settled workflow outlives the interview and every return to Completed keeps the dated expiry") {
+  test(
+    "retention: evidence of a settled workflow outlives the interview and every return to Completed keeps the dated expiry"
+  ) {
     arranged() { a =>
       val candidate = a.workflow.candidateId
       val recruiter = a.workflow.recruiterId
@@ -422,7 +428,7 @@ final class InterviewCancellationCommitIntegrationSpec extends MongoIntegrationS
     }
   }
 
-  test("an interview 30 days out keeps every piece of evidence until eight days after it ends") {
+  test("retention: an interview 30 days out keeps every piece of evidence until eight days after it ends") {
     val farOut = InterviewInterval(now.plusSeconds(30L * 86400L), now.plusSeconds(30L * 86400L + 3600L))
     arranged(farOut) { a =>
       val id = a.workflow.id.value.toString
@@ -448,7 +454,7 @@ final class InterviewCancellationCommitIntegrationSpec extends MongoIntegrationS
     }
   }
 
-  test("request and dismiss on a settled workflow give their receipts and intents the dated expiry") {
+  test("retention: request and dismiss on a settled workflow give their receipts and intents the dated expiry") {
     arranged() { a =>
       val candidate = a.workflow.candidateId
       val recruiter = a.workflow.recruiterId
@@ -527,7 +533,7 @@ final class InterviewCancellationCommitIntegrationSpec extends MongoIntegrationS
   }
 
   test(
-    "an Admin cancels without a participant predicate, records the administrator text and is fenced as an active user"
+    "DHW-16 an Admin cancels without a participant predicate, records the administrator text and is fenced as an active user"
   ) {
     arranged() { a =>
       for {
@@ -553,7 +559,7 @@ final class InterviewCancellationCommitIntegrationSpec extends MongoIntegrationS
     }
   }
 
-  test("an Admin that is not an active user is fenced out and nothing is written") {
+  test("DHW-16 an Admin that is not an active user is fenced out and nothing is written") {
     arranged() { a =>
       for {
         result <- apply(
@@ -566,7 +572,7 @@ final class InterviewCancellationCommitIntegrationSpec extends MongoIntegrationS
     }
   }
 
-  test("a recruiter who no longer owns the job conflicts and nothing is written") {
+  test("DHW-16 a recruiter who no longer owns the job conflicts and nothing is written") {
     arranged() { a =>
       for {
         jobs <- a.collection(MongoCollections.Jobs)
@@ -584,7 +590,7 @@ final class InterviewCancellationCommitIntegrationSpec extends MongoIntegrationS
     }
   }
 
-  test("a failure after the outbox event and request receipt were written rolls everything back") {
+  test("DHW-16 a failure after the outbox event and request receipt were written rolls everything back") {
     arranged() { a =>
       for {
         commands <- a.collection(MongoCollections.InterviewWorkflowCommands)

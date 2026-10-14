@@ -16,13 +16,15 @@ final class InterviewHoldCancellerSpec extends CatsEffectSuite {
   private val hold =
     InterviewLiveHold(id, InterviewWorkflow.reservationKey(id, 2), InterviewWorkflow.cancellationKey(id, 2))
 
-  test("the platform ledger is its own provider, so the cleanup's local release is the confirmation") {
+  test("DHW-30 the platform ledger is its own provider, so the cleanup's local release is the confirmation") {
     InterviewHoldCanceller.ledgerOwned.cancel(hold, at).value.map { answer =>
       assertEquals(answer, Right(InterviewCalendarCancellation.Cancelled(at)))
     }
   }
 
-  test("an external provider is asked for the confirmed cancel under the hold's own cancel key and nothing else") {
+  test(
+    "DHW-30 an external provider is asked for the confirmed cancel under the hold's own cancel key and nothing else"
+  ) {
     for {
       asked <- Ref.of[IO, Vector[(InterviewWorkflowId, String)]](Vector.empty)
       calendar = new InterviewCalendarProvider {

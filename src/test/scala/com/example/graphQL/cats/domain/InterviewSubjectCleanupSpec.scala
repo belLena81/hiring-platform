@@ -103,7 +103,7 @@ final class InterviewSubjectCleanupSpec extends FunSuite {
     )
   }
 
-  test("a live hold is cancelled under the cancel key of its own generation and nothing else is addressable") {
+  test("DHW-30 a live hold is cancelled under the cancel key of its own generation and nothing else is addressable") {
     val id = InterviewWorkflowId(UUID.fromString("00000000-0000-0000-0000-0000000000a1"))
     val other = InterviewWorkflowId(UUID.fromString("00000000-0000-0000-0000-0000000000a2"))
     List(0, 1, 2, 7).foreach { generation =>
@@ -120,7 +120,7 @@ final class InterviewSubjectCleanupSpec extends FunSuite {
     assertEquals(InterviewCalendarKeys.cancellationKeyFor(id, ""), None)
   }
 
-  test("confirming holds is part of the purge step: the cleanup states and their order are unchanged") {
+  test("DHW-30 confirming holds is part of the purge step: the cleanup states and their order are unchanged") {
     val fenced = initial.copy(state = InterviewCleanupState.ProducersFenced)
     assertEquals(InterviewSubjectCleanup.command(fenced), InterviewCleanupCommand.PurgeMongo)
     assertEquals(

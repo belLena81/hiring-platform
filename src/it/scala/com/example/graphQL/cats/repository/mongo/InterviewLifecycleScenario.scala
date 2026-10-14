@@ -35,7 +35,9 @@ private[mongo] final case class InterviewProviderFaults(
     // The cancel waits here until released, to observe the state while the provider has not yet confirmed.
     cancelGate: Ref[IO, Option[cats.effect.Deferred[IO, Unit]]],
     // After every provider call the number of live holds, to prove nobody is ever without a held slot.
-    liveHolds: Ref[IO, Vector[Int]]
+    liveHolds: Ref[IO, Vector[Int]],
+    // The provider answers every cancel with "no such reservation" (a slot removed outside the platform).
+    cancelUnknownReservation: Ref[IO, Boolean]
 )
 
 private[mongo] object InterviewProviderFaults {
@@ -52,7 +54,8 @@ private[mongo] object InterviewProviderFaults {
       Ref.of[IO, Boolean](false),
       Ref.of[IO, Boolean](false),
       Ref.of[IO, Option[cats.effect.Deferred[IO, Unit]]](None),
-      Ref.of[IO, Vector[Int]](Vector.empty)
+      Ref.of[IO, Vector[Int]](Vector.empty),
+      Ref.of[IO, Boolean](false)
     ).mapN(InterviewProviderFaults.apply)
 }
 
@@ -216,7 +219,10 @@ private[mongo] final case class InterviewLifecycleScenario(
           faults.cancelGate.get
         )
         _ <- EitherT.liftF[IO, InterviewProviderError, Unit](gate.traverse_(_.get))
-        outcome <- calendarLedger.cancel(workflowId, idempotencyKey, now, execution)
+        unknown <- EitherT.liftF[IO, InterviewProviderError, Boolean](faults.cancelUnknownReservation.get)
+        outcome <-
+          if (unknown) EitherT.rightT[IO, InterviewProviderError](InterviewCalendarCancellation.UnknownReservation)
+          else calendarLedger.cancel(workflowId, idempotencyKey, now, execution)
         _ <- EitherT.liftF[IO, InterviewProviderError, Unit](outcome match {
           case InterviewCalendarCancellation.Cancelled(_) => faults.confirmedCancels.update(_ :+ idempotencyKey)
           case _                                          => IO.unit

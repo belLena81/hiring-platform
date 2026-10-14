@@ -49,7 +49,9 @@ final class InterviewCancellationMigrationIntegrationSpec extends MongoIntegrati
       .flatMap(_.deleteOne(Filters.eq(MongoFields.Id, ledgerId)))
       .void
 
-  test("the extended validator accepts well-formed intents and rejects intents bound to another workflow or shape") {
+  test(
+    "DHW-27 the extended validator accepts well-formed intents and rejects intents bound to another workflow or shape"
+  ) {
     mongoResource.use { fixture =>
       val wf = UUID.randomUUID().toString
       val other = UUID.randomUUID().toString
@@ -124,7 +126,9 @@ final class InterviewCancellationMigrationIntegrationSpec extends MongoIntegrati
     }
   }
 
-  test("reservation identity is unique per workflow and reserve key while a workflow may hold several generations") {
+  test(
+    "DHW-27 reservation identity is unique per workflow and reserve key while a workflow may hold several generations"
+  ) {
     mongoResource.use { fixture =>
       val wf = UUID.randomUUID().toString
       def insert(value: Document) =
@@ -143,7 +147,9 @@ final class InterviewCancellationMigrationIntegrationSpec extends MongoIntegrati
     }
   }
 
-  test("an unknown reservation index fails closed on restart and an unreadable stored workflow blocks the cutover") {
+  test(
+    "DHW-27 an unknown reservation index fails closed on restart and an unreadable stored workflow blocks the cutover"
+  ) {
     mongoResource.use { fixture =>
       for {
         _ <- initialize(fixture.database)
@@ -173,7 +179,7 @@ final class InterviewCancellationMigrationIntegrationSpec extends MongoIntegrati
     }
   }
 
-  test("upgrading from the previous validator keeps stored commands and installs the exact active definition") {
+  test("DHW-27 upgrading from the previous validator keeps stored commands and installs the exact active definition") {
     mongoResource.use { fixture =>
       val wf = UUID.randomUUID().toString
       val existing = command(wf, "s1", new Document("kind", "reserveCalendar").append("idempotencyKey", s"$wf:reserve"))
@@ -217,7 +223,7 @@ final class InterviewCancellationMigrationIntegrationSpec extends MongoIntegrati
     }
   }
 
-  test("concurrent starts complete and drift of the active validator fails closed afterwards") {
+  test("DHW-27 concurrent starts complete and drift of the active validator fails closed afterwards") {
     mongoResource.use { fixture =>
       for {
         results <- List.fill(4)(initialize(fixture.database).attempt).parSequence

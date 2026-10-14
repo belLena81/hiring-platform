@@ -297,17 +297,7 @@ final class MongoSemanticSearchRepository(
     ).asJava
 
   private def lexicalSearchStage(index: String, text: String, paths: List[String], filter: Document): Document =
-    new Document(
-      "$search",
-      new Document("index", index).append(
-        "compound",
-        new Document(
-          "must",
-          List(new Document("text", new Document("query", text).append("path", paths.asJava))).asJava
-        )
-          .append("filter", List(filter).asJava)
-      )
-    )
+    MongoLexicalSearch.stage(index, text, paths, filter)
 
   private[mongo] def jobLexicalFilter(query: VectorSearchQuery, filter: JobSearchFilter): Document =
     MongoSearchEligibilityRendering.indexed(SearchEligibilityCriteria.jobs(query.model, filter))
@@ -633,4 +623,20 @@ private[mongo] object MongoSemanticSearchResult {
       case Some(value: Number) if value.doubleValue().isFinite => Right(Some(value.doubleValue()))
       case Some(_)                                             => Left(RepositoryError.InvalidStoredData)
     }
+}
+
+/** The one `$search` shape for lexical retrieval; query text is only ever the value of `text.query` on fixed paths. */
+private[mongo] object MongoLexicalSearch {
+  def stage(index: String, text: String, paths: List[String], filter: Document): Document =
+    new Document(
+      "$search",
+      new Document("index", index).append(
+        "compound",
+        new Document(
+          "must",
+          List(new Document("text", new Document("query", text).append("path", paths.asJava))).asJava
+        )
+          .append("filter", List(filter).asJava)
+      )
+    )
 }

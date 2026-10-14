@@ -255,3 +255,10 @@ sbt 'IntegrationTest / runMain com.example.graphQL.cats.repository.mongo.SearchE
 ```
 
 Run the baseline and each sweep point at both concurrencies and both temperatures; use the corpus size authorized for the budget (runner bounds: documents <= 10000, queries <= 100). Telemetry to capture where Atlas exposes it, otherwise record "unavailable": vector index memory and storage bytes, index build time, index status/readiness and replication lag, CPU and memory of the search nodes, query latency percentiles, provider/Atlas usage cost, and native `$rerank` availability and result. Apply decision-4 limits against the cloud baseline; only a pass with independent review adopts a change, and any adopted index change follows the migration and recovery rules in Public and persistence contracts. Dedicated search capacity needs a separately measured bottleneck and cost ceiling.
+
+### Local closure checkpoint (2026-10-13)
+
+- Commit `e2349f0`: split, tags, rerank skip and `RetrievalLimits` rule. Independent Code Reviewer PASS (after tag-accuracy fixes) and Security Engineer PASS.
+- `bash scripts/check-local.sh` exit 0 on that commit: root 1051 units; root integration 297 total, 288 passed, 9 explicit external/opt-in skips (not passes); analytics 458 units and 102 integrations, 4 opt-in ignored; 8 skills and 7 agent definitions validated. Log: ignored `.local/logs/mvr-local-closure-check-local.log`.
+- Independent QA (2026-10-13): PASS for the local scope on the current tree (`check-local` exit 0; root 1083 units, integration 290 passed / 14 skipped). Log: ignored `.local/logs/qa-local-closure-check.log`.
+- BLOCKED: the Atlas Local evidence run for all `.L` rows and the MVR-08.L decision (container not started). `.C` rows remain DEFERRED.

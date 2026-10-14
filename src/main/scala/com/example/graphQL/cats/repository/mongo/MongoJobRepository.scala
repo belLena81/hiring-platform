@@ -112,7 +112,7 @@ final class MongoJobRepository(
   ) = {
     import com.example.graphQL.cats.service.search.NearbyJob
     import scala.jdk.CollectionConverters.*
-    val queryFilter = MongoJobRepository.discoveryFilter(query.filter).append("location.remote", false)
+    val queryFilter = MongoJobRepository.discoveryFilter(query.filter, None).append("location.remote", false)
     val near = new Document(
       "near",
       new Document("type", "Point").append(
@@ -161,7 +161,7 @@ final class MongoJobRepository(
         )
       )
     MongoRepositorySupport.repositoryGuard(diagnostics, "MongoJobRepository.nearbyJobs")(
-      authorizedDiscovery(scope, pipeline)
+      authorizedDiscovery(scope, pipeline, None)
         .subflatMap { documents =>
           MongoStoredDocumentDecoding.values(documents.map { document =>
             val distanceKm = Option(document.get("_distanceKm")).collect { case value: Number => value.doubleValue() }
@@ -178,85 +178,22 @@ final class MongoJobRepository(
 
   override def jobDiscoveryFacets(
       scope: HiringReadScope,
-      query: com.example.graphQL.cats.service.search.JobFacetQuery
-  ) = {
-    import scala.jdk.CollectionConverters.*
-    val filter = query.filter
-    val bucketReadLimit = com.example.graphQL.cats.service.search.JobDiscoveryFacets.MaxBucketsPerDimension + 1
-    val facets = new Document(
-      "skills",
-      List(
-        new Document(
-          "$project",
-          new Document("skills", new Document("$setUnion", List("$skills", List.empty[String].asJava).asJava))
-        ),
-        new Document("$unwind", "$skills"),
-        new Document("$match", new Document("skills", new Document("$ne", ""))),
-        new Document("$group", new Document("_id", "$skills").append("count", new Document("$sum", 1))),
-        new Document("$sort", new Document("count", -1).append("_id", 1)),
-        new Document("$limit", bucketReadLimit)
-      ).asJava
-    ).append(
-      "countries",
-      List(
-        new Document("$match", new Document("location.country", new Document("$nin", List(null, "").asJava))),
-        new Document("$group", new Document("_id", "$location.country").append("count", new Document("$sum", 1))),
-        new Document("$sort", new Document("count", -1).append("_id", 1)),
-        new Document("$limit", bucketReadLimit)
-      ).asJava
-    ).append(
-      "cities",
-      List(
-        new Document("$match", new Document("location.city", new Document("$nin", List(null, "").asJava))),
-        new Document("$group", new Document("_id", "$location.city").append("count", new Document("$sum", 1))),
-        new Document("$sort", new Document("count", -1).append("_id", 1)),
-        new Document("$limit", bucketReadLimit)
-      ).asJava
-    ).append(
-      "remote",
-      List(
-        new Document("$group", new Document("_id", "$location.remote").append("count", new Document("$sum", 1))),
-        new Document("$sort", new Document("count", -1).append("_id", 1)),
-        new Document("$limit", bucketReadLimit)
-      ).asJava
-    )
-    val radiusStage = query.radius.toList.map { radius =>
-      val near = new Document(
-        "near",
-        new Document("type", "Point").append(
-          "coordinates",
-          List(radius.center.longitude, radius.center.latitude).asJava
-        )
-      )
-        .append("key", "location.point")
-        .append("distanceField", "_distanceKm")
-        .append("distanceMultiplier", 0.001d)
-        .append("spherical", true)
-        .append("maxDistance", radius.radiusKm * 1000d)
-        .append("query", MongoJobRepository.discoveryFilter(filter).append("location.remote", false))
-      new Document("$geoNear", near)
-    }
-    val initialMatch =
-      Option.when(query.radius.isEmpty)(new Document("$match", MongoJobRepository.discoveryFilter(filter))).toList
-    val pipeline = radiusStage ++ initialMatch ++ List(
-      new Document(
-        "$project",
-        new Document(MongoFields.Skills, 1)
-          .append("location.country", 1)
-          .append("location.city", 1)
-          .append("location.remote", 1)
-      ),
-      new Document("$facet", facets)
-    )
+      query: com.example.graphQL.cats.service.search.JobFacetQuery,
+      matchedIds: Option[Set[JobId]],
+      maxTime: Option[scala.concurrent.duration.FiniteDuration]
+  ) =
     MongoRepositorySupport.repositoryGuard(diagnostics, "MongoJobRepository.jobDiscoveryFacets")(
-      authorizedDiscovery(scope, pipeline)
+      authorizedDiscovery(scope, MongoJobRepository.facetPipeline(query, matchedIds), maxTime)
         .subflatMap(results =>
           MongoStoredDocumentDecoding.repository(MongoJobDiscoveryCodecs.facets(results.headOption))
         )
     )
-  }
 
-  private def authorizedDiscovery(scope: HiringReadScope, jobsPipeline: List[Document]): RepositoryIO[List[Document]] =
+  private def authorizedDiscovery(
+      scope: HiringReadScope,
+      jobsPipeline: List[Document],
+      maxTime: Option[scala.concurrent.duration.FiniteDuration]
+  ): RepositoryIO[List[Document]] =
     discoveryPolicy match {
       case None         => RepositoryIO.raise(RepositoryError.Unavailable)
       case Some(policy) =>
@@ -271,7 +208,15 @@ final class MongoJobRepository(
                 Mongo4catsCollections
                   .documents(database, MongoCollections.Users)
                   .flatMap(
-                    _.aggregate[Document](pipeline).maxTime(policy.maxTime).boundedStream(1).compile.toList
+                    _.aggregate[Document](pipeline)
+                      .maxTime(
+                        maxTime
+                          .fold(policy.maxTime)(_.min(policy.maxTime))
+                          .max(scala.concurrent.duration.DurationInt(1).milli)
+                      )
+                      .boundedStream(1)
+                      .compile
+                      .toList
                   )
               )
             )
@@ -465,15 +410,98 @@ object MongoJobRepository {
     )
   }
 
+  /** Exact structured facet pipeline; the optional ID restriction joins the eligibility `$and`, and with a radius it
+    * sits inside `$geoNear.query` so `$geoNear` stays the first stage.
+    */
+  private[mongo] def facetPipeline(
+      query: com.example.graphQL.cats.service.search.JobFacetQuery,
+      matchedIds: Option[Set[JobId]]
+  ): List[Document] = {
+    import scala.jdk.CollectionConverters.*
+    val filter = query.filter
+    // The ID restriction joins the same $and as the eligibility predicate; it never replaces it.
+    val eligible = MongoJobRepository.discoveryFilter(filter, matchedIds)
+    val bucketReadLimit = com.example.graphQL.cats.service.search.JobDiscoveryFacets.MaxBucketsPerDimension + 1
+    val facets = new Document(
+      "skills",
+      List(
+        new Document(
+          "$project",
+          new Document("skills", new Document("$setUnion", List("$skills", List.empty[String].asJava).asJava))
+        ),
+        new Document("$unwind", "$skills"),
+        new Document("$match", new Document("skills", new Document("$ne", ""))),
+        new Document("$group", new Document("_id", "$skills").append("count", new Document("$sum", 1))),
+        new Document("$sort", new Document("count", -1).append("_id", 1)),
+        new Document("$limit", bucketReadLimit)
+      ).asJava
+    ).append(
+      "countries",
+      List(
+        new Document("$match", new Document("location.country", new Document("$nin", List(null, "").asJava))),
+        new Document("$group", new Document("_id", "$location.country").append("count", new Document("$sum", 1))),
+        new Document("$sort", new Document("count", -1).append("_id", 1)),
+        new Document("$limit", bucketReadLimit)
+      ).asJava
+    ).append(
+      "cities",
+      List(
+        new Document("$match", new Document("location.city", new Document("$nin", List(null, "").asJava))),
+        new Document("$group", new Document("_id", "$location.city").append("count", new Document("$sum", 1))),
+        new Document("$sort", new Document("count", -1).append("_id", 1)),
+        new Document("$limit", bucketReadLimit)
+      ).asJava
+    ).append(
+      "remote",
+      List(
+        new Document("$group", new Document("_id", "$location.remote").append("count", new Document("$sum", 1))),
+        new Document("$sort", new Document("count", -1).append("_id", 1)),
+        new Document("$limit", bucketReadLimit)
+      ).asJava
+    )
+    val radiusStage = query.radius.toList.map { radius =>
+      val near = new Document(
+        "near",
+        new Document("type", "Point").append(
+          "coordinates",
+          List(radius.center.longitude, radius.center.latitude).asJava
+        )
+      )
+        .append("key", "location.point")
+        .append("distanceField", "_distanceKm")
+        .append("distanceMultiplier", 0.001d)
+        .append("spherical", true)
+        .append("maxDistance", radius.radiusKm * 1000d)
+        .append("query", new Document(eligible).append("location.remote", false))
+      new Document("$geoNear", near)
+    }
+    val initialMatch =
+      Option.when(query.radius.isEmpty)(new Document("$match", eligible)).toList
+    val pipeline = radiusStage ++ initialMatch ++ List(
+      new Document(
+        "$project",
+        new Document(MongoFields.Skills, 1)
+          .append("location.country", 1)
+          .append("location.city", 1)
+          .append("location.remote", 1)
+      ),
+      new Document("$facet", facets)
+    )
+    pipeline
+  }
+
   /** Round down across both multiplier conversions; exact distance/ID comparison still resolves ties. */
   private[mongo] def minimumDistanceMeters(distanceKm: Double): Double = {
     val meters = distanceKm * 1000d
     Math.max(0d, meters - 4d * Math.ulp(meters))
   }
 
-  private[mongo] def discoveryFilter(filter: JobSearchFilter): Document = {
+  private[mongo] def discoveryFilter(filter: JobSearchFilter, matchedIds: Option[Set[JobId]]): Document = {
     import scala.jdk.CollectionConverters.*
     val clauses = List(new Document("status", JobStatus.Open.toString)) ++
+      matchedIds.toList.map(ids =>
+        new Document(MongoFields.Id, new Document("$in", ids.toList.map(_.value.toString).sorted.asJava))
+      ) ++
       filter.city.toList.map(city => new Document("location.city", city.trim)) ++
       Option
         .when(filter.skills.nonEmpty)(

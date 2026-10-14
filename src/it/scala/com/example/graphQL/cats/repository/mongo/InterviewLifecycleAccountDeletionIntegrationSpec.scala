@@ -213,7 +213,7 @@ final class InterviewLifecycleAccountDeletionIntegrationSpec extends MongoIntegr
 
   subjects.foreach { case (label, pick) =>
     test(
-      s"deleting the $label during a pending provider cancel confirms the cancel, frees the slot, notifies nobody and keeps the rejection record"
+      s"DHW-30 deleting the $label during a pending provider cancel confirms the cancel, frees the slot, notifies nobody and keeps the rejection record"
     ) {
       scenario { s =>
         val subject = pick(s)
@@ -267,7 +267,7 @@ final class InterviewLifecycleAccountDeletionIntegrationSpec extends MongoIntegr
     }
   }
 
-  test("an Admin-driven cancel leaves no Admin-keyed receipt behind and the Admin account is untouched") {
+  test("DHW-30 an Admin-driven cancel leaves no Admin-keyed receipt behind and the Admin account is untouched") {
     scenario { s =>
       val admin = UserId(UUID.randomUUID())
       for {
@@ -313,7 +313,7 @@ final class InterviewLifecycleAccountDeletionIntegrationSpec extends MongoIntegr
   }
 
   subjects.foreach { case (label, pick) =>
-    test(s"deleting the $label with an open proposal clears it, denies accept and expiry and sends nothing") {
+    test(s"DHW-30 deleting the $label with an open proposal clears it, denies accept and expiry and sends nothing") {
       scenario { s =>
         val subject = pick(s)
         for {
@@ -369,7 +369,7 @@ final class InterviewLifecycleAccountDeletionIntegrationSpec extends MongoIntegr
     }
   }
 
-  test("deleting a participant during a reschedule that holds both slots cancels both holds before the purge") {
+  test("DHW-30 deleting a participant during a reschedule that holds both slots cancels both holds before the purge") {
     scenario { s =>
       for {
         recorder <- holds(s)
@@ -401,7 +401,9 @@ final class InterviewLifecycleAccountDeletionIntegrationSpec extends MongoIntegr
     }
   }
 
-  test("deleting the recruiter after a compensated attempt purges the retired generation and the one awaiting a hold") {
+  test(
+    "DHW-30 deleting the recruiter after a compensated attempt purges the retired generation and the one awaiting a hold"
+  ) {
     scenario { s =>
       for {
         recorder <- holds(s)
@@ -434,7 +436,7 @@ final class InterviewLifecycleAccountDeletionIntegrationSpec extends MongoIntegr
     }
   }
 
-  test("pending informational notifications and an exhausted one are cleared without being sent") {
+  test("DHW-30 pending informational notifications and an exhausted one are cleared without being sent") {
     scenario { s =>
       for {
         recorder <- holds(s)
@@ -483,7 +485,7 @@ final class InterviewLifecycleAccountDeletionIntegrationSpec extends MongoIntegr
     }
   }
 
-  test("a result and a command redelivered after the deletion are settled without any effect") {
+  test("DHW-30 a result and a command redelivered after the deletion are settled without any effect") {
     scenario { s =>
       for {
         recorder <- holds(s)
@@ -527,7 +529,9 @@ final class InterviewLifecycleAccountDeletionIntegrationSpec extends MongoIntegr
     }
   }
 
-  test("a cancel command redelivered after the deletion is refused first and then settled without a provider call") {
+  test(
+    "DHW-30 a cancel command redelivered after the deletion is refused first and then settled without a provider call"
+  ) {
     scenario { s =>
       for {
         recorder <- holds(s)
@@ -555,7 +559,9 @@ final class InterviewLifecycleAccountDeletionIntegrationSpec extends MongoIntegr
     }
   }
 
-  test("a failed or unknown provider answer stops the purge, keeps all evidence and a restarted cleanup completes") {
+  test(
+    "DHW-30 a failed or unknown provider answer stops the purge, keeps all evidence and a restarted cleanup completes"
+  ) {
     scenario { s =>
       for {
         proposed <- propose(s)
@@ -618,7 +624,7 @@ final class InterviewLifecycleAccountDeletionIntegrationSpec extends MongoIntegr
   }
 
   List("accept", "cancel").foreach { race =>
-    test(s"a deletion racing a $race leaves no data, no live hold and no notification once cleanup finishes") {
+    test(s"DHW-30 a deletion racing a $race leaves no data, no live hold and no notification once cleanup finishes") {
       (1 to 3).toList.traverse_ { _ =>
         scenario { s =>
           for {
@@ -668,7 +674,9 @@ final class InterviewLifecycleAccountDeletionIntegrationSpec extends MongoIntegr
     }
   }
 
-  test("the live-hold lookup of a purge is served by the reservation identity index, not by a collection scan") {
+  test(
+    "DHW-30 (query plan) the live-hold lookup of a purge is served by the reservation identity index, not by a collection scan"
+  ) {
     mongoResource.use { fixture =>
       val subject = UserId(UUID.randomUUID())
       val workflowId = UUID.randomUUID()

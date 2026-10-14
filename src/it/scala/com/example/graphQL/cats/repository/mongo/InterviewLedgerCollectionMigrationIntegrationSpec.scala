@@ -67,7 +67,7 @@ final class InterviewLedgerCollectionMigrationIntegrationSpec extends MongoInteg
   private val newNames = renames.map(_._2)
   private val oldNames = renames.map(_._1)
 
-  test("a fresh installation creates only the business-named ledgers and records the proof") {
+  test("DHW-27 a fresh installation creates only the business-named ledgers and records the proof") {
     mongoResource.use { fixture =>
       for {
         _ <- initialize(fixture.database)
@@ -82,7 +82,7 @@ final class InterviewLedgerCollectionMigrationIntegrationSpec extends MongoInteg
     }
   }
 
-  test("an upgrade renames every ledger, preserves its documents and recreates indexes under business names") {
+  test("DHW-27 an upgrade renames every ledger, preserves its documents and recreates indexes under business names") {
     mongoResource.use { fixture =>
       val (reservations, locks, receipts) = (newNames(0), newNames(1), newNames(2))
       for {
@@ -117,7 +117,9 @@ final class InterviewLedgerCollectionMigrationIntegrationSpec extends MongoInteg
     }
   }
 
-  test("when an original-named and a business-named ledger both exist the migration fails closed and keeps the data") {
+  test(
+    "DHW-27 when an original-named and a business-named ledger both exist the migration fails closed and keeps the data"
+  ) {
     mongoResource.use { fixture =>
       val oldReservations = oldNames.head
       for {
@@ -140,7 +142,9 @@ final class InterviewLedgerCollectionMigrationIntegrationSpec extends MongoInteg
     }
   }
 
-  test("an interrupted run resumes: ledgers already renamed stay, the rest are renamed and the proof completes") {
+  test(
+    "DHW-27 an interrupted run resumes: ledgers already renamed stay, the rest are renamed and the proof completes"
+  ) {
     mongoResource.use { fixture =>
       for {
         _ <- initialize(fixture.database)
@@ -172,7 +176,7 @@ final class InterviewLedgerCollectionMigrationIntegrationSpec extends MongoInteg
     }
   }
 
-  test("concurrent starts over original-named ledgers both succeed with one consistent result") {
+  test("DHW-27 concurrent starts over original-named ledgers both succeed with one consistent result") {
     mongoResource.use { fixture =>
       for {
         _ <- initialize(fixture.database)

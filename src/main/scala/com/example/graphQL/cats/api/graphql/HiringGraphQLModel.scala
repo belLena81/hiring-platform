@@ -25,7 +25,7 @@ private[graphql] object HiringGraphQLModel {
 
   extension [A: Encoder](input: A) def idempotencyPayload: Json = input.asJson
 
-  final case class GraphQLFailure(code: String, message: String, exceptional: Boolean)
+  final case class GraphQLFailure(code: String, message: String, exceptional: Boolean, reason: Option[String] = None)
   sealed trait UserError {
     def code: String
     def message: String

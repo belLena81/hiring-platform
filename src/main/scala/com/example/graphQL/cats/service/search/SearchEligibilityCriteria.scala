@@ -27,15 +27,19 @@ object SearchEligibilityCriteria {
   import SearchEligibilityField.*
   import SearchEligibilityValue.*
 
-  def jobs(model: String, filter: JobSearchFilter): SearchEligibilityCriteria = All(
-    List(
-      Equal(JobStatus, Text(com.example.graphQL.cats.domain.model.JobStatus.Open.toString)),
-      Equal(EmbeddingModel, Text(model))
-    ) ++
-      filter.city.toList.map(city => Equal(JobCity, Text(city))) ++
+  private val openJob: SearchEligibilityCriteria =
+    Equal(JobStatus, Text(com.example.graphQL.cats.domain.model.JobStatus.Open.toString))
+
+  private def jobFilter(filter: JobSearchFilter): List[SearchEligibilityCriteria] =
+    filter.city.toList.map(city => Equal(JobCity, Text(city))) ++
       filter.skills.toList.sorted.map(skill => Equal(JobSkill, Text(skill))) ++
       filter.createdAfter.toList.map(AtLeast(JobCreatedAt, _))
-  )
+
+  def jobs(model: String, filter: JobSearchFilter): SearchEligibilityCriteria =
+    All(List(openJob, Equal(EmbeddingModel, Text(model))) ++ jobFilter(filter))
+
+  /** Open jobs matching the filter regardless of embedding state: derived embedding data is not eligibility. */
+  def openJobs(filter: JobSearchFilter): SearchEligibilityCriteria = All(openJob :: jobFilter(filter))
 
   def candidates(query: VectorSearchQuery, includeEmbeddingModel: Boolean): SearchEligibilityCriteria = {
     val filters = query.candidateFilters

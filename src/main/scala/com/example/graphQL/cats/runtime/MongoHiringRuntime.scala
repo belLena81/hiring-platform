@@ -30,6 +30,7 @@ import com.example.graphQL.cats.service.search.{
   DurableRetrySettings,
   EmbeddingPipeline,
   EmbeddingWorkPublisher,
+  LexicalMatchLimit,
   SearchSessionRecording,
   SemanticSearchService
 }
@@ -52,6 +53,7 @@ import com.example.graphQL.cats.repository.mongo.{
   MongoEventQuarantineRepository,
   MongoHiringSetup,
   MongoJobRepository,
+  MongoLexicalJobMatcher,
   DiscoveryQueryPolicy,
   MongoAnalyticsErasureRequestRepository,
   MongoAnalyticsReportRepository,
@@ -66,6 +68,7 @@ import com.example.graphQL.cats.repository.mongo.{
   MongoEmbeddingWorkEnqueuer,
   AtlasSearchIndexConfig
 }
+import com.example.graphQL.cats.service.port.LexicalJobMatcher
 import mongo4cats.database.MongoDatabase
 
 final case class MongoHiringRuntime(
@@ -140,13 +143,22 @@ object MongoHiringRuntime {
             .leftMap(error => new IllegalStateException(s"Invalid interview proposal lifetime: $error"))
         )
       )
+      // The refined config range is carried into the typed limit; an impossible value stops startup.
+      facetLimit <- Resource.eval(
+        IO.fromOption(LexicalMatchLimit.from(config.discovery.lexicalFacetMatchLimit))(
+          new IllegalStateException("Invalid lexical facet match limit")
+        )
+      )
       searchSessionHandoff <- SearchSessionHandoff
         .resource(searchSessionWork, SearchSessionHandoffConfig(), diagnostics, Clock[IO])
       // One branch decides the embedding capability; everything below is shared by both modes.
       embedding <- config.vectorSearch match {
         case VectorSearchConfig.Disabled =>
-          Resource.pure[IO, (EmbeddingWorkPublisher, Option[SemanticSearchService], EmbeddingCoverageService)](
-            (disabledEmbeddingPublisher, None, EmbeddingCoverageService.vectorSearchDisabled(users))
+          Resource.pure[
+            IO,
+            (EmbeddingWorkPublisher, Option[SemanticSearchService], EmbeddingCoverageService, Option[LexicalJobMatcher])
+          ](
+            (disabledEmbeddingPublisher, None, EmbeddingCoverageService.vectorSearchDisabled(users), None)
           )
         case VectorSearchConfig.Enabled(
               voyage,
@@ -211,10 +223,11 @@ object MongoHiringRuntime {
               new MongoEmbeddingCoverageRepository(database, diagnostics),
               embeddingSettings.durableRetryCapMillis.millis,
               clock = Clock[IO]
-            )
+            ),
+            Some(new MongoLexicalJobMatcher(database, indexes.lexical, diagnostics, discoveryPolicy))
           )
       }
-      (publisher, semanticSearch, coverage) = embedding
+      (publisher, semanticSearch, coverage, lexicalMatcher) = embedding
       idempotent = Idempotent(mutationReceipts)
       accountService = UserAccountService(
         users,
@@ -230,7 +243,16 @@ object MongoHiringRuntime {
       readModel = HiringReadService(users, jobs, applications)
       services = HiringGraphQLServices(
         readModel,
-        new JobService(users, jobs, publisher, idempotent, diagnostics),
+        new JobService(
+          users,
+          jobs,
+          publisher,
+          idempotent,
+          diagnostics,
+          lexicalMatcher = lexicalMatcher,
+          lexicalFacetMatchLimit = facetLimit,
+          lexicalFacetDeadline = Some(config.discovery.maxTimeMillis.millis)
+        ),
         new ApplicationService(users, jobs, applications, readModel, idempotent),
         CursorCodec.keyFromSecret(config.jwtAuth.hmacSecret, config.jwtAuth.cursorTtlSeconds),
         accountService,

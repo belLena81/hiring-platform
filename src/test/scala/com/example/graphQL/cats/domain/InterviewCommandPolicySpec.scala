@@ -15,7 +15,7 @@ class InterviewCommandPolicySpec extends FunSuite {
   private def applicable(w: InterviewWorkflow, command: InterviewCommand, revision: Long = revision) =
     InterviewCommands.isApplicable(w, revision, command)
 
-  test("cancel and lookup commands match the generation the phase requires cancelled") {
+  test("DHW-19 cancel and lookup commands match the generation the phase requires cancelled") {
     val cancelling = workflowIn(Phase.CancelPending)
     assert(applicable(cancelling, Command.CancelCalendarSlot(key("cancel:g0"))))
     assert(applicable(cancelling, Command.LookupCalendarCancellation(key("cancel:g0"))))
@@ -48,7 +48,7 @@ class InterviewCommandPolicySpec extends FunSuite {
     assert(!applicable(proposing, Command.ExpireProposal(now), revision - 1), "a newer proposal supersedes it")
   }
 
-  test("round notifications gate their phase and tolerate older revisions; delivered recipients are done") {
+  test("DHW-24 round notifications gate their phase and tolerate older revisions; delivered recipients are done") {
     val cancelNotifying = workflowIn(Phase.CancelNotificationsPending, _.copy(notified = notified))
     val toRecruiter =
       Command.Notify(
@@ -74,7 +74,7 @@ class InterviewCommandPolicySpec extends FunSuite {
     assert(!applicable(cancelNotifying, rescheduled), "a different round")
   }
 
-  test("informational notifications never gate a phase and stay deliverable in every phase, repair included") {
+  test("DHW-24 informational notifications never gate a phase and stay deliverable in every phase, repair included") {
     val informational = Command.Notify(
       InterviewNotificationKind.RescheduleDeclined,
       InterviewParticipant.Recruiter,

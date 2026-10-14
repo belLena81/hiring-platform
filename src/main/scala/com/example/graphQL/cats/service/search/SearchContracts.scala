@@ -51,8 +51,44 @@ object NearbyJobCursor {
 final case class NearbyRadius(center: GeoPoint, radiusKm: Double) {
   def isValid: Boolean = JobDiscoveryValidation.validRadius(center, radiusKm)
 }
-final case class JobFacetQuery(filter: JobSearchFilter, radius: Option[NearbyRadius]) {
+
+/** Facet request; `text` is the optional lexical query whose top matches restrict the counted jobs. */
+final case class JobFacetQuery(filter: JobSearchFilter, radius: Option[NearbyRadius], text: Option[String] = None) {
   def isValid: Boolean = JobDiscoveryValidation.facets(this).isValid
+}
+
+/** Which matches the counts cover: every eligible match, or only the top `limit` lexical matches (never a total). */
+enum FacetCoverage {
+  case AllMatches
+  case TopMatches(limit: Int)
+}
+
+/** A lexical hit as projected by the index: job identity and its relevance score. */
+final case class ScoredJobId(id: JobId, score: Double)
+
+/** Job IDs matched by a lexical query, with the coverage of the match set. IDs are never returned to callers. */
+final case class LexicalJobMatches(ids: Set[JobId], coverage: FacetCoverage)
+
+/** Validated lexical match limit (1..5000); the Mongo adapter reads limit + 1 hits to detect truncation. */
+opaque type LexicalMatchLimit = Int
+object LexicalMatchLimit {
+  val Min: Int = 1
+  val Max: Int = 5000
+  val Default: LexicalMatchLimit = 1000
+  def from(value: Int): Option[LexicalMatchLimit] = Option.when(value >= Min && value <= Max)(value)
+  extension (limit: LexicalMatchLimit) def value: Int = limit
+}
+
+object LexicalJobMatches {
+
+  /** Reduces a window of at most `limit + 1` hits. Ordered by score descending then job ID ascending (UUID text), the
+    * last element is dropped when the window overflows, so the (limit + 1)th match is never counted.
+    */
+  def fromWindow(window: List[ScoredJobId], limit: Int): LexicalJobMatches = {
+    val ordered = window.distinctBy(_.id).sortBy(hit => (-hit.score, hit.id.value.toString))
+    if (ordered.size > limit) LexicalJobMatches(ordered.take(limit).map(_.id).toSet, FacetCoverage.TopMatches(limit))
+    else LexicalJobMatches(ordered.map(_.id).toSet, FacetCoverage.AllMatches)
+  }
 }
 
 object NearbyJobsQuery {
@@ -66,7 +102,8 @@ final case class JobDiscoveryFacets(
     countries: List[JobFacetBucket],
     cities: List[JobFacetBucket],
     remote: List[JobFacetBucket],
-    truncated: Boolean
+    truncated: Boolean,
+    coverage: FacetCoverage = FacetCoverage.AllMatches
 )
 
 object JobDiscoveryFacets {

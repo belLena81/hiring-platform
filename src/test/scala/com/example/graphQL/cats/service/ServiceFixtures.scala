@@ -295,17 +295,21 @@ private[cats] object ServiceFixtures {
 
     override def jobDiscoveryFacets(
         scope: HiringReadScope,
-        query: com.example.graphQL.cats.service.search.JobFacetQuery
+        query: com.example.graphQL.cats.service.search.JobFacetQuery,
+        matchedIds: Option[Set[JobId]],
+        maxTime: Option[scala.concurrent.duration.FiniteDuration]
     ) =
       requireDiscoveryActor(scope) *> com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(ref.get.map {
         all =>
           val filter = query.filter
           val eligible = all.values.toList.filter(job =>
-            job.status == JobStatus.Open && filter.city.forall(_ == job.location.city) && filter.skills.subsetOf(
-              job.skills
-            ) &&
+            job.status == JobStatus.Open && matchedIds.forall(_.contains(job.id)) &&
+              filter.city.forall(_ == job.location.city) && filter.skills.subsetOf(
+                job.skills
+              ) &&
               filter.createdAfter.forall(!job.createdAt.isBefore(_)) && query.radius.forall(radius =>
-                job.location.coordinates.exists(point => haversine(radius.center, point) <= radius.radiusKm)
+                !job.location.remote &&
+                  job.location.coordinates.exists(point => haversine(radius.center, point) <= radius.radiusKm)
               )
           )
           Right(com.example.graphQL.cats.service.search.JobDiscoveryFacets.fromJobs(eligible))

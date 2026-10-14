@@ -70,7 +70,9 @@ final class InterviewCancellationRepairIntegrationSpec extends MongoIntegrationS
   private def repair(s: InterviewLifecycleScenario, w: InterviewWorkflow, key: UUID = UUID.randomUUID()) =
     success(s.repository.repair(w, w.revision, key, now, admin))
 
-  test("a cancellation whose provider kept failing resumes by lookup after repair, with a fresh budget and an audit") {
+  test(
+    "DHW-29 a cancellation whose provider kept failing resumes by lookup after repair, with a fresh budget and an audit"
+  ) {
     scenario { s =>
       val key = UUID.randomUUID()
       for {
@@ -103,7 +105,7 @@ final class InterviewCancellationRepairIntegrationSpec extends MongoIntegrationS
     }
   }
 
-  test("repair never reopens a slot the provider already cancelled") {
+  test("DHW-29 repair never reopens a slot the provider already cancelled") {
     scenario { s =>
       for {
         cancelling <- cancel(s)
@@ -127,7 +129,7 @@ final class InterviewCancellationRepairIntegrationSpec extends MongoIntegrationS
     }
   }
 
-  test("a failed cancellation notification is repaired and delivered after the cause is gone") {
+  test("DHW-29 a failed cancellation notification is repaired and delivered after the cause is gone") {
     scenario { s =>
       for {
         _ <- cancel(s)
@@ -148,7 +150,7 @@ final class InterviewCancellationRepairIntegrationSpec extends MongoIntegrationS
     }
   }
 
-  test("a replacement hold that kept failing resumes by lookup and completes the reschedule after repair") {
+  test("DHW-29 a replacement hold that kept failing resumes by lookup and completes the reschedule after repair") {
     scenario { s =>
       for {
         proposed <- propose(s, 0L)
@@ -166,7 +168,7 @@ final class InterviewCancellationRepairIntegrationSpec extends MongoIntegrationS
     }
   }
 
-  test("a compensation that kept failing is repaired and the unneeded hold is then cancelled") {
+  test("DHW-29 a compensation that kept failing is repaired and the unneeded hold is then cancelled") {
     scenario { s =>
       for {
         proposed <- propose(s, 0L)
@@ -188,7 +190,7 @@ final class InterviewCancellationRepairIntegrationSpec extends MongoIntegrationS
     }
   }
 
-  test("every other reschedule phase resumes with the lookup of its own step") {
+  test("DHW-29 every other reschedule phase resumes with the lookup of its own step") {
     scenario { s =>
       for {
         proposed <- propose(s, 0L)
@@ -232,7 +234,9 @@ final class InterviewCancellationRepairIntegrationSpec extends MongoIntegrationS
     }
   }
 
-  test("an informational notification that spent its budget needs its own repair and never changes the workflow") {
+  test(
+    "DHW-29 an informational notification that spent its budget needs its own repair and never changes the workflow"
+  ) {
     scenario { s =>
       for {
         proposed <- propose(s, 0L)
@@ -283,7 +287,7 @@ final class InterviewCancellationRepairIntegrationSpec extends MongoIntegrationS
     )
 
   test(
-    "a spent execution budget found at claim time moves a cancel to repair and an informational notification alone"
+    "DHW-18 a spent execution budget found at claim time moves a cancel to repair and an informational notification alone"
   ) {
     scenario { s =>
       for {
@@ -317,7 +321,9 @@ final class InterviewCancellationRepairIntegrationSpec extends MongoIntegrationS
     }
   }
 
-  test("a publication that can never be delivered moves a cancel to repair and an informational notification alone") {
+  test(
+    "DHW-18 a publication that can never be delivered moves a cancel to repair and an informational notification alone"
+  ) {
     scenario { s =>
       for {
         cancelling <- cancel(s)

@@ -7,6 +7,7 @@ import cats.syntax.all.*
 import com.example.graphQL.cats.service.{ActorContext, Diagnostics, SearchError, UseCaseError}
 import com.example.graphQL.cats.service.port.{
   JobRepository,
+  LexicalJobMatcher,
   MutationEntityReference,
   MutationWriteContext,
   RepositoryIO,
@@ -33,9 +34,11 @@ import com.example.graphQL.cats.service.search.{
   NearbyJobsQuery,
   JobDiscoveryFacets,
   JobFacetQuery,
-  JobDiscoveryValidation
+  JobDiscoveryValidation,
+  LexicalMatchLimit
 }
 import java.time.Instant
+import scala.concurrent.duration.*
 import com.example.graphQL.cats.shared.StableIds
 import java.util.UUID
 
@@ -63,7 +66,11 @@ final class JobService(
     idempotent: Idempotent,
     diagnostics: Diagnostics,
     clock: Clock[IO] = Clock[IO],
-    uuidGen: UUIDGen[IO] = UUIDGen[IO]
+    uuidGen: UUIDGen[IO] = UUIDGen[IO],
+    lexicalMatcher: Option[LexicalJobMatcher] = None,
+    lexicalFacetMatchLimit: LexicalMatchLimit = LexicalMatchLimit.Default,
+    /** Total time budget shared by the lexical match and the recount; absent means each step keeps its own bound. */
+    lexicalFacetDeadline: Option[FiniteDuration] = None
 ) extends JobUseCases {
   private val authorization = ActorAuthorization(users)
   private val authorizedJobs = AuthorizedJobAccess(authorization, jobs)
@@ -148,8 +155,37 @@ final class JobService(
           .leftMap(errors => UseCaseError.Search(SearchError.accumulated(errors)))
       )
       scope <- discoveryScope(actor)
-      results <- UseCaseIO.repository(jobs.jobDiscoveryFacets(scope, normalized))
+      results <- normalized.text.fold(UseCaseIO.repository(jobs.jobDiscoveryFacets(scope, normalized, None, None)))(
+        lexicalFacets(scope, normalized, _)
+      )
     } yield results
+
+  /** Step 1 reads index evidence after authorization; step 2 recounts from operational truth restricted to those IDs.
+    * Both steps share one time budget: step 1's elapsed monotonic time is deducted and step 2 receives what remains.
+    */
+  private def lexicalFacets(scope: HiringReadScope, query: JobFacetQuery, text: String): UseCaseIO[JobDiscoveryFacets] =
+    for {
+      matcher <- EitherT.fromOption[IO](lexicalMatcher, facetsUnavailable)
+      started <- EitherT.liftF[IO, UseCaseError, FiniteDuration](clock.monotonic)
+      matched <- UseCaseIO
+        .repository(matcher.matches(text, query.filter, lexicalFacetMatchLimit.value))
+        .leftMap(_ => facetsUnavailable)
+      finished <- EitherT.liftF[IO, UseCaseError, FiniteDuration](clock.monotonic)
+      remaining = lexicalFacetDeadline.map(_ - (finished - started))
+      counted <-
+        if (matched.ids.isEmpty) EitherT.rightT[IO, UseCaseError](JobDiscoveryFacets.fromJobs(Nil))
+        else if (remaining.exists(_ < MinimumRecountBudget)) EitherT.leftT[IO, JobDiscoveryFacets](facetsUnavailable)
+        else
+          UseCaseIO.repository(jobs.jobDiscoveryFacets(scope, query, Some(matched.ids), remaining)).leftMap {
+            case UseCaseError.Repository(_) => facetsUnavailable
+            case other                      => other
+          }
+    } yield counted.copy(coverage = matched.coverage)
+
+  // MongoDB treats maxTimeMS 0 as unbounded, so a sub-millisecond remainder counts as exhausted.
+  private val MinimumRecountBudget: FiniteDuration = 1.milli
+
+  private val facetsUnavailable: UseCaseError = UseCaseError.Search(SearchError.FacetsUnavailable)
 
   /** Candidates and the Admin discover jobs; the read scope comes from the persisted actor. */
   private def discoveryScope(actor: ActorContext): UseCaseIO[HiringReadScope] =

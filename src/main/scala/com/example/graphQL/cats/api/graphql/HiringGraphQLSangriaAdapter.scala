@@ -74,7 +74,11 @@ private[graphql] final class HiringGraphQLSangriaAdapter(dispatcher: Dispatcher[
     }
 
   private def handledGraphQLFailure(marshaller: ResultMarshaller, failure: GraphQLFailure): HandledException =
-    HandledException(failure.message, Map("code" -> marshaller.scalarNode(failure.code, "String", Set.empty)))
+    HandledException(
+      failure.message,
+      Map("code" -> marshaller.scalarNode(failure.code, "String", Set.empty)) ++
+        failure.reason.map(reason => "reason" -> marshaller.scalarNode(reason, "String", Set.empty))
+    )
 
   private def report(context: RequestContext, failures: ConcurrentLinkedQueue[Throwable]): IO[Unit] =
     failures.iterator().asScala.toList.traverse_(context.reportExecutionFailure)

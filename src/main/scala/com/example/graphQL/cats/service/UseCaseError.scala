@@ -29,6 +29,7 @@ enum SearchError {
   case InvalidFilters(fields: NonEmptyList[String])
   case ProviderUnavailable
   case VectorSearchUnavailable
+  case FacetsUnavailable
 }
 
 object SearchError {

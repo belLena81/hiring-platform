@@ -84,7 +84,10 @@ private[graphql] object HiringGraphQLSearchResolvers {
       for {
         filter <- inputResult(discoveryFilter(inputFilter))
         radius <- inputResult(radiusArgs)
-        facets <- raiseOnUseCaseError(hiring.jobService.jobDiscoveryFacets(actor, JobFacetQuery(filter, radius)))
+        facets <- raiseOnUseCaseError(
+          hiring.jobService
+            .jobDiscoveryFacets(actor, JobFacetQuery(filter, radius, context.arg(optionalFacetQueryArgument)))
+        )
       } yield facets
     }
 

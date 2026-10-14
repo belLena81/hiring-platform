@@ -45,7 +45,9 @@ final class InterviewRescheduleWorkerIntegrationSpec extends MongoIntegrationSui
   private def informational(receipts: List[InterviewNotificationReceipt], kind: InterviewNotificationKind) =
     receipts.filter(_.kind == kind).map(_.participant).toSet
 
-  test("acceptance holds the replacement first, swaps once, cancels the old slot last and nobody is ever slotless") {
+  test(
+    "DHW-21 acceptance holds the replacement first, swaps once, cancels the old slot last and nobody is ever slotless"
+  ) {
     scenario { s =>
       for {
         proposed <- propose(s)
@@ -86,7 +88,7 @@ final class InterviewRescheduleWorkerIntegrationSpec extends MongoIntegrationSui
     }
   }
 
-  test("a declined proposal touches no slot, makes no provider call and tells the recruiter") {
+  test("DHW-20 a declined proposal touches no slot, makes no provider call and tells the recruiter") {
     scenario { s =>
       for {
         proposed <- propose(s)
@@ -125,7 +127,7 @@ final class InterviewRescheduleWorkerIntegrationSpec extends MongoIntegrationSui
     loop
   }
 
-  test("a replacement that conflicts with another booking keeps the old interval and tells both participants") {
+  test("DHW-22 a replacement that conflicts with another booking keeps the old interval and tells both participants") {
     scenario { s =>
       for {
         proposed <- propose(s)
@@ -164,7 +166,7 @@ final class InterviewRescheduleWorkerIntegrationSpec extends MongoIntegrationSui
     }
   }
 
-  test("a swap the guard refuses cancels the unneeded replacement and leaves the old interval valid") {
+  test("DHW-22 a swap the guard refuses cancels the unneeded replacement and leaves the old interval valid") {
     scenario { s =>
       for {
         proposed <- propose(s)
@@ -191,7 +193,7 @@ final class InterviewRescheduleWorkerIntegrationSpec extends MongoIntegrationSui
     }
   }
 
-  test("a compensation that cannot be confirmed is visible repair and both holds stay listed") {
+  test("DHW-22 a compensation that cannot be confirmed is visible repair and both holds stay listed") {
     scenario { s =>
       for {
         proposed <- propose(s)
@@ -210,7 +212,7 @@ final class InterviewRescheduleWorkerIntegrationSpec extends MongoIntegrationSui
     }
   }
 
-  test("an unanswered proposal expires after a worker restart, tells both, and accepting at expiry is refused") {
+  test("DHW-20 an unanswered proposal expires after a worker restart, tells both, and accepting at expiry is refused") {
     scenario { s =>
       for {
         real <- IO.realTimeInstant.map(_.truncatedTo(java.time.temporal.ChronoUnit.MILLIS))
@@ -249,7 +251,7 @@ final class InterviewRescheduleWorkerIntegrationSpec extends MongoIntegrationSui
     }
   }
 
-  test("after a compensated attempt the next proposal is accepted under a fresh generation and succeeds") {
+  test("DHW-21 after a compensated attempt the next proposal is accepted under a fresh generation and succeeds") {
     scenario { s =>
       for {
         first <- propose(s)
@@ -284,7 +286,7 @@ final class InterviewRescheduleWorkerIntegrationSpec extends MongoIntegrationSui
     }
   }
 
-  test("a replacement that starts before the old interval makes its own start the swap deadline") {
+  test("DHW-22 a replacement that starts before the old interval makes its own start the swap deadline") {
     scenario { s =>
       val soon = InterviewInterval(now.plusSeconds(3600), now.plusSeconds(7200))
       for {
@@ -310,7 +312,9 @@ final class InterviewRescheduleWorkerIntegrationSpec extends MongoIntegrationSui
     }
   }
 
-  test("informational notifications are delivered or visibly repairable even after the workflow entered repair") {
+  test(
+    "DHW-24 informational notifications are delivered or visibly repairable even after the workflow entered repair"
+  ) {
     scenario { s =>
       for {
         proposed <- propose(s)
@@ -356,7 +360,9 @@ final class InterviewRescheduleWorkerIntegrationSpec extends MongoIntegrationSui
     }
   }
 
-  test("informational notifications issued before the workflow entered repair are still delivered on their own") {
+  test(
+    "DHW-24 informational notifications issued before the workflow entered repair are still delivered on their own"
+  ) {
     scenario { s =>
       for {
         proposed <- propose(s)

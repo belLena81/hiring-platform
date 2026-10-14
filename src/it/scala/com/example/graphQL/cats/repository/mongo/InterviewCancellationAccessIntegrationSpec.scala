@@ -97,7 +97,7 @@ final class InterviewCancellationAccessIntegrationSpec extends MongoIntegrationS
       }
     }
 
-  test("another candidate and a non-owning recruiter reach neither a settled workflow nor an open proposal") {
+  test("DHW-15 another candidate and a non-owning recruiter reach neither a settled workflow nor an open proposal") {
     scenario { s =>
       for {
         flagged <- requested(s)
@@ -129,7 +129,7 @@ final class InterviewCancellationAccessIntegrationSpec extends MongoIntegrationS
       }
     }
 
-  test("participants and Admin are held to the actions their role allows, by the guarded write itself") {
+  test("DHW-15 participants and Admin are held to the actions their role allows, by the guarded write itself") {
     scenario { s =>
       val candidate = s.workflow.candidateId
       val recruiter = s.workflow.recruiterId
@@ -182,7 +182,7 @@ final class InterviewCancellationAccessIntegrationSpec extends MongoIntegrationS
     }
   }
 
-  test("a person can only drive the seven user events and the system never drives them") {
+  test("DHW-15 a person can only drive the seven user events and the system never drives them") {
     scenario { s =>
       val candidate = s.workflow.candidateId
       val recruiter = s.workflow.recruiterId
@@ -229,7 +229,9 @@ final class InterviewCancellationAccessIntegrationSpec extends MongoIntegrationS
     }
   }
 
-  test("repeating a request whose flag is set with fresh keys stores nothing, however often it is repeated") {
+  test(
+    "SECURITY-M1 repeating a request whose flag is set with fresh keys stores nothing, however often it is repeated"
+  ) {
     scenario { s =>
       for {
         flagged <- requested(s)

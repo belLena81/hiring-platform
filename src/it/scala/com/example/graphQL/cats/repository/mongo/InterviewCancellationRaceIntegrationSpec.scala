@@ -53,7 +53,7 @@ final class InterviewCancellationRaceIntegrationSpec extends MongoIntegrationSui
       now
     )
 
-  test("cancel against cancel: one wins, one history entry, one outbox event, one provider effect") {
+  test("DHW-23 cancel against cancel: one wins, one history entry, one outbox event, one provider effect") {
     scenario { s =>
       for {
         outcomes <- List(cancelBy(s, UserRole.Candidate, 0L), cancelBy(s, UserRole.Recruiter, 0L)).parSequence
@@ -73,7 +73,7 @@ final class InterviewCancellationRaceIntegrationSpec extends MongoIntegrationSui
     }
   }
 
-  test("cancel, accept and withdraw race for an open proposal: exactly one leaves the revision") {
+  test("DHW-23 cancel, accept and withdraw race for an open proposal: exactly one leaves the revision") {
     val iterations = (1 to 4).toList
     iterations.traverse { _ =>
       scenario { s =>
@@ -131,7 +131,7 @@ final class InterviewCancellationRaceIntegrationSpec extends MongoIntegrationSui
     }.void
   }
 
-  test("cancel against a generic hire: the application is never both Hired and cancelled") {
+  test("DHW-23 cancel against a generic hire: the application is never both Hired and cancelled") {
     (1 to 4).toList.traverse { _ =>
       scenario { s =>
         // The real status-change write of the application repository (a hire), not a raw update.
@@ -196,7 +196,7 @@ final class InterviewCancellationRaceIntegrationSpec extends MongoIntegrationSui
     }.void
   }
 
-  test("accept against expiry: one wins by revision, the loser has no effect") {
+  test("DHW-23 accept against expiry: one wins by revision, the loser has no effect") {
     (1 to 3).toList.traverse { _ =>
       scenario { s =>
         for {
@@ -249,7 +249,7 @@ final class InterviewCancellationRaceIntegrationSpec extends MongoIntegrationSui
     }.void
   }
 
-  test("cancel against propose, and two proposals against each other: one wins each") {
+  test("DHW-23 cancel against propose, and two proposals against each other: one wins each") {
     scenario { s =>
       for {
         cancelVsPropose <- List(cancelBy(s, UserRole.Candidate, 0L), proposeBy(s, 0L, replacement)).parSequence
@@ -274,7 +274,7 @@ final class InterviewCancellationRaceIntegrationSpec extends MongoIntegrationSui
     }
   }
 
-  test("the same request sent in parallel returns one workflow and writes one rejection") {
+  test("DHW-23 the same request sent in parallel returns one workflow and writes one rejection") {
     scenario { s =>
       val key = UUID.randomUUID()
       val origin = s.actor(UserRole.Candidate, s.workflow.candidateId, key, "cancel")
@@ -306,7 +306,7 @@ final class InterviewCancellationRaceIntegrationSpec extends MongoIntegrationSui
     }
   }
 
-  test("a key reused for another operation or input is a conflict that changes nothing") {
+  test("DHW-23 a key reused for another operation or input is a conflict that changes nothing") {
     scenario { s =>
       val key = UUID.randomUUID()
       for {
@@ -334,7 +334,9 @@ final class InterviewCancellationRaceIntegrationSpec extends MongoIntegrationSui
     }
   }
 
-  test("two workers pumping one cancellation produce a single provider effect and one notification per recipient") {
+  test(
+    "DHW-23 two workers pumping one cancellation produce a single provider effect and one notification per recipient"
+  ) {
     scenario { s =>
       for {
         _ <- cancelBy(s, UserRole.Candidate, 0L)

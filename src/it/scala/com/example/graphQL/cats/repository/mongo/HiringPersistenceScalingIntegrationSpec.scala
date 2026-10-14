@@ -592,7 +592,9 @@ final class HiringPersistenceScalingIntegrationSpec extends MongoIntegrationSuit
     rows <- List("exactHighCardinalityFacets", "denseRadius", "denseRadiusLaterPage").traverse { kind =>
       def call: IO[Result] = kind match {
         case "exactHighCardinalityFacets" =>
-          requireResult(jobs.jobDiscoveryFacets(scope, JobFacetQuery(JobSearchFilter(None, Set.empty, None), None)))
+          requireResult(
+            jobs.jobDiscoveryFacets(scope, JobFacetQuery(JobSearchFilter(None, Set.empty, None), None), None, None)
+          )
             .as(Result(true))
         case "denseRadius" => requireResult(jobs.nearbyJobs(scope, nearby, 21)).map(result => Result(true, result.size))
         case _             =>

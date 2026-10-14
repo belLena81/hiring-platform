@@ -129,6 +129,7 @@ private[graphql] object HiringGraphQLInputs {
     deriveInputObjectType[NearbyJobsFilterGraphQLInput](InputObjectTypeName("NearbyJobsFilter"))
   lazy val nearbyCenterArgument: Argument[GeoPointGraphQLInput] = Argument("center", geoPointInputType)
   lazy val radiusKmArgument: Argument[Double] = Argument("radiusKm", FloatType)
+  lazy val optionalFacetQueryArgument: Argument[Option[String]] = Argument("query", OptionInputType(StringType))
   lazy val optionalRadiusKmArgument: Argument[Option[Double]] = Argument("radiusKm", OptionInputType(FloatType))
   lazy val optionalNearbyCenterArgument: Argument[Option[GeoPointGraphQLInput]] =
     Argument("center", OptionInputType(geoPointInputType))
