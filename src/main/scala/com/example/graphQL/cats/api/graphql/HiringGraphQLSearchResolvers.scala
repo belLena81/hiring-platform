@@ -17,9 +17,9 @@ import com.example.graphQL.cats.service.search.{
 }
 import com.example.graphQL.cats.service.{SearchError, UseCaseError}
 import com.example.graphQL.cats.service.events.OperationalEventPayload.SearchKind
+import com.example.graphQL.cats.service.events.SearchFilterSnapshot
 import com.example.graphQL.cats.domain.model.GeoPoint
 import com.example.graphQL.cats.service.search.CandidateMatchFilters
-import io.circe.Json
 import java.time.Instant
 import sangria.schema.Context
 
@@ -117,7 +117,7 @@ private[graphql] object HiringGraphQLSearchResolvers {
           actor.userId,
           SearchKind.SemanticJobSearch,
           searchId,
-          filterJson(filter),
+          filterSnapshot(filter),
           results.headOption.map(_.meta.model)
         )(results)(_.job.id.value.toString, _.score)
       } yield rankedJobResults(results)
@@ -134,7 +134,7 @@ private[graphql] object HiringGraphQLSearchResolvers {
           actor.userId,
           SearchKind.RecommendedJobs,
           searchId,
-          Json.obj(),
+          SearchFilterSnapshot.Unfiltered,
           results.headOption.map(_.meta.model)
         )(results)(_.job.id.value.toString, _.score)
       } yield rankedJobResults(results)
@@ -168,7 +168,7 @@ private[graphql] object HiringGraphQLSearchResolvers {
           actor.userId,
           SearchKind.CandidateMatches,
           searchId,
-          Json.obj("jobId" -> Json.fromString(jobId.value.toString)),
+          SearchFilterSnapshot.ForJob(jobId),
           results.headOption.map(_.meta.model)
         )(results)(_.candidate.id.value.toString, _.score)
       } yield rankedCandidateResults(results)

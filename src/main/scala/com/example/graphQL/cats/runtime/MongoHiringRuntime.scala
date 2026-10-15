@@ -1,6 +1,7 @@
 package com.example.graphQL.cats.runtime
 
 import cats.effect.{Clock, IO, Resource, Ref}
+import com.example.graphQL.cats.shared.MillisecondClock
 import cats.effect.std.{Semaphore, UUIDGen}
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.workflow.InterviewProposalTtl
@@ -14,10 +15,19 @@ import com.example.graphQL.cats.service.{
   LogEvent,
   LogField,
   LogFields,
-  ProbeResult
+  ProbeResult,
+  DegradedComponents,
+  ReadinessComponent,
+  ReadinessThresholds,
+  WorkerHeartbeats
 }
 import com.example.graphQL.cats.service.application.{ApplicationService, InterviewSchedulingService}
-import com.example.graphQL.cats.service.auth.{UserAccountService, UserAuthenticationService}
+import com.example.graphQL.cats.service.auth.{
+  RecruiterJobClosureSchedule,
+  RecruiterJobClosureWorker,
+  UserAccountService,
+  UserAuthenticationService
+}
 import com.example.graphQL.cats.service.job.JobService
 import com.example.graphQL.cats.service.mutation.Idempotent
 import com.example.graphQL.cats.service.protocol.UserAuthenticator
@@ -34,7 +44,7 @@ import com.example.graphQL.cats.service.search.{
   SearchSessionRecording,
   SemanticSearchService
 }
-import com.example.graphQL.cats.config.{AppConfig, VectorSearchConfig}
+import com.example.graphQL.cats.config.{AppConfig, RecruiterJobClosureConfig, VectorSearchConfig}
 import com.example.graphQL.cats.infrastructure.auth.{
   JwtAccessTokenIssuer,
   Argon2PasswordHasher,
@@ -48,6 +58,7 @@ import com.example.graphQL.cats.repository.mongo.{
   MongoAdminSeed,
   MongoInterviewWorkflowRepository,
   MongoInterviewSubjectCleanup,
+  MongoRecruiterJobClosure,
   MongoConsumerReceiptRepository,
   MongoDatabaseProbe,
   MongoEventQuarantineRepository,
@@ -68,7 +79,7 @@ import com.example.graphQL.cats.repository.mongo.{
   MongoEmbeddingWorkEnqueuer,
   AtlasSearchIndexConfig
 }
-import com.example.graphQL.cats.service.port.LexicalJobMatcher
+import com.example.graphQL.cats.service.port.{JobClosurePageSize, JobClosureRetry, LexicalJobMatcher}
 import com.example.graphQL.cats.service.resilience.CircuitBreaker
 import mongo4cats.database.MongoDatabase
 
@@ -76,7 +87,8 @@ final case class MongoHiringRuntime(
     probe: DatabaseProbe[IO],
     services: HiringGraphQLServices,
     userAuthenticator: UserAuthenticator[IO],
-    hiringReadiness: IO[ProbeResult]
+    hiringReadiness: IO[ProbeResult],
+    degradedComponents: IO[List[ReadinessComponent]]
 )
 
 object MongoHiringRuntime {
@@ -84,11 +96,17 @@ object MongoHiringRuntime {
     override def wake: IO[Unit] = IO.unit
   }
 
-  def resource(config: AppConfig, diagnostics: Diagnostics[IO]): Resource[IO, MongoHiringRuntime] =
+  def resource(config: AppConfig, diagnostics: Diagnostics[IO]): Resource[IO, MongoHiringRuntime] = {
+    // Every service-stamped timestamp is persisted by MongoDB at millisecond precision; one clock keeps them equal.
+    val clock: Clock[IO] = MillisecondClock(Clock[IO])
     for {
       passwordHashPermits <- Resource.eval(Semaphore[IO](Runtime.getRuntime.availableProcessors.toLong))
       embeddingHealth <- Resource.eval(Ref.of[IO, Boolean](config.vectorSearch == VectorSearchConfig.Disabled))
       breakers <- Resource.eval(DependencyBreakers.create(config.resilience, diagnostics))
+      heartbeats <- Resource.eval(WorkerHeartbeats.create[IO])
+      // An idle worker reports at least three times per staleness window.
+      alive = (component: ReadinessComponent) =>
+        heartbeats.alive(component, (config.readiness.workerStalenessSeconds.seconds / 3).max(1.second))
       discoveryPolicy <- Resource.eval(
         DiscoveryQueryPolicy.create(
           config.discovery.maxTimeMillis.millis,
@@ -111,7 +129,7 @@ object MongoHiringRuntime {
           MongoUserRepository.transactional(database, client, MongoEmbeddingWorkEnqueuer.disabled, diagnostics),
           hasher,
           config.adminSeed,
-          Clock[IO],
+          clock,
           UUIDGen[IO]
         )
       )
@@ -119,7 +137,15 @@ object MongoHiringRuntime {
       enqueuer =
         if (config.vectorSearch == VectorSearchConfig.Disabled) MongoEmbeddingWorkEnqueuer.disabled
         else embeddingWork
-      users = MongoUserRepository.transactional(database, client, enqueuer, diagnostics, breakers.mongoWrites)
+      closureSettings <- Resource.eval(recruiterJobClosureSettings(config.recruiterJobClosure))
+      users = MongoUserRepository.transactional(
+        database,
+        client,
+        enqueuer,
+        diagnostics,
+        breakers.mongoWrites,
+        closureSettings._1
+      )
       jobs = MongoJobRepository.transactional(
         database,
         client,
@@ -183,8 +209,15 @@ object MongoHiringRuntime {
           new IllegalStateException("Invalid lexical facet match limit")
         )
       )
+      handoffAlive <- Resource.eval(alive(ReadinessComponent.SearchSessionHandoff))
       searchSessionHandoff <- SearchSessionHandoff
-        .resource[IO](searchSessionWork, SearchSessionHandoffConfig(), diagnostics, Clock[IO])
+        .resource[IO](
+          searchSessionWork,
+          SearchSessionHandoffConfig(),
+          diagnostics,
+          clock,
+          alive = handoffAlive.beat
+        )
       // One branch decides the embedding capability; everything below is shared by both modes.
       embedding <- config.vectorSearch match {
         case VectorSearchConfig.Disabled =>
@@ -238,7 +271,7 @@ object MongoHiringRuntime {
               ),
               embeddingSettings.workerRestartDelayMillis.millis,
               embeddingHealth.set,
-              Clock[IO]
+              clock
             )
             search = new MongoSemanticSearchRepository(
               database,
@@ -261,13 +294,13 @@ object MongoHiringRuntime {
               users,
               new MongoEmbeddingCoverageRepository(database, diagnostics),
               embeddingSettings.durableRetryCapMillis.millis,
-              clock = Clock[IO]
+              clock = clock
             ),
             Some(new MongoLexicalJobMatcher(database, indexes.lexical, diagnostics, discoveryPolicy))
           )
       }
       (publisher, semanticSearch, coverage, lexicalMatcher) = embedding
-      idempotent = Idempotent(mutationReceipts)
+      idempotent = Idempotent(mutationReceipts, clock)
       accountService = UserAccountService(
         users,
         users,
@@ -278,7 +311,7 @@ object MongoHiringRuntime {
         publisher,
         idempotent,
         diagnostics,
-        Clock[IO],
+        clock,
         UUIDGen[IO]
       )
       readModel = HiringReadService(users, jobs, applications)
@@ -290,21 +323,21 @@ object MongoHiringRuntime {
           publisher,
           idempotent,
           diagnostics,
-          Clock[IO],
+          clock,
           UUIDGen[IO],
           lexicalMatcher = lexicalMatcher,
           lexicalFacetMatchLimit = facetLimit,
           lexicalFacetDeadline = Some(config.discovery.maxTimeMillis.millis)
         ),
-        new ApplicationService(users, jobs, applications, readModel, idempotent, Clock[IO], UUIDGen[IO]),
+        new ApplicationService(users, jobs, applications, readModel, idempotent, clock, UUIDGen[IO]),
         CursorCodec.keyFromSecret(config.jwtAuth.hmacSecret, config.jwtAuth.cursorTtlSeconds),
         accountService,
-        new OperationalTelemetryService(users, jobs, searchSessions, searchSessionWork, idempotent, Clock[IO]),
-        SearchSessionRecording(searchSessionHandoff),
+        new OperationalTelemetryService(users, jobs, searchSessions, searchSessionWork, idempotent, clock),
+        SearchSessionRecording(searchSessionHandoff)(using cats.Monad[IO], clock, UUIDGen[IO]),
         semanticSearch,
         AnalyticsReportingService(users, analyticsReports),
         Option.when(config.kafka.interview.enabled)(
-          new InterviewSchedulingService[IO](
+          new InterviewSchedulingService[IO](using cats.Monad[IO], clock, UUIDGen[IO])(
             users,
             jobs,
             applications,
@@ -322,49 +355,89 @@ object MongoHiringRuntime {
           receipts,
           quarantine,
           diagnostics,
-          Clock[IO],
+          clock,
           UUIDGen[IO],
-          breakers.kafkaPublisher
+          breakers.kafkaPublisher,
+          alive
         )
       _ <- InterviewSchedulingRuntime.resource(
         config.kafka,
         interviewRepository,
         new MongoInterviewSubjectCleanup(database, diagnostics, config.kafka.interview.topics),
-        diagnostics
+        diagnostics,
+        alive
+      )
+      // Open jobs of a deleted recruiter beyond the first deletion page are closed here, one transaction per page.
+      closure = MongoRecruiterJobClosure.transactional(
+        database,
+        client,
+        diagnostics,
+        closureSettings._1,
+        breakers.mongoWrites,
+        closureSettings._3
+      )
+      closureAlive <- Resource.eval(alive(ReadinessComponent.RecruiterJobClosure))
+      _ <- new RecruiterJobClosureWorker[IO](closure, diagnostics, closureSettings._2, closureAlive.beat).resource
+      degraded <- Resource.eval(
+        DegradedComponents.create[IO](
+          heartbeats,
+          ReadinessThresholds(
+            config.readiness.workerStalenessSeconds.seconds,
+            config.readiness.maxOutboxAgeSeconds.seconds,
+            config.readiness.maxClosureWorkAgeSeconds.seconds
+          ),
+          embeddingHealth.get,
+          now => outbox.oldestDueAge(now),
+          now => closure.oldestPendingAge(now),
+          diagnostics
+        )
       )
       metadata = MongoDatabaseProbe.connectionMetadata(config.mongoUri, config.mongoDatabase)
     } yield MongoHiringRuntime(
-      probe(database, metadata, diagnostics, embeddingHealth.get, breakers.mongoWrites),
+      probe(database, metadata, diagnostics, breakers.mongoWrites),
       services,
       UserAuthenticationService(users),
-      embeddingHealth.get.map(if (_) ProbeResult.Ready else ProbeResult.Unavailable)
+      embeddingHealth.get.map(if (_) ProbeResult.Ready else ProbeResult.Unavailable),
+      degraded.current
     )
+  }
+
+  /** The validated numbers become the typed values; an impossible combination stops startup. */
+  private def recruiterJobClosureSettings(
+      config: RecruiterJobClosureConfig
+  ): IO[(JobClosurePageSize, RecruiterJobClosureSchedule, JobClosureRetry)] =
+    IO.fromOption(
+      (
+        JobClosurePageSize.from(config.pageSize),
+        RecruiterJobClosureSchedule.from(
+          config.idlePollMillis.millis,
+          config.failureBackoffInitialMillis.millis,
+          config.failureBackoffMaxMillis.millis
+        ),
+        JobClosureRetry.from(config.rowRetryInitialMillis.millis, config.rowRetryMaxMillis.millis)
+      ).tupled
+    )(new IllegalStateException("Invalid recruiter job closure settings"))
 
   private def probe(
       database: MongoDatabase[IO],
       metadata: Map[LogField, String],
       diagnostics: Diagnostics[IO],
-      embeddingHealthy: IO[Boolean],
       mongoWrites: CircuitBreaker[IO]
   ): DatabaseProbe[IO] = new DatabaseProbe[IO] {
     private val delegate = MongoDatabaseProbe.fromDatabase(database, metadata, diagnostics)
 
     override def check(requestId: Option[String]): IO[ProbeResult] =
       // The ping goes straight to the database; only its result is combined with dependency health.
-      delegate.check(requestId).flatMap(readiness(_, embeddingHealthy, mongoWrites))
+      delegate.check(requestId).flatMap(readiness(_, mongoWrites))
   }
 
-  /** Once the open period ends the breaker admits again, so readiness recovers and traffic can probe it. */
-  private[runtime] def readiness(
-      ping: ProbeResult,
-      embeddingHealthy: IO[Boolean],
-      mongoWrites: CircuitBreaker[IO]
-  ): IO[ProbeResult] =
+  /** Only the ping and the Mongo-writes breaker decide the status; every other component is reported as degraded. Once
+    * the open period ends the breaker admits again, so readiness recovers and traffic can probe it.
+    */
+  private[runtime] def readiness(ping: ProbeResult, mongoWrites: CircuitBreaker[IO]): IO[ProbeResult] =
     ping match {
       case ProbeResult.Ready =>
-        (embeddingHealthy, mongoWrites.admits).mapN((embedding, writable) =>
-          if (embedding && writable) ProbeResult.Ready else ProbeResult.Unavailable
-        )
+        mongoWrites.admits.map(writable => if (writable) ProbeResult.Ready else ProbeResult.Unavailable)
       case other => IO.pure(other)
     }
 

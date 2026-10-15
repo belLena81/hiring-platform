@@ -8,6 +8,7 @@ import com.example.graphQL.cats.service.{ActorContext, HiringReadService, UseCas
 import com.example.graphQL.cats.domain.pagination.{ApplicationPageRequest, PageSize}
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.ServiceFixtures.*
+import com.example.graphQL.cats.service.port.ApplicationWriteActor
 import com.example.graphQL.cats.service.protocol.IdempotencyRequest
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.Identifiers.ApplicationEventId
@@ -36,6 +37,67 @@ class ApplicationServiceSpec extends CatsEffectSuite {
           assertEquals(result.map(_.candidateId), Right(candidateId))
           assertEquals(events.map(_.previousStatus), Vector(None))
           assertEquals(events.map(_.newStatus), Vector(ApplicationStatus.Created))
+        }
+    }
+  }
+
+  test("ARR-02.1 submission hands the store the trusted candidate as its write actor") {
+    withServices(Map(jobId -> openJob), Map.empty, now, List(applicationId.value, eventId.value)).flatMap {
+      case (_, applications, service) =>
+        for {
+          _ <- service
+            .submitApplication(request("submit-actor"), ActorContext(candidateId, UserRole.Candidate), jobId)
+            .value
+          actors <- applications.allWriteActors
+        } yield assertEquals(actors, Vector(ApplicationWriteActor(candidateId, UserRole.Candidate)))
+    }
+  }
+
+  List(
+    "recruiter" -> ApplicationWriteActor(recruiterId, UserRole.Recruiter),
+    "admin" -> ApplicationWriteActor(adminId, UserRole.Admin)
+  ).foreach { case (label, writeActor) =>
+    test(s"ARR-02.2 status change hands the store the trusted $label as its write actor") {
+      withServices(Map(jobId -> openJob), Map(applicationId -> createdApplication), later, List(eventId.value))
+        .flatMap { case (_, applications, service) =>
+          for {
+            result <- service
+              .changeStatus(
+                request(s"accept-$label"),
+                ActorContext(writeActor.id, writeActor.role),
+                applicationId,
+                ApplicationStatus.Accepted,
+                None,
+                None
+              )
+              .value
+            actors <- applications.allWriteActors
+          } yield {
+            assertEquals(result.map(_.status), Right(ApplicationStatus.Accepted))
+            assertEquals(actors, Vector(writeActor))
+          }
+        }
+    }
+  }
+
+  test("ARR-02.3 a status change refused by the service never reaches the store") {
+    withServices(Map(jobId -> openJob), Map(applicationId -> createdApplication), later, List(eventId.value)).flatMap {
+      case (_, applications, service) =>
+        for {
+          result <- service
+            .changeStatus(
+              request("candidate-accept"),
+              ActorContext(candidateId, UserRole.Candidate),
+              applicationId,
+              ApplicationStatus.Accepted,
+              None,
+              None
+            )
+            .value
+          actors <- applications.allWriteActors
+        } yield {
+          assertEquals(result, Left(UseCaseError.Domain(DomainError.Forbidden)))
+          assertEquals(actors, Vector.empty)
         }
     }
   }
@@ -234,6 +296,7 @@ class ApplicationServiceSpec extends CatsEffectSuite {
       eventsRef <- Ref.of[IO, Vector[com.example.graphQL.cats.domain.model.ApplicationEvent]](Vector.empty)
       operationalEvents <- Ref
         .of[IO, Vector[com.example.graphQL.cats.service.events.OperationalEventEnvelope]](Vector.empty)
+      writeActors <- Ref.of[IO, Vector[ApplicationWriteActor]](Vector.empty)
       nextCreateError <- Ref.of[IO, Option[com.example.graphQL.cats.service.RepositoryError]](None)
       nextOperationalEventError <- Ref
         .of[IO, Option[com.example.graphQL.cats.service.RepositoryError]](None)
@@ -244,7 +307,8 @@ class ApplicationServiceSpec extends CatsEffectSuite {
         eventsRef,
         nextCreateError,
         Some(operationalEvents),
-        Some(nextOperationalEventError)
+        Some(nextOperationalEventError),
+        Some(writeActors)
       )
       userRepository = InMemoryUsers(usersRef)
       service = new ApplicationService(

@@ -80,7 +80,8 @@ final class MongoMigrationLedgerSpec extends FunSuite {
       "016_candidate_residence_integrity",
       "017_interview_ledger_collections",
       "018_interview_cancellation_reschedule",
-      "019_interview_request_receipt_index"
+      "019_interview_request_receipt_index",
+      "020_recruiter_job_closure_work"
     )
     val actual = List(
       MigrationIds.UserJobRevisions,
@@ -101,7 +102,8 @@ final class MongoMigrationLedgerSpec extends FunSuite {
       MigrationIds.CandidateResidenceIntegrity,
       MigrationIds.InterviewLedgerCollections,
       MigrationIds.InterviewCancellationReschedule,
-      MigrationIds.InterviewRequestReceiptIndex
+      MigrationIds.InterviewRequestReceiptIndex,
+      MigrationIds.RecruiterJobClosureWork
     ).map(_.value)
     assertEquals(actual, expected)
     assertEquals(MongoDeletedAccountEmbeddingMigrations.MigrationId, MigrationIds.DeletedAccountEmbeddings.value)
@@ -113,6 +115,7 @@ final class MongoMigrationLedgerSpec extends FunSuite {
     assertEquals(MongoInterviewLedgerCollectionMigrations.MigrationId, MigrationIds.InterviewLedgerCollections.value)
     assertEquals(MongoInterviewLifecycleMigrations.MigrationId, MigrationIds.InterviewCancellationReschedule.value)
     assertEquals(MongoInterviewRequestReceiptMigrations.MigrationId, MigrationIds.InterviewRequestReceiptIndex.value)
+    assertEquals(MongoRecruiterJobClosureMigrations.MigrationId, MigrationIds.RecruiterJobClosureWork.value)
   }
 
   test("typed migration errors are stack-free throwables whose messages carry identities only") {

@@ -15,6 +15,7 @@ import org.http4s.circe.*
 import org.http4s.dsl.Http4sDsl
 import org.http4s.headers.{Accept, Allow, `Content-Type`, `WWW-Authenticate`}
 import org.http4s.server.AuthMiddleware
+import org.typelevel.ci.*
 import org.typelevel.otel4s.trace.Tracer
 
 private[http] enum HttpRejection(val status: Status, val message: String, val reason: FailureReason) {
@@ -68,6 +69,26 @@ private[http] final class GraphQLHttpRoutes(
       )
       .as(error(rejection.status, rejection.message, mediaType))
 
+  /** HTTP 429 with a GraphQL error body (`RATE_LIMITED`, `retryAfter`) and the standard `Retry-After` header. */
+  private def costBudgetExhausted(
+      retryAfterSeconds: Long,
+      requestId: String,
+      mediaType: MediaType
+  ): IO[Response[IO]] =
+    diagnostics
+      .emit(
+        LogEvent.RequestRejected,
+        Some(requestId),
+        fields = Map(
+          LogField.Reason -> FailureReason.RateLimited.reason,
+          LogField.Status -> Status.TooManyRequests.code.toString
+        )
+      )
+      .as(
+        graphqlJson(Status.TooManyRequests, HiringGraphQLSchema.costBudgetResponse(retryAfterSeconds), mediaType)
+          .putHeaders(Header.Raw(ci"Retry-After", retryAfterSeconds.toString))
+      )
+
   private def graphql(
       request: Request[IO],
       requestId: String,
@@ -97,7 +118,9 @@ private[http] final class GraphQLHttpRoutes(
                     dependencies.clientAddressResolver.resolve(request),
                     key => dependencies.rateLimiter.permit(key),
                     dependencies.discoveryMaxRoots,
-                    actorId => dependencies.interviewActionLimiter.permit(actorId)
+                    actorId => dependencies.interviewActionLimiter.permit(actorId),
+                    (key, cost) => dependencies.costBudgetLimiter.acquireNow(key, cost),
+                    dependencies.schemaExposure
                   )
                 )
                 context
@@ -112,6 +135,8 @@ private[http] final class GraphQLHttpRoutes(
                       completedGraphQL(parsed, result, requestId, mediaType, Some(document.document))
                     case Left(HiringGraphQLSchema.Failure.InvalidQuery) =>
                       rejected(HttpRejection.InvalidQuery, requestId, mediaType = mediaType)
+                    case Left(HiringGraphQLSchema.Failure.CostBudgetExhausted(retryAfterSeconds)) =>
+                      costBudgetExhausted(retryAfterSeconds, requestId, mediaType)
                     case Left(HiringGraphQLSchema.Failure.Internal) =>
                       rejected(HttpRejection.Internal, requestId, mediaType = mediaType)
                   }
@@ -179,8 +204,9 @@ private[http] final class GraphQLHttpRoutes(
   }
 
   def routes: HttpRoutes[IO] = {
-    val schema = HttpRoutes.of[IO] { case GET -> Root / "schema.graphql" =>
-      Ok(HiringGraphQLSchema.sdl)
+    // With exposure off the route is absent, so the fallback answers 404 as for any unknown path.
+    val schema = HttpRoutes.of[IO] {
+      case GET -> Root / "schema.graphql" if dependencies.schemaExposure => Ok(HiringGraphQLSchema.sdl)
     }
     val fallback = HttpRoutes.of[IO] {
       case request if request.uri.path == HiringHttpPaths.GraphQLPath =>

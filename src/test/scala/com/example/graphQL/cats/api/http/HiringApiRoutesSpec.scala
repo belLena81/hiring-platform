@@ -1387,6 +1387,121 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     }
   }
 
+  test("ARR-01.1 a negative first is rejected as VALIDATION_FAILED before resolver work") {
+    for {
+      calls <- Ref.of[IO, Int](0)
+      http <- app(calls.update(_ + 1).as(ProbeResult.Ready))
+      response <- http(request("{ jobs(first: -1) { edges { cursor } } readiness { status } }"))
+      body <- response.as[String]
+      count <- calls.get
+    } yield {
+      assertEquals(count, 0)
+      assert(body.contains("VALIDATION_FAILED"), body)
+    }
+  }
+
+  test("ARR-01.2 a negative first cannot offset the cost of a costly sibling field") {
+    val selections = (1 to 20).map(index => s"name$index: name").mkString(" ")
+    val query =
+      s"{ costly: jobs(first: 100) { edges { node { recruiter { $selections } } } } " +
+        "offset: jobs(first: -1000) { edges { cursor } } readiness { status } }"
+    for {
+      calls <- Ref.of[IO, Int](0)
+      http <- app(calls.update(_ + 1).as(ProbeResult.Ready))
+      response <- http(request(query))
+      body <- response.as[String]
+      count <- calls.get
+    } yield {
+      assertEquals(count, 0)
+      assert(body.contains("VALIDATION_FAILED"), body)
+    }
+  }
+
+  test("ARR-01.3 an oversized first is rejected as VALIDATION_FAILED before resolver work") {
+    for {
+      calls <- Ref.of[IO, Int](0)
+      http <- app(calls.update(_ + 1).as(ProbeResult.Ready))
+      response <- http(request("{ jobs(first: 101) { edges { cursor } } readiness { status } }"))
+      body <- response.as[String]
+      count <- calls.get
+    } yield {
+      assertEquals(count, 0)
+      assert(body.contains("VALIDATION_FAILED"), body)
+    }
+  }
+
+  private def assertPageSizeRefused(query: String, variables: Json = Json.obj()): IO[Unit] =
+    for {
+      calls <- Ref.of[IO, Int](0)
+      http <- app(calls.update(_ + 1).as(ProbeResult.Ready))
+      response <- http(
+        Request[IO](Method.POST, Uri.unsafeFromString("/graphql"))
+          .withEntity(Json.obj("query" -> Json.fromString(query), "variables" -> variables))
+      )
+      body <- response.as[Json]
+      count <- calls.get
+    } yield {
+      assertEquals(count, 0)
+      assertEquals(response.status, Status.Ok)
+      assertEquals(body.hcursor.downField("data").focus, Some(Json.Null), clue(body))
+      assert(body.noSpaces.contains("VALIDATION_FAILED"), body.noSpaces)
+    }
+
+  test("ARR-01.1 a negative first supplied through a variable is rejected before resolver work") {
+    assertPageSizeRefused(
+      "query Q($n: Int!) { jobs(first: $n) { edges { cursor } } readiness { status } }",
+      Json.obj("n" -> Json.fromInt(-1))
+    )
+  }
+
+  test("ARR-01.1 a negative first inside a named fragment is rejected before resolver work") {
+    assertPageSizeRefused(
+      "{ readiness { status } ...Page } fragment Page on Query { jobs(first: -1) { edges { cursor } } }"
+    )
+  }
+
+  test("ARR-01.1 a negative first inside an inline fragment is rejected before resolver work") {
+    assertPageSizeRefused("{ readiness { status } ... on Query { jobs(first: -5) { edges { cursor } } } }")
+  }
+
+  test("ARR-01.1 a negative first under an alias is rejected before resolver work") {
+    assertPageSizeRefused("{ readiness { status } harmless: jobs(first: -1) { edges { cursor } } }")
+  }
+
+  test("ARR-01.1 an oversized first supplied through a variable inside a fragment is rejected before resolver work") {
+    assertPageSizeRefused(
+      "query Q($n: Int!) { ...Page } fragment Page on Query { x: myJobs(first: $n) { edges { cursor } } }",
+      Json.obj("n" -> Json.fromInt(1000))
+    )
+  }
+
+  test("ARR-01.1 only root query fields take a page size, so no nested connection can bypass the pre-execution check") {
+    import sangria.schema.ObjectType
+    val offenders = HiringGraphQLSchema.schema.allTypes.values.toList.collect {
+      case objectType: ObjectType[?, ?] if objectType.name != "Query" =>
+        objectType.fields
+          .filter(_.arguments.exists(_.name == "first"))
+          .map(field => s"${objectType.name}.${field.name}")
+    }.flatten
+    assertEquals(offenders, Nil, "a nested paged field needs its own pre-execution page size test")
+  }
+
+  test("F5 the mutations that take a password are exactly the rate-limited signUp and login") {
+    import sangria.schema.InputObjectType
+    val passwordMutations = HiringGraphQLSchema.schema.mutation.toList.flatMap(_.fields).collect {
+      case field if field.arguments.exists(_.argumentType.namedType match {
+            case input: InputObjectType[?] => input.fields.exists(_.name == "password")
+            case _                         => field.arguments.exists(_.name == "password")
+          }) =>
+        field.name
+    }
+    assertEquals(
+      passwordMutations.sorted,
+      List("login", "signUp"),
+      "a new password-hashing mutation needs AuthRateLimiter coverage and a test"
+    )
+  }
+
   test("named operation, variables, explicit nulls, methods and media negotiation") {
     val selected = health.withEntity(
       Json.obj(

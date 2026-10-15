@@ -5,7 +5,14 @@ import cats.syntax.all.*
 import com.example.graphQL.cats.config.KafkaConfig
 import com.example.graphQL.cats.infrastructure.kafka.*
 import com.example.graphQL.cats.repository.mongo.{MongoInterviewSubjectCleanup, MongoInterviewWorkflowRepository}
-import com.example.graphQL.cats.service.{BackgroundWorker, Diagnostics, LogEvent, LogFields}
+import com.example.graphQL.cats.service.{
+  BackgroundWorker,
+  Diagnostics,
+  LogEvent,
+  LogFields,
+  ReadinessComponent,
+  WorkerAlive
+}
 import com.example.graphQL.cats.service.Diagnostics.*
 import com.example.graphQL.cats.service.application.{
   InterviewWorkflowWorker,
@@ -24,7 +31,8 @@ private[runtime] object InterviewSchedulingRuntime {
       config: KafkaConfig,
       repository: MongoInterviewWorkflowRepository,
       cleanup: MongoInterviewSubjectCleanup,
-      diagnostics: Diagnostics[IO]
+      diagnostics: Diagnostics[IO],
+      alive: ReadinessComponent => IO[WorkerAlive[IO]]
   ): Resource[IO, Unit] = {
     val settings = config.interview
     if (!settings.enabled) Resource.unit[IO]
@@ -116,8 +124,16 @@ private[runtime] object InterviewSchedulingRuntime {
                 .sleep_[IO](settings.retryBaseSeconds.seconds)
             }
           for {
-            _ <- InterviewKafkaRuntime.consumerResource(commandConfig, diagnostics)(receive(worker.receiveResult))
-            _ <- InterviewKafkaRuntime.consumerResource(resultConfig, diagnostics)(receive(worker.receiveCommand))
+            orchestratorAlive <- Resource.eval(alive(ReadinessComponent.InterviewOrchestratorConsumer))
+            workerAlive <- Resource.eval(alive(ReadinessComponent.InterviewWorkerConsumer))
+            publicationAlive <- Resource.eval(alive(ReadinessComponent.InterviewPublication))
+            cleanupAlive <- Resource.eval(alive(ReadinessComponent.InterviewSubjectCleanup))
+            _ <- InterviewKafkaRuntime.consumerResource(commandConfig, diagnostics, orchestratorAlive)(
+              receive(worker.receiveResult)
+            )
+            _ <- InterviewKafkaRuntime.consumerResource(resultConfig, diagnostics, workerAlive)(
+              receive(worker.receiveCommand)
+            )
             retention = InterviewKafkaRetention(
               config.bootstrapServers,
               orchestratorUsername,
@@ -133,7 +149,7 @@ private[runtime] object InterviewSchedulingRuntime {
               diagnostics
             )
             _ <- BackgroundWorker.resource(PublicationWorker, diagnostics)(
-              Stream.suspend(generation).repeat.compile.drain
+              Stream.suspend(generation.evalTap(_ => publicationAlive.beat)).repeat.compile.drain
             )
             _ <- new InterviewSubjectCleanupWorker[IO](
               cleanup,
@@ -141,7 +157,8 @@ private[runtime] object InterviewSchedulingRuntime {
               retention.capture,
               retention.passed,
               diagnostics,
-              topics = settings.topics
+              topics = settings.topics,
+              alive = cleanupAlive.beat
             ).resource
           } yield ()
         case _ => Resource.eval(IO.raiseError(new IllegalStateException("interview credentials were not validated")))

@@ -2,7 +2,6 @@ package com.example.graphQL.cats.repository.mongo
 
 import com.example.graphQL.cats.service.resilience.CircuitBreaker
 
-import com.example.graphQL.cats.shared.StableIds
 import cats.data.EitherT
 import cats.effect.IO
 import cats.syntax.all.*
@@ -10,7 +9,6 @@ import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.RepositoryError
-import com.example.graphQL.cats.service.events.{OperationalEventPayload, OperationalEvents}
 import com.example.graphQL.cats.service.Diagnostics
 import com.mongodb.client.model.{Filters, UpdateOptions}
 import mongo4cats.client.{ClientSession, MongoClient}
@@ -25,14 +23,14 @@ final class MongoUserRepository(
     database: MongoDatabase[IO],
     transactionRunner: MongoTransactionRunner,
     embeddingWork: MongoEmbeddingWorkEnqueuer,
-    diagnostics: Diagnostics[IO]
+    diagnostics: Diagnostics[IO],
+    jobClosurePageSize: JobClosurePageSize = JobClosurePageSize.Default
 ) extends UserRepository[IO]
     with UserAccountRepository[IO] {
   private def collection = Mongo4catsCollections.documents(database, MongoCollections.Users)
   private def registry = Mongo4catsCollections.documents(database, MongoCollections.AccountRegistry)
-  private def outbox = Mongo4catsCollections.documents(database, MongoCollections.EventOutbox)
   private def subjectFences = Mongo4catsCollections.documents(database, MongoCollections.OutboxSubjectFences)
-  private val MaxJobsClosedByAccountDeletion = 1000
+  private val closurePages = new MongoRecruiterJobClosurePages(database, diagnostics, jobClosurePageSize)
 
   def insert(user: User): RepositoryF[IO, Unit] =
     if (!user.roleProfileIsValid) RepositoryF.at[IO].raise(RepositoryError.Conflict)
@@ -454,7 +452,7 @@ final class MongoUserRepository(
       .flatMap(_ =>
         markSubjectFenceDeleted(session, userId, now) *>
           new MongoInterviewSubjectCleanup(database).enqueue(userId, now, session) *>
-          closeRecruiterJobs(userId, now, session)
+          closeFirstRecruiterJobPage(userId, now, session)
       )
   }
 
@@ -480,68 +478,18 @@ final class MongoUserRepository(
       )
   }
 
-  private def closeRecruiterJobs(
+  /** Bounded: closes at most the first page of the recruiter's open jobs. When more remain, one durable work row makes
+    * the follow-up worker close them page by page in later transactions, so the deletion transaction does not grow with
+    * the number of jobs.
+    */
+  private def closeFirstRecruiterJobPage(
       userId: UserId,
       now: Instant,
       session: Option[ClientSession[IO]]
-  ): RepositoryF[IO, Unit] = {
-    val jobFilter = MongoFilter.and(
-      MongoFilter.eq(MongoFields.RecruiterId, userId.value.toString),
-      MongoFilter.eq(MongoFields.Status, JobStatus.Open.toString)
-    )
-    val jobs = Mongo4catsCollections.documents(database, MongoCollections.Jobs)
-    def closeJobs(afterId: Option[String]): RepositoryF[IO, Unit] = {
-      val batchFilter =
-        MongoFilter.and(List(Some(jobFilter), afterId.map(id => MongoFilter.gt(MongoFields.Id, id))).flatten*)
-      RepositoryF
-        .lift(MongoSessionOperations.findManyById(jobs, session, batchFilter, MaxJobsClosedByAccountDeletion))
-        .subflatMap(documents => MongoStoredDocumentDecoding.values(documents.map(MongoHiringCodecs.readVersionedJob)))
-        .flatMap {
-          case Nil           => ().pure[[A] =>> RepositoryF[IO, A]]
-          case versionedJobs =>
-            val openJobs = versionedJobs.map(_.value)
-            val closedJobs =
-              openJobs.map(job => job.copy(status = JobStatus.Closed, closedAt = Some(now), updatedAt = now))
-            val closeWrites = versionedJobs.zip(closedJobs).traverse_ { case (observed, closed) =>
-              for {
-                nextVersion <- RepositoryF
-                  .at[IO]
-                  .fromEither(
-                    Versioned.nextVersion(observed.version).toRight(RepositoryError.Conflict)
-                  )
-                result <- RepositoryF.lift(
-                  MongoSessionOperations.replaceOne(
-                    jobs,
-                    session,
-                    MongoFilter.and(
-                      MongoFilter.eq(MongoFields.Id, observed.value.id.value.toString),
-                      MongoFilter.eq(MongoFields.Version, observed.version)
-                    ),
-                    MongoHiringCodecs.job(closed, nextVersion)
-                  )
-                )
-                _ <- RepositoryF.at[IO].fromEither(MongoRepositorySupport.matchedOne(result))
-              } yield ()
-            }
-            val closeEvents = closedJobs.traverse { closed =>
-              OperationalEvents.jobEvent(
-                OperationalEventPayload.JobKind.Closed,
-                StableIds.uuid(s"job:${closed.id.value}:JOB_CLOSED:${closed.updatedAt.toEpochMilli}"),
-                closed,
-                userId,
-                now
-              )
-            }
-            for {
-              validEvents <- RepositoryF.at[IO].fromEither(closeEvents.leftMap(_ => RepositoryError.InvalidEvent))
-              _ <- closeWrites
-              _ <- MongoOperationalEventInsertion.insert(outbox, session, validEvents, now, diagnostics)
-              _ <- closeJobs(Some(openJobs.last.id.value.toString))
-            } yield ()
-        }
+  ): RepositoryF[IO, Unit] =
+    closurePages.closePage(userId, now, session).flatMap { page =>
+      if (page.remains) closurePages.enqueue(userId, now, session) else RepositoryF.at[IO].pure(())
     }
-    closeJobs(None)
-  }
 }
 
 object MongoUserRepository {
@@ -550,12 +498,14 @@ object MongoUserRepository {
       client: MongoClient[IO],
       embeddingWork: MongoEmbeddingWorkEnqueuer,
       diagnostics: Diagnostics[IO],
-      breaker: CircuitBreaker[IO] = CircuitBreaker.disabled[IO]
+      breaker: CircuitBreaker[IO] = CircuitBreaker.disabled[IO],
+      jobClosurePageSize: JobClosurePageSize = JobClosurePageSize.Default
   ): MongoUserRepository =
     new MongoUserRepository(
       database,
       MongoTransactionRunner.sessions(client, RepositoryError.Conflict, diagnostics = diagnostics, breaker = breaker),
       embeddingWork,
-      diagnostics
+      diagnostics,
+      jobClosurePageSize
     )
 }

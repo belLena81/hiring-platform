@@ -130,9 +130,9 @@ class OperationalEventComposeIntegrationSpec extends KafkaIntegrationSuite {
     val event = OperationalEvents
       .jobEvent(OperationalEventPayload.JobKind.Created, UUID.randomUUID(), value, actors.head, value.createdAt)
       .fold(error => fail(error.toString), identity)
-    val bytes = com.example.graphQL.cats.service.events.OperationalEventJson.bytes(event)
+    val bytes = com.example.graphQL.cats.infrastructure.events.OperationalEventWireCodec.bytes(event)
     assert(bytes.length > 65536)
-    assert(bytes.length <= com.example.graphQL.cats.service.events.OperationalEventJson.MaxEnvelopeBytes)
+    assert(bytes.length <= com.example.graphQL.cats.infrastructure.events.OperationalEventWireCodec.MaxEnvelopeBytes)
     val properties = LocalTestServices.adminProperties(manifest, "hiring_publisher_v2", manifest.publisherPassword)
     val _ = properties.put("key.serializer", classOf[org.apache.kafka.common.serialization.StringSerializer].getName)
     val _ =

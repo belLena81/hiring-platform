@@ -3,12 +3,7 @@ package com.example.graphQL.cats.service.events
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, ApplicationStatus, Job}
-import io.circe.{Decoder, Encoder, Json}
-import io.circe.generic.semiauto.*
-import io.circe.parser.parse
 import java.time.Instant
-import java.nio.charset.{CodingErrorAction, StandardCharsets}
-import java.nio.ByteBuffer
 import java.util.UUID
 
 enum OperationalEventType {
@@ -27,7 +22,7 @@ final case class OperationalEventEnvelope(
     aggregateType: OperationalAggregateType,
     aggregateId: String,
     actorId: UserId,
-    payload: Json
+    payload: OperationalEventPayload
 ) {
   def partitionKey: String =
     aggregateId
@@ -42,120 +37,16 @@ object OperationalEventEnvelope {
       actorId: UserId,
       payload: OperationalEventPayload
   ): OperationalEventEnvelope = {
-    import OperationalEventPayload.*
-    val (eventType, aggregateType, aggregateId) = payload match {
-      case JobFact(kind, job)              => (kind.eventType, OperationalAggregateType.Job, job.jobId)
-      case ApplicationCreated(id, _, _, _) =>
-        (OperationalEventType.APPLICATION_CREATED, OperationalAggregateType.Application, id)
-      case StatusChanged(id, _, _, _, _) =>
-        (OperationalEventType.APPLICATION_STATUS_CHANGED, OperationalAggregateType.Application, id)
-      case CandidateHired(id, _, _, _) =>
-        (OperationalEventType.CANDIDATE_HIRED, OperationalAggregateType.Application, id)
-      case SearchPerformed(id, _, _) => (OperationalEventType.SEARCH_PERFORMED, OperationalAggregateType.Search, id)
-      case JobViewed(_, id, _, _)    => (OperationalEventType.JOB_VIEWED, OperationalAggregateType.Search, id)
-      case SearchResultClicked(id, _, _, _) =>
-        (OperationalEventType.SEARCH_RESULT_CLICKED, OperationalAggregateType.Search, id)
-    }
     OperationalEventEnvelope(
       eventId,
-      eventType,
+      payload.eventType,
       occurredAt,
-      aggregateType,
-      aggregateId.toString,
+      payload.aggregateType,
+      payload.aggregateId.toString,
       actorId,
-      OperationalEventPayload.json(payload)
+      payload
     )
   }
-}
-
-object OperationalEventJson {
-  // Wire contract budget, independently below the broker's framed-record limit.
-  val MaxEnvelopeBytes: Int = 256 * 1024
-
-  def validate(value: OperationalEventEnvelope): Either[OperationalEventContractError, OperationalEventEnvelope] =
-    OperationalEventPayload
-      .decode(value)
-      .flatMap(_ =>
-        Either.cond(bytes(value).length <= MaxEnvelopeBytes, value, OperationalEventContractError.EnvelopeTooLarge)
-      )
-
-  def encode(value: OperationalEventEnvelope): Either[OperationalEventContractError, Array[Byte]] =
-    validate(value).map(bytes)
-  private val EnvelopeFields = Set(
-    "eventId",
-    "eventType",
-    "occurredAt",
-    "aggregateType",
-    "aggregateId",
-    "actorId",
-    "payload"
-  )
-  private given Encoder[UUID] = Encoder.encodeString.contramap(_.toString)
-
-  private given Decoder[UUID] = Decoder.decodeString.emap { raw =>
-    OperationalEventPayload.fullUuid(raw)
-  }
-
-  private given Encoder[Instant] = Encoder.encodeString.contramap(_.toString)
-
-  private given Decoder[Instant] = Decoder.decodeString.emap { raw =>
-    Either.catchNonFatal(Instant.parse(raw)).left.map(_ => "invalid timestamp")
-  }
-
-  private given Encoder[OperationalEventType] = Encoder.encodeString.contramap(_.toString)
-
-  private given Decoder[OperationalEventType] = Decoder.decodeString.emap { raw =>
-    OperationalEventType.values.find(_.toString == raw).toRight("invalid event type")
-  }
-
-  private given Encoder[OperationalAggregateType] = Encoder.encodeString.contramap(_.toString)
-
-  private given Decoder[OperationalAggregateType] = Decoder.decodeString.emap { raw =>
-    OperationalAggregateType.values.find(_.toString == raw).toRight("invalid aggregate type")
-  }
-
-  private given Encoder[UserId] = Encoder.encodeString.contramap(_.value.toString)
-
-  private given Decoder[UserId] = Decoder.decodeString.emap { raw =>
-    OperationalEventPayload.fullUuid(raw).map(UserId.apply)
-  }
-
-  private given Encoder[OperationalEventEnvelope] = deriveEncoder
-  private given Decoder[OperationalEventEnvelope] = deriveDecoder
-
-  def json(value: OperationalEventEnvelope): Json =
-    summon[Encoder[OperationalEventEnvelope]].apply(value)
-
-  def bytes(value: OperationalEventEnvelope): Array[Byte] =
-    json(value).noSpaces.getBytes(StandardCharsets.UTF_8)
-
-  def decode(bytes: Array[Byte]): Either[String, OperationalEventEnvelope] =
-    Option(bytes)
-      .toRight("MalformedEnvelope")
-      .flatMap(value =>
-        if (value.length > MaxEnvelopeBytes) Left(OperationalEventContractError.EnvelopeTooLarge.toString)
-        else
-          Either
-            .catchNonFatal(
-              StandardCharsets.UTF_8
-                .newDecoder()
-                .onMalformedInput(CodingErrorAction.REPORT)
-                .onUnmappableCharacter(CodingErrorAction.REPORT)
-                .decode(ByteBuffer.wrap(value))
-                .toString
-            )
-            .leftMap(_ => "MalformedEnvelope")
-            .flatMap(raw => parse(raw).leftMap(_ => "MalformedEnvelope").flatMap(decode))
-      )
-
-  def decode(json: Json): Either[String, OperationalEventEnvelope] =
-    for {
-      nonNull <- Option(json).toRight("MalformedEnvelope")
-      fields <- nonNull.asObject.toRight("MalformedEnvelope")
-      _ <- Either.cond(fields.keys.toSet == EnvelopeFields, (), "MalformedEnvelope")
-      value <- summon[Decoder[OperationalEventEnvelope]].decodeJson(nonNull).leftMap(_ => "MalformedEnvelope")
-      valid <- validate(value).leftMap(_.toString)
-    } yield valid
 }
 
 final case class SearchSessionResult(
@@ -169,7 +60,7 @@ final case class SearchSession(
     actorId: UserId,
     searchKind: OperationalEventPayload.SearchKind,
     query: Option[String],
-    filter: Json,
+    filter: SearchFilterSnapshot,
     model: Option[String],
     results: List[SearchSessionResult],
     occurredAt: Instant,
@@ -189,7 +80,7 @@ object OperationalEvents {
       actorId: UserId,
       occurredAt: Instant
   ): Either[OperationalEventContractError, OperationalEventEnvelope] =
-    OperationalEventJson.validate(
+    OperationalEventContract.validate(
       OperationalEventEnvelope.fromPayload(eventId, occurredAt, actorId, JobFact(kind, snapshot(job)))
     )
 
@@ -242,7 +133,7 @@ object OperationalEvents {
       eventId: UUID,
       session: SearchSession
   ): Either[OperationalEventContractError, OperationalEventEnvelope] =
-    OperationalEventJson.validate(
+    OperationalEventContract.validate(
       OperationalEventEnvelope.fromPayload(
         eventId,
         session.occurredAt,
@@ -271,8 +162,8 @@ object OperationalEvents {
       occurredAt: Instant
   ): Either[OperationalEventContractError, OperationalEventEnvelope] =
     for {
-      id <- OperationalEventPayload.fullUuid(resultId).leftMap(_ => OperationalEventContractError.InvalidPayload)
-      event <- OperationalEventJson.validate(
+      id <- OperationalEventContract.fullUuid(resultId).leftMap(_ => OperationalEventContractError.InvalidPayload)
+      event <- OperationalEventContract.validate(
         OperationalEventEnvelope.fromPayload(
           eventId,
           occurredAt,

@@ -10,13 +10,14 @@ import com.example.graphQL.cats.config.{
   KafkaSaslSecurityProtocol
 }
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
+import com.example.graphQL.cats.domain.model.JobStatus
 import com.example.graphQL.cats.domain.policy.CircuitBreakerPolicy
 import com.example.graphQL.cats.service.resilience.CircuitBreaker
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField}
+import com.example.graphQL.cats.infrastructure.events.OperationalEventWireCodec
 import com.example.graphQL.cats.service.events.*
-import io.circe.Json
 import fs2.Stream
 import munit.CatsEffectSuite
 import org.apache.kafka.common.errors.{
@@ -92,18 +93,21 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
       OperationalAggregateType.Job,
       aggregateId,
       actor,
-      Json.obj(
-        "job" -> Json.obj(
-          "jobId" -> Json.fromString(aggregateId),
-          "skills" -> Json.arr(Json.fromString("Scala")),
-          "status" -> Json.fromString("Open")
-        )
+      OperationalEventPayload.JobFact(
+        OperationalEventPayload.JobKind.Updated,
+        OperationalEventPayload.JobSnapshot(UUID.fromString(aggregateId), List("Scala"), JobStatus.Open)
       )
     )
 
   private def claim(partitionKey: String, eventId: UUID): ClaimedOperationalEvent = {
     val value = event(OperationalEventType.JOB_UPDATED).copy(eventId = eventId)
-    ClaimedOperationalEvent(value, OperationalEventJson.bytes(value), partitionKey, s"lease-$partitionKey-$eventId", 1)
+    ClaimedOperationalEvent(
+      value,
+      OperationalEventWireCodec.bytes(value),
+      partitionKey,
+      s"lease-$partitionKey-$eventId",
+      1
+    )
   }
 
   private final case class Fakes(
@@ -283,7 +287,7 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
           config.topic,
           0,
           4L,
-          Some(OperationalEventJson.bytes(first))
+          Some(OperationalEventWireCodec.bytes(first))
         )
         duplicateCommit <- durable(
           config,
@@ -292,7 +296,7 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
           config.topic,
           0,
           5L,
-          Some(OperationalEventJson.bytes(first))
+          Some(OperationalEventWireCodec.bytes(first))
         )
         independentCommit <- durable(
           config,
@@ -301,7 +305,7 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
           config.topic,
           0,
           6L,
-          Some(OperationalEventJson.bytes(independent))
+          Some(OperationalEventWireCodec.bytes(independent))
         )
         records <- values.quarantined.get
       } yield {
@@ -334,7 +338,7 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
           config.topic,
           0,
           7L,
-          Some(OperationalEventJson.bytes(event(OperationalEventType.JOB_CREATED)))
+          Some(OperationalEventWireCodec.bytes(event(OperationalEventType.JOB_CREATED)))
         )
           .map(commit => assert(!commit))
       }

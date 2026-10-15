@@ -2,7 +2,6 @@ package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.IO
 import cats.syntax.all.*
-import io.circe.Json
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.workflow.InterviewTopicPair
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogFields}
@@ -46,6 +45,7 @@ private[mongo] object MongoHiringMigrations {
     MongoCollections.AnalyticsReportRuns,
     MongoCollections.HiringMigrationLedger,
     MongoCollections.InterviewSubjectCleanup,
+    MongoCollections.RecruiterJobClosureWork,
     MongoCollections.InterviewWorkflows,
     MongoCollections.InterviewWorkflowCommands,
     MongoCollections.InterviewWorkflowInbox,
@@ -95,6 +95,7 @@ private[mongo] object MongoHiringMigrations {
           run(MongoInterviewCleanupIntegrityMigrations.step(topics)),
           run(MongoInterviewLifecycleMigrations.step),
           run(MongoInterviewRequestReceiptMigrations.step),
+          run(MongoRecruiterJobClosureMigrations.step),
           createAccountRegistry(database)
         ).sequence_
       }
@@ -355,47 +356,35 @@ private[mongo] object MongoHiringMigrations {
 
     if (event.aggregateType != expectedAggregate) IO.pure(Left("an event with an incompatible aggregate type"))
     else
-      event.eventType match {
-        case OperationalEventType.APPLICATION_CREATED | OperationalEventType.APPLICATION_STATUS_CHANGED |
-            OperationalEventType.CANDIDATE_HIRED =>
-          IO.pure(
-            event.payload.hcursor
-              .get[String](MongoFields.CandidateId)
-              .toOption
-              .flatMap(value => Parsing.parseUuid(value).toOption)
-              .map(value => List(value.toString))
-              .toRight("an application event without a valid candidateId")
-          )
-        case OperationalEventType.SEARCH_PERFORMED =>
-          candidateIdsFromSearchPerformed(event.payload)
-        case OperationalEventType.SEARCH_RESULT_CLICKED =>
+      event.payload match {
+        case OperationalEventPayload.ApplicationCreated(_, candidateId, _, _) =>
+          IO.pure(Right(List(candidateId.toString)))
+        case OperationalEventPayload.StatusChanged(_, candidateId, _, _, _) =>
+          IO.pure(Right(List(candidateId.toString)))
+        case OperationalEventPayload.CandidateHired(_, candidateId, _, _) =>
+          IO.pure(Right(List(candidateId.toString)))
+        case search: OperationalEventPayload.SearchPerformed =>
+          candidateIdsFromSearchPerformed(search)
+        case _: OperationalEventPayload.SearchResultClicked =>
           candidateIdFromSearchClick(database, event, diagnostics)
         case _ => IO.pure(Right(Nil))
       }
   }
 
   private def candidateIdsFromSearchPerformed(
-      payload: Json
+      payload: OperationalEventPayload.SearchPerformed
   ): IO[Either[String, List[String]]] = {
-    val cursor = payload.hcursor
-    val searchKind = cursor.get[String](MongoFields.SearchKind).toOption
-    val results = cursor.get[List[Json]](MongoFields.Results).toOption
-    val isCandidateSearch = searchKind.contains("candidateMatches")
-    val isJobSearch = Set("semanticJobSearch", "recommendedJobs", MongoCollections.Jobs).exists(searchKind.contains)
-    if (!isCandidateSearch && !isJobSearch) IO.pure(Left("a search event with an unknown or missing searchKind"))
-    else {
-      val parsedResults = results
-        .toRight("a search event without results")
-        .flatMap(_.traverse { result =>
-          result.hcursor
-            .get[String](MongoFields.ResultId)
-            .toOption
-            .flatMap(value => Parsing.parseUuid(value).toOption)
-            .map(_.toString)
-            .toRight("a search event with an invalid resultId")
-        })
-      IO.pure(parsedResults.map(ids => if (isCandidateSearch) ids else Nil))
+    val parsedResults = payload.results.traverse { result =>
+      Parsing
+        .parseUuid(result.resultId)
+        .map(_.toString)
+        .leftMap(_ => "a search event with an invalid resultId")
     }
+    IO.pure(
+      parsedResults.map(ids =>
+        if (payload.searchKind == OperationalEventPayload.SearchKind.CandidateMatches) ids else Nil
+      )
+    )
   }
 
   private def candidateIdFromSearchClick(
@@ -419,14 +408,12 @@ private[mongo] object MongoHiringMigrations {
       findSession: java.util.UUID => IO[Option[Document]],
       diagnostics: Diagnostics[IO]
   ): IO[Either[String, List[String]]] = {
-    val payload = event.payload.hcursor
-    val searchId = payload
-      .get[String]("searchId")
-      .toOption
-      .flatMap(value => Parsing.parseUuid(value).toOption)
-    val resultId = payload.get[String](MongoFields.ResultId).toOption
-    (searchId, resultId) match {
-      case (Some(id), Some(result)) =>
+    val clicked = event.payload match {
+      case OperationalEventPayload.SearchResultClicked(searchId, resultId, _, _) => Some((searchId, resultId.toString))
+      case _                                                                     => None
+    }
+    clicked match {
+      case Some((id, result)) =>
         findSession(id)
           .map {
             case None           => Left("a search click without its retained search session")
@@ -452,7 +439,7 @@ private[mongo] object MongoHiringMigrations {
               .emit(LogEvent.SearchSessionVerificationFailed, fields = LogFields.failure(error))
               .as(Left("an unavailable retained search session"))
           )
-      case _ => IO.pure(Left("a search click without valid searchId or resultId"))
+      case None => IO.pure(Left("a search click without valid searchId or resultId"))
     }
   }
 

@@ -2,10 +2,9 @@ package com.example.graphQL.cats.service.application
 
 import cats.{Applicative, MonadThrow}
 import cats.effect.{Resource, Temporal}
-import cats.effect.syntax.all.*
 import cats.syntax.all.*
 import com.example.graphQL.cats.service.port.*
-import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, RepositoryError}
+import com.example.graphQL.cats.service.{BackgroundWorker, Diagnostics, LogEvent, LogField, RepositoryError}
 import scala.concurrent.duration.*
 
 enum InterviewPublicationPass {
@@ -75,9 +74,7 @@ final class InterviewWorkflowWorker[F[_]](using F: Temporal[F])(
   )
 
   def publisher(transport: InterviewTransport[F]): Resource[F, Unit] =
-    Resource
-      .make(publicationStream(transport).compile.drain.start)(_.cancel)
-      .void
+    BackgroundWorker.resource("interview-publisher", diagnostics)(publicationStream(transport).compile.drain)
 
   def publicationStream(transport: InterviewTransport[F]): fs2.Stream[F, Unit] =
     InterviewWorkflowWorker.publicationLoop(

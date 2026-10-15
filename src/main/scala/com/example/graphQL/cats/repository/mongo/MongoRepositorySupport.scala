@@ -104,11 +104,13 @@ private[mongo] object MongoSessionOperations {
   def findOne(
       collection: IO[Documents],
       session: Option[ClientSession[IO]],
-      filter: MongoFilter
+      filter: MongoFilter,
+      projection: Option[Bson] = None
   ): IO[Option[Document]] =
-    collection.flatMap(c =>
-      session.fold(c.find(filter.bson).first)(active => c.find(active, filter.sessionFilter).first)
-    )
+    collection.flatMap { c =>
+      val query = session.fold(c.find(filter.bson))(active => c.find(active, filter.sessionFilter))
+      projection.fold(query)(query.projection).first
+    }
 
   def findById(
       collection: IO[Documents],
@@ -334,10 +336,21 @@ private[mongo] object MongoRepositorySupport {
       fields = LogFields.failure(error) + (LogField.SpanName -> operation)
     )
 
+  /** Reports an unexpected failure and maps it. A failure carrying the transient-transaction label (write conflict or
+    * lost transaction state) is re-raised unreported: it can only occur inside a transaction, and only the owning
+    * `MongoTransactionRunner` may retry the whole transaction and finally classify it. Mapping it here would turn a
+    * retriable conflict into `Unavailable` and count it against the dependency breaker.
+    */
   def guard[A](diagnostics: Diagnostics[IO], operation: String)(result: IO[A])(map: Throwable => A): IO[A] =
     result.handleErrorWith { error =>
-      reportFailure(diagnostics, operation, error).as(map(error))
+      // A retriable conflict is routine under contention: only the owning runner logs it, once, when retries run out.
+      if (MongoErrors.isTransient(error)) IO.raiseError[A](error)
+      else reportFailure(diagnostics, operation, error).as(map(error))
     }
+
+  /** Cleanup variant that never re-raises; used where a failure must not replace the primary outcome. */
+  def guardCleanup(diagnostics: Diagnostics[IO], operation: String)(result: IO[Unit]): IO[Unit] =
+    result.handleErrorWith(reportFailure(diagnostics, operation, _))
 
   /** Preserve retry labels within an active transaction; the owning runner sanitizes final failure. */
   def transactionGuard[A](
@@ -491,7 +504,7 @@ private[mongo] object MongoOperationalEventInsertion {
       .at[IO]
       .fromEither(
         events.traverse { event =>
-          com.example.graphQL.cats.service.events.OperationalEventJson
+          com.example.graphQL.cats.infrastructure.events.OperationalEventWireCodec
             .validate(event)
             .leftMap(_ => RepositoryError.InvalidEvent)
             .flatMap(valid => MongoHiringCodecs.outboxRecord(valid, now).leftMap(_ => RepositoryError.InvalidEvent))

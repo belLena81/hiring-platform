@@ -61,6 +61,38 @@ enum ConfigError(val key: String, val paths: Set[String] = Set.empty) {
       extends ConfigError("INTERVIEW_ACTION_RATE_LIMIT_ATTEMPTS", Set("auth.interview-action-rate-limit.attempts"))
   case InvalidInterviewActionRateLimitBuckets
       extends ConfigError("INTERVIEW_ACTION_RATE_LIMIT_BUCKETS", Set("auth.interview-action-rate-limit.max-buckets"))
+  case InvalidCostBudgetWindow
+      extends ConfigError("GRAPHQL_COST_BUDGET_WINDOW_SECONDS", Set("graphql.cost-budget.window-seconds"))
+  case InvalidCostBudgetMaxCost extends ConfigError("GRAPHQL_COST_BUDGET_MAX_COST", Set("graphql.cost-budget.max-cost"))
+  case InvalidSchemaExposure extends ConfigError("GRAPHQL_SCHEMA_EXPOSURE", Set("graphql.schema-exposure"))
+  case InvalidCostBudgetActorBuckets
+      extends ConfigError("GRAPHQL_COST_BUDGET_MAX_ACTOR_BUCKETS", Set("graphql.cost-budget.max-actor-buckets"))
+  case InvalidCostBudgetClientBuckets
+      extends ConfigError("GRAPHQL_COST_BUDGET_MAX_CLIENT_BUCKETS", Set("graphql.cost-budget.max-client-buckets"))
+  case InvalidCostBudgetOverflowBuckets
+      extends ConfigError("GRAPHQL_COST_BUDGET_OVERFLOW_BUCKETS", Set("graphql.cost-budget.overflow-buckets"))
+  case InvalidRecruiterJobClosurePageSize
+      extends ConfigError("RECRUITER_JOB_CLOSURE_PAGE_SIZE", Set("recruiter-job-closure.page-size"))
+  case InvalidRecruiterJobClosureIdlePoll
+      extends ConfigError("RECRUITER_JOB_CLOSURE_IDLE_POLL_MILLIS", Set("recruiter-job-closure.idle-poll-millis"))
+  case InvalidRecruiterJobClosureFailureBackoff
+      extends ConfigError(
+        "RECRUITER_JOB_CLOSURE_FAILURE_BACKOFF_MILLIS",
+        Set("recruiter-job-closure.failure-backoff-initial-millis", "recruiter-job-closure.failure-backoff-max-millis")
+      )
+  case InvalidRecruiterJobClosureRowRetry
+      extends ConfigError(
+        "RECRUITER_JOB_CLOSURE_ROW_RETRY_MILLIS",
+        Set("recruiter-job-closure.row-retry-initial-millis", "recruiter-job-closure.row-retry-max-millis")
+      )
+  case InvalidRecruiterJobClosureBackoffOrder extends ConfigError("RECRUITER_JOB_CLOSURE_BACKOFF_ORDER")
+  case InvalidReadinessWorkerStaleness
+      extends ConfigError("READINESS_WORKER_STALENESS_SECONDS", Set("readiness.worker-staleness-seconds"))
+  case InvalidReadinessOutboxAge
+      extends ConfigError("READINESS_MAX_OUTBOX_AGE_SECONDS", Set("readiness.max-outbox-age-seconds"))
+  case InvalidReadinessClosureWorkAge
+      extends ConfigError("READINESS_MAX_CLOSURE_WORK_AGE_SECONDS", Set("readiness.max-closure-work-age-seconds"))
+  case InvalidReadinessCache extends ConfigError("READINESS_REPORT_CACHE_MILLIS", Set("readiness.report-cache-millis"))
   case InvalidVectorSearchEnabled extends ConfigError("VECTOR_SEARCH_ENABLED", Set("vector-search.enabled"))
   case InvalidVoyageApiKey extends ConfigError("VOYAGE_API_KEY", Set("vector-search.voyage.api-key"))
   case InvalidVoyageEndpoint extends ConfigError("VOYAGE_ENDPOINT", Set("vector-search.voyage.endpoint"))
@@ -272,9 +304,33 @@ final case class JwtAuthConfig(
 final case class PasswordHashConfig(iterations: Int = 2, memoryKilobytes: Int = 19456, parallelism: Int = 1)
 
 /** Allowance of `attempts` per `windowSeconds`, tracked in at most `maxBuckets` buckets. Used for authentication
-  * attempts and for per-actor interview cancel and reschedule actions.
+  * attempts and for per-actor interview cancel and reschedule actions. `overflowBuckets` is the number of shared
+  * counters that serve unseen keys once `maxBuckets` are tracked (interview actions); the packaged configuration sets
+  * it, the constructor default only spares test fixtures.
   */
-final case class RateLimitConfig(windowSeconds: Int, attempts: Int, maxBuckets: Int)
+final case class RateLimitConfig(windowSeconds: Int, attempts: Int, maxBuckets: Int, overflowBuckets: Int = 256)
+
+/** Query cost budget: at most `maxCost` GraphQL complexity per actor or client per `windowSeconds`. Authenticated
+  * actors and anonymous clients are tracked in separate caches of `maxActorBuckets` and `maxClientBuckets`; once a
+  * cache is full, unseen keys share `overflowBuckets` striped counters instead of being refused. The defaults mirror
+  * the packaged `application.conf` for an absent section, as for the resilience settings.
+  */
+final case class CostBudgetConfig(
+    windowSeconds: Int = 60,
+    maxCost: Int = 10000,
+    maxActorBuckets: Int = 10000,
+    maxClientBuckets: Int = 10000,
+    overflowBuckets: Int = 256
+)
+
+object GraphQLConfig {
+
+  /** Per-query complexity cap enforced by the schema; a cost budget below it could never admit a maximal query. */
+  val MaxQueryComplexity: Int = 1000
+}
+
+/** `schemaExposure` enables introspection and the SDL download; it is off unless configuration turns it on. */
+final case class GraphQLConfig(costBudget: CostBudgetConfig = CostBudgetConfig(), schemaExposure: Boolean = false)
 final case class TrustedProxyConfig(cidrs: List[Cidr[IpAddress]])
 final case class KafkaPublisherConfig(
     workerId: String,
@@ -329,6 +385,7 @@ type CursorTtlSeconds = Int :| Interval.Closed[60, 86400]
 type AuthRateWindowSeconds = Int :| Interval.Closed[1, 3600]
 type AuthRateAttempts = Int :| Interval.Closed[1, 1000]
 type AuthRateBuckets = Int :| Interval.Closed[1, 100000]
+type AuthRateOverflowBuckets = Int :| Interval.Closed[1, 4096]
 type PasswordHashIterations = Int :| Interval.Closed[1, 10]
 type PasswordHashMemoryKib = Int :| Interval.Closed[8192, 1048576]
 type PasswordHashParallelism = Int :| Interval.Closed[1, 16]

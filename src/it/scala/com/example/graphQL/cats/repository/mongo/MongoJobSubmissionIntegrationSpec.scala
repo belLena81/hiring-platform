@@ -1,14 +1,19 @@
 package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.IO
-import com.example.graphQL.cats.service.port.MutationWriteContext
+import com.example.graphQL.cats.service.port.{ApplicationWriteActor, MutationWriteContext}
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.{
   Application,
   ApplicationEvent,
   ApplicationStatus,
+  CandidateProfile,
   JobStatus,
-  JobSubmissionSnapshot
+  JobSubmissionSnapshot,
+  RecruiterProfile,
+  User,
+  UserProfile,
+  UserRole
 }
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId, UserId}
 import com.mongodb.client.model.{Filters, Updates}
@@ -85,7 +90,17 @@ final class MongoJobSubmissionIntegrationSpec extends MongoIntegrationSuite {
       )
       val repository = MongoApplicationRepository.transactional(fixture.database, fixture.client, Diagnostics.noop[IO])
       val now = Instant.parse("2026-10-07T12:00:00Z")
-      val application = Application.create(ApplicationId(UUID.randomUUID()), UserId(UUID.randomUUID()), id, now)
+      val recruiterId = UserId(UUID.randomUUID())
+      val candidate = User(
+        UserId(UUID.randomUUID()),
+        None,
+        "Submission candidate",
+        UserRole.Candidate,
+        Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None))),
+        now
+      )
+      val candidateActor = ApplicationWriteActor(candidate.id, candidate.role)
+      val application = Application.create(ApplicationId(UUID.randomUUID()), candidate.id, id, now)
       val event = ApplicationEvent(
         ApplicationEventId(UUID.randomUUID()),
         application.id,
@@ -110,17 +125,47 @@ final class MongoJobSubmissionIntegrationSpec extends MongoIntegrationSuite {
         _ <- MongoHiringIndexSetup.create(fixture.database)
         _ <- MongoRepositoryTestSupport.insertOne(
           fixture.database,
+          MongoCollections.Users,
+          MongoHiringCodecs.user(candidate)
+        )
+        // A submission also requires the job's recruiter to be an active account.
+        _ <- MongoRepositoryTestSupport.insertOne(
+          fixture.database,
+          MongoCollections.Users,
+          MongoHiringCodecs.user(
+            User(
+              recruiterId,
+              None,
+              "Submission recruiter",
+              UserRole.Recruiter,
+              Some(UserProfile.Recruiter(RecruiterProfile("Submission organization", None))),
+              now
+            )
+          )
+        )
+        _ <- MongoRepositoryTestSupport.insertOne(
+          fixture.database,
           MongoCollections.Jobs,
-          new Document("_id", id.value.toString).append("status", "Open").append("version", 0L)
+          new Document("_id", id.value.toString)
+            .append("status", "Open")
+            .append("version", 0L)
+            .append("recruiterId", recruiterId.value.toString)
         )
         snapshot <- readSnapshot
         first <- repository
-          .createForOpenJobWithEvents(snapshot, application, event, Nil, MutationWriteContext.directWrite)
+          .createForOpenJobWithEvents(
+            snapshot,
+            application,
+            event,
+            Nil,
+            candidateActor,
+            MutationWriteContext.directWrite
+          )
           .value
         // The first submission advanced the job revision, so a duplicate is attempted against the fresh snapshot.
         fresh <- readSnapshot
         duplicate <- repository
-          .createForOpenJobWithEvents(fresh, application, event, Nil, MutationWriteContext.directWrite)
+          .createForOpenJobWithEvents(fresh, application, event, Nil, candidateActor, MutationWriteContext.directWrite)
           .value
         afterDuplicate <- jobs.findSubmissionSnapshot(id).value
         collection <- MongoRepositoryTestSupport.collection(fixture.database, MongoCollections.Jobs)
@@ -128,7 +173,14 @@ final class MongoJobSubmissionIntegrationSpec extends MongoIntegrationSuite {
         closedApplication = application.copy(id = ApplicationId(UUID.randomUUID()))
         closedEvent = event.copy(id = ApplicationEventId(UUID.randomUUID()), applicationId = closedApplication.id)
         closed <- repository
-          .createForOpenJobWithEvents(fresh, closedApplication, closedEvent, Nil, MutationWriteContext.directWrite)
+          .createForOpenJobWithEvents(
+            fresh,
+            closedApplication,
+            closedEvent,
+            Nil,
+            candidateActor,
+            MutationWriteContext.directWrite
+          )
           .value
         count <- MongoRepositoryTestSupport.count(fixture.database, MongoCollections.Applications)
         history <- MongoRepositoryTestSupport.count(fixture.database, MongoCollections.ApplicationEvents)

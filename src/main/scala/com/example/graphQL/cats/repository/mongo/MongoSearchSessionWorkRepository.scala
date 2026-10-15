@@ -11,7 +11,7 @@ import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.Diagnostics
-import com.example.graphQL.cats.service.events.OperationalEventJson
+import com.example.graphQL.cats.infrastructure.events.OperationalEventWireCodec
 import com.mongodb.client.model.{Sorts, UpdateOptions}
 import org.bson.Document
 
@@ -35,7 +35,7 @@ final class MongoSearchSessionWorkRepository(
     RepositoryF
       .at[IO]
       .fromEither(
-        OperationalEventJson.validate(value.event).leftMap(_ => RepositoryError.InvalidEvent).flatMap { _ =>
+        OperationalEventWireCodec.validate(value.event).leftMap(_ => RepositoryError.InvalidEvent).flatMap { _ =>
           Either.cond(
             value.addressesSession,
             (),

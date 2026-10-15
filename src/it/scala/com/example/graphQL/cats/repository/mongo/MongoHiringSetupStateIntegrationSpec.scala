@@ -45,7 +45,8 @@ final class MongoHiringSetupStateIntegrationSpec extends MongoIntegrationSuite {
     "016_candidate_residence_integrity",
     "017_interview_ledger_collections",
     "018_interview_cancellation_reschedule",
-    "019_interview_request_receipt_index"
+    "019_interview_request_receipt_index",
+    "020_recruiter_job_closure_work"
   )
 
   /** Records schema-changing commands, which the shared access fixture deliberately ignores. */
@@ -240,7 +241,7 @@ final class MongoHiringSetupStateIntegrationSpec extends MongoIntegrationSuite {
             ) *> MongoHiringSetup.initialize(database, Diagnostics.noop[IO]).attempt
           ledgerAfterCorrupt <- ledgerRows(database)
         } yield {
-          assertEquals(ledgerAfterDrift.size, 19)
+          assertEquals(ledgerAfterDrift.size, 20)
           assert(ledgerAfterDrift.forall(_.getString(MongoFields.State) == "Complete"))
           assertEquals(ledgerAfterDrift, ledgerBefore)
           val revisions = ledgerAfterCorrupt.find(_.getString(MongoFields.Id) == MigrationIds.UserJobRevisions.value)

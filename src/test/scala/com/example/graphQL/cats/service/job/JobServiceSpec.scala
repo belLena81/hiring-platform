@@ -312,7 +312,7 @@ class JobServiceSpec extends CatsEffectSuite {
       assertEquals(result.map(_.id), Right(jobId))
       assertEquals(events.map(_.eventType), Vector(OperationalEventType.JOB_CREATED))
       assertEquals(events.map(_.aggregateId), Vector(jobId.value.toString))
-      assert(!events.head.payload.noSpaces.contains("recruiter@example.com"))
+      assert(!events.head.payload.toString.contains("recruiter@example.com"))
     }
   }
 

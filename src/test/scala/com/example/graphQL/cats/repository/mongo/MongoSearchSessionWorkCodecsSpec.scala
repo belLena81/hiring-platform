@@ -3,8 +3,13 @@ package com.example.graphQL.cats.repository.mongo
 import com.example.graphQL.cats.service.events.OperationalEventPayload.SearchKind
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.service.port.PendingSearchSessionWork
-import com.example.graphQL.cats.service.events.{OperationalEvents, SearchSession, SearchSessionResult}
-import io.circe.Json
+import com.example.graphQL.cats.service.events.{
+  OperationalEvents,
+  SearchFilterSnapshot,
+  SearchSession,
+  SearchSessionResult
+}
+import com.example.graphQL.cats.infrastructure.events.OperationalEventWireCodec
 import munit.FunSuite
 
 import java.time.Instant
@@ -21,7 +26,7 @@ class MongoSearchSessionWorkCodecsSpec extends FunSuite {
       actorId,
       SearchKind.SemanticJobSearch,
       Some("private candidate query"),
-      Json.obj("city" -> Json.fromString("Nicosia")),
+      SearchFilterSnapshot.JobCriteria(Some("Nicosia"), Nil, None),
       Some("test-model"),
       List(SearchSessionResult("00000000-0000-0000-0000-000000000804", 1, 0.9d)),
       now,
@@ -40,7 +45,9 @@ class MongoSearchSessionWorkCodecsSpec extends FunSuite {
     assert(!stored.toJson.contains("private candidate query"))
     assertEquals(MongoSearchSessionWorkCodecs.readWork(stored).map(_.session.query), Right(None))
     assertEquals(
-      MongoSearchSessionWorkCodecs.readWork(stored).map(_.event.payload.hcursor.get[Option[String]]("query")),
+      MongoSearchSessionWorkCodecs
+        .readWork(stored)
+        .map(event => OperationalEventWireCodec.payloadJson(event.event.payload).hcursor.get[Option[String]]("query")),
       Right(Right(None))
     )
   }
@@ -51,7 +58,7 @@ class MongoSearchSessionWorkCodecsSpec extends FunSuite {
       actorId,
       SearchKind.SemanticJobSearch,
       None,
-      Json.obj(),
+      SearchFilterSnapshot.Unfiltered,
       None,
       Nil,
       now,
@@ -77,7 +84,17 @@ class MongoSearchSessionWorkCodecsSpec extends FunSuite {
 
   test("a stored event for another actor returns a typed inconsistency") {
     val session =
-      SearchSession(searchId, actorId, SearchKind.Jobs, None, Json.obj(), None, Nil, now, now.plusSeconds(3600))
+      SearchSession(
+        searchId,
+        actorId,
+        SearchKind.Jobs,
+        None,
+        SearchFilterSnapshot.Unfiltered,
+        None,
+        Nil,
+        now,
+        now.plusSeconds(3600)
+      )
     val event =
       OperationalEvents.searchPerformed(UUID.randomUUID(), session).fold(error => fail(error.toString), identity)
     val invalid = PendingSearchSessionWork(session, event.copy(actorId = UserId(UUID.randomUUID())))

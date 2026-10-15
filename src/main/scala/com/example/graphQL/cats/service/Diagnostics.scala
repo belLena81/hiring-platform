@@ -23,6 +23,8 @@ enum LogEvent(val category: String, val component: String, val message: String, 
       extends LogEvent("MONGO_UNAVAILABLE", "READINESS", "Database readiness check failed", LogLevel.Warn)
   case MongoAuthFailed
       extends LogEvent("MONGO_AUTH_FAILED", "READINESS", "Database authentication failed", LogLevel.Warn)
+  case ReadinessDegraded
+      extends LogEvent("READINESS_DEGRADED", "READINESS", "A readiness component is degraded", LogLevel.Warn)
   case RequestRejected extends LogEvent("REQUEST_REJECTED", "HTTP", "Request rejected", LogLevel.Warn)
   case StartupFailed extends LogEvent("STARTUP_FAILED", "RUNTIME", "Application startup failed", LogLevel.Error)
   case RuntimeFailed extends LogEvent("RUNTIME_FAILED", "RUNTIME", "Unhandled runtime failure", LogLevel.Error)

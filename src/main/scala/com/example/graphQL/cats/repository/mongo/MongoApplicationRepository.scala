@@ -27,6 +27,7 @@ final class MongoApplicationRepository private (
   private def collection = Mongo4catsCollections.documents(database, MongoCollections.Applications)
   private def events = Mongo4catsCollections.documents(database, MongoCollections.ApplicationEvents)
   private def jobs = Mongo4catsCollections.documents(database, MongoCollections.Jobs)
+  private val writeFence = new MongoApplicationWriteFence(database)
   private def outbox = Mongo4catsCollections.documents(database, MongoCollections.EventOutbox)
 
   override def find(id: ApplicationId): RepositoryF[IO, Option[Application]] =
@@ -100,15 +101,17 @@ final class MongoApplicationRepository private (
       application: Application,
       initialEvent: ApplicationEvent,
       operationalEvents: List[OperationalEventEnvelope],
+      actor: ApplicationWriteActor,
       context: MutationWriteContext
   ): RepositoryF[IO, Unit] =
-    if (!isConsistentSubmit(observedJob, application, initialEvent))
+    if (!isConsistentSubmit(observedJob, application, initialEvent, actor))
       EitherT.leftT[IO, Unit](RepositoryError.Conflict)
     else
       MongoRepositorySupport
         .repositoryGuard(diagnostics, "applications.createWithEvents") {
           MongoMutationWriteContext.run(context, transactionRunner, transactionRequired = true)(session =>
-            submitOnceWithSession(observedJob, application, initialEvent, operationalEvents, session)
+            fenced("applications.submitFence", writeFence.forSubmit(session, actor, application.jobId)) *>
+              submitOnceWithSession(observedJob, application, initialEvent, operationalEvents, session)
           )
         }(MongoErrors.duplicateAs(RepositoryError.DuplicateApplication))
 
@@ -116,14 +119,19 @@ final class MongoApplicationRepository private (
       application: Application,
       event: ApplicationEvent,
       operationalEvents: List[OperationalEventEnvelope],
+      actor: ApplicationWriteActor,
       context: MutationWriteContext
   ): RepositoryF[IO, Unit] =
-    MongoRepositorySupport
-      .repositoryGuard(diagnostics, "applications.updateStatusWithContext") {
-        MongoMutationWriteContext.run(context, transactionRunner, transactionRequired = true)(session =>
-          updateStatusWithSession(application, event, operationalEvents, session)
-        )
-      }(MongoErrors.duplicateAs(RepositoryError.DuplicateApplication))
+    if (event.actorId != actor.id || event.applicationId != application.id)
+      EitherT.leftT[IO, Unit](RepositoryError.Conflict)
+    else
+      MongoRepositorySupport
+        .repositoryGuard(diagnostics, "applications.updateStatusWithContext") {
+          MongoMutationWriteContext.run(context, transactionRunner, transactionRequired = true)(session =>
+            fenced("applications.statusFence", writeFence.forStatusChange(session, actor, application.jobId)) *>
+              updateStatusWithSession(application, event, operationalEvents, session)
+          )
+        }(MongoErrors.duplicateAs(RepositoryError.DuplicateApplication))
 
   private def updateStatusWithSession(
       application: Application,
@@ -134,7 +142,14 @@ final class MongoApplicationRepository private (
     val statusGuard = event.previousStatus
       .map(status => MongoFilter.eq(MongoFields.Status, status.toString))
       .getOrElse(MongoFilter.exists(MongoFields.Status))
-    val filter = MongoFilter.and(MongoFilter.eq(MongoFields.Id, application.id.value.toString), statusGuard)
+    // The replacement document is the caller's, so the stored owner facts the fence relied on are part of the predicate:
+    // a forged jobId or candidateId matches nothing and the write is refused as a Conflict.
+    val filter = MongoFilter.and(
+      MongoFilter.eq(MongoFields.Id, application.id.value.toString),
+      MongoFilter.eq(MongoFields.JobId, application.jobId.value.toString),
+      MongoFilter.eq(MongoFields.CandidateId, application.candidateId.value.toString),
+      statusGuard
+    )
     for {
       result <- RepositoryF.lift(
         MongoSessionOperations.replaceOne(collection, session, filter, MongoHiringCodecs.application(application))
@@ -145,6 +160,10 @@ final class MongoApplicationRepository private (
       }(MongoErrors.duplicateAs(RepositoryError.Conflict))
       _ <- MongoOperationalEventInsertion.insert(outbox, session, operationalEvents, application.updatedAt, diagnostics)
     } yield ()
+
+  /** A duplicate key on the actor's fence document is a lost race (`Conflict`), never a `DuplicateApplication`. */
+  private def fenced(operation: String, fence: RepositoryF[IO, Unit]): RepositoryF[IO, Unit] =
+    MongoRepositorySupport.repositoryGuard(diagnostics, operation)(fence)(MongoErrors.duplicateAsConflict)
 
   private def baseFilter(field: String, id: String, page: ApplicationPageRequest): MongoFilter = {
     val statusFilter = page.status.map(status => MongoFilter.eq(MongoFields.Status, status.toString))
@@ -167,9 +186,11 @@ final class MongoApplicationRepository private (
   private def isConsistentSubmit(
       observedJob: JobSubmissionSnapshot,
       application: Application,
-      initialEvent: ApplicationEvent
+      initialEvent: ApplicationEvent,
+      actor: ApplicationWriteActor
   ): Boolean =
-    observedJob.id == application.jobId &&
+    actor.id == application.candidateId &&
+      observedJob.id == application.jobId &&
       initialEvent.applicationId == application.id &&
       initialEvent.previousStatus.isEmpty &&
       initialEvent.newStatus == ApplicationStatus.Created &&
@@ -184,7 +205,9 @@ final class MongoApplicationRepository private (
   ): RepositoryF[IO, Unit] =
     val guardFilter = MongoFilter.and(
       MongoFilter.eq(MongoFields.Id, observedJob.id.value.toString),
-      MongoFilter.eq(MongoFields.Version, observedJob.revision),
+      // The observed revision is deliberately not matched: the application copies only the job id, and the status
+      // guard plus the version bump already serialize against close. Matching it would turn every concurrent
+      // submission into a typed Conflict instead of a transaction retry.
       MongoFilter.lt(MongoFields.Version, Long.MaxValue),
       MongoFilter.eq(MongoFields.Status, JobStatus.Open.toString)
     )

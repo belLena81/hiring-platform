@@ -1,5 +1,7 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.infrastructure.events.OperationalEventWireCodec
+import com.example.graphQL.cats.domain.model.JobStatus
 import com.example.graphQL.cats.service.events.OperationalEventPayload.SearchKind
 import cats.effect.IO
 import cats.syntax.all.*
@@ -13,7 +15,6 @@ import java.time.Instant
 import java.util.{Date, UUID}
 import scala.jdk.CollectionConverters.*
 import scala.concurrent.duration.*
-import io.circe.Json
 
 /** Invalid immutable facts retain deletion evidence while later valid publication remains recoverable. */
 class MongoOperationalEventContractIntegrationSpec extends MongoIntegrationSuite {
@@ -34,7 +35,7 @@ class MongoOperationalEventContractIntegrationSpec extends MongoIntegrationSuite
           .flatMap(result)
       } yield {
         assertEquals(claimed.map(_.event), List(value))
-        assertEquals(claimed.map(_.envelopeBytes.toVector), List(OperationalEventJson.bytes(value).toVector))
+        assertEquals(claimed.map(_.envelopeBytes.toVector), List(OperationalEventWireCodec.bytes(value).toVector))
       }
     }
   }
@@ -43,11 +44,21 @@ class MongoOperationalEventContractIntegrationSpec extends MongoIntegrationSuite
     mongoResource.use { fixture =>
       val actor = UserId(UUID.randomUUID())
       val session =
-        SearchSession(UUID.randomUUID(), actor, SearchKind.Jobs, None, Json.obj(), None, Nil, now, now.plusSeconds(60))
+        SearchSession(
+          UUID.randomUUID(),
+          actor,
+          SearchKind.Jobs,
+          None,
+          SearchFilterSnapshot.Unfiltered,
+          None,
+          Nil,
+          now,
+          now.plusSeconds(60)
+        )
       val valid =
         OperationalEvents.searchPerformed(UUID.randomUUID(), session).fold(error => fail(error.toString), identity)
       val invalid =
-        List(valid.copy(payload = Json.obj()), valid.copy(actorId = UserId(UUID.randomUUID())), event(actor))
+        List(valid.copy(payload = event(actor).payload), valid.copy(actorId = UserId(UUID.randomUUID())), event(actor))
       val repository =
         MongoSearchSessionWorkRepository.transactional(fixture.database, fixture.client, Diagnostics.noop[IO])
       for {
@@ -70,12 +81,9 @@ class MongoOperationalEventContractIntegrationSpec extends MongoIntegrationSuite
       OperationalAggregateType.Job,
       id.toString,
       actor,
-      Json.obj(
-        "job" -> Json.obj(
-          "jobId" -> Json.fromString(id.toString),
-          "skills" -> Json.arr(Json.fromString("Scala")),
-          "status" -> Json.fromString("Open")
-        )
+      OperationalEventPayload.JobFact(
+        OperationalEventPayload.JobKind.Created,
+        OperationalEventPayload.JobSnapshot(id, List("Scala"), JobStatus.Open)
       )
     )
   }
@@ -97,7 +105,7 @@ class MongoOperationalEventContractIntegrationSpec extends MongoIntegrationSuite
     "malformed wire bytes" -> (row => row.append("envelopeBytes", new Binary(Array[Byte](1, 2, 3)))),
     "oversized wire bytes" -> (row => row.append("envelopeBytes", new Binary(Array.fill[Byte](262145)(32)))),
     "different wire event" -> (row =>
-      row.append("envelopeBytes", new Binary(OperationalEventJson.bytes(event(UserId(UUID.randomUUID())))))
+      row.append("envelopeBytes", new Binary(OperationalEventWireCodec.bytes(event(UserId(UUID.randomUUID())))))
     )
   )
 

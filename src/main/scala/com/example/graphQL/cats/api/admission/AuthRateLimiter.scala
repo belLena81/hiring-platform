@@ -29,7 +29,15 @@ object AuthRateLimiter {
 
   private[admission] def create(config: RateLimitConfig, ticker: Ticker): IO[AuthRateLimiter] =
     FixedWindowRateLimiter
-      .create[Key](config.windowSeconds, config.attempts, config.maxBuckets, ticker, normalize)
+      .create[Key](
+        config.windowSeconds,
+        config.attempts,
+        config.maxBuckets,
+        ticker,
+        normalize,
+        config.overflowBuckets,
+        "auth"
+      )
       .map(new AuthRateLimiter(_))
 
   // IPv6 clients are limited per /64 so one host cannot multiply its allowance across addresses.

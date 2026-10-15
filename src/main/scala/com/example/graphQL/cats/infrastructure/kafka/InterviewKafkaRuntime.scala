@@ -4,7 +4,7 @@ import cats.effect.{IO, Resource}
 import cats.effect.std.UUIDGen
 import cats.syntax.all.*
 import com.example.graphQL.cats.config.{InterviewRuntimeConfig, KafkaConfig, KafkaSaslSecurityProtocol}
-import com.example.graphQL.cats.service.{BackgroundWorker, Diagnostics}
+import com.example.graphQL.cats.service.{BackgroundWorker, Diagnostics, WorkerAlive}
 import com.example.graphQL.cats.service.port.{
   InterviewMessage,
   InterviewStep,
@@ -152,7 +152,11 @@ object InterviewKafkaRuntime {
   }
 
   /** Consumers have independent lifetimes so replacing a fenced producer does not reset their offset frontier. */
-  def consumerResource(config: InterviewKafkaConfig, diagnostics: Diagnostics[IO])(
+  def consumerResource(
+      config: InterviewKafkaConfig,
+      diagnostics: Diagnostics[IO],
+      alive: WorkerAlive[IO] = WorkerAlive.none[IO]
+  )(
       receive: Either[String, InterviewMessage] => RepositoryF[IO, Unit]
   ): Resource[IO, Unit] = {
     val consumerSettings = KafkaClientSettings.committedConsumer(
@@ -186,7 +190,12 @@ object InterviewKafkaRuntime {
     }
     BackgroundWorker.resource(InterviewConsumerWorker, diagnostics)(
       KafkaRuntimeSupport
-        .resilientStream(diagnostics, consumer, 1.second, maxDelay = config.restartMaxDelaySeconds.seconds)
+        .resilientStream(
+          diagnostics,
+          consumer.concurrently(fs2.Stream.awakeEvery[IO](alive.every).evalMap(_ => alive.beat)),
+          1.second,
+          maxDelay = config.restartMaxDelaySeconds.seconds
+        )
         .compile
         .drain
     )

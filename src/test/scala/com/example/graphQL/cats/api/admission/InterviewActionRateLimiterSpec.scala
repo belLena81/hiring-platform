@@ -75,21 +75,21 @@ final class InterviewActionRateLimiterSpec extends CatsEffectSuite {
     } yield assertEquals(refused.left.map(_.retryAfterSeconds), Left(30L))
   }
 
-  test("a full cache refuses unseen actors instead of evicting a counted one, and admits them once windows expire") {
-    val config = RateLimitConfig(windowSeconds = 10, attempts = 1, maxBuckets = 3)
+  test("a full cache charges unseen actors to shared overflow counters instead of refusing or evicting a counted one") {
+    val config = RateLimitConfig(windowSeconds = 10, attempts = 1, maxBuckets = 3, overflowBuckets = 4)
     for {
       (ticker, advance) <- testTicker
       limiter <- InterviewActionRateLimiter.create(config, ticker)
       admitted <- List(1L, 2L, 3L).traverse(n => limiter.permit(actor(n)))
-      unseen <- limiter.permit(actor(4))
-      unseenAgain <- limiter.permit(actor(4))
+      newcomers <- (4L to 40L).toList.traverse(n => limiter.permit(actor(n)))
       // None of the counted actors was evicted, so each is still limited.
       counted <- List(1L, 2L, 3L).traverse(n => limiter.permit(actor(n)))
       _ <- advance(10.seconds)
       afterWindow <- limiter.permit(actor(4))
     } yield {
       assertEquals(admitted, List.fill(3)(Right(())))
-      assert(unseen.isLeft && unseenAgain.isLeft, "an unseen actor is refused while the cache is full")
+      assert(newcomers.exists(_.isRight), "some newcomers are still admitted through the overflow counters")
+      assert(newcomers.count(_.isRight) <= 4, "each overflow counter admits only its own allowance")
       assert(counted.forall(_.isLeft), clue(counted))
       assertEquals(afterWindow, Right(()))
     }

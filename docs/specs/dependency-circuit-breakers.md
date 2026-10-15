@@ -25,7 +25,7 @@
 - Discovery (`repository/mongo/DiscoveryQueryPolicy.scala`) takes a `Semaphore` permit and applies `maxTime`. Its failures map to `RepositoryError.Unavailable`.
 - The Kafka publisher (`infrastructure/kafka/OperationalEventKafkaRuntime.scala`) claims outbox waves. A failed batch is released for retry, and the stream restarts with jittered backoff. A fenced producer stops the stream.
 - Mongo transactions (`repository/mongo/MongoTransactionRunner.scala`) retry transient errors and an unknown commit result 3 times each. Errors map through `MongoErrors.toRepositoryError`: write conflict and transient exhaustion become `Conflict` (or the caller's choice), and everything else becomes `Unavailable`.
-- Readiness (`runtime/MongoHiringRuntime.scala:285-301`) combines a Mongo ping with embedding-worker health. `ProbeResult` is `Ready | Unavailable | AuthenticationFailed`.
+- Readiness (`runtime/MongoHiringRuntime.scala:285-301`) decides the status from the Mongo ping and the Mongo-writes breaker only; since ARR-07 embedding-worker health is listed in the `degraded` body array and `/ready` stays 200. `ProbeResult` is `Ready | Unavailable | AuthenticationFailed`.
 
 ## Rules
 

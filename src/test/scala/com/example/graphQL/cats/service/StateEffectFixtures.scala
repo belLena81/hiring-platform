@@ -136,6 +136,7 @@ private[cats] object StateEffectFixtures {
         application: Application,
         initialEvent: ApplicationEvent,
         events: List[OperationalEventEnvelope],
+        actor: ApplicationWriteActor,
         context: MutationWriteContext
     ): RepositoryF[Program, Unit] =
       RepositoryF.lift[Program, Unit](
@@ -151,6 +152,7 @@ private[cats] object StateEffectFixtures {
         application: Application,
         event: ApplicationEvent,
         events: List[OperationalEventEnvelope],
+        actor: ApplicationWriteActor,
         context: MutationWriteContext
     ): RepositoryF[Program, Unit] =
       RepositoryF.lift[Program, Unit](

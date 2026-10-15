@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.service.events.SearchFilterSnapshot
 import com.example.graphQL.cats.service.events.OperationalEventPayload.SearchKind
 import com.example.graphQL.cats.AccountValueFixtures.email
 import cats.effect.{Deferred, IO, Resource}
@@ -21,6 +22,7 @@ import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.events.{
   OperationalAggregateType,
   OperationalEventEnvelope,
+  OperationalEventPayload,
   OperationalEventType,
   OperationalEvents,
   SearchSession,
@@ -35,8 +37,7 @@ import com.example.graphQL.cats.service.auth.{
 }
 import com.example.graphQL.cats.service.mutation.Idempotent
 import com.example.graphQL.cats.service.protocol.IdempotencyRequest
-import com.example.graphQL.cats.domain.model.AccountToken
-import io.circe.Json
+import com.example.graphQL.cats.domain.model.{AccountToken, ApplicationStatus, JobStatus}
 import org.bson.Document
 import com.example.hiring.testing.LocalTestServices
 
@@ -60,7 +61,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
       aggregateType: OperationalAggregateType,
       aggregateId: UUID,
       actorId: UserId,
-      payload: Json
+      payload: OperationalEventPayload
   ): OperationalEventEnvelope =
     OperationalEventEnvelope(uuid(id), eventType, now, aggregateType, aggregateId.toString, actorId, payload)
 
@@ -127,7 +128,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
             actor,
             SearchKind.CandidateMatches,
             None,
-            Json.obj(),
+            SearchFilterSnapshot.Unfiltered,
             None,
             List(SearchSessionResult(candidate.value.toString, 1, 0.9d)),
             now,
@@ -152,12 +153,8 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
             OperationalAggregateType.Application,
             uuid(400L),
             actor,
-            Json.obj(
-              "applicationId" -> Json.fromString(uuid(400L).toString),
-              "candidateId" -> Json.fromString(candidate.value.toString),
-              "jobId" -> Json.fromString(uuid(401L).toString),
-              "status" -> Json.fromString("Created")
-            )
+            OperationalEventPayload
+              .ApplicationCreated(uuid(400L), candidate.value, uuid(401L), ApplicationStatus.Created)
           )
           val incompleteLegacyRecord = outboxRecord(application)
             .append("subjectIds", List(actor.value.toString).asJava)
@@ -175,12 +172,9 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
                       OperationalAggregateType.Job,
                       uuid(300L),
                       actor,
-                      Json.obj(
-                        "job" -> Json.obj(
-                          "jobId" -> Json.fromString(uuid(300L).toString),
-                          "skills" -> Json.arr(Json.fromString("Scala")),
-                          "status" -> Json.fromString("Open")
-                        )
+                      OperationalEventPayload.JobFact(
+                        OperationalEventPayload.JobKind.Created,
+                        OperationalEventPayload.JobSnapshot(uuid(300L), List("Scala"), JobStatus.Open)
                       )
                     )
                   )
@@ -623,12 +617,9 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
             OperationalAggregateType.Job,
             uuid(701L),
             actor,
-            Json.obj(
-              "job" -> Json.obj(
-                "jobId" -> Json.fromString(uuid(701L).toString),
-                "skills" -> Json.arr(Json.fromString("Scala")),
-                "status" -> Json.fromString("Open")
-              )
+            OperationalEventPayload.JobFact(
+              OperationalEventPayload.JobKind.Created,
+              OperationalEventPayload.JobSnapshot(uuid(701L), List("Scala"), JobStatus.Open)
             )
           )
           val secondValue = value.copy(eventId = uuid(702L))
@@ -670,12 +661,9 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
             OperationalAggregateType.Job,
             uuid(901L),
             actor,
-            Json.obj(
-              "job" -> Json.obj(
-                "jobId" -> Json.fromString(uuid(901L).toString),
-                "skills" -> Json.arr(Json.fromString("Scala")),
-                "status" -> Json.fromString("Open")
-              )
+            OperationalEventPayload.JobFact(
+              OperationalEventPayload.JobKind.Created,
+              OperationalEventPayload.JobSnapshot(uuid(901L), List("Scala"), JobStatus.Open)
             )
           )
           val leaseUntil = now.plusSeconds(60L)
@@ -731,12 +719,9 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
             OperationalAggregateType.Job,
             uuid(801L),
             userId,
-            Json.obj(
-              "job" -> Json.obj(
-                "jobId" -> Json.fromString(uuid(801L).toString),
-                "skills" -> Json.arr(Json.fromString("Scala")),
-                "status" -> Json.fromString("Open")
-              )
+            OperationalEventPayload.JobFact(
+              OperationalEventPayload.JobKind.Created,
+              OperationalEventPayload.JobSnapshot(uuid(801L), List("Scala"), JobStatus.Open)
             )
           )
           val erasures = MongoAnalyticsErasureRequestRepository.transactional(database, client, Diagnostics.noop[IO])

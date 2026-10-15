@@ -24,7 +24,10 @@ final case class AppConfig(
     discovery: DiscoveryConfig = DiscoveryConfig(),
     adminSeed: AdminSeedConfig = AdminSeedConfig(),
     interviewActionRateLimit: RateLimitConfig,
-    resilience: ResilienceConfig = ResilienceConfig()
+    resilience: ResilienceConfig = ResilienceConfig(),
+    graphql: GraphQLConfig = GraphQLConfig(),
+    recruiterJobClosure: RecruiterJobClosureConfig = RecruiterJobClosureConfig(),
+    readiness: ReadinessConfig = ReadinessConfig()
 ) {
   override def toString: String = "AppConfig([REDACTED])"
 }

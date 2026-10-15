@@ -178,8 +178,21 @@ final class MongoAnalyticsErasureRequestRepository(
         })
         .flatMap {
           case AccountDeletionStatus.Complete =>
+            // Deletion is reported complete only when the interview cleanup is done and no open job of the deleted
+            // recruiter is still waiting for its follow-up closure.
             RepositoryF
-              .lift(new MongoInterviewSubjectCleanup(database, diagnostics, topics).complete(userId))
+              .lift(
+                (
+                  new MongoInterviewSubjectCleanup(database, diagnostics, topics).complete(userId),
+                  MongoSessionOperations
+                    .findOne(
+                      Mongo4catsCollections.documents(database, MongoCollections.RecruiterJobClosureWork),
+                      None,
+                      MongoFilter.eq(MongoFields.Id, userId.value.toString)
+                    )
+                    .map(_.isEmpty)
+                ).mapN(_ && _)
+              )
               .map(if (_) AccountDeletionStatus.Complete else AccountDeletionStatus.Pending)
           case other => other.pure[[A] =>> RepositoryF[IO, A]]
         }

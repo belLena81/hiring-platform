@@ -9,7 +9,7 @@ import com.example.graphQL.cats.service.port.{
   SearchSessionWorkRepository
 }
 import com.example.graphQL.cats.service.RepositoryError
-import com.example.graphQL.cats.service.{BackgroundWorker, Diagnostics, LogEvent, LogField, LogOutcome}
+import com.example.graphQL.cats.service.{BackgroundWorker, Diagnostics, LogEvent, LogField, LogFields, LogOutcome}
 import com.example.graphQL.cats.service.events.{OperationalEventEnvelope, SearchSession}
 
 import scala.concurrent.duration.*
@@ -36,9 +36,10 @@ object SearchSessionHandoff {
       repository: SearchSessionWorkRepository[F],
       config: SearchSessionHandoffConfig,
       diagnostics: Diagnostics[F],
-      clock: Clock[F] = F
+      clock: Clock[F] = F,
+      alive: F[Unit] = F.unit
   ): Resource[F, SearchSessionHandoff[F]] = {
-    val worker = workerLoop(repository, config, diagnostics, clock)
+    val worker = workerLoop(repository, config, diagnostics, clock, alive)
     List
       .tabulate(config.parallelism)(index =>
         BackgroundWorker.resource(s"$WorkerName-${index + 1}", diagnostics)(worker)
@@ -61,17 +62,37 @@ object SearchSessionHandoff {
       })
   }
 
+  /** An unexpected failure is reported and the loop resumes after `pollInterval`, so one fault never ends the worker.
+    */
   private def workerLoop[F[_]](
       repository: SearchSessionWorkRepository[F],
       config: SearchSessionHandoffConfig,
       diagnostics: Diagnostics[F],
-      clock: Clock[F]
+      clock: Clock[F],
+      alive: F[Unit]
   )(using F: Temporal[F]): F[Unit] =
-    (clock.realTimeInstant.flatMap { now =>
+    iteration(repository, config, diagnostics, clock, alive)
+      .handleErrorWith(error =>
+        diagnostics.emit(
+          LogEvent.RuntimeFailed,
+          fields = LogFields.failure(error) + (LogField.Worker -> WorkerName)
+        ) *> F.sleep(config.pollInterval)
+      )
+      .foreverM
+
+  private def iteration[F[_]](
+      repository: SearchSessionWorkRepository[F],
+      config: SearchSessionHandoffConfig,
+      diagnostics: Diagnostics[F],
+      clock: Clock[F],
+      alive: F[Unit]
+  )(using F: Temporal[F]): F[Unit] =
+    // Only a pass that reached the store and handled its claim (or found none) is progress for readiness.
+    clock.realTimeInstant.flatMap { now =>
       repository.claim(config.workerId, now, now.plusMillis(config.lease.toMillis)).value.flatMap {
         case Right(Some(claim)) =>
           processClaim(repository, config, claim, now).flatMap {
-            case WorkOutcome.Completed | WorkOutcome.RetryScheduled | WorkOutcome.Failed => F.unit
+            case WorkOutcome.Completed | WorkOutcome.RetryScheduled | WorkOutcome.Failed => alive
             case WorkOutcome.OwnershipLost                                               =>
               diagnostics.emit(LogEvent.RuntimeFailed, fields = Map(LogField.Outcome -> LogOutcome.OwnershipLost.wire))
             case WorkOutcome.RecoveryDeferred(error) =>
@@ -81,7 +102,7 @@ object SearchSessionHandoff {
                   Map(LogField.Outcome -> LogOutcome.RecoveryDeferred.wire, LogField.ErrorType -> errorType(error))
               ) *> F.sleep(config.pollInterval)
           }
-        case Right(None) => F.sleep(config.pollInterval)
+        case Right(None) => alive *> F.sleep(config.pollInterval)
         case Left(error) =>
           diagnostics.emit(
             LogEvent.RuntimeFailed,
@@ -92,7 +113,7 @@ object SearchSessionHandoff {
             )
           ) *> F.sleep(config.pollInterval)
       }
-    }).foreverM
+    }
 
   private[events] enum WorkOutcome {
     case Completed, RetryScheduled, Failed, OwnershipLost

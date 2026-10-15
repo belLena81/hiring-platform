@@ -11,7 +11,7 @@ import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, UserId}
 import com.example.graphQL.cats.service.{ActorContext, AvailabilityError, SearchError, UseCaseError}
 import com.example.graphQL.cats.service.ProbeResult
 import com.example.graphQL.cats.service.protocol.{IdempotencyRequest, UseCaseF}
-import com.example.graphQL.cats.service.events.OperationalEventPayload
+import com.example.graphQL.cats.service.events.{OperationalEventPayload, SearchFilterSnapshot}
 import com.example.graphQL.cats.domain.pagination.*
 import com.example.graphQL.cats.service.search.{JobSearchFilter, SearchSessionEntry}
 import io.circe.{Json, Printer}
@@ -63,12 +63,8 @@ private[graphql] object HiringGraphQLResolverSupport {
         JobSearchFilter(filter.city, filter.skills.fold(Set.empty[String])(_.toSet), filter.createdAfter)
     }
 
-  def filterJson(value: JobSearchFilter): Json =
-    Json.obj(
-      "city" -> value.city.fold(Json.Null)(Json.fromString),
-      "skills" -> Json.arr(value.skills.toList.sorted.map(Json.fromString)*),
-      "createdAfter" -> value.createdAfter.fold(Json.Null)(instant => Json.fromString(instant.toString))
-    )
+  def filterSnapshot(value: JobSearchFilter): SearchFilterSnapshot =
+    SearchFilterSnapshot.jobCriteria(value.city, value.skills, value.createdAfter)
 
   /** Resolves the client-supplied search id or lets the service generate one. */
   def searchIdFor(hiring: HiringGraphQLServices, supplied: Option[UUID]): HiringGraphQLResult[UUID] =
@@ -79,7 +75,7 @@ private[graphql] object HiringGraphQLResolverSupport {
       actorId: UserId,
       kind: OperationalEventPayload.SearchKind,
       searchId: UUID,
-      filter: Json,
+      filter: SearchFilterSnapshot,
       model: Option[String] = None
   )(results: List[A])(idOf: A => String, scoreOf: A => Double): HiringGraphQLResult[Unit] =
     raiseOnUseCaseError(

@@ -195,12 +195,13 @@ final class HiringGraphQLDiscoveryContractSpec extends CatsEffectSuite {
     }
   }
 
-  test("executed invalid geographic, page and pairing inputs never call discovery repositories") {
+  test("ARR-01.1 ARR-01.3 executed invalid geographic, page and pairing inputs never call discovery repositories") {
     val cases = List(
       "nearbyJobs(center: {latitude: 91, longitude: 33}, radiusKm: 20, first: 1) { hasNextPage }" -> "INVALID_SEARCH_FILTER",
       "nearbyJobs(center: {latitude: 35, longitude: 33}, radiusKm: 501, first: 1) { hasNextPage }" -> "INVALID_SEARCH_FILTER",
       "nearbyJobs(center: {latitude: 35, longitude: 33}, radiusKm: 0, first: 1) { hasNextPage }" -> "INVALID_SEARCH_FILTER",
       "nearbyJobs(center: {latitude: 35, longitude: 33}, radiusKm: 20, first: 0) { hasNextPage }" -> "VALIDATION_FAILED",
+      "nearbyJobs(center: {latitude: 35, longitude: 33}, radiusKm: 20, first: -1) { hasNextPage }" -> "VALIDATION_FAILED",
       "nearbyJobs(center: {latitude: 35, longitude: 33}, radiusKm: 20, first: 101) { hasNextPage }" -> "VALIDATION_FAILED",
       "jobDiscoveryFacets(center: {latitude: 35, longitude: 33}) { truncated }" -> "INVALID_FILTER",
       "jobDiscoveryFacets(radiusKm: 20) { truncated }" -> "INVALID_FILTER",

@@ -7,6 +7,7 @@ import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.service.events.*
 import com.example.graphQL.cats.service.port.Versioned
 import MongoHiringPersistenceCodecs.*
+import com.example.graphQL.cats.infrastructure.events.{OperationalEventWireCodec, SearchFilterWireCodec}
 import io.circe.Json
 import io.circe.parser.parse
 import org.bson.Document
@@ -149,6 +150,7 @@ private[mongo] object MongoHiringCodecs {
   def operationalEvent(value: OperationalEventEnvelope): Document =
     MongoHiringPersistenceCodecs.operationalEvent(storedOperationalEvent(value))
 
+  // Envelope size is enforced at write (`outboxRecord`) and claim time, so this stored read does not re-measure it.
   def readOperationalEvent(document: Document): ValidatedNel[StoredDocumentError, OperationalEventEnvelope] = {
     val eventDocument = if (isOutbox(document)) projectOperationalEvent(document) else document
     val fields = if (isOutbox(document)) OutboxFields else OperationalEventFields
@@ -189,14 +191,25 @@ private[mongo] object MongoHiringCodecs {
       value.aggregateId.validNel,
       uuid(MongoFields.ActorId, value.actorId).toValidatedNel.map(UserId.apply),
       parseJson(MongoFields.Payload, value.payload).toValidatedNel
-    ).mapN(OperationalEventEnvelope.apply)
+    ).tupled
+      .andThen { case (eventId, eventType, occurredAt, aggregateType, aggregateId, actorId, payloadJson) =>
+        OperationalEventWireCodec
+          .decodePayload(eventType, payloadJson)
+          .leftMap(_ => InvalidField(MongoFields.Payload))
+          .toValidatedNel
+          .map(OperationalEventEnvelope(eventId, eventType, occurredAt, aggregateType, aggregateId, actorId, _))
+      }
       .andThen(event =>
-        OperationalEventJson.validate(event).leftMap(_ => InvalidField(MongoFields.Payload)).toValidatedNel
+        OperationalEventContract.validate(event).leftMap(_ => InvalidField(MongoFields.Payload)).toValidatedNel
       )
 
-  def outboxRecord(value: OperationalEventEnvelope, now: Instant): Either[String, Document] =
+  def outboxRecord(
+      value: OperationalEventEnvelope,
+      now: Instant,
+      maxEnvelopeBytes: Int = OperationalEventWireCodec.MaxEnvelopeBytes
+  ): Either[String, Document] =
     for {
-      valid <- OperationalEventJson.validate(value).leftMap(_.toString)
+      valid <- OperationalEventWireCodec.validate(value, maxEnvelopeBytes).leftMap(_.toString)
       subjectIds <- outboxSubjectIds(valid)
       document <- Either
         .catchNonFatal(outboxDocument(valid, now, subjectIds))
@@ -231,9 +244,7 @@ private[mongo] object MongoHiringCodecs {
   }
 
   private[mongo] def outboxSubjectIds(value: OperationalEventEnvelope): Either[String, List[String]] =
-    OperationalEventPayload
-      .decode(value)
-      .flatMap(_.subjectIds)
+    value.payload.subjectIds
       .leftMap(_.toString)
       .map(subjects => (value.actorId.value :: subjects).map(_.toString).distinct.sorted)
 
@@ -244,7 +255,7 @@ private[mongo] object MongoHiringCodecs {
         value.actorId.value.toString,
         value.searchKind.wire,
         value.query,
-        value.filter.noSpaces,
+        SearchFilterWireCodec.encodeString(value.filter),
         value.model,
         value.results.map(result => StoredSearchSessionResult(result.resultId, result.rank, result.score)),
         value.occurredAt.toDate,
@@ -262,7 +273,7 @@ private[mongo] object MongoHiringCodecs {
           .toRight(InvalidField(MongoFields.SearchKind))
           .toValidatedNel,
         value.query.validNel,
-        parseJson(MongoFields.Filter, value.filter).toValidatedNel,
+        SearchFilterWireCodec.decodeString(value.filter).leftMap(_ => InvalidField(MongoFields.Filter)).toValidatedNel,
         value.model.validNel,
         value.results.map(result => SearchSessionResult(result.resultId, result.rank, result.score)).validNel,
         value.occurredAt.toInstant.validNel,
@@ -603,8 +614,8 @@ private[mongo] object MongoHiringCodecs {
       value.aggregateType.toString,
       value.aggregateId,
       value.actorId.value.toString,
-      value.payload.noSpaces,
-      OperationalEventJson.bytes(value),
+      OperationalEventWireCodec.payloadJson(value.payload).noSpaces,
+      OperationalEventWireCodec.bytes(value),
       value.partitionKey
     )
 }

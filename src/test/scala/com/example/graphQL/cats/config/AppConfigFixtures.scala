@@ -13,9 +13,12 @@ object AppConfigFixtures {
       .flatMap(AppConfigValidation.fromParsed)
 
   /** The packaged `application.conf` plus the minimal local values it leaves unset, then `overrides`. */
-  def withPackagedDefaults(overrides: String): Either[NonEmptyList[ConfigError], AppConfig] =
+  def withPackagedDefaults(
+      overrides: String,
+      env: Map[String, String] = Map.empty
+  ): Either[NonEmptyList[ConfigError], AppConfig] =
     fromConfig(
       "include classpath(\"application.conf\")\nhttp.host=\"127.0.0.1\"\nhttp.port=8080\nmongo.uri=\"mongodb://127.0.0.1:27018\"\nauth.jwt.hs256-secret=\"synthetic-test-signing-key-material\"\n" + overrides,
-      Map.empty
+      env
     )
 }

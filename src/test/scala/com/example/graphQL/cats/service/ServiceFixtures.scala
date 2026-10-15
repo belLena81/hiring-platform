@@ -6,6 +6,7 @@ import cats.effect.Ref
 import cats.syntax.all.*
 import com.example.graphQL.cats.service.port.{
   ApplicationRepository,
+  ApplicationWriteActor,
   JobRepository,
   MutationWriteContext,
   RepositoryF,
@@ -444,6 +445,7 @@ private[cats] object ServiceFixtures {
       nextCreateError: Ref[IO, Option[RepositoryError]],
       operationalEvents: Option[Ref[IO, Vector[OperationalEventEnvelope]]] = None,
       nextOperationalEventError: Option[Ref[IO, Option[RepositoryError]]] = None,
+      writeActors: Option[Ref[IO, Vector[ApplicationWriteActor]]] = None,
       jobLookup: JobId => IO[Option[Job]] = id =>
         IO.pure(Option.when(id == ServiceFixtures.openJob.id)(ServiceFixtures.openJob))
   ) extends ApplicationRepository[IO] {
@@ -568,16 +570,18 @@ private[cats] object ServiceFixtures {
         application: Application,
         initialEvent: ApplicationEvent,
         outboxEvents: List[OperationalEventEnvelope],
+        actor: ApplicationWriteActor,
         context: MutationWriteContext
     ): RepositoryF[IO, Unit] =
-      com.example.graphQL.cats.service.port.RepositoryF.fromFEither(rejectNextOperationalEvent.flatMap {
-        case Some(error) => IO.pure(Left(error))
-        case None        =>
-          createForOpenJob(observedJob, application, initialEvent).value.flatTap {
-            case Right(()) => operationalEvents.fold(IO.unit)(_.update(_ ++ outboxEvents))
-            case Left(_)   => IO.unit
-          }
-      })
+      com.example.graphQL.cats.service.port.RepositoryF
+        .fromFEither(writeActors.fold(IO.unit)(_.update(_ :+ actor)) *> rejectNextOperationalEvent.flatMap {
+          case Some(error) => IO.pure(Left(error))
+          case None        =>
+            createForOpenJob(observedJob, application, initialEvent).value.flatTap {
+              case Right(()) => operationalEvents.fold(IO.unit)(_.update(_ ++ outboxEvents))
+              case Left(_)   => IO.unit
+            }
+        })
 
     private def updateStatus(
         application: Application,
@@ -602,19 +606,24 @@ private[cats] object ServiceFixtures {
         application: Application,
         event: ApplicationEvent,
         outboxEvents: List[OperationalEventEnvelope],
+        actor: ApplicationWriteActor,
         context: MutationWriteContext
     ): RepositoryF[IO, Unit] =
-      com.example.graphQL.cats.service.port.RepositoryF.fromFEither(rejectNextOperationalEvent.flatMap {
-        case Some(error) => IO.pure(Left(error))
-        case None        =>
-          updateStatus(application, event).value.flatTap {
-            case Right(()) => operationalEvents.fold(IO.unit)(_.update(_ ++ outboxEvents))
-            case Left(_)   => IO.unit
-          }
-      })
+      com.example.graphQL.cats.service.port.RepositoryF
+        .fromFEither(writeActors.fold(IO.unit)(_.update(_ :+ actor)) *> rejectNextOperationalEvent.flatMap {
+          case Some(error) => IO.pure(Left(error))
+          case None        =>
+            updateStatus(application, event).value.flatTap {
+              case Right(()) => operationalEvents.fold(IO.unit)(_.update(_ ++ outboxEvents))
+              case Left(_)   => IO.unit
+            }
+        })
 
     def allEvents: IO[Vector[ApplicationEvent]] =
       events.get
+
+    def allWriteActors: IO[Vector[ApplicationWriteActor]] =
+      writeActors.fold(IO.pure(Vector.empty[ApplicationWriteActor]))(_.get)
 
     def allOperationalEvents: IO[Vector[OperationalEventEnvelope]] =
       operationalEvents.fold(IO.pure(Vector.empty[OperationalEventEnvelope]))(_.get)

@@ -244,7 +244,8 @@ final class HiringGraphQLContractSpec extends CatsEffectSuite {
                   dependencies.hiring,
                   dependencies.ensureHiringReady,
                   diagnostics = Diagnostics.noop,
-                  requestId = Some("00000000-0000-0000-0000-000000000001")
+                  requestId = Some("00000000-0000-0000-0000-000000000001"),
+                  schemaExposure = true
                 )
               )
             )

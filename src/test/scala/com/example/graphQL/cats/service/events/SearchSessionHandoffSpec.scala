@@ -9,9 +9,9 @@ import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.Diagnostics
 import com.example.graphQL.cats.service.events.{OperationalEvents, SearchSession, SearchSessionResult}
-import io.circe.Json
 import java.time.Instant
 import java.util.UUID
+import cats.effect.testkit.TestControl
 import munit.CatsEffectSuite
 import scala.concurrent.duration.*
 
@@ -123,6 +123,45 @@ final class SearchSessionHandoffSpec extends CatsEffectSuite {
     } yield assertEquals(result, (now, now.plusSeconds(45)))
   }
 
+  private def beats(unavailable: Boolean): IO[Int] =
+    for {
+      retried <- Ref.of[IO, Vector[Int]](Vector.empty)
+      failed <- Ref.of[IO, Vector[(Int, SearchSessionWorkFailure)]](Vector.empty)
+      // Three claims already used, so the base repository reports an empty queue.
+      claimed <- Ref.of[IO, Int](3)
+      terminal <- Deferred[IO, Unit]
+      base = failingRepository(claimed, retried, failed, terminal)
+      repository = new SearchSessionWorkRepository[IO] {
+        def enqueue(work: PendingSearchSessionWork, createdAt: Instant) = base.enqueue(work, createdAt)
+        def findForActor(actor: UserId, search: UUID) = base.findForActor(actor, search)
+        def claim(workerId: String, currentTime: Instant, leaseUntil: Instant) =
+          if (unavailable) RepositoryF.raise[IO, Option[ClaimedSearchSessionWork]](RepositoryError.Unavailable)
+          else base.claim(workerId, currentTime, leaseUntil)
+        def complete(claim: ClaimedSearchSessionWork, completedAt: Instant) = base.complete(claim, completedAt)
+        def retry(claim: ClaimedSearchSessionWork, availableAt: Instant) = base.retry(claim, availableAt)
+        def fail(claim: ClaimedSearchSessionWork, failure: SearchSessionWorkFailure, failedAt: Instant) =
+          base.fail(claim, failure, failedAt)
+      }
+      count <- Ref.of[IO, Int](0)
+      _ <- SearchSessionHandoff
+        .resource[IO](
+          repository,
+          SearchSessionHandoffConfig(parallelism = 1, pollInterval = 1.second),
+          Diagnostics.noop,
+          alive = count.update(_ + 1)
+        )
+        .surround(IO.sleep(10.seconds))
+      total <- count.get
+    } yield total
+
+  test("ARR-07.1 the search-session handoff reports progress on every pass that reached the store") {
+    TestControl.executeEmbed(beats(unavailable = false)).map(count => assert(count >= 9, clue(count)))
+  }
+
+  test("ARR-07.1 the search-session handoff reports no progress while its store is unavailable") {
+    TestControl.executeEmbed(beats(unavailable = true)).map(count => assertEquals(count, 0))
+  }
+
   private def failingRepository(
       claimed: Ref[IO, Int],
       retried: Ref[IO, Vector[Int]],
@@ -135,7 +174,7 @@ final class SearchSessionHandoffSpec extends CatsEffectSuite {
       actorId,
       SearchKind.SemanticJobSearch,
       Some("scala"),
-      Json.obj("city" -> Json.fromString("Nicosia")),
+      SearchFilterSnapshot.JobCriteria(Some("Nicosia"), Nil, None),
       Some("test-model"),
       List(SearchSessionResult("00000000-0000-0000-0000-000000000904", 1, 0.9d)),
       now,

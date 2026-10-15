@@ -6,7 +6,6 @@ import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.service.{Diagnostics, RepositoryError}
 import com.example.graphQL.cats.service.events.*
 import com.example.graphQL.cats.service.port.*
-import io.circe.Json
 import org.bson.Document
 import java.time.Instant
 import java.util.UUID
@@ -21,7 +20,7 @@ class MongoSearchSessionRetryIntegrationSpec extends MongoIntegrationSuite {
         UserId(UUID.randomUUID()),
         SearchKind.Jobs,
         None,
-        Json.obj(),
+        SearchFilterSnapshot.Unfiltered,
         None,
         Nil,
         now,
@@ -81,7 +80,7 @@ class MongoSearchSessionRetryIntegrationSpec extends MongoIntegrationSuite {
         UserId(UUID.randomUUID()),
         SearchKind.Jobs,
         None,
-        Json.obj(),
+        SearchFilterSnapshot.Unfiltered,
         None,
         Nil,
         now,
@@ -132,7 +131,7 @@ class MongoSearchSessionRetryIntegrationSpec extends MongoIntegrationSuite {
         UserId(UUID.randomUUID()),
         SearchKind.Jobs,
         None,
-        Json.obj(),
+        SearchFilterSnapshot.Unfiltered,
         None,
         Nil,
         now,

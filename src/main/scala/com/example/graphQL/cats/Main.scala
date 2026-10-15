@@ -1,14 +1,23 @@
 package com.example.graphQL.cats
 
+import scala.concurrent.duration.DurationInt
 import cats.data.NonEmptyList
 import cats.effect.{ExitCode, IO, IOApp, Resource}
 import cats.data.Kleisli
 import cats.syntax.all.*
-import com.example.graphQL.cats.api.admission.{AuthRateLimiter, InterviewActionRateLimiter}
+import com.example.graphQL.cats.api.admission.{AuthRateLimiter, CostBudgetLimiter, InterviewActionRateLimiter}
 import com.example.graphQL.cats.api.auth.JwtActorAuthenticator
 import com.example.graphQL.cats.api.graphql.{GraphQLDocumentCache, RequestContextFactory}
 import com.example.graphQL.cats.api.http.{ClientAddressResolver, HiringApiRoutes}
-import com.example.graphQL.cats.service.{Diagnostics, HealthService, LogEvent, LogField, LogFields}
+import com.example.graphQL.cats.service.{
+  Diagnostics,
+  HealthService,
+  ReadinessCache,
+  ReadinessReport,
+  LogEvent,
+  LogField,
+  LogFields
+}
 import com.example.graphQL.cats.service.Diagnostics.*
 import com.example.graphQL.cats.config.{AppConfig, ConfigError}
 import com.example.graphQL.cats.infrastructure.logging.SafeDiagnostics
@@ -28,10 +37,14 @@ object Main extends IOApp {
     documentCache <- GraphQLDocumentCache.resource
     rateLimiter <- Resource.eval(AuthRateLimiter.create(config.authRateLimit))
     interviewActionLimiter <- Resource.eval(InterviewActionRateLimiter.create(config.interviewActionRateLimit))
+    costBudgetLimiter <- Resource.eval(CostBudgetLimiter.create(config.graphql.costBudget))
+    reportCache <- Resource.eval(
+      ReadinessCache.create[IO, ReadinessReport](config.readiness.reportCacheMillis.millis)
+    )
     authenticator = new JwtActorAuthenticator(config.jwtAuth, runtime.userAuthenticator, cats.effect.Clock[IO])
     authenticate = Kleisli(authenticator.authenticate)
     routeBuilder = new HiringApiRoutes(
-      new HealthService(runtime.probe, diagnostics),
+      new HealthService(runtime.probe, diagnostics, Some(runtime.degradedComponents), Some(reportCache)),
       diagnostics,
       HiringApiRoutes.Dependencies(
         runtime.services,
@@ -41,8 +54,10 @@ object Main extends IOApp {
         documentCache,
         rateLimiter,
         interviewActionLimiter,
+        costBudgetLimiter,
         ClientAddressResolver(config.trustedProxy),
-        config.discovery.maxRoots
+        config.discovery.maxRoots,
+        config.graphql.schemaExposure
       ),
       telemetry.tracer
     )

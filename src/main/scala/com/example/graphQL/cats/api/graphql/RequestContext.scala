@@ -5,7 +5,7 @@ import cats.effect.{Deferred, IO, Ref, Resource}
 import cats.effect.std.Dispatcher
 import cats.syntax.all.*
 import com.comcast.ip4s.IpAddress
-import com.example.graphQL.cats.api.admission.{AuthRateLimiter, FixedWindowRateLimiter}
+import com.example.graphQL.cats.api.admission.{AuthRateLimiter, CostBudgetLimiter, FixedWindowRateLimiter}
 import com.example.graphQL.cats.service.{
   ActorContext,
   AuthenticatedActor,
@@ -61,7 +61,9 @@ final case class RequestContextParameters(
     clientAddress: Option[IpAddress] = None,
     rateLimit: AuthRateLimiter.Key => IO[Either[AuthRateLimiter.RateLimited, Unit]] = _ => IO.pure(Right(())),
     discoveryMaxRoots: Int = 4,
-    interviewActionRateLimit: UserId => IO[Either[FixedWindowRateLimiter.RateLimited, Unit]] = _ => IO.pure(Right(()))
+    interviewActionRateLimit: UserId => IO[Either[FixedWindowRateLimiter.RateLimited, Unit]] = _ => IO.pure(Right(())),
+    costBudget: (CostBudgetLimiter.Key, Int) => Either[FixedWindowRateLimiter.RateLimited, Unit] = (_, _) => Right(()),
+    schemaExposure: Boolean = false
 )
 
 final class RequestContext private (
@@ -79,6 +81,8 @@ final class RequestContext private (
   def hiring: HiringGraphQLServices = parameters.hiring
 
   private[graphql] def discoveryMaxRoots: Int = parameters.discoveryMaxRoots
+
+  private[graphql] def schemaExposure: Boolean = parameters.schemaExposure
 
   def readiness: IO[ProbeResult] = readinessProbe
 
@@ -117,6 +121,17 @@ final class RequestContext private (
       case None        => IO.pure(Left(unauthorizedFailure))
       case Some(actor) => parameters.interviewActionRateLimit(actor.userId).map(Right(_))
     })
+
+  /** Charges a query's computed complexity to its caller's cost budget before any resolver runs. The key is the actor
+    * id from the verified token claims (no storage read), or the resolved client address when anonymous.
+    */
+  private[graphql] def chargeCostBudget(cost: Int): Either[FixedWindowRateLimiter.RateLimited, Unit] =
+    parameters.costBudget(
+      parameters.actor.fold[CostBudgetLimiter.Key](CostBudgetLimiter.Key.Client(parameters.clientAddress))(actor =>
+        CostBudgetLimiter.Key.Actor(actor.userId)
+      ),
+      cost
+    )
 
   private[graphql] def requestScoped[A](action: HiringGraphQLResult[A]): HiringGraphQLResult[A] =
     cats.data.EitherT(

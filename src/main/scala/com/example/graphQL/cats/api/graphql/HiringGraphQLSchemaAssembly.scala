@@ -13,6 +13,7 @@ import com.example.graphQL.cats.api.graphql.HiringGraphQLReportingTypes.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLTypes.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLDsl.{ioField, resultField}
 import com.example.graphQL.cats.domain.model.ApplicationStatus
+import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.GraphQLFailure
 import sangria.execution.{QueryReducer, ExecutionPath}
 import sangria.ast
 import sangria.execution.deferred.DeferredResolver
@@ -21,7 +22,7 @@ import sangria.schema.*
 private[graphql] object HiringGraphQLSchemaAssembly {
   private val MaxQueryDepth = 16
 
-  private val MaxQueryComplexity = 1000d
+  private val MaxQueryComplexity = com.example.graphQL.cats.config.GraphQLConfig.MaxQueryComplexity.toDouble
 
   // Each interview action weighs this much, so one request (complexity limit 1000) carries at most a handful of them
   // however they are aliased; the per-actor allowance then counts each of those actions individually.
@@ -39,9 +40,9 @@ private[graphql] object HiringGraphQLSchemaAssembly {
       complexity = Some((_, _, child) => InterviewActionComplexity + child)
     )(resolve)
   private val connectionComplexity: (RequestContext, Args, Double) => Double =
-    (_, args, child) => 1d + args.arg(firstArgument) * child
+    (_, args, child) => 1d + args.arg(firstArgument).max(0) * child
   private val expensivePageComplexity: (RequestContext, Args, Double) => Double =
-    (_, args, child) => 100d + args.arg(firstArgument) * (1d + child)
+    (_, args, child) => 100d + args.arg(firstArgument).max(0) * (1d + child)
   // A lexical-query facet request runs `$search` plus an aggregation, so it costs at least a semanticJobSearch page.
   // 25 is the page-size equivalent: 100 + 25 * (1 + child) is at least a semanticJobSearch(first: 25) page, close to
   // the default page, and with the typical facet selection stays well under MaxQueryComplexity (1000).
@@ -85,14 +86,100 @@ private[graphql] object HiringGraphQLSchemaAssembly {
         throw context.effectAdapter.complexityRejected(context.discoveryMaxRoots.toDouble)
       else context
   }
+  // Rejects any `first` outside PageSize.Min..Max before execution, so a negative value cannot lower the complexity
+  // computed for sibling fields. Runs ahead of the complexity reducer; resolvers keep their own check as well.
+  private val pageSizeBounds = new QueryReducer[RequestContext, RequestContext] {
+    type Acc = Option[GraphQLFailure]
+    val initial = None
+    def reduceAlternatives(values: Seq[Option[GraphQLFailure]]): Option[GraphQLFailure] = values.flatten.headOption
+    def reduceField[Val](
+        fieldAcc: Option[GraphQLFailure],
+        childrenAcc: Option[GraphQLFailure],
+        path: ExecutionPath,
+        context: RequestContext,
+        astFields: Vector[ast.Field],
+        parentType: ObjectType[RequestContext, Val],
+        field: Field[RequestContext, Val],
+        argumentValuesFn: QueryReducer.ArgumentValuesFn
+    ): Option[GraphQLFailure] =
+      fieldAcc.orElse(childrenAcc).orElse {
+        if (field.arguments.exists(_.name == firstArgument.name))
+          argumentValuesFn(path, field.arguments, astFields.head.arguments).toOption
+            .flatMap(args => HiringGraphQLResolverSupport.pageSize(args.arg(firstArgument)).left.toOption)
+        else None
+      }
+    def reduceScalar[T](path: ExecutionPath, context: RequestContext, tpe: ScalarType[T]): Option[GraphQLFailure] = None
+    def reduceEnum[T](path: ExecutionPath, context: RequestContext, tpe: EnumType[T]): Option[GraphQLFailure] = None
+    def reduceCtx(
+        failure: Option[GraphQLFailure],
+        context: RequestContext
+    ): ReduceAction[RequestContext, RequestContext] =
+      // Sangria reducers reject through the framework throwable boundary before any resolver starts.
+      failure.fold[ReduceAction[RequestContext, RequestContext]](context)(rejected =>
+        throw context.effectAdapter.pageSizeRejected(rejected)
+      )
+  }
+  // Introspection is cheap to request and expensive to answer, and aliases repeat it freely; each `__schema` or
+  // `__type` selection therefore weighs as much as a few ordinary pages, so a handful per request reaches the cap.
+  private val IntrospectionComplexity = 200d
+  private val IntrospectionFields = Set("__schema", "__type")
+
+  // Sangria's `measureComplexity` plus the introspection weight above; the handler decides what to do with the total.
+  private def weightedComplexity(
+      handle: (Double, RequestContext) => ReduceAction[RequestContext, RequestContext]
+  ): QueryReducer[RequestContext, RequestContext] =
+    new QueryReducer[RequestContext, RequestContext] {
+      type Acc = Double
+      val initial = 0d
+      def reduceAlternatives(values: Seq[Double]): Double = values.foldLeft(0d)(math.max)
+      def reduceField[Val](
+          fieldAcc: Double,
+          childrenAcc: Double,
+          path: ExecutionPath,
+          context: RequestContext,
+          astFields: Vector[ast.Field],
+          parentType: ObjectType[RequestContext, Val],
+          field: Field[RequestContext, Val],
+          argumentValuesFn: QueryReducer.ArgumentValuesFn
+      ): Double = {
+        val own = field.complexity match {
+          case Some(estimate) =>
+            argumentValuesFn(path, field.arguments, astFields.head.arguments).toOption
+              .fold(1d + childrenAcc)(args => estimate(context, args, childrenAcc))
+          case None => 1d + childrenAcc
+        }
+        val weight = if (IntrospectionFields.contains(field.name)) IntrospectionComplexity else 0d
+        fieldAcc + own + weight
+      }
+      def reduceScalar[T](path: ExecutionPath, context: RequestContext, tpe: ScalarType[T]): Double = 0d
+      def reduceEnum[T](path: ExecutionPath, context: RequestContext, tpe: EnumType[T]): Double = 0d
+      def reduceCtx(total: Double, context: RequestContext): ReduceAction[RequestContext, RequestContext] =
+        handle(total, context)
+    }
+
+  private val complexityCap = weightedComplexity { (total, context) =>
+    // Sangria reducers reject through the framework throwable boundary before any resolver starts.
+    if (total > MaxQueryComplexity) throw context.effectAdapter.complexityRejected(MaxQueryComplexity) else context
+  }
+
+  // Charges the computed complexity to the caller's cost budget. It runs after the structural and complexity
+  // rejections (those queries are refused anyway) and before execution, so no resolver work precedes the decision.
+  private val costBudget = weightedComplexity { (complexity, context) =>
+    // The charge is an in-memory step, so the reducer needs no Future interop; refusal goes through the same
+    // framework throwable boundary as the other reducers.
+    context
+      .chargeCostBudget(budgetCost(complexity))
+      .fold(refused => throw context.effectAdapter.costBudgetRejected(refused.retryAfterSeconds), _ => context)
+  }
+  private def budgetCost(complexity: Double): Int =
+    math.min(Int.MaxValue.toDouble, math.max(1d, math.ceil(complexity))).toInt
+
   lazy val queryReducers: List[QueryReducer[RequestContext, ?]] = List(
+    pageSizeBounds,
     expensiveRootBudget,
     QueryReducer.rejectMaxDepth[RequestContext](MaxQueryDepth),
-    QueryReducer
-      .rejectComplexQueries[RequestContext](
-        MaxQueryComplexity,
-        (_, context) => context.effectAdapter.complexityRejected(MaxQueryComplexity)
-      )
+    complexityCap,
+    costBudget
   )
 
   lazy val deferredResolver: DeferredResolver[RequestContext] =

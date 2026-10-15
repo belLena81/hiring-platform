@@ -57,11 +57,13 @@ class AppConfigSpec extends FunSuite {
       |  window-seconds = 60
       |  attempts = 20
       |  max-buckets = 10000
+      |  overflow-buckets = 256
       |}
       |auth.interview-action-rate-limit {
       |  window-seconds = 60
       |  attempts = 30
       |  max-buckets = 10000
+      |  overflow-buckets = 256
       |}
       |kafka {
       |  enabled = false
@@ -242,11 +244,13 @@ class AppConfigSpec extends FunSuite {
         |  window-seconds = 30
         |  attempts = 10
         |  max-buckets = 500
+        |  overflow-buckets = 256
         |}
         |auth.interview-action-rate-limit {
         |  window-seconds = 60
         |  attempts = 30
         |  max-buckets = 10000
+        |  overflow-buckets = 256
         |}
         |kafka {
         |  enabled = false
@@ -486,11 +490,13 @@ class AppConfigSpec extends FunSuite {
         |  window-seconds = 60
         |  attempts = 20
         |  max-buckets = 10000
+        |  overflow-buckets = 256
         |}
         |auth.interview-action-rate-limit {
         |  window-seconds = 60
         |  attempts = 30
         |  max-buckets = 10000
+        |  overflow-buckets = 256
         |}
         |kafka {
         |  enabled = false
@@ -801,6 +807,7 @@ class AppConfigSpec extends FunSuite {
          |  window-seconds = $window
          |  attempts = $attempts
          |  max-buckets = $buckets
+         |  overflow-buckets = 256
          |}
          |""".stripMargin
     assertEquals(

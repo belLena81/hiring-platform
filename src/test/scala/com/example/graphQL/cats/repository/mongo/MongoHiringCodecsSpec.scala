@@ -28,11 +28,12 @@ import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.events.{
   OperationalAggregateType,
   OperationalEventEnvelope,
+  OperationalEventPayload,
   OperationalEventType,
+  SearchFilterSnapshot,
   SearchSession,
   SearchSessionResult
 }
-import io.circe.Json
 import cats.data.NonEmptyList
 import java.time.Instant
 import java.util.{Date, UUID}
@@ -380,16 +381,10 @@ class MongoHiringCodecsSpec extends FunSuite {
       OperationalAggregateType.Search,
       "00000000-0000-0000-0000-000000000208",
       candidateId,
-      Json.obj(
-        "searchId" -> Json.fromString("00000000-0000-0000-0000-000000000208"),
-        "searchKind" -> Json.fromString("semanticJobSearch"),
-        "results" -> Json.arr(
-          Json.obj(
-            "resultId" -> Json.fromString(jobId.value.toString),
-            "rank" -> Json.fromInt(1),
-            "score" -> Json.fromDoubleOrNull(0.95)
-          )
-        )
+      OperationalEventPayload.SearchPerformed(
+        UUID.fromString("00000000-0000-0000-0000-000000000208"),
+        SearchKind.SemanticJobSearch,
+        List(SearchSessionResult(jobId.value.toString, 1, 0.95))
       )
     )
     val search = SearchSession(
@@ -397,7 +392,7 @@ class MongoHiringCodecsSpec extends FunSuite {
       candidateId,
       SearchKind.SemanticJobSearch,
       Some("Scala"),
-      Json.obj("city" -> Json.fromString("Nicosia")),
+      SearchFilterSnapshot.JobCriteria(Some("Nicosia"), Nil, None),
       Some("test-model"),
       List(SearchSessionResult("job-203", 1, 0.95d)),
       now,
@@ -430,5 +425,7 @@ class MongoHiringCodecsSpec extends FunSuite {
     )
     assert(MongoHiringCodecs.outboxRecord(operational.copy(occurredAt = Instant.MAX), now).isLeft)
     assert(MongoHiringCodecs.outboxRecord(operational, Instant.MAX).isLeft)
+    // Write-side size enforcement: an envelope over the budget is refused before any document is built.
+    assertEquals(MongoHiringCodecs.outboxRecord(operational, now, maxEnvelopeBytes = 16), Left("EnvelopeTooLarge"))
   }
 }

@@ -9,7 +9,29 @@ import Diagnostics.*
 
 private final case class ProbeOutcome(result: ProbeResult, failure: Map[LogField, String], elapsed: FiniteDuration)
 
-final class HealthService[F[_]: Temporal](probe: DatabaseProbe[F], diagnostics: Diagnostics[F]) {
+/** The status class is decided only by `result`; `degraded` names components needing attention and never changes it. */
+final case class ReadinessReport(result: ProbeResult, degraded: List[ReadinessComponent])
+
+final class HealthService[F[_]: Temporal](
+    probe: DatabaseProbe[F],
+    diagnostics: Diagnostics[F],
+    degradedComponents: Option[F[List[ReadinessComponent]]] = None,
+    reportCache: Option[ReadinessCache[F, ReadinessReport]] = None
+) {
+
+  /** Degraded components are collected only while ready, and a failure to collect them never changes the result. */
+  def report(requestId: Option[String]): F[ReadinessReport] =
+    reportCache.fold(collect(requestId))(_.get(collect(requestId)))
+
+  private def collect(requestId: Option[String]): F[ReadinessReport] =
+    readiness(requestId).flatMap {
+      case ProbeResult.Ready =>
+        degradedComponents
+          .fold(Applicative[F].pure(List.empty[ReadinessComponent]))(_.handleError(_ => Nil))
+          .map(ReadinessReport(ProbeResult.Ready, _))
+      case other => Applicative[F].pure(ReadinessReport(other, Nil))
+    }
+
   def readiness(requestId: Option[String]): F[ProbeResult] =
     Applicative[F].unit
       .flatMap(_ => probe.check(requestId))

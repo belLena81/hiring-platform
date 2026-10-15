@@ -3,10 +3,15 @@ package com.example.graphQL.cats.api.graphql
 import cats.data.EitherT
 import cats.data.Kleisli
 import cats.effect.{IO, Resource}
-import com.example.graphQL.cats.api.admission.{AuthRateLimiter, FixedWindowRateLimiter, InterviewActionRateLimiter}
+import com.example.graphQL.cats.api.admission.{
+  AuthRateLimiter,
+  CostBudgetLimiter,
+  FixedWindowRateLimiter,
+  InterviewActionRateLimiter
+}
 import com.example.graphQL.cats.api.auth.AuthFailure
 import com.example.graphQL.cats.api.http.{ClientAddressResolver, HiringApiRoutes}
-import com.example.graphQL.cats.config.{RateLimitConfig, TrustedProxyConfig}
+import com.example.graphQL.cats.config.{CostBudgetConfig, RateLimitConfig, TrustedProxyConfig}
 import com.example.graphQL.cats.domain.model.{AccountDeletionStatus, ApplicationStatus, UserPageRequest}
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.service.{ActorContext, Diagnostics, ProbeResult}
@@ -123,7 +128,9 @@ object TestGraphQLSupport {
       hiringReady: IO[ProbeResult] = IO.pure(ProbeResult.Ready),
       diagnostics: Diagnostics[IO] = Diagnostics.noop,
       requestId: Option[String] = None,
-      interviewActionRateLimit: UserId => IO[Either[FixedWindowRateLimiter.RateLimited, Unit]] = _ => IO.pure(Right(()))
+      interviewActionRateLimit: UserId => IO[Either[FixedWindowRateLimiter.RateLimited, Unit]] = _ =>
+        IO.pure(Right(())),
+      schemaExposure: Boolean = true
   ): Resource[IO, RequestContext] =
     RequestContextFactory.resource.flatMap(
       _.resource(
@@ -134,7 +141,8 @@ object TestGraphQLSupport {
           hiringReady,
           diagnostics = diagnostics,
           requestId = requestId,
-          interviewActionRateLimit = interviewActionRateLimit
+          interviewActionRateLimit = interviewActionRateLimit,
+          schemaExposure = schemaExposure
         )
       )
     )
@@ -151,13 +159,16 @@ object TestGraphQLSupport {
       hiringReady: IO[ProbeResult] = IO.pure(ProbeResult.Ready),
       authRateLimit: RateLimitConfig = RateLimitConfig(60, 100, 1000),
       trustedProxy: TrustedProxyConfig = TrustedProxyConfig(Nil),
-      interviewActionRateLimit: RateLimitConfig = RateLimitConfig(60, 1000, 1000)
+      interviewActionRateLimit: RateLimitConfig = RateLimitConfig(60, 1000, 1000),
+      costBudget: CostBudgetConfig = CostBudgetConfig(60, 1000000, 1000),
+      schemaExposure: Boolean = true
   ): Resource[IO, HiringApiRoutes.Dependencies] =
     for {
       factory <- RequestContextFactory.resource
       documentCache <- GraphQLDocumentCache.resource
       limiter <- Resource.eval(AuthRateLimiter.create(authRateLimit))
       interviewActionLimiter <- Resource.eval(InterviewActionRateLimiter.create(interviewActionRateLimit))
+      costBudgetLimiter <- Resource.eval(CostBudgetLimiter.create(costBudget))
     } yield HiringApiRoutes.Dependencies(
       hiring,
       Kleisli(authenticate),
@@ -166,6 +177,8 @@ object TestGraphQLSupport {
       documentCache,
       limiter,
       interviewActionLimiter,
-      ClientAddressResolver(trustedProxy)
+      costBudgetLimiter,
+      ClientAddressResolver(trustedProxy),
+      schemaExposure = schemaExposure
     )
 }

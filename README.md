@@ -31,7 +31,7 @@ Login/signup idempotency receipts use domain-separated HMAC fingerprints keyed b
 
 ## Local build
 
-`sbt run` forks a separate JVM so Cats Effect `IOApp` owns the application lifecycle. The packaged configuration has no defaults for the HTTP bind address, port, MongoDB URI or JWT secret; supply them through the environment (`HTTP_HOST`, `HTTP_PORT`, `MONGODB_URI`, `AUTH_JWT_HS256_SECRET`) or an explicitly selected configuration file. `src/main/resources/local.conf` binds `127.0.0.1:8080` but is loaded only when selected by `config.resource`/`config.file`. Start MongoDB locally, then run the application:
+`sbt run` forks a separate JVM so Cats Effect `IOApp` owns the application lifecycle. The packaged configuration has no defaults for the HTTP bind address, port, MongoDB URI or JWT secret; supply them through the environment (`HTTP_HOST`, `HTTP_PORT`, `MONGODB_URI`, `AUTH_JWT_HS256_SECRET`) or an explicitly selected configuration file. `src/main/resources/local.conf` binds `127.0.0.1:8080`, enables schema exposure and is loaded only when selected by `config.resource`/`config.file`. Start MongoDB locally, then run the application:
 
 ```bash
 docker compose up -d mongodb
@@ -99,7 +99,7 @@ Worker failures persist a fixed operational category and retry count; exhausted 
 
 The accelerated Compose proof scripts and their overlay files were removed in commit `3755455`; the pre-production Kafka/Delta retention proof, external-writer exclusion, guarded key retirement and operational signoff remain required before production and are tracked in the analytics specs.
 
-`GET /health` reports application liveness; `GET /ready` reports MongoDB connectivity and, when vector search is enabled, embedding worker health. `POST /graphql` accepts `{"query":"{ health { status } readiness { status } }"}`. MongoDB outages leave HTTP running and readiness reports `NOT_READY`. `GET /schema.graphql` exports the current schema; GraphQL introspection supports API documentation/testing clients. See the [API reference](docs/api.md).
+`GET /health` reports application liveness; `GET /ready` answers 503 only when MongoDB is unreachable or the Mongo-writes breaker is open; otherwise 200 with a `degraded` list naming stalled workers (including the embedding worker when vector search is enabled) and aged durable work, for internal probes only. `POST /graphql` accepts `{"query":"{ health { status } readiness { status } }"}`. MongoDB outages leave HTTP running and readiness reports `NOT_READY`. `GET /schema.graphql` exports the current schema and GraphQL introspection supports API documentation/testing clients, but only when `graphql.schema-exposure` is true (set `GRAPHQL_SCHEMA_EXPOSURE=true`, or `graphql.schema-exposure = true` in your own git-ignored `local.conf`; it is off in the packaged default and no local default is shipped, so both are refused with 404 and `FORBIDDEN` until you opt in). Anonymous callers share one query cost budget when the peer address is missing or the service sits behind a proxy not listed in `http.trusted-proxy-cidrs`; configure the real proxy networks for per-client budgets. See the [API reference](docs/api.md).
 
 See the [API reference](docs/api.md) and the [current reset specification](docs/specs/pre-mvp-contract-reset.md) for the active contract and verification evidence.
 

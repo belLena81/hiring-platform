@@ -12,7 +12,8 @@ import com.example.graphQL.cats.service.{
   LogEvent,
   LogField,
   LogFields,
-  ProbeResult
+  ProbeResult,
+  ReadinessComponent
 }
 import org.http4s.server.Server
 import io.circe.Json
@@ -40,7 +41,12 @@ class HiringPlatformServerSpec extends CatsEffectSuite {
     def check(requestId: Option[String]): IO[ProbeResult] = result
   }
 
-  private def server(host: String, port: Int, database: DatabaseProbe[IO]): Resource[IO, Server] =
+  private def server(
+      host: String,
+      port: Int,
+      database: DatabaseProbe[IO],
+      degraded: Option[IO[List[ReadinessComponent]]] = None
+  ): Resource[IO, Server] =
     for {
       dependencies <- TestGraphQLSupport.dependencies(
         TestGraphQLSupport.emptyServices,
@@ -50,7 +56,7 @@ class HiringPlatformServerSpec extends CatsEffectSuite {
       )
       app <- Resource.eval(
         new HiringApiRoutes(
-          new HealthService(database, Diagnostics.noop[IO]),
+          new HealthService(database, Diagnostics.noop[IO], degraded),
           Diagnostics.noop[IO],
           dependencies
         ).httpApp(HiringApiRoutes.HttpConfig(AdmissionPermits, 5.seconds))
@@ -109,6 +115,29 @@ class HiringPlatformServerSpec extends CatsEffectSuite {
     val header = response.headers().firstValue("X-Request-ID")
     assert(header.isPresent)
     assert(scala.util.Try(java.util.UUID.fromString(header.get())).isSuccess)
+  }
+
+  test("ARR-07.1 the served readiness lists a degraded publisher with 200 and a lost database with 503") {
+    val degraded = Some(IO.pure(List(ReadinessComponent.KafkaPublisher, ReadinessComponent.OutboxAge)))
+    for {
+      served <- server("127.0.0.1", 0, probe(IO.pure(ProbeResult.Ready)), degraded).use { running =>
+        request(running.address.getPort, "/ready")
+      }
+      lost <- server("127.0.0.1", 0, probe(IO.pure(ProbeResult.Unavailable)), degraded).use { running =>
+        request(running.address.getPort, "/ready")
+      }
+    } yield {
+      assertEquals(served.statusCode(), 200)
+      assertEquals(
+        json(served),
+        Json.obj(
+          "status" -> Json.fromString("READY"),
+          "degraded" -> Json.arr(Json.fromString("kafka-publisher"), Json.fromString("outbox-age"))
+        )
+      )
+      assertEquals(lost.statusCode(), 503)
+      assertEquals(json(lost), Json.obj("status" -> Json.fromString("NOT_READY")))
+    }
   }
 
   test("P1-AC02/04 live health, readiness and GraphQL use the served contract") {

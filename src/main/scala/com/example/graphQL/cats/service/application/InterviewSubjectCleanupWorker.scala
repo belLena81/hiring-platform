@@ -2,7 +2,6 @@ package com.example.graphQL.cats.service.application
 
 import cats.Applicative
 import cats.effect.{Resource, Temporal}
-import cats.effect.syntax.all.*
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.workflow.{
   InterviewSubjectCleanup,
@@ -12,7 +11,7 @@ import com.example.graphQL.cats.domain.workflow.{
 }
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.RepositoryError
-import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFields}
+import com.example.graphQL.cats.service.{BackgroundWorker, Diagnostics, LogEvent, LogField, LogFields}
 import com.example.graphQL.cats.service.Diagnostics.*
 import java.time.Instant
 import scala.concurrent.duration.*
@@ -25,7 +24,9 @@ final class InterviewSubjectCleanupWorker[F[_]](using F: Temporal[F])(
     passed: Vector[InterviewRetentionBarrier] => F[Boolean],
     diagnostics: Diagnostics[F],
     currentTime: F[Instant] = F.realTimeInstant,
-    topics: InterviewTopicPair = InterviewTopicPair.Default
+    topics: InterviewTopicPair = InterviewTopicPair.Default,
+    restartDelay: FiniteDuration = 1.second,
+    alive: F[Unit] = F.unit
 ) {
   private def boundary[A](effect: F[A]): RepositoryF[F, A] =
     RepositoryF.fromFEither(effect.attempt.map(_.leftMap(_ => RepositoryError.Unavailable)))
@@ -99,23 +100,33 @@ final class InterviewSubjectCleanupWorker[F[_]](using F: Temporal[F])(
     }
   }
 
-  def resource: Resource[F, Unit] = Resource
-    .make(
-      fs2.Stream
-        .unfoldEval(Option.empty[InterviewCleanupCursor]) { cursor =>
-          runOnce(cursor).value.attempt.flatMap {
-            case Right(Right(progress)) => Applicative[F].pure(Some(((), progress.next)))
-            case Right(Left(_))         => diagnostics.emit(LogEvent.RuntimeFailed).as(Some(((), cursor)))
-            case Left(error)            =>
-              diagnostics
-                .emit(LogEvent.RuntimeFailed, fields = LogFields.failure(error))
-                .as(Some(((), cursor)))
-          }
+  /** Polls pages until released. Failures outside a single step are reported and the loop restarts after
+    * `restartDelay`; release cancels the loop promptly.
+    */
+  def resource: Resource[F, Unit] = supervised(polling)
+
+  private[application] def supervised(pollingStream: fs2.Stream[F, Unit]): Resource[F, Unit] =
+    BackgroundWorker.resource("interview-subject-cleanup", diagnostics)(
+      pollingStream.compile.drain
+        .handleErrorWith(error =>
+          diagnostics.emit(LogEvent.RuntimeFailed, fields = LogFields.failure(error)) *> F.sleep(restartDelay)
+        )
+        .foreverM
+    )
+
+  private def polling: fs2.Stream[F, Unit] =
+    fs2.Stream
+      .unfoldEval(Option.empty[InterviewCleanupCursor]) { cursor =>
+        runOnce(cursor).value.attempt.flatMap {
+          case Right(Right(progress)) =>
+            // A page with a failing subject is not progress for readiness.
+            (if (progress.firstFailure.isEmpty) alive else Applicative[F].unit).as(Some(((), progress.next)))
+          case Right(Left(_)) => diagnostics.emit(LogEvent.RuntimeFailed).as(Some(((), cursor)))
+          case Left(error)    =>
+            diagnostics
+              .emit(LogEvent.RuntimeFailed, fields = LogFields.failure(error))
+              .as(Some(((), cursor)))
         }
-        .metered(1.second)
-        .compile
-        .drain
-        .start
-    )(_.cancel)
-    .void
+      }
+      .metered(1.second)
 }

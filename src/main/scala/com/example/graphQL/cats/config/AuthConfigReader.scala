@@ -13,9 +13,13 @@ private object AuthSettingReaders {
         PasswordHashConfig(iterations, memoryKib, parallelism)
     )
   given ConfigReader[RateLimitConfig] =
-    ConfigReader.forProduct3("window-seconds", "attempts", "max-buckets")(
-      (window: AuthRateWindowSeconds, attempts: AuthRateAttempts, buckets: AuthRateBuckets) =>
-        RateLimitConfig(window, attempts, buckets)
+    ConfigReader.forProduct4("window-seconds", "attempts", "max-buckets", "overflow-buckets")(
+      (
+          window: AuthRateWindowSeconds,
+          attempts: AuthRateAttempts,
+          buckets: AuthRateBuckets,
+          overflow: AuthRateOverflowBuckets
+      ) => RateLimitConfig(window, attempts, buckets, overflow)
     )
 }
 import AuthSettingReaders.given

@@ -20,7 +20,7 @@ private[mongo] trait MongoTransactionRunner {
 
 private[mongo] object MongoTransactionRunner {
   final case class RetryPolicy(
-      maxTransactionAttempts: Int = 3,
+      maxTransactionAttempts: Int = 5,
       maxCommitAttempts: Int = 3,
       initialDelay: FiniteDuration = 25.millis,
       maxDelay: FiniteDuration = 250.millis
@@ -62,8 +62,9 @@ private[mongo] object MongoTransactionRunner {
           client.startSession(ClientSessionOptions()).use { session =>
             Resource.make(session.startTransaction.as(session))(abort).use { active =>
               operation(Some(active)).value
-                .onError { case error =>
-                  MongoRepositorySupport.reportFailure(diagnostics, "transaction.operation", error)
+                .onError {
+                  case error if !MongoErrors.isTransient(error) =>
+                    MongoRepositorySupport.reportFailure(diagnostics, "transaction.operation", error)
                 }
                 .flatTap(_.traverse_(_ => commit(active)))
             }
@@ -81,7 +82,13 @@ private[mongo] object MongoTransactionRunner {
               classify(sawUnreachable.get)
             )
             .map(_.leftMap(_ => RepositoryError.Unavailable).flatten)
-            .handleError(MongoErrors.toRepositoryError(_, duplicateKeyError, transientExhaustionError))
+            .handleErrorWith(error =>
+              // Per-attempt conflicts are not logged; the exhausted outcome is.
+              MongoRepositorySupport
+                .reportFailure(diagnostics, "transaction.exhausted", error)
+                .whenA(MongoErrors.isTransient(error))
+                .as(MongoErrors.toRepositoryError(error, duplicateKeyError, transientExhaustionError))
+            )
         }
       }
     }
@@ -110,11 +117,11 @@ private[mongo] object MongoTransactionRunner {
       abort: IO[Unit]
   ): IO[Unit] =
     // Resource constructs release effects at acquisition; inspect native state only when cleanup runs.
-    MongoRepositorySupport.guard(diagnostics, "transaction.abort")(
+    MongoRepositorySupport.guardCleanup(diagnostics, "transaction.abort")(
       isActive.flatMap(active => if (active) abort else IO.unit)
-    )(_ => ())
+    )
 
   private[mongo] def backoff[A](policy: RetryPolicy, maxAttempts: Int): retry.RetryPolicy[IO, A] =
     limitRetries[IO](math.max(maxAttempts - 1, 0)) join
-      capDelay(policy.maxDelay, exponentialBackoff[IO](policy.initialDelay))
+      capDelay(policy.maxDelay, fullJitter[IO](policy.initialDelay))
 }

@@ -6,7 +6,9 @@ import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.github.benmanes.caffeine.cache.Ticker
 
 /** Interview cancel and reschedule actions per authenticated actor. Every action counts once, whichever mutation it is
-  * and however many share a request, and each actor has an isolated allowance. It runs before any storage work.
+  * and however many share a request, and each actor has an isolated allowance. It runs before any storage work. When
+  * `maxBuckets` actors are tracked, unseen actors share overflow counters instead of being refused or evicting a
+  * counted actor.
   */
 object InterviewActionRateLimiter {
   type RateLimited = FixedWindowRateLimiter.RateLimited
@@ -23,6 +25,7 @@ object InterviewActionRateLimiter {
       config.maxBuckets,
       ticker,
       identity,
-      failClosedWhenFull = true
+      config.overflowBuckets,
+      "interview-action"
     )
 }

@@ -3,8 +3,7 @@ package com.example.graphQL.cats.service.search
 import com.example.graphQL.cats.domain.model.{EmbeddingMeta, GeoPoint, Job, SearchMode}
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.pagination.PageSize
-import com.example.graphQL.cats.shared.crypto.SourceHash
-import io.circe.Json
+import com.example.graphQL.cats.shared.crypto.CriteriaDigest
 import java.time.Instant
 import java.util.UUID
 
@@ -32,20 +31,13 @@ object NearbyJobCursor {
 
   /** Canonical digest of the criteria and ordering a nearby cursor is bound to. */
   private[search] def fingerprint(query: NearbyJobsQuery): String =
-    SourceHash.sha256(
-      Json
-        .arr(
-          Json.fromDoubleOrNull(query.center.latitude),
-          Json.fromDoubleOrNull(query.center.longitude),
-          Json.fromDoubleOrNull(query.radiusKm),
-          query.filter.city.map(value => Json.fromString(value.trim)).getOrElse(Json.Null),
-          Json.fromValues(
-            query.filter.skills.toList.map(_.trim).filter(_.nonEmpty).distinct.sorted.map(Json.fromString)
-          ),
-          query.filter.createdAfter.map(value => Json.fromString(value.toString)).getOrElse(Json.Null),
-          Json.fromString("distanceKm,id")
-        )
-        .noSpaces
+    CriteriaDigest.sha256(
+      query.center.latitude,
+      query.center.longitude,
+      query.radiusKm,
+      query.filter.city.map(_.trim),
+      query.filter.skills.toList.map(_.trim).filter(_.nonEmpty).distinct.sorted,
+      query.filter.createdAfter.map(_.toString)
     )
 }
 final case class NearbyRadius(center: GeoPoint, radiusKm: Double) {

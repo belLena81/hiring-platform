@@ -9,10 +9,11 @@ import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.events.{
   OperationalAggregateType,
   OperationalEventEnvelope,
+  OperationalEventPayload,
   OperationalEventType
 }
+import com.example.graphQL.cats.domain.model.JobStatus
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField}
-import io.circe.Json
 import munit.CatsEffectSuite
 import java.time.Instant
 import java.util.UUID
@@ -29,12 +30,9 @@ final class MongoRepositorySupportSpec extends CatsEffectSuite {
       OperationalAggregateType.Job,
       new UUID(1L, number).toString,
       actor,
-      Json.obj(
-        "job" -> Json.obj(
-          "jobId" -> Json.fromString(new UUID(1L, number).toString),
-          "skills" -> Json.arr(Json.fromString("Scala")),
-          "status" -> Json.fromString("Open")
-        )
+      OperationalEventPayload.JobFact(
+        OperationalEventPayload.JobKind.Created,
+        OperationalEventPayload.JobSnapshot(new UUID(1L, number), List("Scala"), JobStatus.Open)
       )
     )
 

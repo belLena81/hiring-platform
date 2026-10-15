@@ -226,9 +226,22 @@ final class HiringPersistenceScalingIntegrationSpec extends MongoIntegrationSuit
           None,
           None
         )
+        applicant = candidate.copy(id = application.candidateId, name = s"Synthetic applicant $index")
+        _ <- MongoRepositoryTestSupport.insertOne(
+          fixture.database,
+          MongoCollections.Users,
+          MongoHiringCodecs.user(applicant)
+        )
         writeStart <- IO.monotonic
         result <- applications
-          .createForOpenJobWithEvents(snapshot, application, event, Nil, MutationWriteContext.directWrite)
+          .createForOpenJobWithEvents(
+            snapshot,
+            application,
+            event,
+            Nil,
+            ApplicationWriteActor(applicant.id, applicant.role),
+            MutationWriteContext.directWrite
+          )
           .value
         writeEnd <- IO.monotonic
         outcome <- result match {

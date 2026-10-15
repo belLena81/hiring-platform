@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.domain.model.JobStatus
 import cats.effect.{IO, Ref}
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
@@ -9,7 +10,6 @@ import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.events.*
 import org.bson.Document
 import com.mongodb.client.model.Filters
-import io.circe.Json
 import java.time.Instant
 import java.util.{Date, UUID}
 import scala.concurrent.duration.*
@@ -167,12 +167,9 @@ final class MongoProducerRegistrationsIntegrationSpec extends MongoIntegrationSu
         OperationalAggregateType.Job,
         new UUID(1L, n).toString,
         actor,
-        Json.obj(
-          "job" -> Json.obj(
-            "jobId" -> Json.fromString(new UUID(1L, n).toString),
-            "skills" -> Json.arr(Json.fromString("Scala")),
-            "status" -> Json.fromString("Open")
-          )
+        OperationalEventPayload.JobFact(
+          OperationalEventPayload.JobKind.Created,
+          OperationalEventPayload.JobSnapshot(new UUID(1L, n), List("Scala"), JobStatus.Open)
         )
       )
       val desired = event(200L, independent)

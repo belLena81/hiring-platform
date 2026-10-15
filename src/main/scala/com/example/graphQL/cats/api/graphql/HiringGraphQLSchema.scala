@@ -2,6 +2,7 @@ package com.example.graphQL.cats.api.graphql
 
 import cats.effect.IO
 import io.circe.Json
+import sangria.ast
 import sangria.execution.Executor
 import sangria.marshalling.circe.*
 import sangria.renderer.SchemaRenderer
@@ -13,6 +14,52 @@ object HiringGraphQLSchema {
 
   enum Failure {
     case InvalidQuery, Internal
+    case CostBudgetExhausted(retryAfterSeconds: Long)
+  }
+
+  /** The refusal body for an exhausted query cost budget; the HTTP layer pairs it with status 429. */
+  private[api] def costBudgetResponse(retryAfterSeconds: Long): Json = {
+    val failure = GraphQLFailureCatalog.costBudgetExhausted
+    Json.obj(
+      "data" -> Json.Null,
+      "errors" -> Json.arr(
+        Json.obj(
+          "message" -> Json.fromString(failure.message),
+          "extensions" -> Json.obj(
+            "code" -> Json.fromString(failure.code),
+            "retryAfter" -> Json.fromLong(retryAfterSeconds)
+          )
+        )
+      )
+    )
+  }
+
+  private def rejectedResponse(failure: HiringGraphQLModel.GraphQLFailure): Json =
+    Json.obj(
+      "data" -> Json.Null,
+      "errors" -> Json.arr(
+        Json.obj(
+          "message" -> Json.fromString(failure.message),
+          "extensions" -> Json.obj(
+            ("code" -> Json.fromString(failure.code)) +:
+              failure.reason.toList.map(reason => "reason" -> Json.fromString(reason))*
+          )
+        )
+      )
+    )
+
+  private val IntrospectionFields = Set("__schema", "__type")
+
+  /** True when any operation or fragment selects `__schema` or `__type`; `__typename` is not introspection. */
+  private[graphql] def selectsIntrospection(document: ast.Document): Boolean = {
+    def hits(selections: Vector[ast.Selection]): Boolean =
+      selections.exists {
+        case field: ast.Field           => IntrospectionFields.contains(field.name) || hits(field.selections)
+        case inline: ast.InlineFragment => hits(inline.selections)
+        case _: ast.FragmentSpread      => false
+      }
+    document.operations.values.exists(operation => hits(operation.selections)) ||
+    document.fragments.values.exists(fragment => hits(fragment.selections))
   }
 
   private[api] def executeInContext(
@@ -20,7 +67,17 @@ object HiringGraphQLSchema {
       document: GraphQLDocument,
       context: RequestContext
   ): IO[Either[Failure, Json]] =
-    context.effectAdapter.execute(context) { exceptionHandler =>
+    if (!context.schemaExposure && selectsIntrospection(document.document))
+      // Refused before validation or execution, so a disabled schema reveals nothing about itself.
+      IO.pure(Right(rejectedResponse(GraphQLFailureCatalog.schemaExposureDisabled)))
+    else execute(request, document, context)
+
+  private def execute(
+      request: GraphQLRequest,
+      document: GraphQLDocument,
+      context: RequestContext
+  ): IO[Either[Failure, Json]] =
+    context.effectAdapter.execute(context, rejectedResponse) { exceptionHandler =>
       IO.executionContext.flatMap { implicit executionContext =>
         context.effectAdapter.fromFuture(
           IO(

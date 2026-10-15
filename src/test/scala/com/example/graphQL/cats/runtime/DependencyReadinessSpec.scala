@@ -23,9 +23,9 @@ final class DependencyReadinessSpec extends CatsEffectSuite {
   test("CBR-06.4 an open Mongo-writes breaker reports Unavailable and a closed one stays Ready") {
     for {
       closed <- DependencyBreakers.create(ResilienceConfig(), Diagnostics.noop)
-      ready <- MongoHiringRuntime.readiness(ProbeResult.Ready, IO.pure(true), closed.mongoWrites)
+      ready <- MongoHiringRuntime.readiness(ProbeResult.Ready, closed.mongoWrites)
       breakers <- openMongoWrites()
-      unavailable <- MongoHiringRuntime.readiness(ProbeResult.Ready, IO.pure(true), breakers.mongoWrites)
+      unavailable <- MongoHiringRuntime.readiness(ProbeResult.Ready, breakers.mongoWrites)
     } yield {
       assertEquals(ready, ProbeResult.Ready)
       assertEquals(unavailable, ProbeResult.Unavailable)
@@ -36,14 +36,14 @@ final class DependencyReadinessSpec extends CatsEffectSuite {
     for {
       breakers <- openMongoWrites()
       _ <- IO.sleep(200.millis)
-      recovered <- MongoHiringRuntime.readiness(ProbeResult.Ready, IO.pure(true), breakers.mongoWrites)
+      recovered <- MongoHiringRuntime.readiness(ProbeResult.Ready, breakers.mongoWrites)
     } yield assertEquals(recovered, ProbeResult.Ready)
   }
 
   test("CBR-06.4 a failed ping is reported as-is and other open breakers do not change readiness") {
     for {
       breakers <- openMongoWrites()
-      failed <- MongoHiringRuntime.readiness(ProbeResult.AuthenticationFailed, IO.pure(true), breakers.mongoWrites)
+      failed <- MongoHiringRuntime.readiness(ProbeResult.AuthenticationFailed, breakers.mongoWrites)
       others <- DependencyBreakers.create(ResilienceConfig(voyage = quick), Diagnostics.noop)
       _ <- List
         .fill(2)(
@@ -52,7 +52,7 @@ final class DependencyReadinessSpec extends CatsEffectSuite {
             .attempt
         )
         .sequence
-      ready <- MongoHiringRuntime.readiness(ProbeResult.Ready, IO.pure(true), others.mongoWrites)
+      ready <- MongoHiringRuntime.readiness(ProbeResult.Ready, others.mongoWrites)
     } yield {
       assertEquals(failed, ProbeResult.AuthenticationFailed)
       assertEquals(ready, ProbeResult.Ready)
@@ -111,7 +111,7 @@ final class DependencyReadinessSpec extends CatsEffectSuite {
             .attempt
         )
         .sequence
-      ready <- MongoHiringRuntime.readiness(ProbeResult.Ready, IO.pure(true), breakers.mongoWrites)
+      ready <- MongoHiringRuntime.readiness(ProbeResult.Ready, breakers.mongoWrites)
     } yield assertEquals(ready, ProbeResult.Ready)
   }
 }

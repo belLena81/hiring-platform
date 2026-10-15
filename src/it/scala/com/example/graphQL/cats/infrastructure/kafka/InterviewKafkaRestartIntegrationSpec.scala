@@ -1,5 +1,7 @@
 package com.example.graphQL.cats.infrastructure.kafka
 
+import com.example.graphQL.cats.infrastructure.events.OperationalEventWireCodec
+import com.example.graphQL.cats.domain.model.JobStatus
 import cats.effect.{IO, Ref, Deferred, Resource}
 import cats.syntax.all.*
 import com.example.graphQL.cats.repository.mongo.*
@@ -14,7 +16,6 @@ import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.events.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.config.{KafkaConfig, KafkaPublisherConfig, KafkaConsumerConfig}
-import io.circe.Json
 import com.example.graphQL.cats.config.KafkaSaslSecurityProtocol
 import com.example.graphQL.cats.service.Diagnostics
 import java.time.Instant
@@ -335,12 +336,9 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
       OperationalAggregateType.Job,
       jobId,
       UserId(UUID.randomUUID()),
-      Json.obj(
-        "job" -> Json.obj(
-          "jobId" -> Json.fromString(jobId),
-          "skills" -> Json.arr(Json.fromString("Scala")),
-          "status" -> Json.fromString("Open")
-        )
+      OperationalEventPayload.JobFact(
+        OperationalEventPayload.JobKind.Created,
+        OperationalEventPayload.JobSnapshot(UUID.fromString(jobId), List("Scala"), JobStatus.Open)
       )
     )
     val settings = ProducerSettings(Serializer[IO, String], Serializer[IO, Array[Byte]])
@@ -372,7 +370,7 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
             second <- producer
               .produce(
                 ProducerRecords.one(
-                  ProducerRecord(kafka.topic, value.partitionKey, OperationalEventJson.bytes(value))
+                  ProducerRecord(kafka.topic, value.partitionKey, OperationalEventWireCodec.bytes(value))
                 )
               )
               .flatten

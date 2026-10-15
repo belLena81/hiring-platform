@@ -32,28 +32,35 @@ private[config] object AppConfigValidation {
       loadSection[RawAuthConfig](source, "auth").andThen(AuthConfigValidation.read),
       loadSection[RawKafkaConfig](source, "kafka").andThen(KafkaConfigValidation.read),
       loadSection[RawVectorSearchConfig](source, "vector-search").andThen(VectorSearchConfigValidation.read),
-      resilienceSection(source)
-    ).mapN { (transport, logging, authSettings, kafkaSettings, vectorSettings, resilience) =>
-      AppConfig(
-        transport.host,
-        transport.port,
-        transport.admissionPermits,
-        transport.requestTimeout,
-        transport.trustedProxy,
-        transport.mongoUri,
-        transport.mongoDatabase,
-        logging.maskSensitive,
-        authSettings.jwt,
-        authSettings.passwordHash,
-        authSettings.rateLimit,
-        vectorSettings,
-        kafkaSettings,
-        transport.resetOnStart,
-        transport.discovery,
-        authSettings.adminSeed,
-        authSettings.interviewActionRateLimit,
-        resilience
-      )
+      resilienceSection(source),
+      graphQLSection(source),
+      recruiterJobClosureSection(source),
+      readinessSection(source)
+    ).mapN {
+      (transport, logging, authSettings, kafkaSettings, vectorSettings, resilience, graphql, closure, readiness) =>
+        AppConfig(
+          transport.host,
+          transport.port,
+          transport.admissionPermits,
+          transport.requestTimeout,
+          transport.trustedProxy,
+          transport.mongoUri,
+          transport.mongoDatabase,
+          logging.maskSensitive,
+          authSettings.jwt,
+          authSettings.passwordHash,
+          authSettings.rateLimit,
+          vectorSettings,
+          kafkaSettings,
+          transport.resetOnStart,
+          transport.discovery,
+          authSettings.adminSeed,
+          authSettings.interviewActionRateLimit,
+          resilience,
+          graphql,
+          closure,
+          readiness
+        )
     }.toEither
 
   /** An absent section keeps the conservative defaults; a present one must be complete and valid. */
@@ -64,6 +71,38 @@ private[config] object AppConfigValidation {
       .fold(
         _ => ResilienceConfig().validNel,
         _ => loadSection[RawResilienceConfig](source, "resilience").andThen(ResilienceConfigValidation.read)
+      )
+
+  /** An absent section keeps the defaults; a present one is validated, accumulating every violation. */
+  private def graphQLSection(source: ConfigSource): ValidatedNel[ConfigError, GraphQLConfig] =
+    source
+      .at("graphql")
+      .cursor()
+      .fold(
+        _ => GraphQLConfig().validNel,
+        _ => loadSection[RawGraphQLConfig](source, "graphql").andThen(GraphQLConfigValidation.read)
+      )
+
+  /** An absent section keeps the defaults; a present one is validated, accumulating every violation. */
+  private def recruiterJobClosureSection(source: ConfigSource): ValidatedNel[ConfigError, RecruiterJobClosureConfig] =
+    source
+      .at("recruiter-job-closure")
+      .cursor()
+      .fold(
+        _ => RecruiterJobClosureConfig().validNel,
+        _ =>
+          loadSection[RawRecruiterJobClosureConfig](source, "recruiter-job-closure")
+            .andThen(RecruiterJobClosureConfigValidation.read)
+      )
+
+  /** An absent section keeps the defaults; a present one is validated, accumulating every violation. */
+  private def readinessSection(source: ConfigSource): ValidatedNel[ConfigError, ReadinessConfig] =
+    source
+      .at("readiness")
+      .cursor()
+      .fold(
+        _ => ReadinessConfig().validNel,
+        _ => loadSection[RawReadinessConfig](source, "readiness").andThen(ReadinessConfigValidation.read)
       )
 
   private def loadSection[A: ConfigReader](source: ConfigSource, section: String): ValidatedNel[ConfigError, A] =

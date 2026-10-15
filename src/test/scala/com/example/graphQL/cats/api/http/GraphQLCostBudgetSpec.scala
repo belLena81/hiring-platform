@@ -1,0 +1,186 @@
+package com.example.graphQL.cats.api.http
+
+import cats.effect.{IO, Ref}
+import cats.syntax.all.*
+import com.comcast.ip4s.{Cidr, SocketAddress}
+import com.example.graphQL.cats.api.graphql.TestGraphQLSupport
+import com.example.graphQL.cats.config.{CostBudgetConfig, TrustedProxyConfig}
+import com.example.graphQL.cats.domain.model.UserRole
+import com.example.graphQL.cats.domain.model.Identifiers.UserId
+import com.example.graphQL.cats.service.{ActorContext, DatabaseProbe, Diagnostics, HealthService, ProbeResult}
+import io.circe.Json
+import munit.CatsEffectSuite
+import org.http4s.*
+import org.http4s.circe.*
+import org.typelevel.ci.CIString
+import scala.concurrent.duration.*
+
+/** ARR-14: GraphQL complexity is charged to a per-actor or per-client budget before any resolver runs. */
+final class GraphQLCostBudgetSpec extends CatsEffectSuite {
+  // Each `readiness { status }` selection weighs 2, so this request costs 8.
+  private val spend =
+    "{ a: readiness { status } b: readiness { status } c: readiness { status } d: readiness { status } }"
+  private val cheap = "{ readiness { status } }"
+  private val login =
+    """mutation {
+      |  login(input: { idempotencyKey: "00000000-0000-0000-0000-000000000021", name: "Candidate", password: "password-password" }) { __typename }
+      |}""".stripMargin
+  private val proxies = TrustedProxyConfig(List(Cidr.fromString("10.0.0.0/8").get))
+  private val actorHeader = CIString("X-Test-Actor")
+
+  private def actor(name: String): ActorContext =
+    ActorContext(UserId(java.util.UUID.nameUUIDFromBytes(name.getBytes)), UserRole.Candidate)
+
+  private def build(budget: CostBudgetConfig): IO[(HttpApp[IO], Ref[IO, Int])] =
+    for {
+      probeCalls <- Ref.of[IO, Int](0)
+      probe = new DatabaseProbe[IO] {
+        def check(requestId: Option[String]): IO[ProbeResult] = probeCalls.update(_ + 1).as(ProbeResult.Ready)
+      }
+      built <- TestGraphQLSupport
+        .dependencies(
+          authenticate = request => IO.pure(Right(request.headers.get(actorHeader).map(h => actor(h.head.value)))),
+          trustedProxy = proxies,
+          costBudget = budget
+        )
+        .allocated
+      routes = new HiringApiRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, built._1)
+      http <- routes.httpApp(HiringApiRoutes.HttpConfig(16L, 5.seconds))
+    } yield (http, probeCalls)
+
+  private def post(query: String, actorName: Option[String] = None, clientIp: Option[String] = None): Request[IO] = {
+    val base = Request[IO](Method.POST, Uri.unsafeFromString("/graphql"))
+      .withEntity(Json.obj("query" -> Json.fromString(query)))
+    val withActor = actorName.fold(base)(name => base.putHeaders(Header.Raw(actorHeader, name)))
+    clientIp.fold(withActor) { ip =>
+      withActor
+        .putHeaders(Header.Raw(CIString("X-Forwarded-For"), ip))
+        .withAttribute(
+          Request.Keys.ConnectionInfo,
+          Request.Connection(
+            SocketAddress.fromStringIp("127.0.0.1:8080").get,
+            SocketAddress.fromStringIp("10.0.0.5:12345").get,
+            secure = false
+          )
+        )
+    }
+  }
+
+  private val tight = CostBudgetConfig(windowSeconds = 60, maxCost = 9, maxActorBuckets = 100, maxClientBuckets = 100)
+
+  test("ARR-14.1 a request within the budget succeeds and runs its resolvers") {
+    for {
+      (http, calls) <- build(tight)
+      response <- http(post(cheap))
+      body <- response.as[Json]
+      count <- calls.get
+    } yield {
+      assertEquals(response.status, Status.Ok)
+      assertEquals(
+        body.hcursor.downField("data").downField("readiness").get[String]("status"),
+        Right("READY"),
+        clue(body)
+      )
+      assertEquals(count, 1)
+    }
+  }
+
+  test(
+    "ARR-14.1 after expensive queries spend the budget the next request is refused with 429 before any resolver runs"
+  ) {
+    for {
+      (http, calls) <- build(tight)
+      spent <- http(post(spend))
+      afterSpend <- calls.get
+      refused <- http(post(cheap))
+      body <- refused.as[Json]
+      afterRefusal <- calls.get
+    } yield {
+      assertEquals(spent.status, Status.Ok)
+      assertEquals(afterSpend, 1)
+      assertEquals(refused.status, Status.TooManyRequests)
+      assertEquals(refused.headers.get(CIString("Retry-After")).map(_.head.value), Some("60"))
+      val error = body.hcursor.downField("errors").downArray.downField("extensions")
+      assertEquals(error.get[String]("code"), Right("RATE_LIMITED"), clue(body))
+      assertEquals(error.get[Long]("retryAfter"), Right(60L), clue(body))
+      assertEquals(afterRefusal, afterSpend)
+    }
+  }
+
+  test("ARR-14.1 a mutation is charged and refused too once the budget is spent") {
+    for {
+      (http, calls) <- build(tight)
+      _ <- http(post(spend))
+      refused <- http(post(login))
+      count <- calls.get
+    } yield {
+      assertEquals(refused.status, Status.TooManyRequests)
+      assertEquals(count, 1)
+    }
+  }
+
+  test("ARR-14.1 a query whose cost exceeds the whole budget is refused without running") {
+    for {
+      (http, calls) <- build(CostBudgetConfig(60, 5, 100))
+      refused <- http(post(spend))
+      count <- calls.get
+    } yield {
+      assertEquals(refused.status, Status.TooManyRequests)
+      assertEquals(count, 0)
+    }
+  }
+
+  test("ARR-14.2 authenticated callers are keyed by actor id, whatever their client address") {
+    for {
+      (http, _) <- build(tight)
+      _ <- http(post(spend, Some("alice"), Some("203.0.113.1")))
+      aliceElsewhere <- http(post(cheap, Some("alice"), Some("203.0.113.2")))
+      bobSameAddress <- http(post(cheap, Some("bob"), Some("203.0.113.1")))
+    } yield {
+      assertEquals(aliceElsewhere.status, Status.TooManyRequests)
+      assertEquals(bobSameAddress.status, Status.Ok)
+    }
+  }
+
+  test("ARR-14.2 anonymous callers are keyed by the resolved client address, separately from actors") {
+    for {
+      (http, _) <- build(tight)
+      _ <- http(post(spend, clientIp = Some("203.0.113.1")))
+      sameClient <- http(post(cheap, clientIp = Some("203.0.113.1")))
+      otherClient <- http(post(cheap, clientIp = Some("203.0.113.2")))
+      actorOnSameClient <- http(post(cheap, Some("alice"), Some("203.0.113.1")))
+    } yield {
+      assertEquals(sameClient.status, Status.TooManyRequests)
+      assertEquals(otherClient.status, Status.Ok)
+      assertEquals(actorOnSameClient.status, Status.Ok)
+    }
+  }
+
+  test("ARR-14.2 flooding distinct clients past max-buckets does not reset a victim's exhausted budget") {
+    for {
+      (http, _) <- build(CostBudgetConfig(60, 9, 3, 3))
+      _ <- http(post(spend, clientIp = Some("203.0.113.1")))
+      _ <- http(post(cheap, clientIp = Some("203.0.113.1")))
+      _ <- (1 to 30).toList.foldLeft(IO.unit)((done, index) =>
+        // Bodies are drained so each response releases its admission permit.
+        done *> http(post(cheap, clientIp = Some(s"198.51.100.$index"))).flatMap(_.as[String]).void
+      )
+      victim <- http(post(cheap, clientIp = Some("203.0.113.1")))
+    } yield assertEquals(victim.status, Status.TooManyRequests)
+  }
+
+  test("ARR-01.1 a refused page size does not charge the cost budget") {
+    for {
+      (http, calls) <- build(tight)
+      refusals <- (1 to 5).toList.traverse(_ =>
+        http(post("{ jobs(first: -1) { edges { cursor } } }")).flatMap(_.as[Json])
+      )
+      afterRefusals <- calls.get
+      spent <- http(post(spend))
+    } yield {
+      assert(refusals.forall(_.noSpaces.contains("VALIDATION_FAILED")), refusals.toString)
+      assertEquals(afterRefusals, 0)
+      assertEquals(spent.status, Status.Ok, "the whole budget is still available after the refusals")
+    }
+  }
+}

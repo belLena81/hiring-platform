@@ -165,6 +165,7 @@ final class InterviewCancellationRaceIntegrationSpec extends MongoIntegrationSui
               stored.copy(status = ApplicationStatus.Hired, updatedAt = now),
               event,
               Nil,
+              ApplicationWriteActor(s.workflow.recruiterId, UserRole.Recruiter),
               MutationWriteContext.directWrite
             )
             .value

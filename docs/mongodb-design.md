@@ -119,3 +119,42 @@ Migrations `017_interview_ledger_collections` (renames the calendar and notifica
 Interview publication authorization and account deletion serialize writes on the permanent subject-fence row. The `interviewTransactionalIds` field is separate from operational `transactionalIds`; cleanup cannot register a replacement generation after deletion. Cleanup uses Pending → ProducersFenced → MongoPurged → AwaitingRetention → Complete with expected revision/state CAS. Purge and absence checks include orphan request receipts and linked commands. Before any local evidence of a workflow is purged, every reservation of it that is still held (original, replacement and compensated generations) is cancelled with the provider's confirmation under its own cancel key; a failed or unknown provider answer stops the purge and the next sweep retries, so a slot is never leaked. The cancel, reschedule proposal, request flag, expiry and informational notification state of a deleted participant's workflow is purged with it and nothing is sent. Maintenance must stop and revoke old nontransactional writers before applying these migrations; see [recovery acceptance](specs/hiring-workflow-recovery.md).
 
 Cleanup selection sweeps ascending raw `_id` values in pages of at most 32 through the existing `_id` index. Each sweep captures its greatest eligible key and request-time cutoff, then wraps after exhaustion. Scalar request Dates after the cutoff wait for the next sweep; malformed timestamps and identities remain independently decoded evidence. Aggregation comparisons use literal BSON bounds to preserve mixed-type ordering. The immutable opaque continuation stays in the worker stream, while state/revision CAS and permanent fences retain durable authority. A bad row does not stop valid rows; a failed page read does not advance selection. No stored field or index migration is introduced. Query-plan and failure evidence belongs to the [boundary reliability specification](specs/embedding-workflow-boundary-reliability.md).
+
+## Durable work age for readiness
+
+`/ready` reports the age of waiting durable work (see [API readiness](api.md#readiness)). Both reads are one document with `limit(1)`, a one-field projection and `maxTimeMS` 500, so they stay constant-cost. Oldest due outbox entry: filter `state = Retryable` and `availableAt <= now`, sort `availableAt`; the age is `now - occurredAt`. The existing `event_outbox_claim` index (`state`, `availableAt`, `leaseUntil`, `occurredAt`, `_id`) covers it (there is no separate partial index): local explain on 350 entries shows `IXSCAN` on `event_outbox_claim`, no `SORT`, 1 key and 0 documents examined (`MongoPendingWorkAgeIntegrationSpec`). Entries leased in flight and entries waiting out a retry delay are not counted. Known limitation: a publisher whose sends keep failing still beats its heartbeat, because a failed send is absorbed (`releaseForRetry`, then `markFailed` after the maximum attempts), and `Failed` outbox rows appear nowhere in readiness. A broker outage therefore surfaces as `outbox-age` only while rows are still due, and exhausted rows go unreported. Claim-time `SUBJECT_DELETED` suppression also marks rows `Failed`, so a plain "Failed rows exist" component would be noisy and was not added; a follow-up could report the rate of `Failed` rows that were not suppressed. Oldest pending closure: `requestedAt` ascending on `recruiter_job_closure_work`; the collection deliberately has no index (neither `requestedAt` nor `(notBefore, requestedAt, _id)`), so the read is a `COLLSCAN` with one document examined while the collection holds one row (the worker peek, which filters `notBefore <= now` and sorts `(notBefore, requestedAt, _id)`, has the same shape with an in-memory sort). A row exists only for a deleted recruiter with more than one page (1000) of open jobs whose closure has not finished, and is deleted on completion, so the collection is bounded by the number of such deletions in flight (expected to be a handful). An index would cost a write on every enqueue, page and retry rotation for a scan over a few documents; revisit with measured explain output if the pending count ever reaches the thousands. Alert on `outbox-age` and `closure-work-age` (a stuck first row blocks later closures, see the head-of-line note under the closure section) as well as on the worker names.
+
+## Deleted recruiter job closure
+
+Account deletion closes at most one page (1000, `recruiter-job-closure.page-size`) of the recruiter's open jobs inside its transaction. If open jobs remain, the same transaction upserts one row in `recruiter_job_closure_work` (`_id` = recruiter id, `requestedAt`, `notBefore`, `attempts`; strict validator, migration `020_recruiter_job_closure_work`). A background worker then closes the rest, one transaction per page: job replacements, exactly one `JOB_CLOSED` outbox event per job (event id derived from job and deletion time) and, on the last page, removal of the row commit together. A crash or abort leaves the previous state, so resuming never duplicates an event. The read follows `jobs_recruiter_status_created_id` (explain on 2500 open jobs: `LIMIT`, `FETCH`, `IXSCAN`, 1000 keys and documents examined for a 1000-document page, 1 for the "jobs remain" check and for each submit-gate read).
+
+**Poison rows.** The head is the earliest eligible row by `(notBefore, requestedAt, _id)`, peeked without a transaction so an idle worker opens no session. When a page fails (for example a malformed job), the transaction rolls back and only that row gets `attempts + 1` and `notBefore` pushed out by a capped doubling delay (`row-retry-*`). The row is retried forever and never dropped, later recruiters are served meanwhile, and the deletion receipt stays `PENDING` until its row is gone. The log carries the attempt count, never a user id.
+
+**Submission window.** A deleted recruiter's jobs stay `Open` until the follow-up reaches them. A submission transaction rejects a job whose recruiter is not an active account (Conflict), so after the deletion commits no new application is accepted. The recruiter's user document is read, not written (fencing it would serialize every submission to that recruiter's jobs), so under snapshot isolation a submission that read the recruiter as active before the deletion committed, for a job beyond the first page, can still commit afterwards. It is equivalent to a submission serialized just before the deletion: the application exists on a job that the follow-up then closes. Jobs in the first page conflict on the job document itself and retry.
+
+**Operations.**
+
+- The interview publisher worker is not restarted by the closure worker or by cleanup supervision; if it has died, restart the application process.
+- Re-enqueue is a manual repair, for a deleted recruiter whose open jobs have no work row (for example a lost row). Find them with a full scan, in maintenance only:
+
+  ```js
+  db.jobs.aggregate([
+    {$match: {status: "Open"}},
+    {$lookup: {from: "users", localField: "recruiterId", foreignField: "_id", as: "r"}},
+    {$match: {"r.accountStatus": "Deleted"}},
+    {$group: {_id: "$recruiterId", open: {$sum: 1}}}
+  ])
+  ```
+
+  Then, for each `_id`:
+
+  ```js
+  db.recruiter_job_closure_work.updateOne(
+    {_id: "<recruiter-uuid>"},
+    {$setOnInsert: {requestedAt: new Date(), notBefore: new Date(), attempts: 0}},
+    {upsert: true}
+  )
+  ```
+
+  To retry a backed-off row immediately, set `attempts: 0` and `notBefore: new Date()` on it with `$set`.
+- A local database that ran an earlier draft of migration 020 (before the required retry fields) fails closed with a validator mismatch: drop `recruiter_job_closure_work` and the `020_recruiter_job_closure_work` row of `hiring_migration_ledger`, then restart. Nothing was released with that draft.

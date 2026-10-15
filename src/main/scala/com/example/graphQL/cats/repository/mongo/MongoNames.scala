@@ -6,6 +6,7 @@ extension (instant: java.time.Instant) private[mongo] def toDate: java.util.Date
 /** Persisted Mongo collection names used by the hiring platform. */
 private[mongo] object MongoCollections {
   val InterviewSubjectCleanup = "interview_subject_cleanup"
+  val RecruiterJobClosureWork = "recruiter_job_closure_work"
   val Users = "users"
   val Jobs = "jobs"
   val Applications = "applications"
@@ -157,6 +158,7 @@ private[mongo] object MongoFields {
   val SubjectRefsVersion = "subjectRefsVersion"
   val State = "state"
   val Attempts = "attempts"
+  val NotBefore = "notBefore"
   val AvailableAt = "availableAt"
   val LeaseOwner = "leaseOwner"
   val LeaseToken = "leaseToken"

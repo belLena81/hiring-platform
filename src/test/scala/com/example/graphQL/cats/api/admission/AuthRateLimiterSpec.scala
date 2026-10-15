@@ -114,4 +114,26 @@ final class AuthRateLimiterSpec extends CatsEffectSuite {
       limiter <- AuthRateLimiter.create(config); results <- (1 to 80).toList.parTraverse(_ => limiter.permit(shared))
     } yield assertEquals(results.count(_.isRight), config.attempts)
   }
+  test("ARR-05.1 flooding distinct keys beyond max-buckets does not reset an exhausted victim") {
+    val config = RateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 4, overflowBuckets = 8)
+    val victim = key("203.0.113.1")
+    for {
+      limiter <- AuthRateLimiter.create(config)
+      _ <- limiter.permit(victim)
+      limited <- limiter.permit(victim)
+      _ <- (1 to 300).toList.traverse_(index => limiter.permit(key(s"198.51.${index / 250}.${index % 250}")))
+      after <- limiter.permit(victim)
+    } yield {
+      assert(limited.isLeft)
+      assertEquals(after, Left(AuthRateLimiter.RateLimited(60.seconds)))
+    }
+  }
+  test("ARR-05.1 a newcomer is still admitted through overflow while the stripe has headroom") {
+    val config = RateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 2, overflowBuckets = 64)
+    for {
+      limiter <- AuthRateLimiter.create(config)
+      _ <- List("203.0.113.1", "203.0.113.2").traverse(address => limiter.permit(key(address)))
+      newcomers <- (10 to 20).toList.traverse(index => limiter.permit(key(s"198.51.100.$index")))
+    } yield assert(newcomers.exists(_.isRight), "overflow counters admit some newcomers")
+  }
 }

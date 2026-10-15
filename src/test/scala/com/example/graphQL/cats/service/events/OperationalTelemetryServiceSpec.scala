@@ -27,7 +27,6 @@ import com.example.graphQL.cats.service.events.{
   SearchSession,
   SearchSessionResult
 }
-import io.circe.Json
 import munit.CatsEffectSuite
 
 import java.util.UUID
@@ -51,7 +50,10 @@ class OperationalTelemetryServiceSpec extends CatsEffectSuite {
         assertEquals(retry, Right(()))
         assertEquals(events.size, 1)
         assertEquals(events.head.eventType, OperationalEventType.JOB_VIEWED)
-        assertEquals(events.head.payload.hcursor.get[Int]("rank"), Right(2))
+        assertEquals(
+          events.head.payload,
+          OperationalEventPayload.JobViewed(Some(searchId), events.head.payload.aggregateId, None, Some(2))
+        )
       }
     }
   }
@@ -166,7 +168,7 @@ class OperationalTelemetryServiceSpec extends CatsEffectSuite {
       candidateId,
       SearchKind.Jobs,
       None,
-      Json.obj(),
+      SearchFilterSnapshot.Unfiltered,
       None,
       List(
         SearchSessionResult("other-result", 1, 0d),

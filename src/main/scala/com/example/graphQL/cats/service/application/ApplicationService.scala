@@ -8,6 +8,7 @@ import cats.syntax.all.*
 import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
 import com.example.graphQL.cats.service.port.{
   ApplicationRepository,
+  ApplicationWriteActor,
   JobRepository,
   MutationEntityReference,
   UserRepository
@@ -67,7 +68,14 @@ final class ApplicationService[F[_]: Monad](
           )
           event = OperationalEvents.applicationCreated(eventId.value, application, candidate.id, now)
           _ <- UseCaseF.repository(
-            applications.createForOpenJobWithEvents(job, application, initialEvent, List(event), context)
+            applications.createForOpenJobWithEvents(
+              job,
+              application,
+              initialEvent,
+              List(event),
+              ApplicationWriteActor(candidate.id, candidate.role),
+              context
+            )
           )
         } yield application
     }
@@ -117,7 +125,15 @@ final class ApplicationService[F[_]: Monad](
               .leftMap(UseCaseError.Domain.apply)
           )
           (event, events) <- EitherT.fromEither[F](statusEvents(persistedApplication, change, eventId))
-          _ <- UseCaseF.repository(applications.updateStatusWithEvents(persistedApplication, event, events, context))
+          _ <- UseCaseF.repository(
+            applications.updateStatusWithEvents(
+              persistedApplication,
+              event,
+              events,
+              ApplicationWriteActor(actorUser.id, actorUser.role),
+              context
+            )
+          )
         } yield persistedApplication
     }
 

@@ -23,9 +23,16 @@ import com.example.graphQL.cats.service.port.{
   OperationalEventOutboxRepository,
   RepositoryF
 }
-import com.example.graphQL.cats.service.{BackgroundWorker, Diagnostics, LogEvent, LogFields}
+import com.example.graphQL.cats.service.{
+  BackgroundWorker,
+  Diagnostics,
+  LogEvent,
+  LogFields,
+  ReadinessComponent,
+  WorkerAlive
+}
 import com.example.graphQL.cats.service.Diagnostics.*
-import com.example.graphQL.cats.service.events.OperationalEventJson
+import com.example.graphQL.cats.infrastructure.events.OperationalEventWireCodec
 import com.example.graphQL.cats.shared.CauseChain
 import fs2.Stream
 import fs2.kafka.*
@@ -48,16 +55,21 @@ object OperationalEventKafkaRuntime {
       diagnostics: Diagnostics[IO],
       clock: Clock[IO] = Clock[IO],
       uuidGen: UUIDGen[IO] = UUIDGen[IO],
-      breaker: CircuitBreaker[IO] = CircuitBreaker.disabled[IO]
+      breaker: CircuitBreaker[IO] = CircuitBreaker.disabled[IO],
+      alive: ReadinessComponent => IO[WorkerAlive[IO]] = _ => IO.pure(WorkerAlive.none[IO])
   ): Resource[IO, Unit] =
     if (!config.enabled) Resource.unit
-    else {
-      val publisher = publisherResource(config, outbox, diagnostics, clock, uuidGen, breaker)
-      val consumer =
-        if (config.consumer.enabled) consumerResource(config, receipts, quarantine, diagnostics, clock)
-        else Resource.unit
-      publisher *> consumer
-    }
+    else
+      for {
+        publisherAlive <- Resource.eval(alive(ReadinessComponent.KafkaPublisher))
+        _ <- publisherResource(config, outbox, diagnostics, clock, uuidGen, breaker, publisherAlive.beat)
+        _ <-
+          if (config.consumer.enabled)
+            Resource.eval(alive(ReadinessComponent.KafkaConsumer)).flatMap { consumerAlive =>
+              consumerResource(config, receipts, quarantine, diagnostics, clock, consumerAlive)
+            }
+          else Resource.unit[IO]
+      } yield ()
 
   private def publisherResource(
       config: KafkaConfig,
@@ -65,7 +77,8 @@ object OperationalEventKafkaRuntime {
       diagnostics: Diagnostics[IO],
       clock: Clock[IO],
       uuidGen: UUIDGen[IO],
-      breaker: CircuitBreaker[IO]
+      breaker: CircuitBreaker[IO],
+      batchDone: IO[Unit]
   ): Resource[IO, Unit] = {
     val settings = KafkaClientSettings.producer(
       config.bootstrapServers,
@@ -90,7 +103,9 @@ object OperationalEventKafkaRuntime {
               diagnostics,
               Stream
                 .awakeEvery[IO](config.publisher.pollIntervalMillis.millis)
-                .evalMap(_ => publishBatch(config, outbox, diagnostics, transactionalId, producer, clock, breaker)),
+                .evalMap(_ =>
+                  publishBatch(config, outbox, diagnostics, transactionalId, producer, clock, breaker) *> batchDone
+                ),
               config.publisher.retryDelaySeconds.seconds,
               stopRetrying = KafkaRuntimeSupport.isProducerFenced,
               maxDelay = config.restartMaxDelaySeconds.seconds
@@ -277,7 +292,8 @@ object OperationalEventKafkaRuntime {
       receipts: ConsumerReceiptRepository[IO],
       quarantine: EventQuarantineRepository[IO],
       diagnostics: Diagnostics[IO],
-      clock: Clock[IO] = Clock[IO]
+      clock: Clock[IO] = Clock[IO],
+      alive: WorkerAlive[IO] = WorkerAlive.none[IO]
   ): Resource[IO, Unit] = {
     val settings = KafkaClientSettings.committedConsumer(
       config.bootstrapServers,
@@ -291,7 +307,7 @@ object OperationalEventKafkaRuntime {
       KafkaRuntimeSupport
         .resilientStream(
           diagnostics,
-          KafkaPartitionProcessing(
+          (KafkaPartitionProcessing(
             KafkaConsumer.stream(settings).subscribeTo(config.topic).partitionedRecords,
             config.consumer.partitionConcurrency
           ) { message =>
@@ -308,7 +324,7 @@ object OperationalEventKafkaRuntime {
                 clock
               )
             )(message.offset.commit)
-          },
+          }).concurrently(Stream.awakeEvery[IO](alive.every).evalMap(_ => alive.beat)),
           1.second,
           maxDelay = config.restartMaxDelaySeconds.seconds
         )
@@ -329,7 +345,7 @@ object OperationalEventKafkaRuntime {
       clock: Clock[IO] = Clock[IO]
   ): RepositoryF[IO, Unit] =
     RepositoryF.lift(clock.realTimeInstant).flatMap { now =>
-      bytes.toRight("MalformedEnvelope").flatMap(OperationalEventJson.decode) match {
+      bytes.toRight("MalformedEnvelope").flatMap(OperationalEventWireCodec.decode) match {
         case Left(_) =>
           quarantine.save(
             EventQuarantineRecord(

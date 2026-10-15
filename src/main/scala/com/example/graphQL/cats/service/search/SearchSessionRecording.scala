@@ -9,12 +9,11 @@ import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.service.events.{
   OperationalEventPayload,
   OperationalEvents,
+  SearchFilterSnapshot,
   SearchSession,
   SearchSessionHandoff,
   SearchSessionResult
 }
-import io.circe.Json
-
 import com.example.graphQL.cats.service.protocol.UseCaseF
 import com.example.graphQL.cats.service.{RepositoryError, UseCaseError}
 import com.example.graphQL.cats.shared.StableIds
@@ -34,7 +33,7 @@ trait SearchSessionRecording[F[_]] {
       actorId: UserId,
       kind: OperationalEventPayload.SearchKind,
       searchId: UUID,
-      filter: Json,
+      filter: SearchFilterSnapshot,
       model: Option[String],
       results: List[SearchSessionEntry]
   ): UseCaseF[F, Unit]
@@ -60,7 +59,7 @@ object SearchSessionRecording {
         actorId: UserId,
         kind: OperationalEventPayload.SearchKind,
         searchId: UUID,
-        filter: Json,
+        filter: SearchFilterSnapshot,
         model: Option[String],
         results: List[SearchSessionEntry]
     ): UseCaseF[F, Unit] =

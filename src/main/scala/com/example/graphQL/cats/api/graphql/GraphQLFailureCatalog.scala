@@ -30,6 +30,7 @@ private[graphql] object GraphQLFailureCatalog {
     case AdminBootstrapOnly extends FailureMetadata("ADMIN_BOOTSTRAP_ONLY", exceptional = false)
     case ServiceNotReady extends FailureMetadata("SERVICE_NOT_READY", exceptional = true)
     case Forbidden extends FailureMetadata("FORBIDDEN", exceptional = true)
+    case SchemaExposureDisabled extends FailureMetadata("FORBIDDEN", exceptional = false)
     case NotFound extends FailureMetadata("NOT_FOUND", exceptional = false)
     case DuplicateApplication extends FailureMetadata("DUPLICATE_APPLICATION", exceptional = false)
     case SearchSessionPending extends FailureMetadata("SEARCH_SESSION_PENDING", exceptional = false)
@@ -97,6 +98,14 @@ private[graphql] object GraphQLFailureCatalog {
   /** An interview action refused by the per-actor allowance; it carries no limit, window or counter. */
   def interviewActionRateLimited: GraphQLFailure =
     failure(FailureMetadata.RateLimited, "Too many interview actions; retry later")
+
+  /** An introspection operation refused while schema exposure is off; it names neither the schema nor its types. */
+  def schemaExposureDisabled: GraphQLFailure =
+    failure(FailureMetadata.SchemaExposureDisabled, "Schema introspection is not available")
+
+  /** A query refused because its caller's cost budget for the window is spent; it carries no budget or counter. */
+  def costBudgetExhausted: GraphQLFailure =
+    failure(FailureMetadata.RateLimited, "Query cost budget exhausted; retry later")
 
   /** A role or ownership refusal of a mutation is a typed payload for interview actions, so one refused alias does not
     * discard the results of the others in a batched request.

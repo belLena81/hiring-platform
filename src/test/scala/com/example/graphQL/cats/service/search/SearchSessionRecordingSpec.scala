@@ -5,8 +5,12 @@ import cats.effect.std.UUIDGen
 import com.example.graphQL.cats.FixedTestClock
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.service.events.OperationalEventPayload.SearchKind
-import com.example.graphQL.cats.service.events.{OperationalEventEnvelope, SearchSession, SearchSessionHandoff}
-import io.circe.Json
+import com.example.graphQL.cats.service.events.{
+  OperationalEventEnvelope,
+  SearchFilterSnapshot,
+  SearchSession,
+  SearchSessionHandoff
+}
 import munit.CatsEffectSuite
 
 import java.time.Instant
@@ -51,7 +55,7 @@ final class SearchSessionRecordingSpec extends CatsEffectSuite {
           actorId,
           SearchKind.Jobs,
           supplied,
-          Json.obj("city" -> Json.Null),
+          SearchFilterSnapshot.JobCriteria(None, Nil, None),
           None,
           List(
             SearchSessionEntry("00000000-0000-0000-0000-000000000c01", 0.5d),
@@ -87,7 +91,7 @@ final class SearchSessionRecordingSpec extends CatsEffectSuite {
           actorId,
           SearchKind.SemanticJobSearch,
           supplied,
-          Json.obj(),
+          SearchFilterSnapshot.Unfiltered,
           Some("voyage-4-lite"),
           Nil
         )

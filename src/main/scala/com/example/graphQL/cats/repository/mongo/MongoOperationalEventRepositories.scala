@@ -8,7 +8,8 @@ import cats.effect.std.UUIDGen
 import cats.syntax.all.*
 import mongo4cats.client.{ClientSession, MongoClient}
 import mongo4cats.database.MongoDatabase
-import com.example.graphQL.cats.service.events.{OperationalEventEnvelope, OperationalEventJson, SearchSession}
+import com.example.graphQL.cats.infrastructure.events.OperationalEventWireCodec
+import com.example.graphQL.cats.service.events.{OperationalEventEnvelope, SearchSession}
 import com.example.graphQL.cats.service.port.{
   ClaimedOperationalEvent,
   ConsumerReceiptRepository,
@@ -146,6 +147,17 @@ final class MongoOperationalEventOutboxRepository(
       filter: MongoFilter,
       update: MongoUpdate
   ) = MongoSessionOperations.updateMany(collection, session, filter, update)
+
+  /** Age of the oldest due entry, one indexed read bounded by `maxTime`; `None` when nothing is waiting. */
+  def oldestDueAge(now: Instant): IO[Option[scala.concurrent.duration.FiniteDuration]] =
+    MongoPendingWorkAge.oldest(
+      outbox,
+      Some(MongoOperationalEventOutboxRepository.OldestDue.filter(now)),
+      MongoOperationalEventOutboxRepository.OldestDue.Sort,
+      MongoOperationalEventOutboxRepository.OldestDue.Projection,
+      MongoFields.OccurredAt,
+      now
+    )
 
   override def claim(
       workerId: String,
@@ -570,7 +582,7 @@ final class MongoOperationalEventOutboxRepository(
     ).toEither
       .flatMap { claim =>
         val invalid = NonEmptyList.one(MongoHiringCodecs.StoredDocumentError.InconsistentDocument)
-        OperationalEventJson.decode(claim.envelopeBytes).leftMap(_ => invalid).flatMap { wire =>
+        OperationalEventWireCodec.decode(claim.envelopeBytes).leftMap(_ => invalid).flatMap { wire =>
           // BSON dates have millisecond precision; the immutable wire bytes retain the original Instant.
           val storedTime = wire.occurredAt.truncatedTo(java.time.temporal.ChronoUnit.MILLIS)
           val consistent = wire.copy(occurredAt = storedTime) == claim.event &&
@@ -608,6 +620,20 @@ final class MongoOperationalEventOutboxRepository(
 }
 
 object MongoOperationalEventOutboxRepository {
+
+  /** Oldest due outbox entry: the claim index (`state`, `availableAt`, ...) yields the first due `Retryable` row
+    * without a sort stage. Its age is measured from `occurredAt`, so repeated retries do not hide a stuck event.
+    */
+  private[mongo] object OldestDue {
+    def filter(now: Instant): MongoFilter =
+      MongoFilter.and(
+        MongoFilter.eq(MongoFields.State, "Retryable"),
+        MongoFilter.lte(MongoFields.AvailableAt, now.toDate)
+      )
+    val Sort: org.bson.conversions.Bson = Sorts.ascending(MongoFields.AvailableAt)
+    val Projection: org.bson.conversions.Bson = Projections.include(MongoFields.OccurredAt)
+  }
+
   def transactional(
       database: MongoDatabase[IO],
       client: MongoClient[IO],
@@ -719,4 +745,38 @@ private[mongo] object MongoOutboxSubjectLeases {
   def acquire(subjectIds: List[String])(acquireOne: String => RepositoryF[IO, Unit]): RepositoryF[IO, Unit] =
     if (subjectIds.isEmpty) RepositoryF.at[IO].raise(RepositoryError.InvalidStoredData)
     else subjectIds.sorted.traverse_(acquireOne)
+}
+
+/** One bounded read of the oldest waiting row of a durable queue: `limit(1)`, a projection of the timestamp only, and a
+  * server-side time limit, so a slow or unavailable store fails the observation instead of the request.
+  */
+private[mongo] object MongoPendingWorkAge {
+  val MaxTime: scala.concurrent.duration.FiniteDuration = scala.concurrent.duration.DurationInt(500).millis
+
+  def oldest(
+      collection: IO[MongoSessionOperations.Documents],
+      filter: Option[MongoFilter],
+      sort: org.bson.conversions.Bson,
+      projection: org.bson.conversions.Bson,
+      timestampField: String,
+      now: Instant
+  ): IO[Option[scala.concurrent.duration.FiniteDuration]] =
+    collection
+      .flatMap(c =>
+        filter
+          .fold(c.find)(value => c.find(value.bson))
+          .sort(sort)
+          .projection(projection)
+          .limit(1)
+          .maxTime(MaxTime)
+          .first
+      )
+      .map(
+        _.flatMap(row => Option(row.getDate(timestampField))).map(date =>
+          scala.concurrent.duration.FiniteDuration(
+            java.time.Duration.between(date.toInstant, now).toMillis.max(0L),
+            java.util.concurrent.TimeUnit.MILLISECONDS
+          )
+        )
+      )
 }
