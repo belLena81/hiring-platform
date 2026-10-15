@@ -15,7 +15,7 @@ final class HiringGraphQLContractSpec extends CatsEffectSuite {
     finally stream.close()
   }
 
-  private val probe = new DatabaseProbe {
+  private val probe = new DatabaseProbe[IO] {
     def check(requestId: Option[String]): IO[ProbeResult] = IO.pure(ProbeResult.Ready)
   }
   private val service = new HealthService(probe, Diagnostics.noop)
@@ -125,7 +125,7 @@ final class HiringGraphQLContractSpec extends CatsEffectSuite {
   test("unexpected resolver failures are sanitized and reported after Sangria handles them") {
     for {
       reportCount <- Ref.of[IO, Int](0)
-      diagnostics = new Diagnostics {
+      diagnostics = new Diagnostics[IO] {
         def event(
             event: com.example.graphQL.cats.service.LogEvent,
             requestId: Option[String],

@@ -2,7 +2,7 @@ package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.{Deferred, IO}
 import cats.syntax.all.*
-import com.example.graphQL.cats.service.port.{RepositoryIO}
+import com.example.graphQL.cats.service.port.{RepositoryF}
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.search.{CandidateRetrievalHit, JobRetrievalHit}
 import munit.CatsEffectSuite
@@ -14,8 +14,8 @@ final class MongoSearchFusionSpec extends CatsEffectSuite {
     val fusion = for {
       vectorStarted <- Deferred[IO, Unit]
       lexicalStarted <- Deferred[IO, Unit]
-      vector = RepositoryIO.lift(vectorStarted.complete(()) *> lexicalStarted.get).as(List.empty[JobRetrievalHit])
-      lexical = RepositoryIO.lift(lexicalStarted.complete(()) *> vectorStarted.get).as(List.empty[JobRetrievalHit])
+      vector = RepositoryF.lift(vectorStarted.complete(()) *> lexicalStarted.get).as(List.empty[JobRetrievalHit])
+      lexical = RepositoryF.lift(lexicalStarted.complete(()) *> vectorStarted.get).as(List.empty[JobRetrievalHit])
       result <- MongoSemanticSearchResult.fuseJobs(vector, lexical, 10).value
     } yield assertEquals(result, Right(Nil))
     fusion.timeout(5.seconds)
@@ -26,13 +26,13 @@ final class MongoSearchFusionSpec extends CatsEffectSuite {
       jobStarted <- Deferred[IO, Unit]
       queryStarted <- Deferred[IO, Unit]
       lexicalStarted <- Deferred[IO, Unit]
-      job = RepositoryIO
+      job = RepositoryF
         .lift(jobStarted.complete(()) *> queryStarted.get *> lexicalStarted.get)
         .as(List.empty[CandidateRetrievalHit])
-      query = RepositoryIO
+      query = RepositoryF
         .lift(queryStarted.complete(()) *> jobStarted.get *> lexicalStarted.get)
         .as(List.empty[CandidateRetrievalHit])
-      lexical = RepositoryIO
+      lexical = RepositoryF
         .lift(lexicalStarted.complete(()) *> jobStarted.get *> queryStarted.get)
         .as(List.empty[CandidateRetrievalHit])
       result <- MongoSemanticSearchResult.fuseCandidates(job, query, lexical, 10).value
@@ -41,8 +41,8 @@ final class MongoSearchFusionSpec extends CatsEffectSuite {
   }
 
   test("job fusion normalizes each branch's typed error to unavailable") {
-    val successful = RepositoryIO.pure(List.empty[JobRetrievalHit])
-    val invalid: RepositoryIO[List[JobRetrievalHit]] = RepositoryIO.raise(RepositoryError.InvalidStoredData)
+    val successful = RepositoryF.at[IO].pure(List.empty[JobRetrievalHit])
+    val invalid: RepositoryF[IO, List[JobRetrievalHit]] = RepositoryF.at[IO].raise(RepositoryError.InvalidStoredData)
     for {
       vectorFailure <- MongoSemanticSearchResult.fuseJobs(invalid, successful, 10).value
       lexicalFailure <- MongoSemanticSearchResult.fuseJobs(successful, invalid, 10).value
@@ -53,9 +53,9 @@ final class MongoSearchFusionSpec extends CatsEffectSuite {
   }
 
   test("candidate fusion normalizes each branch's typed error to unavailable") {
-    val successful = RepositoryIO.pure(List.empty[CandidateRetrievalHit])
-    val invalid: RepositoryIO[List[CandidateRetrievalHit]] =
-      RepositoryIO.raise(RepositoryError.InvalidStoredData)
+    val successful = RepositoryF.at[IO].pure(List.empty[CandidateRetrievalHit])
+    val invalid: RepositoryF[IO, List[CandidateRetrievalHit]] =
+      RepositoryF.at[IO].raise(RepositoryError.InvalidStoredData)
     List(
       MongoSemanticSearchResult.fuseCandidates(invalid, successful, successful, 10),
       MongoSemanticSearchResult.fuseCandidates(successful, invalid, successful, 10),

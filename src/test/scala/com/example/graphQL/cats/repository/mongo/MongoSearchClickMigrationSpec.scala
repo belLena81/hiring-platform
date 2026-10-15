@@ -30,7 +30,7 @@ final class MongoSearchClickMigrationSpec extends CatsEffectSuite {
     for {
       lookedUp <- Ref.of[IO, Option[UUID]](None)
       observed <- Ref.of[IO, List[(LogEvent, Map[LogField, String])]](Nil)
-      diagnostics = new Diagnostics {
+      diagnostics = new Diagnostics[IO] {
         override def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]): IO[Unit] =
           observed.update(_ :+ (event -> fields))
       }

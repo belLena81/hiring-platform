@@ -6,7 +6,7 @@ import com.example.graphQL.cats.service.port.{EmbeddingWorkKey, EmbeddingWorkKin
 
 /** Test-only publisher for service tests that do not exercise embedding wakeups. */
 object TestEmbeddingWorkPublisher {
-  val noop: EmbeddingWorkPublisher = new EmbeddingWorkPublisher {
+  val noop: EmbeddingWorkPublisher[IO] = new EmbeddingWorkPublisher[IO] {
     override def wake: IO[Unit] = IO.unit
   }
 }

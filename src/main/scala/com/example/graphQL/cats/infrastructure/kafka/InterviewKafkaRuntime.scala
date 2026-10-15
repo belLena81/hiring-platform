@@ -13,7 +13,7 @@ import com.example.graphQL.cats.service.port.{
   InterviewPublisherRole,
   InterviewPublisherGeneration,
   InterviewProducerGenerationFenced,
-  RepositoryIO
+  RepositoryF
 }
 import fs2.kafka.*
 import fs2.kafka.producer.MkProducer
@@ -103,18 +103,18 @@ object InterviewKafkaRuntime {
     */
   def resource(
       config: InterviewKafkaConfig,
-      diagnostics: Diagnostics
+      diagnostics: Diagnostics[IO]
   )(
-      receive: Either[String, InterviewMessage] => RepositoryIO[Unit]
-  ): Resource[IO, InterviewTransport] =
+      receive: Either[String, InterviewMessage] => RepositoryF[IO, Unit]
+  ): Resource[IO, InterviewTransport[IO]] =
     consumerResource(config, diagnostics)(receive) *> publisherResource(config, diagnostics)
 
   /** Producer initialization completes before the immutable generation is exposed for Mongo authorization. */
   def publisherResource(
       config: InterviewKafkaConfig,
-      diagnostics: Diagnostics = Diagnostics.noop,
+      diagnostics: Diagnostics[IO] = Diagnostics.noop,
       uuidGen: UUIDGen[IO] = UUIDGen[IO]
-  ): Resource[IO, InterviewTransport] = {
+  ): Resource[IO, InterviewTransport[IO]] = {
     val producerSettings = KafkaClientSettings
       .producer(
         config.bootstrapServers,
@@ -135,7 +135,7 @@ object InterviewKafkaRuntime {
           MkProducer.mkProducerForSync[IO]
         )
       )
-    } yield new InterviewTransport {
+    } yield new InterviewTransport[IO] {
       def generationFor(_message: InterviewMessage): InterviewPublisherGeneration = generation
       def publish(message: InterviewMessage): IO[Unit] =
         IO.fromEither(InterviewMessageCodec.encode(message).leftMap(InterviewMessageCodec.RecordRejected(_))).flatMap {
@@ -152,8 +152,8 @@ object InterviewKafkaRuntime {
   }
 
   /** Consumers have independent lifetimes so replacing a fenced producer does not reset their offset frontier. */
-  def consumerResource(config: InterviewKafkaConfig, diagnostics: Diagnostics)(
-      receive: Either[String, InterviewMessage] => RepositoryIO[Unit]
+  def consumerResource(config: InterviewKafkaConfig, diagnostics: Diagnostics[IO])(
+      receive: Either[String, InterviewMessage] => RepositoryF[IO, Unit]
   ): Resource[IO, Unit] = {
     val consumerSettings = KafkaClientSettings.committedConsumer(
       config.bootstrapServers,

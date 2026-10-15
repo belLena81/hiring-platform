@@ -41,8 +41,8 @@ object MongoDatabaseProbe {
   def resource(
       uri: String,
       database: String,
-      diagnostics: Diagnostics
-  ): Resource[IO, DatabaseProbe] =
+      diagnostics: Diagnostics[IO]
+  ): Resource[IO, DatabaseProbe[IO]] =
     clientResource(uri)
       .evalMap(_.getDatabase(database))
       .map(db => fromDatabase(db, connectionMetadata(uri, database), diagnostics))
@@ -50,8 +50,8 @@ object MongoDatabaseProbe {
   def fromDatabase(
       database: MongoDatabase[IO],
       metadata: Map[LogField, String],
-      diagnostics: Diagnostics
-  ): DatabaseProbe = new DatabaseProbe {
+      diagnostics: Diagnostics[IO]
+  ): DatabaseProbe[IO] = new DatabaseProbe[IO] {
     override def check(requestId: Option[String]): IO[ProbeResult] =
       database
         .runCommand(new Document("ping", 1))

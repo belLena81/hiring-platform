@@ -82,22 +82,25 @@ final class HiringGeographicDiscoveryEvaluationIntegrationSpec extends MongoInte
           fixture.database,
           fixture.client,
           MongoEmbeddingWorkEnqueuer.disabled,
-          Diagnostics.noop,
+          Diagnostics.noop[IO],
           Some(policy)
         )
         val users = MongoUserRepository.transactional(
           fixture.database,
           fixture.client,
           MongoEmbeddingWorkEnqueuer.disabled,
-          Diagnostics.noop
+          Diagnostics.noop[IO]
         )
-        val receipts = MongoMutationReceiptRepository.transactional(fixture.database, fixture.client, Diagnostics.noop)
+        val receipts =
+          MongoMutationReceiptRepository.transactional(fixture.database, fixture.client, Diagnostics.noop[IO])
         val service = new JobService(
           users,
           repository,
-          new EmbeddingWorkPublisher { def wake: IO[Unit] = IO.unit },
+          new EmbeddingWorkPublisher[IO] { def wake: IO[Unit] = IO.unit },
           Idempotent(receipts),
-          Diagnostics.noop
+          Diagnostics.noop[IO],
+          cats.effect.Clock[IO],
+          cats.effect.std.UUIDGen[IO]
         )
         def storage = for {
           admin <- fixture.client.getDatabase("admin")
@@ -110,7 +113,7 @@ final class HiringGeographicDiscoveryEvaluationIntegrationSpec extends MongoInte
           "sampleBoundary" -> Json.fromString("After fsync flush on the disposable MongoDB")
         )
         for {
-          _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+          _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
           mongoBuild <- support.command(fixture.database, new Document("buildInfo", 1))
           before <- storage
           _ <- MongoRepositoryTestSupport.insertOne(

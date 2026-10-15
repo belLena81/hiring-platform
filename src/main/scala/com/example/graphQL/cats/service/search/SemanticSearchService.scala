@@ -1,7 +1,7 @@
 package com.example.graphQL.cats.service.search
 
 import cats.data.EitherT
-import cats.effect.IO
+import cats.Monad
 import cats.syntax.all.*
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.{ActorContext, RepositoryError, SearchError, UseCaseError}
@@ -20,7 +20,7 @@ import com.example.graphQL.cats.domain.model.{
 }
 import com.example.graphQL.cats.service.auth.ActorAuthorization
 import com.example.graphQL.cats.service.read.HiringReadScope
-import com.example.graphQL.cats.service.protocol.{SearchUseCases, UseCaseIO}
+import com.example.graphQL.cats.service.protocol.{SearchUseCases, UseCaseF}
 import com.example.graphQL.cats.shared.crypto.SourceHash
 import com.example.graphQL.cats.domain.pagination.PageSize
 import com.example.graphQL.cats.service.search.{
@@ -33,13 +33,13 @@ import com.example.graphQL.cats.service.search.{
 }
 import java.util.UUID
 
-final class SemanticSearchService(
-    users: UserRepository,
-    jobs: JobRepository,
-    embeddings: EmbeddingService,
-    search: SemanticSearchRepository,
+final class SemanticSearchService[F[_]: Monad](
+    users: UserRepository[F],
+    jobs: JobRepository[F],
+    embeddings: EmbeddingService[F],
+    search: SemanticSearchRepository[F],
     embeddingModel: String
-) extends SearchUseCases {
+) extends SearchUseCases[F] {
   private val authorization = ActorAuthorization(users)
 
   def semanticJobSearch(
@@ -48,7 +48,7 @@ final class SemanticSearchService(
       filter: JobSearchFilter,
       first: PageSize,
       searchId: UUID
-  ): UseCaseIO[List[RankedJob]] =
+  ): UseCaseF[F, List[RankedJob]] =
     for {
       candidate <- resolveCandidate(actor)
       _ <- requireQueryLength(text)
@@ -79,9 +79,9 @@ final class SemanticSearchService(
       actor: ActorContext,
       first: PageSize,
       searchId: UUID
-  ): UseCaseIO[List[RankedJob]] =
+  ): UseCaseF[F, List[RankedJob]] =
     resolveCandidate(actor).flatMap { user =>
-      user.candidateProfile.fold(EitherT.leftT[IO, List[RankedJob]](missingEmbedding("candidate")))(profile =>
+      user.candidateProfile.fold(EitherT.leftT[F, List[RankedJob]](missingEmbedding("candidate")))(profile =>
         currentEmbedding(user.embedding, "candidate", candidateEmbeddingIsCurrent(profile, _)).flatMap { embedding =>
           val noFilter = JobSearchFilter(None, Set.empty, None)
           val query = VectorSearchQuery(
@@ -110,13 +110,13 @@ final class SemanticSearchService(
       filters: CandidateMatchFilters,
       first: PageSize,
       searchId: UUID
-  ): UseCaseIO[List[RankedCandidate]] =
+  ): UseCaseF[F, List[RankedCandidate]] =
     for {
       user <- authorization.resolve(actor)
-      job <- authorizeJobForMatching(user, UseCaseIO.found(jobs.find(jobId), "job"))
+      job <- authorizeJobForMatching(user, UseCaseF.found(jobs.find(jobId), "job"))
       normalizedQuery = queryText.map(_.trim).filter(_.nonEmpty)
       _ <- normalizedQuery.traverse_(requireQueryLength)
-      validatedFilters <- EitherT.fromEither[IO](
+      validatedFilters <- EitherT.fromEither[F](
         ValidatedCandidateMatchFilters
           .from(filters)
           .toEither
@@ -146,10 +146,10 @@ final class SemanticSearchService(
       filter: JobSearchFilter,
       hits: List[JobRetrievalHit],
       expectedActorEmbedding: Option[EntityEmbedding] = None
-  ): UseCaseIO[List[RankedJob]] =
+  ): UseCaseF[F, List[RankedJob]] =
     for {
       (currentActor, scope) <- currentCandidate(actor)
-      _ <- UseCaseIO.ensure(
+      _ <- UseCaseF.ensure[F](
         expectedActorEmbedding.forall(expected =>
           currentActor.candidateProfile.exists(profile =>
             currentActor.embedding.contains(expected) && candidateEmbeddingIsCurrent(profile, expected)
@@ -178,14 +178,14 @@ final class SemanticSearchService(
       queryMeta: EmbeddingMeta,
       filters: ValidatedCandidateMatchFilters,
       hits: List[CandidateRetrievalHit]
-  ): UseCaseIO[List[RankedCandidate]] =
+  ): UseCaseF[F, List[RankedCandidate]] =
     for {
       (currentActor, scope) <- authorization.readScope(actor).leftMap(searchFailure)
       currentJob <- authorizeJobForMatching(
         currentActor,
-        UseCaseIO.found(jobs.find(jobId), "job").leftMap(searchFailure)
+        UseCaseF.found(jobs.find(jobId), "job").leftMap(searchFailure)
       )
-      _ <- UseCaseIO.ensure(
+      _ <- UseCaseF.ensure[F](
         currentJob.embedding.exists(embedding =>
           embedding.meta == queryMeta && jobEmbeddingIsCurrent(currentJob, embedding)
         ),
@@ -210,15 +210,15 @@ final class SemanticSearchService(
     }
 
   /** A non-Candidate user matching candidates against an open job it may manage. */
-  private def authorizeJobForMatching(user: User, job: UseCaseIO[Job]): UseCaseIO[Job] =
+  private def authorizeJobForMatching(user: User, job: UseCaseF[F, Job]): UseCaseF[F, Job] =
     for {
-      _ <- UseCaseIO.ensure(user.role != UserRole.Candidate, UseCaseError.Domain(DomainError.RecruiterRequired))
+      _ <- UseCaseF.ensure[F](user.role != UserRole.Candidate, UseCaseError.Domain(DomainError.RecruiterRequired))
       found <- job
-      _ <- UseCaseIO.ensure(
+      _ <- UseCaseF.ensure[F](
         user.role != UserRole.Recruiter || found.recruiterId == user.id,
         UseCaseError.Domain(DomainError.Forbidden)
       )
-      _ <- UseCaseIO.ensure(found.status == JobStatus.Open, UseCaseError.Domain(DomainError.JobMustBeOpen))
+      _ <- UseCaseF.ensure[F](found.status == JobStatus.Open, UseCaseError.Domain(DomainError.JobMustBeOpen))
     } yield found
 
   /** Keeps each distinct hit whose entity still exists, ranking it only if it is still eligible. */
@@ -236,15 +236,15 @@ final class SemanticSearchService(
       embedding: Option[EntityEmbedding],
       entity: String,
       isCurrent: EntityEmbedding => Boolean
-  ): UseCaseIO[EntityEmbedding] =
-    EitherT.fromEither[IO](
+  ): UseCaseF[F, EntityEmbedding] =
+    EitherT.fromEither[F](
       embedding
         .toRight(missingEmbedding(entity))
         .filterOrElse(isCurrent, UseCaseError.Search(SearchError.StaleEmbedding(entity)))
     )
 
-  private def requireQueryLength(text: String): UseCaseIO[Unit] =
-    UseCaseIO.ensure(
+  private def requireQueryLength(text: String): UseCaseF[F, Unit] =
+    UseCaseF.ensure[F](
       text.length <= SearchableText.QueryMaxChars,
       UseCaseError.Search(SearchError.InputTooLarge("query", SearchableText.QueryMaxChars))
     )
@@ -256,16 +256,16 @@ final class SemanticSearchService(
     embedding.meta.model == embeddingModel &&
       embedding.meta.sourceHash == SourceHash.sha256(SearchableText.candidate(profile))
 
-  private def requireCandidate(user: User): UseCaseIO[Unit] =
-    UseCaseIO.ensure(user.role == UserRole.Candidate, UseCaseError.Domain(DomainError.CandidateRequired))
+  private def requireCandidate(user: User): UseCaseF[F, Unit] =
+    UseCaseF.ensure[F](user.role == UserRole.Candidate, UseCaseError.Domain(DomainError.CandidateRequired))
 
-  private def resolveCandidate(actor: ActorContext): UseCaseIO[User] =
+  private def resolveCandidate(actor: ActorContext): UseCaseF[F, User] =
     authorization.resolve(actor).flatTap(requireCandidate)
 
-  private def currentCandidate(actor: ActorContext): UseCaseIO[(User, HiringReadScope)] =
+  private def currentCandidate(actor: ActorContext): UseCaseF[F, (User, HiringReadScope)] =
     authorization.readScope(actor).leftMap(searchFailure).flatTap((user, _) => requireCandidate(user))
 
-  private def embedQuery(text: String): UseCaseIO[EmbeddingVector] =
+  private def embedQuery(text: String): UseCaseF[F, EmbeddingVector] =
     EitherT
       .liftF(embeddings.embed(EmbeddingInput(text, EmbeddingInputType.Query)))
       .subflatMap(
@@ -283,6 +283,6 @@ final class SemanticSearchService(
       case other                      => other
     }
 
-  private def searchRead[A](result: RepositoryIO[A]): UseCaseIO[A] =
-    UseCaseIO.repository(result).leftMap(searchFailure)
+  private def searchRead[A](result: RepositoryF[F, A]): UseCaseF[F, A] =
+    UseCaseF.repository(result).leftMap(searchFailure)
 }

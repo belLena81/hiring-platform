@@ -1,25 +1,25 @@
 package com.example.graphQL.cats.service.auth
 
+import cats.Applicative
 import cats.data.EitherT
-import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.service.port.UserRepository
 import com.example.graphQL.cats.service.{ActorContext, AuthenticatedActor, AuthenticationError, UseCaseError}
-import com.example.graphQL.cats.service.protocol.UseCaseIO
+import com.example.graphQL.cats.service.protocol.UseCaseF
 import com.example.graphQL.cats.service.read.HiringReadScope
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.{AccountStatus, Job, JobStatus, User, UserRole}
 
-final class ActorAuthorization(users: UserRepository) {
-  def resolve(actor: ActorContext, allowDeleted: Boolean = false): UseCaseIO[User] =
+final class ActorAuthorization[F[_]: Applicative](users: UserRepository[F]) {
+  def resolve(actor: ActorContext, allowDeleted: Boolean = false): UseCaseF[F, User] =
     actor match {
       case authenticated: AuthenticatedActor =>
-        EitherT.fromEither[IO](validate(authenticated.claims, authenticated.viewer, allowDeleted))
+        EitherT.fromEither[F](validate(authenticated.claims, authenticated.viewer, allowDeleted))
       case _ => persisted(actor).subflatMap(validate(actor, _, allowDeleted))
     }
 
   /** The live Admin record, never the token claims: Active, singleton Admin only. */
-  def requireAdmin(actor: ActorContext): UseCaseIO[User] =
+  def requireAdmin(actor: ActorContext): UseCaseF[F, User] =
     persisted(actor).subflatMap(user =>
       Either.cond(
         user.accountStatus == AccountStatus.Active && isAdmin(user),
@@ -29,7 +29,7 @@ final class ActorAuthorization(users: UserRepository) {
     )
 
   /** Only a freshly persisted, validated actor can grant a repository read scope. */
-  def readScope(actor: ActorContext): UseCaseIO[(User, HiringReadScope)] =
+  def readScope(actor: ActorContext): UseCaseF[F, (User, HiringReadScope)] =
     persisted(actor).subflatMap(user => HiringReadScope.validated(actor, user, this).tupleLeft(user))
 
   def validate(actor: ActorContext, user: User, allowDeleted: Boolean = false): Either[UseCaseError, User] =
@@ -50,8 +50,8 @@ final class ActorAuthorization(users: UserRepository) {
   def canView(user: User, job: Job): Boolean =
     job.status == JobStatus.Open || canManage(user, job)
 
-  private def persisted(actor: ActorContext): UseCaseIO[User] =
-    UseCaseIO
+  private def persisted(actor: ActorContext): UseCaseF[F, User] =
+    UseCaseF
       .repository(users.find(actor.userId))
       .subflatMap(_.toRight(UseCaseError.Authentication(AuthenticationError.Unauthorized)))
 }

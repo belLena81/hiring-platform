@@ -24,9 +24,9 @@ class MongoOperationalEventContractIntegrationSpec extends MongoIntegrationSuite
     mongoResource.use { fixture =>
       val value = event(UserId(UUID.randomUUID())).copy(occurredAt = now.plusNanos(123456789L))
       val repository =
-        MongoOperationalEventOutboxRepository.transactional(fixture.database, fixture.client, Diagnostics.noop)
+        MongoOperationalEventOutboxRepository.transactional(fixture.database, fixture.client, Diagnostics.noop[IO])
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- MongoRepositoryTestSupport.insertOne(fixture.database, MongoCollections.EventOutbox, document(value))
         claimed <- repository
           .claim("precision-test", s"hiring-publisher-${UUID.randomUUID()}", now.plusSeconds(1), now.plusSeconds(30), 1)
@@ -49,9 +49,9 @@ class MongoOperationalEventContractIntegrationSpec extends MongoIntegrationSuite
       val invalid =
         List(valid.copy(payload = Json.obj()), valid.copy(actorId = UserId(UUID.randomUUID())), event(actor))
       val repository =
-        MongoSearchSessionWorkRepository.transactional(fixture.database, fixture.client, Diagnostics.noop)
+        MongoSearchSessionWorkRepository.transactional(fixture.database, fixture.client, Diagnostics.noop[IO])
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         results <- invalid.traverse(value => repository.enqueue(PendingSearchSessionWork(session, value), now).value)
         count <- MongoRepositoryTestSupport.count(fixture.database, MongoCollections.SearchSessionWork)
       } yield {
@@ -111,9 +111,9 @@ class MongoOperationalEventContractIntegrationSpec extends MongoIntegrationSuite
         val originalBytes = wireBytes(bad)
         val originalSubjects = bad.getList("subjectIds", classOf[String]).asScala.toVector
         val repository =
-          MongoOperationalEventOutboxRepository.transactional(fixture.database, fixture.client, Diagnostics.noop)
+          MongoOperationalEventOutboxRepository.transactional(fixture.database, fixture.client, Diagnostics.noop[IO])
         for {
-          _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+          _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
           _ <- MongoRepositoryTestSupport.insertOne(fixture.database, MongoCollections.EventOutbox, bad)
           _ <- MongoRepositoryTestSupport.insertOne(fixture.database, MongoCollections.EventOutbox, document(healthy))
           claimed <- repository
@@ -149,9 +149,9 @@ class MongoOperationalEventContractIntegrationSpec extends MongoIntegrationSuite
       mongoResource.use { fixture =>
         val bad = corrupt(document(event(UserId(UUID.randomUUID()))))
         val repository =
-          MongoOperationalEventOutboxRepository.transactional(fixture.database, fixture.client, Diagnostics.noop)
+          MongoOperationalEventOutboxRepository.transactional(fixture.database, fixture.client, Diagnostics.noop[IO])
         for {
-          _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+          _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
           _ <- MongoRepositoryTestSupport.insertOne(fixture.database, MongoCollections.EventOutbox, bad)
           claimed <- repository
             .claim("contract-test", s"hiring-publisher-${UUID.randomUUID()}", now, now.plusSeconds(30), 1)

@@ -3,7 +3,7 @@ package com.example.graphQL.cats.infrastructure.kafka
 import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.config.KafkaConfig
-import com.example.graphQL.cats.service.port.{InterviewPublisherRole, RepositoryIO}
+import com.example.graphQL.cats.service.port.{InterviewPublisherRole, RepositoryF}
 import com.example.graphQL.cats.service.RepositoryError
 import fs2.kafka.*
 import com.example.graphQL.cats.shared.Parsing
@@ -39,12 +39,12 @@ object KafkaProducerGenerationRetirement {
       }
     }
 
-  def fence(config: KafkaConfig, id: String): RepositoryIO[Unit] =
-    RepositoryIO.fromEither(credentials(config, id)).flatMap { case (user, password) =>
+  def fence(config: KafkaConfig, id: String): RepositoryF[IO, Unit] =
+    RepositoryF.at[IO].fromEither(credentials(config, id)).flatMap { case (user, password) =>
       val settings = ProducerSettings(Serializer[IO, String], Serializer[IO, Array[Byte]])
         .withBootstrapServers(config.bootstrapServers)
         .withProperties(KafkaClientSettings.security(Some(user), Some(password), config.saslSecurityProtocol))
-      RepositoryIO.fromIOEither(
+      RepositoryF.fromFEither(
         GuardedTransactionalProducer
           .resource(TransactionalProducerSettings(id, settings), MkProducer.mkProducerForSync[IO])
           .use(_ => IO.unit)

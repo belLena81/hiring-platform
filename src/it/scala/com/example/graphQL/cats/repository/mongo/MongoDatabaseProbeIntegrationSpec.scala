@@ -17,7 +17,7 @@ import com.example.graphQL.cats.domain.model.{
   UserRole
 }
 import com.example.graphQL.cats.repository.mongo.MongoDatabaseProbe
-import com.example.graphQL.cats.service.port.{MutationWriteContext, RepositoryIO}
+import com.example.graphQL.cats.service.port.{MutationWriteContext, RepositoryF}
 import com.example.graphQL.cats.service.RepositoryError
 import com.github.dockerjava.api.model.{ExposedPort, Ulimit}
 import com.example.graphQL.cats.service.{DatabaseProbe, Diagnostics, HealthService, LogEvent, LogField, ProbeResult}
@@ -97,7 +97,7 @@ class MongoDatabaseProbeIntegrationSpec extends CatsEffectSuite {
   private def uri(instance: Standalone): String =
     s"mongodb://${instance.getHost}:${instance.getMappedPort(27017)}"
 
-  private def ready(probe: DatabaseProbe, remaining: Int = 30): IO[Unit] =
+  private def ready(probe: DatabaseProbe[IO], remaining: Int = 30): IO[Unit] =
     probe.check(None).flatMap {
       case ProbeResult.Ready  => IO.unit
       case _ if remaining > 0 => IO.sleep(200.millis) *> ready(probe, remaining - 1)
@@ -107,7 +107,7 @@ class MongoDatabaseProbeIntegrationSpec extends CatsEffectSuite {
   private def requireResult[A](result: Either[RepositoryError, A]): IO[A] =
     result.fold(error => IO.raiseError(new AssertionError(s"Mongo repository failure: $error")), IO.pure)
 
-  private def requireIO[A](result: RepositoryIO[A]): IO[A] = result.value.flatMap(requireResult)
+  private def requireIO[A](result: RepositoryF[IO, A]): IO[A] = result.value.flatMap(requireResult)
 
   private val fixtureTime = Instant.parse("2026-09-22T10:00:00Z")
 
@@ -142,8 +142,8 @@ class MongoDatabaseProbeIntegrationSpec extends CatsEffectSuite {
           val jobs = new MongoJobRepository(
             database,
             MongoRepositoryTestSupport.noTransaction,
-            new MongoEmbeddingWorkRepository(database, com.example.graphQL.cats.service.Diagnostics.noop),
-            Diagnostics.noop
+            new MongoEmbeddingWorkRepository(database, com.example.graphQL.cats.service.Diagnostics.noop[IO]),
+            Diagnostics.noop[IO]
           )
           val recruiterId = UserId(UUID.randomUUID())
           val job = fixtureJob(JobId(UUID.randomUUID()), recruiterId)
@@ -180,18 +180,18 @@ class MongoDatabaseProbeIntegrationSpec extends CatsEffectSuite {
       MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
         client.getDatabase(s"embedding_cas_${UUID.randomUUID()}").flatMap { database =>
           val embeddingWork =
-            new MongoEmbeddingWorkRepository(database, com.example.graphQL.cats.service.Diagnostics.noop)
+            new MongoEmbeddingWorkRepository(database, com.example.graphQL.cats.service.Diagnostics.noop[IO])
           val jobs = new MongoJobRepository(
             database,
             MongoRepositoryTestSupport.noTransaction,
             embeddingWork,
-            com.example.graphQL.cats.service.Diagnostics.noop
+            com.example.graphQL.cats.service.Diagnostics.noop[IO]
           )
           val users = new MongoUserRepository(
             database,
             MongoRepositoryTestSupport.noTransaction,
             embeddingWork,
-            com.example.graphQL.cats.service.Diagnostics.noop
+            com.example.graphQL.cats.service.Diagnostics.noop[IO]
           )
           val recruiterId = UserId(UUID.randomUUID())
           val job = fixtureJob(JobId(UUID.randomUUID()), recruiterId)
@@ -256,8 +256,9 @@ class MongoDatabaseProbeIntegrationSpec extends CatsEffectSuite {
 
   test("standalone readiness, outage/recovery, retained synthetic fixture and resource close") {
     container(auth = false).use { case (instance, _) =>
-      MongoDatabaseProbe.resource(uri(instance), "foundation", com.example.graphQL.cats.service.Diagnostics.noop).use {
-        probe =>
+      MongoDatabaseProbe
+        .resource(uri(instance), "foundation", com.example.graphQL.cats.service.Diagnostics.noop[IO])
+        .use { probe =>
           for {
             _ <- ready(probe)
             _ <- MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
@@ -293,7 +294,7 @@ class MongoDatabaseProbeIntegrationSpec extends CatsEffectSuite {
               s"mongodb://${instance.getHost}:$port"
             }
             _ <- MongoDatabaseProbe
-              .resource(restartedUri, "foundation", com.example.graphQL.cats.service.Diagnostics.noop)
+              .resource(restartedUri, "foundation", com.example.graphQL.cats.service.Diagnostics.noop[IO])
               .use(restarted => ready(restarted))
             closedClient <- MongoDatabaseProbe.clientResource(restartedUri).use { client =>
               client.getDatabase("foundation").flatMap { database =>
@@ -310,7 +311,7 @@ class MongoDatabaseProbeIntegrationSpec extends CatsEffectSuite {
               .attempt
             _ <- IO(assert(afterClose.isLeft))
           } yield ()
-      }
+        }
     }
   }
 
@@ -319,12 +320,12 @@ class MongoDatabaseProbeIntegrationSpec extends CatsEffectSuite {
       val address = s"${instance.getHost}:${instance.getMappedPort(27017)}"
       val valid = s"mongodb://foundation:$password@$address/?authSource=admin"
       val invalid = s"mongodb://foundation:incorrect@$address/?authSource=admin"
-      MongoDatabaseProbe.resource(valid, "foundation", com.example.graphQL.cats.service.Diagnostics.noop).use {
+      MongoDatabaseProbe.resource(valid, "foundation", com.example.graphQL.cats.service.Diagnostics.noop[IO]).use {
         authenticated =>
           for {
             _ <- ready(authenticated)
             records <- Ref.of[IO, Vector[(LogEvent, Option[String], Map[LogField, String])]](Vector.empty)
-            diagnostics = new Diagnostics {
+            diagnostics = new Diagnostics[IO] {
               def event(event: LogEvent, id: Option[String], fields: => Map[LogField, String]): IO[Unit] =
                 records.update(_ :+ (event, id, fields))
             }
@@ -381,7 +382,7 @@ class MongoDatabaseProbeIntegrationSpec extends CatsEffectSuite {
                 )
               }
             }
-            throwing = new Diagnostics {
+            throwing = new Diagnostics[IO] {
               def event(event: LogEvent, id: Option[String], fields: => Map[LogField, String]): IO[Unit] =
                 throw new IllegalStateException("synthetic-sink-secret")
             }

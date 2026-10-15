@@ -25,7 +25,7 @@ import com.example.graphQL.cats.service.protocol.{
   InteractionUseCases,
   JobUseCases,
   SearchUseCases,
-  UseCaseIO
+  UseCaseF
 }
 import com.example.graphQL.cats.service.UseCaseError
 import com.example.graphQL.cats.api.graphql.HiringGraphQLResolverSupport.raiseOnUseCaseError
@@ -35,17 +35,17 @@ import org.typelevel.otel4s.trace.{SpanContext, Tracer}
 import com.example.graphQL.cats.service.read.*
 
 final case class HiringGraphQLServices(
-    readModel: HiringReadModel,
-    jobService: JobUseCases,
-    applicationService: ApplicationUseCases,
+    readModel: HiringReadModel[IO],
+    jobService: JobUseCases[IO],
+    applicationService: ApplicationUseCases[IO],
     cursorKey: CursorCodec.CursorKey,
-    accountService: AccountUseCases,
-    interactionService: InteractionUseCases,
-    searchSessions: SearchSessionRecording,
-    semanticSearchService: Option[SearchUseCases] = None,
-    analyticsReporting: AnalyticsReportingUseCases = AnalyticsReportingUseCases.unavailable,
-    interviewScheduling: Option[com.example.graphQL.cats.service.application.InterviewSchedulingService] = None,
-    embeddingCoverage: EmbeddingCoverageUseCases = EmbeddingCoverageUseCases.denyAll
+    accountService: AccountUseCases[IO],
+    interactionService: InteractionUseCases[IO],
+    searchSessions: SearchSessionRecording[IO],
+    semanticSearchService: Option[SearchUseCases[IO]] = None,
+    analyticsReporting: AnalyticsReportingUseCases[IO] = AnalyticsReportingUseCases.unavailable,
+    interviewScheduling: Option[com.example.graphQL.cats.service.application.InterviewSchedulingService[IO]] = None,
+    embeddingCoverage: EmbeddingCoverageUseCases[IO] = EmbeddingCoverageUseCases.denyAll[IO]
 )
 
 final case class EmailVisibility(userId: UserId)
@@ -56,7 +56,7 @@ final case class RequestContextParameters(
     hiring: HiringGraphQLServices,
     ensureHiringReady: IO[ProbeResult],
     tracer: Tracer[IO] = Tracer.noop[IO],
-    diagnostics: Diagnostics,
+    diagnostics: Diagnostics[IO],
     requestId: Option[String] = None,
     clientAddress: Option[IpAddress] = None,
     rateLimit: AuthRateLimiter.Key => IO[Either[AuthRateLimiter.RateLimited, Unit]] = _ => IO.pure(Right(())),
@@ -71,7 +71,7 @@ final class RequestContext private (
     spanContext: Option[SpanContext],
     readinessProbe: IO[ProbeResult],
     hiringReadinessProbe: IO[ProbeResult],
-    viewer: Option[UseCaseIO[AuthenticatedActor]],
+    viewer: Option[UseCaseF[IO, AuthenticatedActor]],
     viewerInvalidated: Ref[IO, Boolean]
 ) {
   private[graphql] def effectAdapter: HiringGraphQLSangriaAdapter = sangriaAdapter

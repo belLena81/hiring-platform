@@ -2,7 +2,8 @@ package com.example.graphQL.cats.service.auth
 
 import cats.data.EitherT
 import cats.data.ValidatedNel
-import cats.effect.{Clock, IO}
+import cats.MonadThrow
+import cats.effect.Clock
 import cats.effect.std.UUIDGen
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.error.DomainValidationError
@@ -23,23 +24,23 @@ import com.example.graphQL.cats.service.search.EmbeddingWorkPublisher
 import com.example.graphQL.cats.shared.Parsing
 import java.time.Instant
 
-final class UserAccountService(
-    users: UserRepository,
-    accounts: UserAccountRepository,
-    hasher: PasswordHasher,
-    tokenIssuer: AccessTokenIssuer,
+final class UserAccountService[F[_]: MonadThrow](
+    users: UserRepository[F],
+    accounts: UserAccountRepository[F],
+    hasher: PasswordHasher[F],
+    tokenIssuer: AccessTokenIssuer[F],
     authenticationFingerprint: AuthenticationFingerprint,
-    erasureRequests: AnalyticsErasureRequestRepository = AnalyticsErasureRequestRepository.unavailable,
-    embeddingWork: EmbeddingWorkPublisher,
-    idempotent: Idempotent,
-    diagnostics: Diagnostics,
-    clock: Clock[IO] = Clock[IO],
-    uuidGen: UUIDGen[IO] = UUIDGen[IO]
-) extends AccountUseCases {
+    erasureRequests: AnalyticsErasureRequestRepository[F],
+    embeddingWork: EmbeddingWorkPublisher[F],
+    idempotent: Idempotent[F],
+    diagnostics: Diagnostics[F],
+    clock: Clock[F],
+    uuidGen: UUIDGen[F]
+) extends AccountUseCases[F] {
   import Diagnostics.*
   private val authorization = ActorAuthorization(users)
 
-  override def signUp(request: IdempotencyRequest, input: SignUpInput): UseCaseIO[(User, AccountToken)] =
+  override def signUp(request: IdempotencyRequest, input: SignUpInput): UseCaseF[F, (User, AccountToken)] =
     idempotent.execute(
       "signUp",
       Idempotent.publicActorScope(input.name),
@@ -48,7 +49,7 @@ final class UserAccountService(
       replayAccount(input.name, input.password)
     ) { context =>
       for {
-        now <- EitherT.liftF(clock.realTimeInstant)
+        now <- EitherT.liftF[F, UseCaseError, Instant](clock.realTimeInstant)
         userId <- EitherT.liftF(uuidGen.randomUUID.map(UserId.apply))
         result <- signUpOnce(input, now, userId, context)
       } yield result
@@ -59,16 +60,16 @@ final class UserAccountService(
       now: Instant,
       userId: UserId,
       context: MutationWriteContext
-  ): UseCaseIO[(User, AccountToken)] =
+  ): UseCaseF[F, (User, AccountToken)] =
     if (input.role == UserRole.Admin) EitherT.leftT(UseCaseError.Account(AccountError.AdminSignupForbidden))
     else if (!UserProfile.matchesRole(input.role, input.profile))
       EitherT.leftT(UseCaseError.Account(AccountError.ProfileRoleMismatch))
     else
       (for {
-        name <- EitherT.fromEither[IO](
+        name <- EitherT.fromEither[F](
           validateRegistration(input).toEither.leftMap(UseCaseError.ValidationFailed.apply)
         )
-        _ <- UseCaseIO
+        _ <- UseCaseF
           .repository(accounts.initialized)
           .subflatMap(initialized => Either.cond(initialized, (), UseCaseError.Account(AccountError.BootstrapRequired)))
         hash <- EitherT.liftF(hasher.hash(input.password))
@@ -80,7 +81,7 @@ final class UserAccountService(
         }
       } yield issued).semiflatTap(_ => embeddingWork.wakeAfterCommit(diagnostics))
 
-  override def login(request: IdempotencyRequest, input: LoginInput): UseCaseIO[(User, AccountToken)] =
+  override def login(request: IdempotencyRequest, input: LoginInput): UseCaseF[F, (User, AccountToken)] =
     idempotent.execute(
       "login",
       Idempotent.publicActorScope(input.name),
@@ -88,11 +89,11 @@ final class UserAccountService(
       accountReference,
       replayAccount(input.name, input.password)
     ) { _ =>
-      EitherT.liftF(clock.realTimeInstant).flatMap(now => loginOnce(input, now))
+      EitherT.liftF[F, UseCaseError, Instant](clock.realTimeInstant).flatMap(now => loginOnce(input, now))
     }
 
-  private def loginOnce(input: LoginInput, now: Instant): UseCaseIO[(User, AccountToken)] =
-    UseCaseIO
+  private def loginOnce(input: LoginInput, now: Instant): UseCaseF[F, (User, AccountToken)] =
+    UseCaseF
       .repository(accounts.findByCanonicalName(canonicalName(input.name)))
       .flatMap(found =>
         verified(found.filter(_.user.accountStatus == AccountStatus.Active), input.password)(token(_, now))
@@ -100,8 +101,8 @@ final class UserAccountService(
 
   /** Every refusal costs one password verification, so an unknown or inactive account is not distinguishable. */
   private def verified(credentials: Option[AccountCredentials], password: String)(
-      issue: User => UseCaseIO[(User, AccountToken)]
-  ): UseCaseIO[(User, AccountToken)] =
+      issue: User => UseCaseF[F, (User, AccountToken)]
+  ): UseCaseF[F, (User, AccountToken)] =
     credentials match {
       case Some(known) =>
         EitherT.liftF(hasher.verify(known.passwordHash, password)).flatMap {
@@ -113,17 +114,17 @@ final class UserAccountService(
           EitherT.leftT(UseCaseError.Account(AccountError.InvalidCredentials))
     }
 
-  override def me(actor: ActorContext): UseCaseIO[User] =
+  override def me(actor: ActorContext): UseCaseF[F, User] =
     authorization.resolve(actor)
 
   override def updateMyProfile(
       request: IdempotencyRequest,
       actor: ActorContext,
       input: AccountProfileInput
-  ): UseCaseIO[User] =
+  ): UseCaseF[F, User] =
     idempotent.executeFor[User](actor, "updateMyProfile", request, userReference, replayUser(actor)) { context =>
       for {
-        now <- EitherT.liftF(clock.realTimeInstant)
+        now <- EitherT.liftF[F, UseCaseError, Instant](clock.realTimeInstant)
         user <- updateMyProfileOnce(actor, input, now, context)
       } yield user
     }
@@ -133,35 +134,37 @@ final class UserAccountService(
       input: AccountProfileInput,
       now: Instant,
       context: MutationWriteContext
-  ): UseCaseIO[User] =
+  ): UseCaseF[F, User] =
     authorization.resolve(actor).flatMap { user =>
       if (user.role == UserRole.Admin)
         EitherT.leftT(UseCaseError.Account(AccountError.ProfileUnsupportedForRole))
       else if (!UserProfile.matchesRole(user.role, Some(input.profile)))
         EitherT.leftT(UseCaseError.Account(AccountError.ProfileRoleMismatch))
       else
-        EitherT.fromEither[IO](
+        EitherT.fromEither[F](
           UserProfile.validateFor(user.role, Some(input.profile)).toEither.leftMap(UseCaseError.ValidationFailed.apply)
         ) *>
-          UseCaseIO
+          UseCaseF
             .repository(accounts.updateProfile(user.id, input.profile, now, context))
             .semiflatTap(_ => embeddingWork.wakeAfterCommit(diagnostics))
     }
 
-  override def deleteMyAccount(request: IdempotencyRequest, actor: ActorContext): UseCaseIO[String] =
+  override def deleteMyAccount(request: IdempotencyRequest, actor: ActorContext): UseCaseF[F, String] =
     idempotent.executeFor[String](actor, "deleteMyAccount", request, receiptReference, replayDeletion(actor)) {
       context =>
-        EitherT.liftF(clock.realTimeInstant).flatMap(now => deleteMyAccountOnce(actor, now, context))
+        EitherT
+          .liftF[F, UseCaseError, Instant](clock.realTimeInstant)
+          .flatMap(now => deleteMyAccountOnce(actor, now, context))
     }
 
-  override def accountDeletionStatus(actor: ActorContext, receiptId: String): UseCaseIO[AccountDeletionStatus] =
-    UseCaseIO.repository(erasureRequests.statusForSubject(actor.userId, receiptId))
+  override def accountDeletionStatus(actor: ActorContext, receiptId: String): UseCaseF[F, AccountDeletionStatus] =
+    UseCaseF.repository(erasureRequests.statusForSubject(actor.userId, receiptId))
 
   private def deleteMyAccountOnce(
       actor: ActorContext,
       now: Instant,
       context: MutationWriteContext
-  ): UseCaseIO[String] =
+  ): UseCaseF[F, String] =
     if (context eq MutationWriteContext.directWrite)
       EitherT.leftT(UseCaseError.Analytics(AnalyticsError.ErasureContextRequired))
     else
@@ -169,24 +172,24 @@ final class UserAccountService(
         case user if user.role == UserRole.Admin =>
           EitherT.leftT(UseCaseError.Authentication(AuthenticationError.SingletonAdminViolation))
         case user if user.accountStatus == AccountStatus.Deleted =>
-          UseCaseIO.repository(erasureRequests.enqueue(user.id, now, context))
+          UseCaseF.repository(erasureRequests.enqueue(user.id, now, context))
         case user =>
           for {
             _ <- erasureRequests
               .workerReady(now)
               .leftMap(_ => UseCaseError.Analytics(AnalyticsError.ErasureWorkerUnavailable))
-            receiptId <- UseCaseIO.repository(erasureRequests.enqueue(user.id, now, context))
-            _ <- UseCaseIO.repository(accounts.deleteAccount(user.id, now, s"deleted-${user.id.value}", context))
+            receiptId <- UseCaseF.repository(erasureRequests.enqueue(user.id, now, context))
+            _ <- UseCaseF.repository(accounts.deleteAccount(user.id, now, s"deleted-${user.id.value}", context))
           } yield receiptId
       }
 
-  override def listUsers(actor: ActorContext, page: UserPageRequest): UseCaseIO[List[User]] =
+  override def listUsers(actor: ActorContext, page: UserPageRequest): UseCaseF[F, List[User]] =
     authorization
       .resolve(actor)
       // Deliberate anti-enumeration: every actor-lookup failure looks like Unauthorized, never Forbidden or Unavailable.
       .leftMap(_ => UseCaseError.Authentication(AuthenticationError.Unauthorized))
       .flatMap {
-        case user if user.role == UserRole.Admin => UseCaseIO.repository(accounts.listAccounts(page))
+        case user if user.role == UserRole.Admin => UseCaseF.repository(accounts.listAccounts(page))
         case _ => EitherT.leftT(UseCaseError.Authentication(AuthenticationError.Unauthorized))
       }
 
@@ -197,8 +200,8 @@ final class UserAccountService(
 
   private def replayAccount(name: String, password: String)(
       reference: MutationEntityReference
-  ): UseCaseIO[(User, AccountToken)] =
-    if (reference.entityType != "user") Idempotent.corruptReference
+  ): UseCaseF[F, (User, AccountToken)] =
+    if (reference.entityType != "user") Idempotent.corruptReference[F, (User, AccountToken)]
     else
       replayKnownAccount(name, password, reference)
 
@@ -206,8 +209,8 @@ final class UserAccountService(
       name: String,
       password: String,
       reference: MutationEntityReference
-  ): UseCaseIO[(User, AccountToken)] =
-    UseCaseIO
+  ): UseCaseF[F, (User, AccountToken)] =
+    UseCaseF
       .repository(accounts.findByCanonicalName(canonicalName(name)))
       .flatMap(found =>
         verified(
@@ -217,19 +220,19 @@ final class UserAccountService(
               canonicalName(credentials.user.name) == canonicalName(name)
           ),
           password
-        )(user => EitherT.liftF(clock.realTimeInstant).flatMap(token(user, _)))
+        )(user => EitherT.liftF[F, UseCaseError, Instant](clock.realTimeInstant).flatMap(token(user, _)))
       )
 
-  private def replayUser(actor: ActorContext): MutationEntityReference => UseCaseIO[User] =
-    Idempotent.replayById("user", UserId.apply) { userId =>
+  private def replayUser(actor: ActorContext): MutationEntityReference => UseCaseF[F, User] =
+    Idempotent.replayById[F, UserId, User]("user", UserId.apply) { userId =>
       if (userId == actor.userId) me(actor)
       else EitherT.leftT(UseCaseError.Authentication(AuthenticationError.Unauthorized))
     }
 
-  private def replayDeletion(actor: ActorContext)(reference: MutationEntityReference): UseCaseIO[String] =
+  private def replayDeletion(actor: ActorContext)(reference: MutationEntityReference): UseCaseF[F, String] =
     if (reference.entityType == "analytics-erasure-receipt" && validReceiptId(reference.entityId))
       authorization.resolve(actor, allowDeleted = true).map(_ => reference.entityId)
-    else Idempotent.corruptReference
+    else Idempotent.corruptReference[F, String]
 
   private def accountReference(value: (User, AccountToken)): MutationEntityReference = userReference(value._1)
 
@@ -241,7 +244,7 @@ final class UserAccountService(
   private def validReceiptId(value: String): Boolean =
     Parsing.parseUuid(value).exists(_.toString == value)
 
-  private def token(user: User, now: Instant): UseCaseIO[(User, AccountToken)] =
+  private def token(user: User, now: Instant): UseCaseF[F, (User, AccountToken)] =
     EitherT(
       tokenIssuer
         .issue(user, now)

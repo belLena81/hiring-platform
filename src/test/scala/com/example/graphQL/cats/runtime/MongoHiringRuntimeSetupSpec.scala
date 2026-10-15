@@ -18,7 +18,7 @@ final class MongoHiringRuntimeSetupSpec extends CatsEffectSuite {
       .fold(errors => fail(s"fixture rejected: $errors"), identity)
     for {
       events <- Ref.of[IO, Vector[LogEvent]](Vector.empty)
-      diagnostics = new Diagnostics {
+      diagnostics = new Diagnostics[IO] {
         override def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]): IO[Unit] =
           events.update(_ :+ event)
       }

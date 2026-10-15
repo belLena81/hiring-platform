@@ -1,12 +1,14 @@
 package com.example.graphQL.cats.api.graphql
 
+import cats.effect.IO
+
 import com.example.graphQL.cats.api.graphql.HiringGraphQLInputs.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLResolverSupport.*
 import com.example.graphQL.cats.domain.model.{Job, JobStatus, Location}
 import com.example.graphQL.cats.domain.model.Identifiers.JobId
 import com.example.graphQL.cats.service.job.{CreateJobInput, UpdateJobInput}
-import com.example.graphQL.cats.service.protocol.{IdempotencyRequest, JobUseCases, UseCaseIO}
+import com.example.graphQL.cats.service.protocol.{IdempotencyRequest, JobUseCases, UseCaseF}
 import com.example.graphQL.cats.service.search.JobSearchFilter
 import com.example.graphQL.cats.domain.pagination.{JobCursor, JobPageRequest}
 import com.example.graphQL.cats.service.events.OperationalEventPayload.SearchKind
@@ -80,9 +82,11 @@ private[graphql] object HiringGraphQLJobResolvers {
 
   def changeJob(
       context: Context[RequestContext, Unit],
-      method: JobUseCases => (IdempotencyRequest, com.example.graphQL.cats.service.ActorContext, JobId) => UseCaseIO[
-        Job
-      ]
+      method: JobUseCases[IO] => (
+          IdempotencyRequest,
+          com.example.graphQL.cats.service.ActorContext,
+          JobId
+      ) => UseCaseF[IO, Job]
   ): HiringGraphQLResult[MutationOutcome[Job]] =
     authenticated(context) { case (actor, hiring) =>
       val input = context.arg(jobActionInputArgument)

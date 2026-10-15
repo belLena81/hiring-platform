@@ -65,13 +65,13 @@ enum MutationReceiptExecution[+A, +E] {
 /** Runs a state write and its idempotency receipt atomically when the adapter supports transactions. The callback must
   * use the supplied context for every participating write.
   */
-trait MutationReceiptRepository {
+trait MutationReceiptRepository[F[_]] {
   def execute[A, E](
       key: MutationReceiptKey,
       fingerprint: MutationReceiptFingerprint,
       now: Instant,
       expiresAt: Instant
   )(
-      write: MutationWriteContext => RepositoryIO[MutationWriteOutcome[A, E]]
-  ): RepositoryIO[MutationReceiptExecution[A, E]]
+      write: MutationWriteContext => RepositoryF[F, MutationWriteOutcome[A, E]]
+  ): RepositoryF[F, MutationReceiptExecution[A, E]]
 }

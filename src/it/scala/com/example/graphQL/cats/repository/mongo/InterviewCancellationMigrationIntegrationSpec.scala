@@ -18,7 +18,7 @@ final class InterviewCancellationMigrationIntegrationSpec extends MongoIntegrati
   private val at = Date.from(Instant.parse("2026-10-09T08:00:00Z"))
 
   private def initialize(database: MongoDatabase[IO]): IO[Unit] =
-    MongoHiringSetup.initialize(database, Diagnostics.noop)
+    MongoHiringSetup.initialize(database, Diagnostics.noop[IO])
 
   private def command(workflow: String, step: String, body: Document, availableAt: Date = at): Document =
     new Document("_id", s"$workflow:$step")

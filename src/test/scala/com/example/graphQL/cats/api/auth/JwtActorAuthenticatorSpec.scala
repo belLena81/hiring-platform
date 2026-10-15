@@ -9,7 +9,7 @@ import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.ActorContext
 import com.example.graphQL.cats.service.auth.UserAuthenticationService
 import com.example.graphQL.cats.service.protocol.UserAuthenticator
-import com.example.graphQL.cats.service.port.{RepositoryIO, UserRepository}
+import com.example.graphQL.cats.service.port.{RepositoryF, UserRepository}
 import com.example.graphQL.cats.config.JwtAuthConfig
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.domain.model.{
@@ -123,10 +123,10 @@ final class JwtActorAuthenticatorSpec extends CatsEffectSuite {
 
   test("repository failures remain unavailable rather than becoming an unknown actor") {
     val unavailableUsers = new com.example.graphQL.cats.service.ServiceFixtures.VersionedUserRepositoryTestAdapter {
-      override def find(id: UserId): RepositoryIO[Option[User]] =
-        com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Left(RepositoryError.Unavailable)))
-      override def updateEmbedding(id: UserId, embedding: EntityEmbedding): RepositoryIO[Unit] =
-        com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Right(())))
+      override def find(id: UserId): RepositoryF[IO, Option[User]] =
+        com.example.graphQL.cats.service.port.RepositoryF.fromFEither(IO.pure(Left(RepositoryError.Unavailable)))
+      override def updateEmbedding(id: UserId, embedding: EntityEmbedding): RepositoryF[IO, Unit] =
+        com.example.graphQL.cats.service.port.RepositoryF.fromFEither(IO.pure(Right(())))
     }
     val authenticator = new JwtActorAuthenticator(
       JwtAuthConfig(secret, issuer, audience),
@@ -168,14 +168,14 @@ final class JwtActorAuthenticatorSpec extends CatsEffectSuite {
     overrideClaims.asObject.fold(baseClaims)(fields => baseClaims.deepMerge(Json.fromJsonObject(fields)))
   }
 
-  private def users(values: Map[UserId, User]): UserAuthenticator =
+  private def users(values: Map[UserId, User]): UserAuthenticator[IO] =
     UserAuthenticationService(userRepository(values))
 
-  private def userRepository(values: Map[UserId, User]): UserRepository =
+  private def userRepository(values: Map[UserId, User]): UserRepository[IO] =
     new com.example.graphQL.cats.service.ServiceFixtures.VersionedUserRepositoryTestAdapter {
-      override def find(id: UserId): RepositoryIO[Option[User]] =
-        com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Right(values.get(id))))
-      override def updateEmbedding(id: UserId, embedding: EntityEmbedding): RepositoryIO[Unit] =
-        com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Right(())))
+      override def find(id: UserId): RepositoryF[IO, Option[User]] =
+        com.example.graphQL.cats.service.port.RepositoryF.fromFEither(IO.pure(Right(values.get(id))))
+      override def updateEmbedding(id: UserId, embedding: EntityEmbedding): RepositoryF[IO, Unit] =
+        com.example.graphQL.cats.service.port.RepositoryF.fromFEither(IO.pure(Right(())))
     }
 }

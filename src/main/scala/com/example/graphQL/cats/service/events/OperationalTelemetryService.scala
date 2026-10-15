@@ -1,7 +1,8 @@
 package com.example.graphQL.cats.service.events
 
 import cats.data.EitherT
-import cats.effect.{Clock, IO}
+import cats.Monad
+import cats.effect.Clock
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.Identifiers.JobId
@@ -18,17 +19,17 @@ import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
 import com.example.graphQL.cats.service.auth.ActorAuthorization
 import com.example.graphQL.cats.service.mutation.Idempotent
-import com.example.graphQL.cats.service.protocol.{IdempotencyRequest, InteractionUseCases, UseCaseIO}
+import com.example.graphQL.cats.service.protocol.{IdempotencyRequest, InteractionUseCases, UseCaseF}
 import java.util.UUID
 
-final class OperationalTelemetryService(
-    users: UserRepository,
-    jobs: JobRepository,
-    searchSessions: SearchSessionRepository,
-    searchSessionWork: SearchSessionWorkRepository,
-    idempotent: Idempotent,
-    clock: Clock[IO] = Clock[IO]
-) extends InteractionUseCases {
+final class OperationalTelemetryService[F[_]: Monad](
+    users: UserRepository[F],
+    jobs: JobRepository[F],
+    searchSessions: SearchSessionRepository[F],
+    searchSessionWork: SearchSessionWorkRepository[F],
+    idempotent: Idempotent[F],
+    clock: Clock[F]
+) extends InteractionUseCases[F] {
   private val authorization = ActorAuthorization(users)
 
   override def recordJobView(
@@ -37,7 +38,7 @@ final class OperationalTelemetryService(
       eventId: UUID,
       jobId: JobId,
       searchId: Option[UUID]
-  ): UseCaseIO[Unit] =
+  ): UseCaseF[F, Unit] =
     idempotent.executeFor[Unit](
       actor,
       "recordJobView",
@@ -47,14 +48,14 @@ final class OperationalTelemetryService(
     ) { context =>
       for {
         user <- authorization.resolve(actor)
-        job <- UseCaseIO.found(jobs.find(jobId), "job")
-        _ <- UseCaseIO.ensure(authorization.canView(user, job), UseCaseError.Domain(DomainError.Forbidden))
-        rank <- searchId.fold(EitherT.rightT[IO, UseCaseError](Option.empty[Int]))(id =>
+        job <- UseCaseF.found(jobs.find(jobId), "job")
+        _ <- UseCaseF.ensure[F](authorization.canView(user, job), UseCaseError.Domain(DomainError.Forbidden))
+        rank <- searchId.fold(EitherT.rightT[F, UseCaseError](Option.empty[Int]))(id =>
           verifiedSearchResult(actor, id, jobId.value.toString).map(value => Some(value._1))
         )
-        now <- EitherT.liftF(clock.realTimeInstant)
+        now <- EitherT.liftF[F, UseCaseError, java.time.Instant](clock.realTimeInstant)
         event = OperationalEvents.jobViewed(eventId, jobId, actor.userId, searchId, rank, now)
-        _ <- UseCaseIO.repository(searchSessions.recordInteraction(event, context))
+        _ <- UseCaseF.repository(searchSessions.recordInteraction(event, context))
       } yield ()
     }
 
@@ -64,7 +65,7 @@ final class OperationalTelemetryService(
       eventId: UUID,
       searchId: UUID,
       resultId: String
-  ): UseCaseIO[Unit] =
+  ): UseCaseF[F, Unit] =
     idempotent.executeFor[Unit](
       actor,
       "recordSearchResultClick",
@@ -74,8 +75,8 @@ final class OperationalTelemetryService(
     ) { context =>
       for {
         verified <- verifiedSearchResult(actor, searchId, resultId)
-        now <- EitherT.liftF(clock.realTimeInstant)
-        event <- EitherT.fromEither[IO](
+        now <- EitherT.liftF[F, UseCaseError, java.time.Instant](clock.realTimeInstant)
+        event <- EitherT.fromEither[F](
           OperationalEvents
             .searchResultClicked(
               eventId,
@@ -88,7 +89,7 @@ final class OperationalTelemetryService(
             )
             .leftMap(_ => UseCaseError.Repository(RepositoryError.InvalidEvent))
         )
-        _ <- UseCaseIO.repository(searchSessions.recordInteraction(event, context))
+        _ <- UseCaseF.repository(searchSessions.recordInteraction(event, context))
       } yield ()
     }
 
@@ -96,10 +97,10 @@ final class OperationalTelemetryService(
       actor: ActorContext,
       searchId: UUID,
       resultId: String
-  ): UseCaseIO[(Int, OperationalEventPayload.SearchKind)] =
-    UseCaseIO.repository(searchSessions.find(searchId)).flatMap {
+  ): UseCaseF[F, (Int, OperationalEventPayload.SearchKind)] =
+    UseCaseF.repository(searchSessions.find(searchId)).flatMap {
       case None =>
-        UseCaseIO.repository(searchSessionWork.findForActor(actor.userId, searchId)).subflatMap {
+        UseCaseF.repository(searchSessionWork.findForActor(actor.userId, searchId)).subflatMap {
           case Some(SearchSessionLookup.Pending) =>
             Left(UseCaseError.Domain(DomainError.SearchSessionPending))
           case Some(SearchSessionLookup.Failed) =>
@@ -109,7 +110,7 @@ final class OperationalTelemetryService(
       case Some(session) if session.actorId != actor.userId =>
         EitherT.leftT(UseCaseError.Domain(DomainError.Forbidden))
       case Some(session) =>
-        EitherT.fromEither[IO](
+        EitherT.fromEither[F](
           session.results
             .find(_.resultId == resultId)
             .map(result => (result.rank, session.searchKind))
@@ -122,7 +123,7 @@ final class OperationalTelemetryService(
 
   private def replayInteraction(actor: ActorContext, eventId: UUID)(
       reference: MutationEntityReference
-  ): UseCaseIO[Unit] =
+  ): UseCaseF[F, Unit] =
     if (reference == interactionReference(eventId)) authorization.resolve(actor).void
     else Idempotent.corruptReference
 }

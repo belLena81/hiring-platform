@@ -68,7 +68,7 @@ private[mongo] object MongoHiringMigrations {
   def initialize(
       database: SetupDatabase,
       resetOnStart: Boolean,
-      diagnostics: Diagnostics,
+      diagnostics: Diagnostics[IO],
       topics: InterviewTopicPair = InterviewTopicPair.Default
   ): IO[Unit] =
     IO.whenA(resetOnStart)(resetOwnedCollections(database)) *>
@@ -210,7 +210,7 @@ private[mongo] object MongoHiringMigrations {
   /** Backfills the internal subject index needed to fence/purge events without changing the Kafka envelope. A completed
     * proof is reopened when unverified events reappear.
     */
-  private def outboxSubjectReferences(diagnostics: Diagnostics): MongoMigrationStep = {
+  private def outboxSubjectReferences(diagnostics: Diagnostics[IO]): MongoMigrationStep = {
     val unverifiedSubjects = Filters.ne(MongoFields.SubjectRefsVersion, 1)
     def outbox(database: SetupDatabase) = database.getCollection(MongoCollections.EventOutbox)
     def backfill(run: MigrationRun): IO[Unit] =
@@ -237,7 +237,7 @@ private[mongo] object MongoHiringMigrations {
   private def backfillOutboxSubjectReferences(
       run: MigrationRun,
       document: Document,
-      diagnostics: Diagnostics
+      diagnostics: Diagnostics[IO]
   ): IO[Unit] = {
     val outbox = run.database.getCollection(MongoCollections.EventOutbox)
     val id = Option(document.getString(MongoFields.Id))
@@ -338,7 +338,7 @@ private[mongo] object MongoHiringMigrations {
   private def outboxCandidateIds(
       database: SetupDatabase,
       event: com.example.graphQL.cats.service.events.OperationalEventEnvelope,
-      diagnostics: Diagnostics
+      diagnostics: Diagnostics[IO]
   ): IO[Either[String, List[String]]] = {
     import com.example.graphQL.cats.service.events.{OperationalAggregateType, OperationalEventType}
 
@@ -401,7 +401,7 @@ private[mongo] object MongoHiringMigrations {
   private def candidateIdFromSearchClick(
       database: SetupDatabase,
       event: com.example.graphQL.cats.service.events.OperationalEventEnvelope,
-      diagnostics: Diagnostics
+      diagnostics: Diagnostics[IO]
   ): IO[Either[String, List[String]]] =
     verifyRetainedSearchSessionForClick(
       event,
@@ -417,7 +417,7 @@ private[mongo] object MongoHiringMigrations {
   private[mongo] def verifyRetainedSearchSessionForClick(
       event: com.example.graphQL.cats.service.events.OperationalEventEnvelope,
       findSession: java.util.UUID => IO[Option[Document]],
-      diagnostics: Diagnostics
+      diagnostics: Diagnostics[IO]
   ): IO[Either[String, List[String]]] = {
     val payload = event.payload.hcursor
     val searchId = payload

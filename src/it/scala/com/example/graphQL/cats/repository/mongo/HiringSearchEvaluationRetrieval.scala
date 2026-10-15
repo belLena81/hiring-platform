@@ -27,27 +27,27 @@ private[mongo] final class HiringSearchEvaluationRetrieval(database: MongoDataba
     indexes.candidateLexicalIndex,
     8,
     8,
-    diagnostics = Diagnostics.noop,
+    diagnostics = Diagnostics.noop[IO],
     discoveryPolicy = Some(policy)
   )
   private val users = new MongoUserRepository(
     database,
     MongoRepositoryTestSupport.noTransaction,
     MongoEmbeddingWorkEnqueuer.disabled,
-    Diagnostics.noop
+    Diagnostics.noop[IO]
   )
   private val jobs = new MongoJobRepository(
     database,
     MongoRepositoryTestSupport.noTransaction,
     MongoEmbeddingWorkEnqueuer.disabled,
-    Diagnostics.noop
+    Diagnostics.noop[IO]
   )
   private val page = PageSize
     .fromInt(SearchEvaluationFixtures.K)
     .fold(_ => throw new IllegalStateException("Invalid fixed fixture page size"), identity)
 
-  private def documents(collection: String, pipeline: List[Document]): RepositoryIO[List[Document]] =
-    RepositoryIO.fromIOEither(
+  private def documents(collection: String, pipeline: List[Document]): RepositoryF[IO, List[Document]] =
+    RepositoryF.fromFEither(
       policy
         .run(
           Mongo4catsCollections
@@ -61,51 +61,52 @@ private[mongo] final class HiringSearchEvaluationRetrieval(database: MongoDataba
         .map(_.leftMap(_ => RepositoryError.Unavailable))
     )
 
-  private def branch(strategy: SearchEvaluationStrategy): SemanticSearchRepository = new SemanticSearchRepository {
-    def authorizedJobEligibility(
-        scope: HiringReadScope,
-        ids: List[JobId],
-        candidate: Option[CandidateSearchEligibility]
-    ) =
-      repository.authorizedJobEligibility(scope, ids, candidate)
-    def authorizedCandidateEligibility(scope: HiringReadScope, job: JobSearchEligibility, ids: List[UserId]) =
-      repository.authorizedCandidateEligibility(scope, job, ids)
-    def recommendedJobs(query: VectorSearchQuery) = repository.recommendedJobs(query)
-    def searchJobs(query: VectorSearchQuery): RepositoryIO[List[JobRetrievalHit]] = strategy match {
-      case SearchEvaluationStrategy.ApplicationRrf => repository.searchJobs(query)
-      case SearchEvaluationStrategy.Vector         =>
-        repository.searchJobs(query.copy(lexicalQuery = None, mode = SearchMode.VECTOR))
-      case SearchEvaluationStrategy.Lexical =>
-        val pipeline = repository
-          .lexicalJobStages(query.lexicalQuery.getOrElse(""), repository.jobLexicalFilter(query, query.filter))
-          .asScala
-          .toList :+
-          new Document("$set", new Document(MongoFields.Score, new Document("$meta", "searchScore"))) :+
-          repository.retrievalProjection
-        documents(MongoCollections.Jobs, pipeline).subflatMap(
-          MongoSemanticSearchResult.jobHits(_, query).map(_.flatten)
-        )
-      case SearchEvaluationStrategy.AtlasAnn => RepositoryIO.raise(RepositoryError.Unavailable)
+  private def branch(strategy: SearchEvaluationStrategy): SemanticSearchRepository[IO] =
+    new SemanticSearchRepository[IO] {
+      def authorizedJobEligibility(
+          scope: HiringReadScope,
+          ids: List[JobId],
+          candidate: Option[CandidateSearchEligibility]
+      ) =
+        repository.authorizedJobEligibility(scope, ids, candidate)
+      def authorizedCandidateEligibility(scope: HiringReadScope, job: JobSearchEligibility, ids: List[UserId]) =
+        repository.authorizedCandidateEligibility(scope, job, ids)
+      def recommendedJobs(query: VectorSearchQuery) = repository.recommendedJobs(query)
+      def searchJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] = strategy match {
+        case SearchEvaluationStrategy.ApplicationRrf => repository.searchJobs(query)
+        case SearchEvaluationStrategy.Vector         =>
+          repository.searchJobs(query.copy(lexicalQuery = None, mode = SearchMode.VECTOR))
+        case SearchEvaluationStrategy.Lexical =>
+          val pipeline = repository
+            .lexicalJobStages(query.lexicalQuery.getOrElse(""), repository.jobLexicalFilter(query, query.filter))
+            .asScala
+            .toList :+
+            new Document("$set", new Document(MongoFields.Score, new Document("$meta", "searchScore"))) :+
+            repository.retrievalProjection
+          documents(MongoCollections.Jobs, pipeline).subflatMap(
+            MongoSemanticSearchResult.jobHits(_, query).map(_.flatten)
+          )
+        case SearchEvaluationStrategy.AtlasAnn => RepositoryF.at[IO].raise(RepositoryError.Unavailable)
+      }
+      def candidateMatches(query: VectorSearchQuery): RepositoryF[IO, List[CandidateRetrievalHit]] = strategy match {
+        case SearchEvaluationStrategy.ApplicationRrf => repository.candidateMatches(query)
+        case SearchEvaluationStrategy.Vector         =>
+          repository.candidateMatches(query.copy(lexicalQuery = None, candidateQueryVector = None))
+        case SearchEvaluationStrategy.Lexical =>
+          val pipeline =
+            repository.candidateLexicalPipeline(query, repository.candidateLexicalFilter(query)).asScala.toList
+          documents(MongoCollections.Users, pipeline).subflatMap(
+            MongoSemanticSearchResult.candidateHits(_, query).map(_.flatten)
+          )
+        case SearchEvaluationStrategy.AtlasAnn => RepositoryF.at[IO].raise(RepositoryError.Unavailable)
+      }
     }
-    def candidateMatches(query: VectorSearchQuery): RepositoryIO[List[CandidateRetrievalHit]] = strategy match {
-      case SearchEvaluationStrategy.ApplicationRrf => repository.candidateMatches(query)
-      case SearchEvaluationStrategy.Vector         =>
-        repository.candidateMatches(query.copy(lexicalQuery = None, candidateQueryVector = None))
-      case SearchEvaluationStrategy.Lexical =>
-        val pipeline =
-          repository.candidateLexicalPipeline(query, repository.candidateLexicalFilter(query)).asScala.toList
-        documents(MongoCollections.Users, pipeline).subflatMap(
-          MongoSemanticSearchResult.candidateHits(_, query).map(_.flatten)
-        )
-      case SearchEvaluationStrategy.AtlasAnn => RepositoryIO.raise(RepositoryError.Unavailable)
-    }
-  }
 
   override def retrieve(
       query: SearchEvaluationFixtureQuery,
       strategy: SearchEvaluationStrategy
   ): IO[Either[SearchEvaluationFailure, List[String]]] = {
-    val embeddings = new EmbeddingService {
+    val embeddings = new EmbeddingService[IO] {
       def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] = IO.pure(
         Right(
           EmbeddingVector(

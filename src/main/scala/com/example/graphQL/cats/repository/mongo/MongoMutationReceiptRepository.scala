@@ -1,5 +1,7 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.service.resilience.CircuitBreaker
+
 import cats.effect.IO
 import cats.effect.std.UUIDGen
 import cats.syntax.all.*
@@ -27,13 +29,13 @@ private[mongo] object MongoMutationWriteContext {
       context: MutationWriteContext,
       transactionRunner: MongoTransactionRunner,
       transactionRequired: Boolean
-  )(operation: Option[ClientSession[IO]] => RepositoryIO[A]): RepositoryIO[A] =
+  )(operation: Option[ClientSession[IO]] => RepositoryF[IO, A]): RepositoryF[IO, A] =
     context match {
       case MongoMutationWriteContext(value)                   => operation(value)
       case value if value eq MutationWriteContext.directWrite =>
         if (transactionRequired) transactionRunner.run(operation) else operation(None)
       case _ =>
-        RepositoryIO.lift(
+        RepositoryF.lift(
           IO.raiseError(MongoSetupError("Mutation write context belongs to another repository adapter"))
         )
     }
@@ -45,9 +47,9 @@ private[mongo] object MongoMutationWriteContext {
 final class MongoMutationReceiptRepository(
     database: MongoDatabase[IO],
     transactionRunner: MongoTransactionRunner,
-    diagnostics: Diagnostics,
+    diagnostics: Diagnostics[IO],
     uuidGen: UUIDGen[IO] = UUIDGen[IO]
-) extends MutationReceiptRepository {
+) extends MutationReceiptRepository[IO] {
   private val collection = Mongo4catsCollections.documents(database, MongoCollections.MutationReceipts)
 
   override def execute[A, E](
@@ -56,37 +58,39 @@ final class MongoMutationReceiptRepository(
       now: Instant,
       expiresAt: Instant
   )(
-      write: MutationWriteContext => RepositoryIO[MutationWriteOutcome[A, E]]
-  ): RepositoryIO[MutationReceiptExecution[A, E]] =
+      write: MutationWriteContext => RepositoryF[IO, MutationWriteOutcome[A, E]]
+  ): RepositoryF[IO, MutationReceiptExecution[A, E]] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "mutationReceipt.execute")(transactionRunner.run { session =>
         find(session, key).flatMap {
           case None =>
             for {
-              pending <- RepositoryIO.lift(inProgress(key, fingerprint, now, expiresAt))
+              pending <- RepositoryF.lift(inProgress(key, fingerprint, now, expiresAt))
               _ <- insert(session, pending)
               outcome <- write(MongoMutationWriteContext(session)).recoverWith { error =>
-                RepositoryIO.lift(remove(session, key)).flatMap(_ => RepositoryIO.raise(error))
+                RepositoryF.lift(remove(session, key)).flatMap(_ => RepositoryF.at[IO].raise(error))
               }
               result <- outcome match {
                 case MutationWriteOutcome.Rejected(error) =>
-                  RepositoryIO.lift(remove(session, key)).as(MutationReceiptExecution.Rejected(error))
+                  RepositoryF.lift(remove(session, key)).as(MutationReceiptExecution.Rejected(error))
                 case MutationWriteOutcome.Applied(completed) =>
                   complete(session, key, fingerprint, completed.entity, now, expiresAt)
                     .as(MutationReceiptExecution.Applied(completed.value, completed.entity))
               }
             } yield result
           case Some(receipt) if receipt.fingerprint != fingerprint =>
-            RepositoryIO.pure(MutationReceiptExecution.FingerprintMismatch)
+            RepositoryF.at[IO].pure(MutationReceiptExecution.FingerprintMismatch)
           case Some(receipt) if receipt.state == MutationReceiptState.InProgress =>
-            RepositoryIO.pure(MutationReceiptExecution.InProgress)
+            RepositoryF.at[IO].pure(MutationReceiptExecution.InProgress)
           case Some(receipt) =>
             // A completed receipt without its rehydration key is corrupt; do not repeat the write.
-            RepositoryIO.fromEither(
-              receipt.entity
-                .toRight(RepositoryError.InvalidStoredData)
-                .map(MutationReceiptExecution.Replay.apply)
-            )
+            RepositoryF
+              .at[IO]
+              .fromEither(
+                receipt.entity
+                  .toRight(RepositoryError.InvalidStoredData)
+                  .map(MutationReceiptExecution.Replay.apply)
+              )
         }
         /*
          * The preceding branches keep receipt insertion, the caller write, and completion in the same
@@ -97,17 +101,15 @@ final class MongoMutationReceiptRepository(
   private def find(
       session: Option[ClientSession[IO]],
       key: MutationReceiptKey
-  ): RepositoryIO[Option[MutationReceipt]] =
-    RepositoryIO
+  ): RepositoryF[IO, Option[MutationReceipt]] =
+    RepositoryF
       .lift(MongoSessionOperations.findOne(collection, session, keyFilter(key)))
       .subflatMap(_.traverse(read))
 
-  private def insert(session: Option[ClientSession[IO]], receipt: Document): RepositoryIO[Unit] =
+  private def insert(session: Option[ClientSession[IO]], receipt: Document): RepositoryF[IO, Unit] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "mutationReceipt.insert")(
-        RepositoryIO
-          .lift(MongoSessionOperations.insertOne(collection, session, receipt))
-          .void
+        RepositoryF.lift(MongoSessionOperations.insertOne(collection, session, receipt)).void
       )(MongoErrors.duplicateAsConflict)
 
   private def complete(
@@ -117,7 +119,7 @@ final class MongoMutationReceiptRepository(
       entity: MutationEntityReference,
       now: Instant,
       expiresAt: Instant
-  ): RepositoryIO[Unit] =
+  ): RepositoryF[IO, Unit] =
     val filter = MongoFilter.and(
       keyFilter(key),
       MongoFilter.eq(MongoFields.Fingerprint, fingerprint.value),
@@ -131,7 +133,7 @@ final class MongoMutationReceiptRepository(
     )
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "mutationReceipt.complete")(
-        RepositoryIO
+        RepositoryF
           .lift(MongoSessionOperations.updateOne(collection, session, filter, update))
           .subflatMap(MongoRepositorySupport.matchedOne(_))
       )(MongoErrors.duplicateAsConflict)
@@ -205,12 +207,13 @@ object MongoMutationReceiptRepository {
   def transactional(
       database: MongoDatabase[IO],
       client: MongoClient[IO],
-      diagnostics: Diagnostics,
-      uuidGen: UUIDGen[IO] = UUIDGen[IO]
+      diagnostics: Diagnostics[IO],
+      uuidGen: UUIDGen[IO] = UUIDGen[IO],
+      breaker: CircuitBreaker[IO] = CircuitBreaker.disabled[IO]
   ): MongoMutationReceiptRepository =
     new MongoMutationReceiptRepository(
       database,
-      MongoTransactionRunner.sessions(client, RepositoryError.Conflict, diagnostics = diagnostics),
+      MongoTransactionRunner.sessions(client, RepositoryError.Conflict, diagnostics = diagnostics, breaker = breaker),
       diagnostics,
       uuidGen
     )

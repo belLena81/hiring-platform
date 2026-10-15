@@ -136,7 +136,7 @@ final class InterviewCancellationRaceIntegrationSpec extends MongoIntegrationSui
       scenario { s =>
         // The real status-change write of the application repository (a hire), not a raw update.
         val applications =
-          MongoApplicationRepository.transactional(s.fixture.database, s.fixture.client, Diagnostics.noop)
+          MongoApplicationRepository.transactional(s.fixture.database, s.fixture.client, Diagnostics.noop[IO])
         val hire: IO[Boolean] = for {
           document <- MongoRepositoryTestSupport.findOne(
             s.fixture.database,

@@ -1,7 +1,6 @@
 package com.example.graphQL.cats.service.application
 
 import cats.data.EitherT
-import cats.effect.IO
 import com.example.graphQL.cats.domain.workflow.InterviewWorkflowError
 import com.example.graphQL.cats.service.UseCaseError
 
@@ -14,4 +13,4 @@ enum InterviewActionError {
   case Workflow(error: InterviewWorkflowError)
 }
 
-type InterviewActionIO[A] = EitherT[IO, InterviewActionError, A]
+type InterviewActionF[F[_], A] = EitherT[F, InterviewActionError, A]

@@ -20,7 +20,7 @@ object HttpMiddleware {
     Header.Raw(ci"Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'; base-uri 'none'")
   )
 
-  def correlation(diagnostics: Diagnostics, tracer: Tracer[IO])(next: HttpApp[IO]): HttpApp[IO] =
+  def correlation(diagnostics: Diagnostics[IO], tracer: Tracer[IO])(next: HttpApp[IO]): HttpApp[IO] =
     Kleisli { request =>
       tracer.currentSpanContext
         .flatMap(_.fold(IO.randomUUID.map(_.toString))(context => IO.pure(context.traceIdHex)))
@@ -66,7 +66,7 @@ object HttpMiddleware {
       config: HiringApiRoutes.HttpConfig,
       routes: HttpApp[IO],
       unmetered: Request[IO] => Boolean,
-      diagnostics: Diagnostics,
+      diagnostics: Diagnostics[IO],
       tracer: Tracer[IO],
       onError: (Request[IO], Throwable) => IO[Response[IO]],
       onEntityTooLarge: Request[IO] => IO[Response[IO]]

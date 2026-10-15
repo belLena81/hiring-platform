@@ -15,52 +15,58 @@ import scala.jdk.CollectionConverters.*
 
 /** Durable notification receipts: each delivery is recorded once, fenced against the workflow phase. */
 final class MongoInterviewNotificationLedger(store: MongoInterviewWorkflowStore)
-    extends InterviewNotificationReceiptLedger {
+    extends InterviewNotificationReceiptLedger[IO] {
   import MongoInterviewFields.*
   import store.*
 
   override def deliverOnce(
       receipt: InterviewNotificationReceipt,
       execution: Option[ClaimedInterviewWorkflowCommand] = None
-  ): InterviewProviderIO[InterviewNotificationReceipt] = {
+  ): InterviewProviderF[IO, InterviewNotificationReceipt] = {
     val result = MongoRepositorySupport.repositoryGuard(diagnostics, "interviewNotification.deliverOnce") {
       transactionRunner.run { session =>
         fenceExecution(session, receipt.workflowId, execution) *>
           loadWorkflow(receipt.workflowId, session).orConflict.flatMap(workflow =>
             for {
               _ <- fenceParticipants(session, workflow)
-              _ <- RepositoryIO.fromEither(
-                Either.cond(
-                  InterviewNotificationFence.permits(receipt.kind, workflow.phase),
-                  (),
-                  RepositoryError.Conflict
+              _ <- RepositoryF
+                .at[IO]
+                .fromEither(
+                  Either.cond(
+                    InterviewNotificationFence.permits(receipt.kind, workflow.phase),
+                    (),
+                    RepositoryError.Conflict
+                  )
                 )
-              )
               _ <- bumpProviderFence(session, workflow.id, workflow.phase)
-              receiptExists <- RepositoryIO.lift(
+              receiptExists <- RepositoryF.lift(
                 MongoSessionOperations.findById(inbox, session, s"${workflow.id.value}:hiring")
               )
               // Only the scheduling notification requires the hiring commit; later kinds follow other durable events.
-              _ <- RepositoryIO.fromEither(
-                Either.cond(
-                  receipt.kind != InterviewNotificationKind.Scheduled || receiptExists.nonEmpty,
-                  (),
-                  RepositoryError.Conflict
+              _ <- RepositoryF
+                .at[IO]
+                .fromEither(
+                  Either.cond(
+                    receipt.kind != InterviewNotificationKind.Scheduled || receiptExists.nonEmpty,
+                    (),
+                    RepositoryError.Conflict
+                  )
                 )
-              )
             } yield ()
           ) *>
-          RepositoryIO
+          RepositoryF
             .lift(
               MongoSessionOperations.findById(notificationReceipts, session, receipt.idempotencyKey)
             )
             .flatMap {
               case Some(document) =>
-                RepositoryIO.fromEither(decodeNotification(document).flatMap { existing =>
-                  Either.cond(sameNotification(existing, receipt), existing, RepositoryError.Conflict)
-                })
+                RepositoryF
+                  .at[IO]
+                  .fromEither(decodeNotification(document).flatMap { existing =>
+                    Either.cond(sameNotification(existing, receipt), existing, RepositoryError.Conflict)
+                  })
               case None =>
-                RepositoryIO
+                RepositoryF
                   .lift(MongoSessionOperations.insertOne(notificationReceipts, session, notificationDocument(receipt)))
                   .as(receipt)
             }
@@ -69,14 +75,14 @@ final class MongoInterviewNotificationLedger(store: MongoInterviewWorkflowStore)
     mapProvider(result)
   }
 
-  override def find(idempotencyKey: String): InterviewProviderIO[Option[InterviewNotificationReceipt]] =
+  override def find(idempotencyKey: String): InterviewProviderF[IO, Option[InterviewNotificationReceipt]] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "interviewNotification.find") {
-        RepositoryIO
+        RepositoryF
           .lift(
             MongoSessionOperations.findById(notificationReceipts, None, idempotencyKey)
           )
-          .flatMap(_.traverse(document => RepositoryIO.fromEither(decodeNotification(document))))
+          .flatMap(_.traverse(document => RepositoryF.at[IO].fromEither(decodeNotification(document))))
       }
       .leftMap(_ => InterviewProviderError.Unavailable)
 

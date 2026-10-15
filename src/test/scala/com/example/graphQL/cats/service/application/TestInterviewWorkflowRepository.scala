@@ -8,11 +8,11 @@ import com.example.graphQL.cats.service.RepositoryError
 import java.time.Instant
 import java.util.UUID
 
-private[cats] class TestInterviewWorkflowRepository extends InterviewWorkflowRepository {
-  private def unexpected[A]: RepositoryIO[A] =
-    RepositoryIO.lift(IO.raiseError(new AssertionError("Unexpected repository operation")))
+private[cats] class TestInterviewWorkflowRepository extends InterviewWorkflowRepository[IO] {
+  private def unexpected[A]: RepositoryF[IO, A] =
+    RepositoryF.lift(IO.raiseError(new AssertionError("Unexpected repository operation")))
   override def claimDueCommands(workerId: String, now: Instant, leaseUntil: Instant, limit: Int) =
-    RepositoryIO.fromEither[List[ClaimedInterviewWorkflowCommand]](Left(RepositoryError.Unavailable))
+    RepositoryF.at[IO].fromEither[List[ClaimedInterviewWorkflowCommand]](Left(RepositoryError.Unavailable))
   override def claimExecution(
       command: InterviewWorkflowCommandRecord,
       workerId: String,

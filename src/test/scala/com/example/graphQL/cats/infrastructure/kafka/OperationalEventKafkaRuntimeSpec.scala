@@ -10,6 +10,8 @@ import com.example.graphQL.cats.config.{
   KafkaSaslSecurityProtocol
 }
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
+import com.example.graphQL.cats.domain.policy.CircuitBreakerPolicy
+import com.example.graphQL.cats.service.resilience.CircuitBreaker
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField}
@@ -17,7 +19,17 @@ import com.example.graphQL.cats.service.events.*
 import io.circe.Json
 import fs2.Stream
 import munit.CatsEffectSuite
-import org.apache.kafka.common.errors.ProducerFencedException
+import org.apache.kafka.common.errors.{
+  BrokerNotAvailableException,
+  DisconnectException,
+  InvalidTopicException,
+  NetworkException,
+  NotLeaderOrFollowerException,
+  ProducerFencedException,
+  RecordTooLargeException,
+  TopicAuthorizationException
+}
+import org.apache.kafka.common.errors.SerializationException
 
 import java.time.Instant
 import java.util.UUID
@@ -95,8 +107,8 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
   }
 
   private final case class Fakes(
-      receipts: ConsumerReceiptRepository,
-      quarantines: EventQuarantineRepository,
+      receipts: ConsumerReceiptRepository[IO],
+      quarantines: EventQuarantineRepository[IO],
       quarantined: Ref[IO, Vector[EventQuarantineRecord]]
   )
 
@@ -105,34 +117,34 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
       receiptState <- Ref.of[IO, Map[(String, UUID), OperationalEventEnvelope]](Map.empty)
       quarantineState <- Ref.of[IO, Vector[EventQuarantineRecord]](Vector.empty)
     } yield {
-      val receipts = new ConsumerReceiptRepository {
-        override def exists(group: String, id: UUID): RepositoryIO[Boolean] =
-          com.example.graphQL.cats.service.port.RepositoryIO
+      val receipts = new ConsumerReceiptRepository[IO] {
+        override def exists(group: String, id: UUID): RepositoryF[IO, Boolean] =
+          com.example.graphQL.cats.service.port.RepositoryF
             .lift(IO.raiseError(new AssertionError("receipt deduplication must use the atomic insert")))
         override def record(
             group: String,
             value: OperationalEventEnvelope,
             createdAt: Instant,
             expiresAt: Instant
-        ): RepositoryIO[Boolean] =
-          com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(receiptState.modify { values =>
+        ): RepositoryF[IO, Boolean] =
+          com.example.graphQL.cats.service.port.RepositoryF.fromFEither(receiptState.modify { values =>
             val key = group -> value.eventId
             if (values.contains(key)) (values, Right(false))
             else (values.updated(key, value), Right(true))
           })
       }
-      val quarantines = new EventQuarantineRepository {
-        override def save(record: EventQuarantineRecord): RepositoryIO[Unit] =
-          com.example.graphQL.cats.service.port.RepositoryIO
-            .fromIOEither(quarantineState.update(_ :+ record).as(Right(())))
+      val quarantines = new EventQuarantineRepository[IO] {
+        override def save(record: EventQuarantineRecord): RepositoryF[IO, Unit] =
+          com.example.graphQL.cats.service.port.RepositoryF
+            .fromFEither(quarantineState.update(_ :+ record).as(Right(())))
       }
       Fakes(receipts, quarantines, quarantineState)
     }
 
   private def durable(
       config: KafkaConfig,
-      receipts: ConsumerReceiptRepository,
-      quarantine: EventQuarantineRepository,
+      receipts: ConsumerReceiptRepository[IO],
+      quarantine: EventQuarantineRepository[IO],
       topic: String,
       partition: Int,
       offset: Long,
@@ -145,9 +157,9 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
 
   test("tombstones quarantine safely before committing and failures retain the offset") {
     fakes.flatMap { values =>
-      val failing = new EventQuarantineRepository {
-        def save(record: EventQuarantineRecord): RepositoryIO[Unit] =
-          RepositoryIO.raise(RepositoryError.Unavailable)
+      val failing = new EventQuarantineRepository[IO] {
+        def save(record: EventQuarantineRecord): RepositoryF[IO, Unit] =
+          RepositoryF.at[IO].raise(RepositoryError.Unavailable)
       }
       for {
         success <- durable(
@@ -221,9 +233,9 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
   }
 
   test("malformed records remain uncommitted when quarantine persistence fails") {
-    val failedQuarantine = new EventQuarantineRepository {
-      override def save(record: EventQuarantineRecord): RepositoryIO[Unit] =
-        com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Left(RepositoryError.Unavailable)))
+    val failedQuarantine = new EventQuarantineRepository[IO] {
+      override def save(record: EventQuarantineRecord): RepositoryF[IO, Unit] =
+        com.example.graphQL.cats.service.port.RepositoryF.fromFEither(IO.pure(Left(RepositoryError.Unavailable)))
     }
     fakes.flatMap { values =>
       durable(
@@ -245,9 +257,9 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
       committed <- cats.effect.Ref.of[IO, Vector[Long]](Vector.empty)
       result <- List(10L, 11L).traverse_ { offset =>
         KafkaRuntimeSupport.processRecord("hiring.events", 0, offset)(
-          RepositoryIO
+          RepositoryF
             .lift(processed.update(_ :+ offset))
-            .flatMap(_ => RepositoryIO.fromEither(Either.cond(offset != 10L, (), RepositoryError.Unavailable)))
+            .flatMap(_ => RepositoryF.at[IO].fromEither(Either.cond(offset != 10L, (), RepositoryError.Unavailable)))
         )(committed.update(_ :+ offset))
       }.attempt
       handled <- processed.get
@@ -304,16 +316,16 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
   test("receipt failures prevent acknowledgment including unacknowledged conflicts") {
     fakes.flatMap { values =>
       List(RepositoryError.Unavailable, RepositoryError.Conflict).traverse_ { error =>
-        val receipts = new ConsumerReceiptRepository {
-          def exists(group: String, id: UUID): RepositoryIO[Boolean] =
-            RepositoryIO.lift(IO.raiseError(new AssertionError("Unexpected preflight read")))
+        val receipts = new ConsumerReceiptRepository[IO] {
+          def exists(group: String, id: UUID): RepositoryF[IO, Boolean] =
+            RepositoryF.lift(IO.raiseError(new AssertionError("Unexpected preflight read")))
           def record(
               group: String,
               value: OperationalEventEnvelope,
               at: Instant,
               until: Instant
-          ): RepositoryIO[Boolean] =
-            RepositoryIO.raise(error)
+          ): RepositoryF[IO, Boolean] =
+            RepositoryF.at[IO].raise(error)
         }
         durable(
           config,
@@ -399,26 +411,150 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
     } yield assertEquals(count, 2)
   }
 
+  private val publisherBreakerSettings = CircuitBreakerPolicy.Settings(2, 10.seconds, 100.millis, 1.second, 1)
+
+  private def failingPublication(breaker: CircuitBreaker[IO], error: Throwable, released: Ref[IO, Int]) =
+    OperationalEventKafkaRuntime
+      .publishClaim(
+        config,
+        publicationOutbox(IO.pure(Right(())), IO.pure(Right(())), released.update(_ + 1).as(Right(()))),
+        Diagnostics.noop,
+        claim("key", UUID.randomUUID())
+      )(OperationalEventKafkaRuntime.guardedSend(breaker, IO.raiseError(error)))
+      .attempt
+
+  test("CBR-05.1 send failures open the breaker and no outbox rows are claimed while it is open") {
+    for {
+      breaker <- CircuitBreaker.create[IO](publisherBreakerSettings, _ => IO.unit)
+      released <- Ref.of[IO, Int](0)
+      _ <- failingPublication(breaker, new org.apache.kafka.common.errors.TimeoutException("broker down"), released)
+      _ <- failingPublication(breaker, new org.apache.kafka.common.errors.TimeoutException("broker down"), released)
+      claims <- Ref.of[IO, Int](0)
+      claimed <- OperationalEventKafkaRuntime.claimWithin(breaker, 4)(_ => claims.update(_ + 1).as(Nil))
+      attempts <- claims.get
+      state <- breaker.current
+    } yield {
+      assertEquals(claimed, Nil)
+      assertEquals(attempts, 0)
+      assert(state.isInstanceOf[CircuitBreakerPolicy.State.Open], clue(state))
+    }
+  }
+
+  test("CBR-05.4 repeated record-too-large failures from one poison event never open the breaker") {
+    for {
+      breaker <- CircuitBreaker.create[IO](publisherBreakerSettings, _ => IO.unit)
+      released <- Ref.of[IO, Int](0)
+      results <- List.fill(5)(failingPublication(breaker, new RecordTooLargeException("poison"), released)).sequence
+      state <- breaker.current
+    } yield {
+      assert(results.forall(_.isRight), clue(results))
+      assertEquals(state, CircuitBreakerPolicy.initial)
+    }
+  }
+
+  test("CBR-05.4 only transport and broker-availability errors count against the breaker") {
+    val counted = List[Throwable](
+      new org.apache.kafka.common.errors.TimeoutException("timeout"),
+      new NetworkException("network"),
+      new DisconnectException("disconnect"),
+      new NotLeaderOrFollowerException("leader moved"),
+      new BrokerNotAvailableException("broker gone"),
+      new java.util.concurrent.TimeoutException("send"),
+      new RuntimeException("wrapped", new NetworkException("cause"))
+    )
+    val ignored = List[Throwable](
+      new RecordTooLargeException("too large"),
+      new SerializationException("bad record"),
+      new InvalidTopicException("topic"),
+      new TopicAuthorizationException("denied"),
+      new ProducerFencedException("fenced"),
+      new IllegalStateException("bug")
+    )
+    assert(counted.forall(OperationalEventKafkaRuntime.isBrokerUnavailable), clue(counted))
+    assert(!ignored.exists(OperationalEventKafkaRuntime.isBrokerUnavailable), clue(ignored))
+  }
+
+  test("CBR-05.2 producer fencing is not counted and still stops the stream") {
+    for {
+      breaker <- CircuitBreaker.create[IO](publisherBreakerSettings, _ => IO.unit)
+      released <- Ref.of[IO, Int](0)
+      results <- List
+        .fill(4)(failingPublication(breaker, new ProducerFencedException("fenced"), released))
+        .sequence
+      state <- breaker.current
+      retried <- released.get
+    } yield {
+      assert(results.forall(_.isLeft), clue(results))
+      assertEquals(state, CircuitBreakerPolicy.initial)
+      assertEquals(retried, 0)
+    }
+  }
+
+  test("CBR-05.3 after the open period a single probe is claimed and success drains normally") {
+    for {
+      breaker <- CircuitBreaker.create[IO](publisherBreakerSettings, _ => IO.unit)
+      released <- Ref.of[IO, Int](0)
+      _ <- failingPublication(breaker, new org.apache.kafka.common.errors.TimeoutException("broker down"), released)
+      _ <- failingPublication(breaker, new org.apache.kafka.common.errors.TimeoutException("broker down"), released)
+      _ <- IO.sleep(200.millis)
+      limits <- Ref.of[IO, List[Int]](Nil)
+      probeClaims <- OperationalEventKafkaRuntime.claimWithin(breaker, 4)(limit =>
+        limits.update(_ :+ limit).as(List(claim("key", UUID.randomUUID())))
+      )
+      _ <- OperationalEventKafkaRuntime.publishClaims(probeClaims)(_ =>
+        OperationalEventKafkaRuntime.guardedSend(breaker, IO.unit)
+      )
+      afterRecovery <- OperationalEventKafkaRuntime.claimWithin(breaker, 4)(limit => limits.update(_ :+ limit).as(Nil))
+      observed <- limits.get
+    } yield {
+      assertEquals(observed, List(1, 4))
+      assertEquals(afterRecovery, Nil)
+    }
+  }
+
+  test("CBR-05.1 a send rejected by the open breaker is released for retry without being marked failed") {
+    for {
+      breaker <- CircuitBreaker.create[IO](publisherBreakerSettings, _ => IO.unit)
+      released <- Ref.of[IO, Int](0)
+      _ <- failingPublication(breaker, new org.apache.kafka.common.errors.TimeoutException("broker down"), released)
+      _ <- failingPublication(breaker, new org.apache.kafka.common.errors.TimeoutException("broker down"), released)
+      before <- released.get
+      sent <- Ref.of[IO, Boolean](false)
+      _ <- OperationalEventKafkaRuntime
+        .publishClaim(
+          config,
+          publicationOutbox(IO.pure(Right(())), IO.pure(Right(())), released.update(_ + 1).as(Right(()))),
+          Diagnostics.noop,
+          claim("key", UUID.randomUUID())
+        )(OperationalEventKafkaRuntime.guardedSend(breaker, sent.set(true)))
+      after <- released.get
+      didSend <- sent.get
+    } yield {
+      assertEquals(after - before, 1)
+      assert(!didSend)
+    }
+  }
+
   private def publicationOutbox(
       renewal: IO[Either[RepositoryError, Unit]],
       published: IO[Either[RepositoryError, Unit]],
       retried: IO[Either[RepositoryError, Unit]] = IO.pure(Right(()))
-  ): OperationalEventOutboxRepository = new OperationalEventOutboxRepository {
+  ): OperationalEventOutboxRepository[IO] = new OperationalEventOutboxRepository[IO] {
     def claim(
         workerId: String,
         transactionalId: String,
         at: Instant,
         until: Instant,
         limit: Int
-    ): RepositoryIO[List[ClaimedOperationalEvent]] = RepositoryIO.raise(RepositoryError.Unavailable)
-    def renewLease(id: UUID, token: String, subjects: List[String], until: Instant): RepositoryIO[Unit] =
-      RepositoryIO.fromIOEither(renewal)
-    def markPublished(id: UUID, token: String, at: Instant, expires: Instant): RepositoryIO[Unit] =
-      RepositoryIO.fromIOEither(published)
-    def releaseForRetry(id: UUID, token: String, at: Instant, available: Instant): RepositoryIO[Unit] =
-      RepositoryIO.fromIOEither(retried)
-    def markFailed(id: UUID, token: String, at: Instant, reason: String): RepositoryIO[Unit] =
-      RepositoryIO.fromIOEither(retried)
+    ): RepositoryF[IO, List[ClaimedOperationalEvent]] = RepositoryF.at[IO].raise(RepositoryError.Unavailable)
+    def renewLease(id: UUID, token: String, subjects: List[String], until: Instant): RepositoryF[IO, Unit] =
+      RepositoryF.fromFEither(renewal)
+    def markPublished(id: UUID, token: String, at: Instant, expires: Instant): RepositoryF[IO, Unit] =
+      RepositoryF.fromFEither(published)
+    def releaseForRetry(id: UUID, token: String, at: Instant, available: Instant): RepositoryF[IO, Unit] =
+      RepositoryF.fromFEither(retried)
+    def markFailed(id: UUID, token: String, at: Instant, reason: String): RepositoryF[IO, Unit] =
+      RepositoryF.fromFEither(retried)
   }
 
   test("publication renews its guarded lease before sending and then records durable success") {
@@ -613,7 +749,7 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
     for {
       attempts <- Ref.of[IO, Int](0)
       records <- Ref.of[IO, Vector[(LogEvent, Map[LogField, String])]](Vector.empty)
-      diagnostics = new Diagnostics {
+      diagnostics = new Diagnostics[IO] {
         override def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]): IO[Unit] =
           records.update(_ :+ (event -> fields))
       }

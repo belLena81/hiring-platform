@@ -61,7 +61,7 @@ MongoDB and Kafka do not share a transaction. A crash after Kafka publication bu
 
 The workflow reserves both participants, commits Accepted → Interview plus history and notification intent atomically, and delivers candidate/recruiter notifications. Half-open intervals allow adjacent bookings and reject overlap. Before hiring commit, failed work can release a reservation; after commit, notification problems require forward recovery. Deadline, attempt limits, leases, revisions, inbox receipts, outbox commands/replies, and producer-generation fencing constrain replay and stale workers.
 
-This is a concrete Saga: local transactions coordinate steps with compensation where valid. An Admin repair request carries an expected revision and idempotency key and reconciles persisted provider receipts. Repair does not extend the original deadline or reopen a released reservation. It can remain in visible repair if safe completion is impossible. The configured runtime uses [durable fake calendar and notification providers](../../src/main/scala/com/example/graphQL/cats/service/port/InterviewProviders.scala); real calendar/email integrations, cancellation and rescheduling are not delivered by those adapters.
+This is a concrete Saga: local transactions coordinate steps with compensation where valid. Its scheduling decisions run on the shared pure Saga engine (`shared/saga`) through `InterviewSchedulingOrchestrator`; cancel and reschedule keep their lifecycle policy. An Admin repair request carries an expected revision and idempotency key and reconciles persisted provider receipts. Repair does not extend the original deadline or reopen a released reservation. It can remain in visible repair if safe completion is impossible. The configured runtime uses [durable fake calendar and notification providers](../../src/main/scala/com/example/graphQL/cats/service/port/InterviewProviders.scala); real calendar/email integrations, cancellation and rescheduling are not delivered by those adapters.
 
 ## Account deletion and analytics: account extension, UC11–UC13
 
@@ -74,13 +74,13 @@ Deletion coordinates an operational tombstone with durable erasure work, embeddi
 | Ports and adapters; dependency inversion | Service-owned repositories/providers; Mongo/Kafka/HTTP adapters | Tests and business services depend on business contracts, with external failures translated at adapters |
 | Functional core and effectful orchestration | Domain policies versus services/runtime | Deterministic rules can be tested with explicit time/IDs; effects remain resource-owned |
 | State transition program (`StateT`) | Job/application lifecycle and workflow decisions | Combines validated immutable transitions; persistence remains a separate responsibility |
-| Typed error channels (`Either`, `EitherT`) | Domain, `UseCaseIO`, `RepositoryIO` | Expected rejection is explicit and composable; framework exceptions are handled at the boundary |
+| Typed error channels (`Either`, `EitherT`) | Domain, `UseCaseF`, `RepositoryF` | Expected rejection is explicit and composable; framework exceptions are handled at the boundary |
 | Accumulating validation (`ValidatedNec`) and refined values | Configuration and independent input checks | Reports multiple invalid settings before acquiring runtime dependencies |
 | Unit of work / Mongo transaction | Mutation receipt, business write, history and outbox | Keeps locally related writes atomic under concurrency |
 | Optimistic concurrency / compare-and-set | Revisions, expected states, claim tokens | Rejects stale mutations or workers without an unbounded in-memory lock |
 | Transactional outbox and inbox/receipt deduplication | Operational publication and interview messages | Decouples broker availability from a committed intent and makes replay manageable |
 | Leased work queue with fencing | Embeddings, publication, interviews, cleanup | Supports bounded concurrent processing and rejects stale owners; each workflow has its own recovery policy |
-| Saga / process manager | Interviews and account erasure | Coordinates multiple durable steps without pretending external systems share one transaction |
+| Saga / process manager | Interview scheduling (shared pure engine); cancel/reschedule, subject cleanup and account erasure keep their existing policies | Coordinates multiple durable steps without pretending external systems share one transaction |
 | Strategy | Application RRF / Mongo fusion, provider ports | Allows concrete retrieval or adapter alternatives behind stable contracts |
 | Request-scoped DataLoader/fetcher | Nested GraphQL entities | Reduces N+1 reads without sharing actor-specific results between requests |
 | Materialized views / read projections | Mongo analytics reports, Delta Gold | Serves bounded Admin queries without executing Spark in an HTTP request |

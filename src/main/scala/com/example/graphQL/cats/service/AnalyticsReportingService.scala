@@ -1,7 +1,9 @@
 package com.example.graphQL.cats.service
 
+import cats.{Applicative, Monad}
+
 import cats.data.EitherT
-import com.example.graphQL.cats.service.protocol.{UseCaseIO}
+import com.example.graphQL.cats.service.protocol.{UseCaseF}
 import com.example.graphQL.cats.service.auth.ActorAuthorization
 import com.example.graphQL.cats.service.port.{AnalyticsReportRepository, UserRepository}
 
@@ -35,39 +37,39 @@ final case class AnalyticsTimeToHire(
 )
 final case class AnalyticsSkillPostingDay(day: Instant, skill: String, postings: Long)
 
-trait AnalyticsReportingUseCases {
+trait AnalyticsReportingUseCases[F[_]] {
   def report(
       actor: ActorContext,
       period: AnalyticsPeriod
-  ): UseCaseIO[AnalyticsReportSnapshot]
+  ): UseCaseF[F, AnalyticsReportSnapshot]
 }
 
 object AnalyticsReportingUseCases {
-  val unavailable: AnalyticsReportingUseCases = new AnalyticsReportingUseCases {
+  def unavailable[F[_]: Applicative]: AnalyticsReportingUseCases[F] = new AnalyticsReportingUseCases[F] {
     override def report(
         actor: ActorContext,
         period: AnalyticsPeriod
-    ): UseCaseIO[AnalyticsReportSnapshot] =
-      EitherT.leftT(UseCaseError.Analytics(AnalyticsError.ReportsUnavailable))
+    ): UseCaseF[F, AnalyticsReportSnapshot] =
+      EitherT.leftT[F, AnalyticsReportSnapshot](UseCaseError.Analytics(AnalyticsError.ReportsUnavailable))
   }
 }
 
 /** Authorizes aggregate analytics at the application boundary, before projection access. */
-final class AnalyticsReportingService(
-    users: UserRepository,
-    reports: AnalyticsReportRepository
-) extends AnalyticsReportingUseCases {
+final class AnalyticsReportingService[F[_]: Monad](
+    users: UserRepository[F],
+    reports: AnalyticsReportRepository[F]
+) extends AnalyticsReportingUseCases[F] {
   private val authorization = ActorAuthorization(users)
   private val maximumPeriodSeconds = 30L * 24L * 60L * 60L
 
   override def report(
       actor: ActorContext,
       period: AnalyticsPeriod
-  ): UseCaseIO[AnalyticsReportSnapshot] =
+  ): UseCaseF[F, AnalyticsReportSnapshot] =
     for {
-      _ <- UseCaseIO.ensure(validPeriod(period), UseCaseError.Analytics(AnalyticsError.InvalidPeriod))
+      _ <- UseCaseF.ensure[F](validPeriod(period), UseCaseError.Analytics(AnalyticsError.InvalidPeriod))
       _ <- authorization.requireAdmin(actor)
-      snapshot <- UseCaseIO
+      snapshot <- UseCaseF
         .repository(reports.latest)
         .subflatMap(_.toRight(UseCaseError.Analytics(AnalyticsError.ReportsUnavailable)))
     } yield filter(snapshot, period)

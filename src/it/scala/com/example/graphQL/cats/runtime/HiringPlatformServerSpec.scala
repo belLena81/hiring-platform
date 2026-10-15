@@ -36,11 +36,11 @@ class HiringPlatformServerSpec extends CatsEffectSuite {
   private val AdmissionPermits = 16
   private val authRateLimit = RateLimitConfig(60, 100, 1000)
 
-  private def probe(result: IO[ProbeResult]): DatabaseProbe = new DatabaseProbe {
+  private def probe(result: IO[ProbeResult]): DatabaseProbe[IO] = new DatabaseProbe[IO] {
     def check(requestId: Option[String]): IO[ProbeResult] = result
   }
 
-  private def server(host: String, port: Int, database: DatabaseProbe): Resource[IO, Server] =
+  private def server(host: String, port: Int, database: DatabaseProbe[IO]): Resource[IO, Server] =
     for {
       dependencies <- TestGraphQLSupport.dependencies(
         TestGraphQLSupport.emptyServices,
@@ -50,8 +50,8 @@ class HiringPlatformServerSpec extends CatsEffectSuite {
       )
       app <- Resource.eval(
         new HiringApiRoutes(
-          new HealthService(database, Diagnostics.noop),
-          Diagnostics.noop,
+          new HealthService(database, Diagnostics.noop[IO]),
+          Diagnostics.noop[IO],
           dependencies
         ).httpApp(HiringApiRoutes.HttpConfig(AdmissionPermits, 5.seconds))
       )
@@ -59,7 +59,7 @@ class HiringPlatformServerSpec extends CatsEffectSuite {
         Host.fromString(host).getOrElse(fail(s"Invalid test host: $host")),
         Port.fromInt(port).getOrElse(fail(s"Invalid test port: $port")),
         app,
-        Diagnostics.noop
+        Diagnostics.noop[IO]
       )
     } yield server
 
@@ -67,7 +67,7 @@ class HiringPlatformServerSpec extends CatsEffectSuite {
     val failure = new IllegalStateException("synthetic server failure")
     for {
       emitted <- Ref.of[IO, Vector[(LogEvent, Map[LogField, String])]](Vector.empty)
-      diagnostics = new Diagnostics {
+      diagnostics = new Diagnostics[IO] {
         override def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]): IO[Unit] =
           IO.defer(emitted.update(_ :+ (event, fields)))
       }

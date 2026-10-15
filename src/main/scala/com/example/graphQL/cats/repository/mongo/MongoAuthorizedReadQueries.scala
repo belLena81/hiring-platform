@@ -3,7 +3,7 @@ package com.example.graphQL.cats.repository.mongo
 import cats.effect.IO
 import com.example.graphQL.cats.domain.model.{AccountStatus, JobStatus, UserRole}
 import com.example.graphQL.cats.service.Diagnostics
-import com.example.graphQL.cats.service.port.RepositoryIO
+import com.example.graphQL.cats.service.port.RepositoryF
 import com.example.graphQL.cats.service.read.HiringReadScope
 import mongo4cats.database.MongoDatabase
 import org.bson.Document
@@ -102,10 +102,10 @@ private[mongo] object MongoAuthorizedReadQueries {
       collection: String,
       pipeline: List[Document],
       limit: Int,
-      diagnostics: Diagnostics
-  ): RepositoryIO[List[Document]] =
+      diagnostics: Diagnostics[IO]
+  ): RepositoryF[IO, List[Document]] =
     MongoRepositorySupport.repositoryGuard(diagnostics, "repository.authorizedRead")(
-      RepositoryIO.lift(
+      RepositoryF.lift(
         Mongo4catsCollections
           .documents(database, collection)
           .flatMap(

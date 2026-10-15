@@ -8,7 +8,7 @@ import com.example.graphQL.cats.service.application.InterviewSubjectCleanupWorke
 import com.example.graphQL.cats.service.port.{
   InterviewPublisherFencer,
   InterviewRetentionBarrier,
-  RepositoryIO,
+  RepositoryF,
   InterviewCleanupUpdate,
   InterviewCleanupCursor,
   InterviewCleanupPage
@@ -34,18 +34,26 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
     InterviewRetentionBarrier("hiring.interview-commands", 0, 4L),
     InterviewRetentionBarrier("hiring.interview-results", 0, 5L)
   )
-  private val fencer = new InterviewPublisherFencer {
-    override def fence(ids: Vector[String]): RepositoryIO[Unit] =
-      RepositoryIO.fromEither(
-        InterviewSubjectCleanup
-          .validateProducerIds(ids)
-          .left
-          .map(_ => com.example.graphQL.cats.service.RepositoryError.InvalidStoredData)
-          .map(_ => ())
-      )
+  private val fencer = new InterviewPublisherFencer[IO] {
+    override def fence(ids: Vector[String]): RepositoryF[IO, Unit] =
+      RepositoryF
+        .at[IO]
+        .fromEither(
+          InterviewSubjectCleanup
+            .validateProducerIds(ids)
+            .left
+            .map(_ => com.example.graphQL.cats.service.RepositoryError.InvalidStoredData)
+            .map(_ => ())
+        )
   }
-  private def worker(cleanup: MongoInterviewSubjectCleanup, passed: Boolean): InterviewSubjectCleanupWorker =
-    new InterviewSubjectCleanupWorker(cleanup, fencer, IO.pure(barriers), _ => IO.pure(passed), Diagnostics.noop)
+  private def worker(cleanup: MongoInterviewSubjectCleanup, passed: Boolean): InterviewSubjectCleanupWorker[IO] =
+    new InterviewSubjectCleanupWorker[IO](
+      cleanup,
+      fencer,
+      IO.pure(barriers),
+      _ => IO.pure(passed),
+      Diagnostics.noop[IO]
+    )
   private def step(cleanup: MongoInterviewSubjectCleanup, passed: Boolean = false): IO[Unit] =
     worker(cleanup, passed)
       .runOnce(None)
@@ -83,7 +91,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
       val later = UserId(new UUID(0L, 33L))
       val cleaner = worker(cleanup, false)
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- (1L to 32L).toList.traverse_ { ordinal =>
           val row = pendingRow(new UUID(0L, ordinal).toString, at)
             .append("state", "AwaitingRetention")
@@ -133,7 +141,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
       val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
       val healthy = UserId(new UUID(0L, 2L))
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- allowCorruptFixtures(fixture.database)
         _ <- MongoRepositoryTestSupport.insertOne(
           fixture.database,
@@ -190,7 +198,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
       val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
       val healthy = UserId(new UUID(0L, 2L))
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- allowCorruptFixtures(fixture.database)
         _ <- (1 to 31).toList.traverse_(ordinal =>
           MongoRepositoryTestSupport.insertOne(
@@ -245,7 +253,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
       val ahead = UserId(new UUID(0L, 34L))
       val future = UserId(new UUID(0L, 35L))
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- (1L to 33L).toList.traverse_(ordinal =>
           MongoRepositoryTestSupport.insertOne(
             fixture.database,
@@ -290,7 +298,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
       val inserted = UserId(new UUID(0L, 33L))
       val ceiling = UserId(new UUID(0L, 34L))
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- ((1L to 32L).toList :+ 34L).traverse_(ordinal =>
           MongoRepositoryTestSupport.insertOne(
             fixture.database,
@@ -321,7 +329,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
       val at = Instant.now().minusSeconds(60)
       val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- (1L to 33L).toList.traverse_(ordinal =>
           MongoRepositoryTestSupport.insertOne(
             fixture.database,
@@ -372,7 +380,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
       val at = Instant.now().minusSeconds(60)
       val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- (1L to 32L).toList.traverse_(ordinal =>
           MongoRepositoryTestSupport.insertOne(
             fixture.database,
@@ -405,7 +413,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
       val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
       val subject = UserId(new UUID(0L, 1L))
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- MongoRepositoryTestSupport.insertOne(
           fixture.database,
           MongoCollections.InterviewSubjectCleanup,
@@ -413,24 +421,24 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
         )
         entered <- Ref.of[IO, Int](0)
         both <- Deferred[IO, Unit]
-        synchronizedFencer = new InterviewPublisherFencer {
-          override def fence(ids: Vector[String]) = RepositoryIO.lift(
+        synchronizedFencer = new InterviewPublisherFencer[IO] {
+          override def fence(ids: Vector[String]) = RepositoryF.lift(
             entered.updateAndGet(_ + 1).flatMap(count => if (count == 2) both.complete(()).void else both.get)
           )
         }
-        first = new InterviewSubjectCleanupWorker(
+        first = new InterviewSubjectCleanupWorker[IO](
           cleanup,
           synchronizedFencer,
           IO.pure(barriers),
           _ => IO.pure(false),
-          Diagnostics.noop
+          Diagnostics.noop[IO]
         )
-        second = new InterviewSubjectCleanupWorker(
+        second = new InterviewSubjectCleanupWorker[IO](
           cleanup,
           synchronizedFencer,
           IO.pure(barriers),
           _ => IO.pure(false),
-          Diagnostics.noop
+          Diagnostics.noop[IO]
         )
         raced <- (first.runOnce(None).value, second.runOnce(None).value).parTupled.timeout(20.seconds)
         afterRace <- cleanup.find(subject).value
@@ -456,7 +464,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
       val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
       val at = Instant.now()
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- MongoRepositoryTestSupport.insertOne(
           fixture.database,
           MongoCollections.InterviewWorkflows,
@@ -495,20 +503,20 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
         )
         _ <- step(cleanup)
         pending <- cleanup.complete(subject)
-        _ <- new InterviewSubjectCleanupWorker(
+        _ <- new InterviewSubjectCleanupWorker[IO](
           cleanup,
           fencer,
           IO.raiseError(new AssertionError("barrier must be reused")),
           _ => IO.pure(false),
-          Diagnostics.noop
+          Diagnostics.noop[IO]
         ).runOnce(None).value
         pendingAfterRestart <- new MongoInterviewSubjectCleanup(fixture.database).complete(subject)
-        _ <- new InterviewSubjectCleanupWorker(
+        _ <- new InterviewSubjectCleanupWorker[IO](
           cleanup,
           fencer,
           IO.raiseError(new AssertionError("barrier must be reused")),
           _ => IO.pure(true),
-          Diagnostics.noop
+          Diagnostics.noop[IO]
         ).runOnce(None).value
         complete <- cleanup.complete(subject)
         row <- MongoRepositoryTestSupport.findOne(
@@ -535,7 +543,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
       val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
       val at = Instant.now()
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- MongoRepositoryTestSupport.insertOne(
           fixture.database,
           MongoCollections.InterviewCalendarReservations,
@@ -574,10 +582,10 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
           )
         )
         _ <- (
-          MongoHiringSetup.initialize(fixture.database, Diagnostics.noop),
-          MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+          MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO]),
+          MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         ).parTupled
-        repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
+        repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop[IO])
         _ <- repository
           .quarantine("first_invalid_record", Instant.now())
           .value
@@ -603,7 +611,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
       val subject = UserId(UUID.randomUUID())
       val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- cleanup.enqueue(subject, Instant.now(), None).value.flatMap(result => IO(assert(result.isRight)))
         complete <- cleanup.complete(subject)
       } yield assert(complete)
@@ -617,7 +625,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
       val unrelated = "hiring-publisher-" + UUID.randomUUID().toString
       val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- MongoRepositoryTestSupport.insertOne(
           fixture.database,
           MongoCollections.OutboxSubjectFences,
@@ -657,7 +665,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
       val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
       val at = Instant.now()
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- MongoRepositoryTestSupport.insertOne(
           fixture.database,
           MongoCollections.InterviewCalendarParticipantLocks,
@@ -703,7 +711,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
       val subject = UserId(UUID.randomUUID())
       val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- allowCorruptFixtures(fixture.database)
         _ <- MongoRepositoryTestSupport.insertOne(
           fixture.database,
@@ -721,7 +729,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
       val workflowId = UUID.randomUUID().toString
       val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- MongoRepositoryTestSupport.insertOne(
           fixture.database,
           MongoCollections.InterviewWorkflows,
@@ -827,7 +835,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
       val ids = Vector.fill(137)(UUID.randomUUID().toString)
       val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- seedCleanupData(
           fixture.database,
           other,
@@ -857,7 +865,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
       val shared = UUID.randomUUID().toString
       val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- seedCleanupData(
           fixture.database,
           other,
@@ -893,7 +901,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
       val ids = Vector.fill(137)(UUID.randomUUID().toString)
       val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- seedCleanupData(fixture.database, subject, ids, Set(CleanupAttribution.CalendarReservation))
         _ <- cleanup.enqueue(subject, Instant.now(), None).value.flatMap(result => IO(assert(result.isRight)))
         _ <- step(cleanup)
@@ -945,7 +953,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
       val generation = "hiring-interview-orchestrator-" + UUID.randomUUID().toString
       val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         ledger <- Mongo4catsCollections.documents(fixture.database, MongoCollections.HiringMigrationLedger)
         _ <- ledger.deleteMany(
           Filters.in(
@@ -978,11 +986,11 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
             .append("requestedAt", Date.from(Instant.now()))
             .append("completedAt", Date.from(Instant.now()))
         )
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         reopened <- cleanup.find(subject).value
         ids <- cleanup.producerBatch(subject).value
         _ <- step(cleanup)
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         resumed <- cleanup.find(subject).value
       } yield {
         assertEquals(reopened.toOption.flatten.map(_.state), Some(InterviewCleanupState.Pending))
@@ -1017,7 +1025,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
         new Document("_id", Int.box(1)).append("state", "Pending").append("revision", Long.box(0L))
       )
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         queue <- Mongo4catsCollections.documents(fixture.database, MongoCollections.InterviewSubjectCleanup)
         _ <- (1 to 129).toList.traverse_ { _ =>
           queue
@@ -1043,7 +1051,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
             _ <- IO(assert(rejected.isLeft))
           } yield ()
         }
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
       } yield ()
     }
   }
@@ -1058,7 +1066,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
         new Document("state", "Running")
       )
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         ledger <- Mongo4catsCollections.documents(fixture.database, MongoCollections.HiringMigrationLedger)
         _ <- malformedRows.toList.traverse_ { malformed =>
           val row = new Document("_id", MongoInterviewCleanupMigrations.MigrationId)
@@ -1066,7 +1074,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
           for {
             _ <- ledger.deleteMany(Filters.eq("_id", MongoInterviewCleanupMigrations.MigrationId))
             _ <- ledger.insertOne(row)
-            result <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop).attempt
+            result <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO]).attempt
             stored <- ledger.find(Filters.eq("_id", MongoInterviewCleanupMigrations.MigrationId)).first
             _ <- IO {
               assert(result.isLeft)

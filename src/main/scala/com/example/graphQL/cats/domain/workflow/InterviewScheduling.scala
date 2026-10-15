@@ -2,6 +2,7 @@ package com.example.graphQL.cats.domain.workflow
 
 import com.example.graphQL.cats.domain.model.ApplicationStatus
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, UserId}
+import com.example.hiring.saga.SagaEngine
 import java.time.Instant
 import java.util.UUID
 
@@ -203,73 +204,22 @@ object InterviewWorkflow {
   def notificationKey(id: InterviewWorkflowId, participant: InterviewParticipant): String =
     s"${id.value}:notify:$participant"
 
-  /** Pure policy: the caller persists the returned state and command intent in one transaction. */
+  /** Pure policy: the caller persists the returned state and command intent in one transaction. The rules live in the
+    * shared saga engine; `InterviewSchedulingSaga` is the scheduling definition.
+    */
   def decide(
       workflow: InterviewWorkflow,
       expectedRevision: Long,
       event: InterviewWorkflowEvent
   ): Either[InterviewWorkflowError, InterviewWorkflowDecision] =
-    if (!revisionMatches(workflow, expectedRevision)) Left(InterviewWorkflowError.StaleRevision)
-    else
-      transition(workflow, event).map { case (phase, notified, commands) =>
-        InterviewWorkflowDecision(
-          workflow.copy(revision = workflow.revision + 1L, phase = phase, notified = notified),
-          commands
-        )
-      }
-
-  private type Step = (InterviewWorkflowPhase, Set[InterviewParticipant], List[InterviewWorkflowCommand])
-
-  private def transition(
-      workflow: InterviewWorkflow,
-      event: InterviewWorkflowEvent
-  ): Either[InterviewWorkflowError, Step] = {
-    import InterviewWorkflowPhase.*
-    import InterviewWorkflowEvent as Event
-    import InterviewWorkflowCommand as Command
-    val releaseKey = s"${workflow.id.value}:release"
-    def notifyKey(participant: InterviewParticipant) = notificationKey(workflow.id, participant)
-    def move(phase: InterviewWorkflowPhase, commands: Command*): Either[InterviewWorkflowError, Step] =
-      Right((phase, workflow.notified, commands.toList))
-    def delivered(participant: InterviewParticipant): Either[InterviewWorkflowError, Step] = {
-      val all = workflow.notified + participant
-      Right((if (all.size == 2) Completed else NotificationsPending, all, Nil))
-    }
-    val commit = Command.CommitAcceptedToInterview(ApplicationStatus.Accepted)
-    val notifyBoth = InterviewParticipant.values.toList.map(p => Command.Notify(p, notifyKey(p)))
-
-    (workflow.phase, event) match {
-      case (ReservationPending, Event.ReservationConfirmed | Event.ReservationLookupFound) =>
-        move(StatusCommitPending, commit)
-      case (ReservationPending, Event.ReservationOutcomeUnknown) =>
-        move(ReservationPending, Command.LookupCalendarReservation(workflow.id))
-      case (ReservationPending, Event.ReservationLookupAbsent) =>
-        move(ReservationPending, Command.ReserveCalendarSlot(reservationKey(workflow.id, 0)))
-      case (ReservationPending, Event.ReservationRejected) =>
-        move(RepairRequired, Command.RequireRepair(InterviewRepairReason.CalendarReservationRejected))
-      case (ReservationPending | StatusCommitPending | NotificationsPending, Event.RetryExhausted(step)) =>
-        move(RepairRequired, Command.RequireRepair(InterviewRepairReason.RetryExhausted(step)))
-      case (StatusCommitPending, Event.StatusCommitted | Event.StatusLookupFound) =>
-        move(NotificationsPending, notifyBoth*)
-      case (StatusCommitPending, Event.StatusCommitOutcomeUnknown) =>
-        move(StatusCommitPending, Command.LookupStatusCommitReceipt(workflow.id))
-      case (StatusCommitPending, Event.StatusLookupAbsent) =>
-        move(StatusCommitPending, commit)
-      case (StatusCommitPending, Event.StatusCommitRejected) =>
-        move(CompensationPending, Command.ReleaseCalendarSlot(releaseKey))
-      case (CompensationPending, Event.ReservationReleaseOutcomeUnknown) =>
-        move(CompensationPending, Command.ReleaseCalendarSlot(releaseKey))
-      case (CompensationPending, Event.ReservationReleased) =>
-        move(RepairRequired, Command.RequireRepair(InterviewRepairReason.StatusNotCommitted))
-      case (CompensationPending, Event.RetryExhausted(step)) =>
-        move(RepairRequired, Command.RequireRepair(InterviewRepairReason.CompensationFailed(step)))
-      case (NotificationsPending, Event.NotificationDelivered(p))      => delivered(p)
-      case (NotificationsPending, Event.NotificationLookupFound(p))    => delivered(p)
-      case (NotificationsPending, Event.NotificationOutcomeUnknown(p)) =>
-        move(NotificationsPending, Command.LookupNotificationReceipt(p, notifyKey(p)))
-      case (NotificationsPending, Event.NotificationLookupAbsent(p)) =>
-        move(NotificationsPending, Command.Notify(p, notifyKey(p)))
-      case _ => Left(InterviewWorkflowError.InvalidTransition)
-    }
-  }
+    SagaEngine
+      .decide(
+        InterviewSchedulingSaga.definition,
+        workflow,
+        expectedRevision,
+        InterviewSchedulingSaga.input(workflow, event)
+      )
+      .left
+      .map(InterviewSchedulingSaga.toWorkflowError)
+      .map(decision => InterviewWorkflowDecision(decision.instance, decision.commands))
 }

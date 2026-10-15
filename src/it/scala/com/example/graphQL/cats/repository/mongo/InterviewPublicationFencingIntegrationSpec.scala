@@ -57,18 +57,18 @@ final class InterviewPublicationFencingIntegrationSpec extends KafkaIntegrationS
         workerGroup = kafkaNamespace.workers,
         orchestratorGroup = kafkaNamespace.orchestrator
       )
-    def fencer: Resource[IO, InterviewPublisherFencer] = InterviewProducerFencer.resource(
+    def fencer: Resource[IO, InterviewPublisherFencer[IO]] = InterviewProducerFencer.resource(
       bootstrap,
       "interview_fencer",
       values("KAFKA_INTERVIEW_FENCER_PASSWORD"),
       KafkaSaslSecurityProtocol.Plaintext,
-      Diagnostics.noop
+      Diagnostics.noop[IO]
     )
   }
 
   private def broker: IO[Broker] = IO.delay(Broker(kafkaEnvironment))
 
-  private def success[A](operation: RepositoryIO[A]): IO[A] = operation.value.flatMap {
+  private def success[A](operation: RepositoryF[IO, A]): IO[A] = operation.value.flatMap {
     case Right(value) => IO.pure(value)
     case Left(error)  => IO.raiseError(new AssertionError(s"Repository failure: $error"))
   }
@@ -192,9 +192,9 @@ final class InterviewPublicationFencingIntegrationSpec extends KafkaIntegrationS
   ): IO[Vector[String]] = {
     val users = new MongoUserRepository(
       database,
-      MongoTransactionRunner.sessions(client, RepositoryError.Conflict, diagnostics = Diagnostics.noop),
+      MongoTransactionRunner.sessions(client, RepositoryError.Conflict, diagnostics = Diagnostics.noop[IO]),
       MongoEmbeddingWorkEnqueuer.disabled,
-      Diagnostics.noop
+      Diagnostics.noop[IO]
     )
     val cleanup = new MongoInterviewSubjectCleanup(database, topics = interviewTopics)
     for {
@@ -210,14 +210,14 @@ final class InterviewPublicationFencingIntegrationSpec extends KafkaIntegrationS
     broker.flatMap { kafka =>
       List(false, true).traverse_ { worker =>
         mongoResource.use { fixture =>
-          val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
+          val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop[IO])
           (
             InterviewKafkaRuntime.publisherResource(kafka.config(worker)),
             InterviewKafkaRuntime.publisherResource(kafka.config(worker)),
             kafka.fencer
           ).tupled.use { case (transport, peer, fencer) =>
             for {
-              _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop, interviewTopics)
+              _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO], interviewTopics)
               item <- scheduled(fixture.database, repository, result = worker)
               authorized <- Deferred[IO, ClaimedInterviewWorkflowCommand]
               release <- Deferred[IO, Unit]
@@ -324,11 +324,11 @@ final class InterviewPublicationFencingIntegrationSpec extends KafkaIntegrationS
   test("deletion fences an already open transaction and its acknowledged record remains invisible") {
     broker.flatMap { kafka =>
       mongoResource.use { fixture =>
-        val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
+        val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop[IO])
         val generation = InterviewPublisherGeneration(InterviewPublisherRole.Orchestrator, UUID.randomUUID())
         (initializedProducer(kafka, generation), kafka.fencer).tupled.use { case (sender, fencer) =>
           for {
-            _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop, interviewTopics)
+            _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO], interviewTopics)
             item <- scheduled(fixture.database, repository)
             at <- IO.realTimeInstant
             permitted <- success(repository.authorizePublication(item.claim, generation, at))
@@ -359,11 +359,11 @@ final class InterviewPublicationFencingIntegrationSpec extends KafkaIntegrationS
   test("concurrent generation registration and real deletion either deny authorization or capture the generation") {
     broker.flatMap { kafka =>
       mongoResource.use { fixture =>
-        val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
+        val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop[IO])
         (InterviewKafkaRuntime.publisherResource(kafka.config(false)), kafka.fencer).tupled.use {
           case (transport, fencer) =>
             for {
-              _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop, interviewTopics)
+              _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO], interviewTopics)
               item <- scheduled(fixture.database, repository)
               start <- Deferred[IO, Unit]
               at <- IO.realTimeInstant

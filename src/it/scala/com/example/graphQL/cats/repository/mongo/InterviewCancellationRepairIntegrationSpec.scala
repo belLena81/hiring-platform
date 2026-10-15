@@ -23,7 +23,7 @@ final class InterviewCancellationRepairIntegrationSpec extends MongoIntegrationS
 
   private val admin = UserId(UUID.randomUUID())
 
-  private def success[A](operation: RepositoryIO[A]): IO[A] =
+  private def success[A](operation: RepositoryF[IO, A]): IO[A] =
     operation.value.flatMap(_.fold(error => IO.raiseError(new AssertionError(s"$error")), IO.pure))
 
   private def cancel(s: InterviewLifecycleScenario): IO[InterviewWorkflow] =

@@ -1,6 +1,7 @@
 package com.example.graphQL.cats.service.events
 
-import cats.effect.{Clock, IO, Resource}
+import cats.Monad
+import cats.effect.{Clock, Resource, Temporal}
 import cats.syntax.all.*
 import com.example.graphQL.cats.service.port.{
   PendingSearchSessionWork,
@@ -22,29 +23,31 @@ final case class SearchSessionHandoffConfig(
     pollInterval: FiniteDuration = 250.millis
 )
 
-trait SearchSessionHandoff {
-  def enqueue(session: SearchSession, event: OperationalEventEnvelope): IO[Unit]
+trait SearchSessionHandoff[F[_]] {
+  def enqueue(session: SearchSession, event: OperationalEventEnvelope): F[Unit]
 }
 
 object SearchSessionHandoff {
   private val WorkerName = "search-session-handoff"
 
-  def resource(
-      repository: SearchSessionWorkRepository,
+  def resource[F[_]](using
+      F: Temporal[F]
+  )(
+      repository: SearchSessionWorkRepository[F],
       config: SearchSessionHandoffConfig,
-      diagnostics: Diagnostics,
-      clock: Clock[IO] = Clock[IO]
-  ): Resource[IO, SearchSessionHandoff] = {
+      diagnostics: Diagnostics[F],
+      clock: Clock[F] = F
+  ): Resource[F, SearchSessionHandoff[F]] = {
     val worker = workerLoop(repository, config, diagnostics, clock)
     List
       .tabulate(config.parallelism)(index =>
         BackgroundWorker.resource(s"$WorkerName-${index + 1}", diagnostics)(worker)
       )
       .sequence_
-      .as(new SearchSessionHandoff {
-        def enqueue(session: SearchSession, event: OperationalEventEnvelope): IO[Unit] =
+      .as(new SearchSessionHandoff[F] {
+        def enqueue(session: SearchSession, event: OperationalEventEnvelope): F[Unit] =
           repository.enqueue(PendingSearchSessionWork(session, event), session.occurredAt).value.flatMap {
-            case Right(())   => IO.unit
+            case Right(())   => F.unit
             case Left(error) =>
               diagnostics.emit(
                 LogEvent.RuntimeFailed,
@@ -58,17 +61,17 @@ object SearchSessionHandoff {
       })
   }
 
-  private def workerLoop(
-      repository: SearchSessionWorkRepository,
+  private def workerLoop[F[_]](
+      repository: SearchSessionWorkRepository[F],
       config: SearchSessionHandoffConfig,
-      diagnostics: Diagnostics,
-      clock: Clock[IO]
-  ): IO[Unit] =
+      diagnostics: Diagnostics[F],
+      clock: Clock[F]
+  )(using F: Temporal[F]): F[Unit] =
     (clock.realTimeInstant.flatMap { now =>
       repository.claim(config.workerId, now, now.plusMillis(config.lease.toMillis)).value.flatMap {
         case Right(Some(claim)) =>
           processClaim(repository, config, claim, now).flatMap {
-            case WorkOutcome.Completed | WorkOutcome.RetryScheduled | WorkOutcome.Failed => IO.unit
+            case WorkOutcome.Completed | WorkOutcome.RetryScheduled | WorkOutcome.Failed => F.unit
             case WorkOutcome.OwnershipLost                                               =>
               diagnostics.emit(LogEvent.RuntimeFailed, fields = Map(LogField.Outcome -> LogOutcome.OwnershipLost.wire))
             case WorkOutcome.RecoveryDeferred(error) =>
@@ -76,9 +79,9 @@ object SearchSessionHandoff {
                 LogEvent.RuntimeFailed,
                 fields =
                   Map(LogField.Outcome -> LogOutcome.RecoveryDeferred.wire, LogField.ErrorType -> errorType(error))
-              ) *> IO.sleep(config.pollInterval)
+              ) *> F.sleep(config.pollInterval)
           }
-        case Right(None) => IO.sleep(config.pollInterval)
+        case Right(None) => F.sleep(config.pollInterval)
         case Left(error) =>
           diagnostics.emit(
             LogEvent.RuntimeFailed,
@@ -87,7 +90,7 @@ object SearchSessionHandoff {
               LogField.ErrorType -> errorType(error),
               LogField.ErrorLocation -> "unavailable"
             )
-          ) *> IO.sleep(config.pollInterval)
+          ) *> F.sleep(config.pollInterval)
       }
     }).foreverM
 
@@ -96,14 +99,14 @@ object SearchSessionHandoff {
     case RecoveryDeferred(error: RepositoryError)
   }
 
-  private[events] def processClaim(
-      repository: SearchSessionWorkRepository,
+  private[events] def processClaim[F[_]: Monad](
+      repository: SearchSessionWorkRepository[F],
       config: SearchSessionHandoffConfig,
       claim: com.example.graphQL.cats.service.port.ClaimedSearchSessionWork,
       now: java.time.Instant
-  ): IO[WorkOutcome] =
+  ): F[WorkOutcome] =
     repository.complete(claim, now).value.flatMap {
-      case Right(()) => IO.pure(WorkOutcome.Completed)
+      case Right(()) => Monad[F].pure(WorkOutcome.Completed)
       case Left(_)   =>
         // Persisted attempts count prior failed executions, starting at zero.
         val exhausted = claim.attempts.toLong + 1L >= config.maxAttempts.toLong

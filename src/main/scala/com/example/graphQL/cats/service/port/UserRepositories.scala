@@ -12,39 +12,39 @@ import com.example.graphQL.cats.domain.model.{
 import com.example.graphQL.cats.service.read.*
 import java.time.Instant
 
-trait UserRepository {
-  def relatedUsers(scope: HiringReadScope, keys: List[UserRelationKey]): RepositoryIO[List[RelatedUser]]
-  def find(id: UserId): RepositoryIO[Option[User]]
-  def findVersioned(id: UserId): RepositoryIO[Option[Versioned[User]]]
-  def updateEmbedding(id: UserId, embedding: EntityEmbedding): RepositoryIO[Unit]
-  def updateEmbedding(observed: Versioned[User], embedding: EntityEmbedding): RepositoryIO[Unit]
+trait UserRepository[F[_]] {
+  def relatedUsers(scope: HiringReadScope, keys: List[UserRelationKey]): RepositoryF[F, List[RelatedUser]]
+  def find(id: UserId): RepositoryF[F, Option[User]]
+  def findVersioned(id: UserId): RepositoryF[F, Option[Versioned[User]]]
+  def updateEmbedding(id: UserId, embedding: EntityEmbedding): RepositoryF[F, Unit]
+  def updateEmbedding(observed: Versioned[User], embedding: EntityEmbedding): RepositoryF[F, Unit]
 }
 
-trait UserAccountRepository {
+trait UserAccountRepository[F[_]] {
   def bootstrap(
       user: User,
       passwordHash: PasswordHash,
       context: MutationWriteContext
-  ): RepositoryIO[Unit]
-  def initialized: RepositoryIO[Boolean]
+  ): RepositoryF[F, Unit]
+  def initialized: RepositoryF[F, Boolean]
   def createAccount(
       user: User,
       passwordHash: PasswordHash,
       now: Instant,
       context: MutationWriteContext
-  ): RepositoryIO[Unit]
-  def findByCanonicalName(nameCanonical: String): RepositoryIO[Option[AccountCredentials]]
+  ): RepositoryF[F, Unit]
+  def findByCanonicalName(nameCanonical: String): RepositoryF[F, Option[AccountCredentials]]
   def updateProfile(
       userId: UserId,
       profile: UserProfile,
       now: Instant,
       context: MutationWriteContext
-  ): RepositoryIO[User]
-  def listAccounts(page: UserPageRequest): RepositoryIO[List[User]]
+  ): RepositoryF[F, User]
+  def listAccounts(page: UserPageRequest): RepositoryF[F, List[User]]
   def deleteAccount(
       userId: UserId,
       now: Instant,
       tombstone: String,
       context: MutationWriteContext
-  ): RepositoryIO[Unit]
+  ): RepositoryF[F, Unit]
 }

@@ -33,7 +33,7 @@ final class MongoInterviewCleanupIntegrityIntegrationSpec extends MongoIntegrati
       }
       .map(values => MongoHiringSetup.SetupDatabase(database, values.toMap))
   private def initialize(database: MongoDatabase[IO], topics: InterviewTopicPair): IO[Unit] =
-    MongoHiringSetup.initialize(database, Diagnostics.noop, topics)
+    MongoHiringSetup.initialize(database, Diagnostics.noop[IO], topics)
   private def disableValidation(database: MongoDatabase[IO]): IO[Unit] =
     database
       .runCommand(
@@ -101,7 +101,7 @@ final class MongoInterviewCleanupIntegrityIntegrationSpec extends MongoIntegrati
         )
       )
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         queue <- Mongo4catsCollections.documents(fixture.database, MongoCollections.InterviewSubjectCleanup)
         _ <- valid.traverse_(value =>
           IO(assert(MongoInterviewCleanupCodec.decodeCurrent(value).isRight)) *> queue.insertOne(value).void
@@ -112,7 +112,7 @@ final class MongoInterviewCleanupIntegrityIntegrationSpec extends MongoIntegrati
             case other => IO(fail(s"Expected document validation failure, got ${other.map(_ => ())}"))
           }
         }
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
       } yield ()
     }
   }
@@ -137,7 +137,7 @@ final class MongoInterviewCleanupIntegrityIntegrationSpec extends MongoIntegrati
   test("cleanup integrity cutover resumes a 500-row audit without skipping mixed BSON identities") {
     mongoResource.use { fixture =>
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         ledger <- Mongo4catsCollections.documents(fixture.database, MongoCollections.HiringMigrationLedger)
         queue <- Mongo4catsCollections.documents(fixture.database, MongoCollections.InterviewSubjectCleanup)
         _ <- ledger.deleteMany(Filters.eq("_id", MongoInterviewCleanupIntegrityMigrations.MigrationId))
@@ -165,7 +165,7 @@ final class MongoInterviewCleanupIntegrityIntegrationSpec extends MongoIntegrati
   test("concurrent cleanup integrity initialization preserves completed proof and strict validation") {
     mongoResource.use { fixture =>
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         ledger <- Mongo4catsCollections.documents(fixture.database, MongoCollections.HiringMigrationLedger)
         _ <- ledger.deleteMany(Filters.eq("_id", MongoInterviewCleanupIntegrityMigrations.MigrationId))
         fixtureSetup <- setup(fixture.database)
@@ -188,11 +188,11 @@ final class MongoInterviewCleanupIntegrityIntegrationSpec extends MongoIntegrati
   test("completed cleanup proof checks exact definitions and covered ledgers without rescanning cleanup") {
     mongoResource.use { fixture =>
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         queue <- Mongo4catsCollections.documents(fixture.database, MongoCollections.InterviewSubjectCleanup)
         _ <- queue.insertOne(waiting())
         _ <- fixture.commands.clear
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         reads <- fixture.commands.snapshot
         _ <- IO(
           assert(
@@ -206,7 +206,7 @@ final class MongoInterviewCleanupIntegrityIntegrationSpec extends MongoIntegrati
         )
         ledger <- Mongo4catsCollections.documents(fixture.database, MongoCollections.HiringMigrationLedger)
         _ <- ledger.deleteMany(Filters.eq("_id", MongoInterviewCleanupMigrations.MigrationId))
-        rejected <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop).attempt
+        rejected <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO]).attempt
         _ <- IO(assert(rejected.isLeft))
       } yield ()
     }
@@ -215,7 +215,7 @@ final class MongoInterviewCleanupIntegrityIntegrationSpec extends MongoIntegrati
   test("explicit cleanup audit preserves the successful raw identity checkpoint across repair") {
     mongoResource.use { fixture =>
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         queue <- Mongo4catsCollections.documents(fixture.database, MongoCollections.InterviewSubjectCleanup)
         _ <- (1L to 500L).toList.traverse_(n => queue.insertOne(row(new UUID(0L, n).toString)).void)
         _ <- disableValidation(fixture.database)

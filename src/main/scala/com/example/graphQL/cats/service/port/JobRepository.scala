@@ -14,13 +14,13 @@ import com.example.graphQL.cats.service.search.{
 }
 import java.time.Instant
 
-trait JobRepository {
-  def relatedJobs(scope: HiringReadScope, keys: List[JobRelationKey]): RepositoryIO[List[RelatedJob]]
-  def find(id: JobId): RepositoryIO[Option[Job]]
-  def findVersioned(id: JobId): RepositoryIO[Option[Versioned[Job]]]
-  def findSubmissionSnapshot(id: JobId): RepositoryIO[Option[JobSubmissionSnapshot]]
-  def findOpen(filter: JobSearchFilter, page: JobPageRequest): RepositoryIO[List[Job]]
-  def nearbyJobs(scope: HiringReadScope, query: NearbyJobsQuery, limit: Int): RepositoryIO[List[NearbyJob]]
+trait JobRepository[F[_]] {
+  def relatedJobs(scope: HiringReadScope, keys: List[JobRelationKey]): RepositoryF[F, List[RelatedJob]]
+  def find(id: JobId): RepositoryF[F, Option[Job]]
+  def findVersioned(id: JobId): RepositoryF[F, Option[Versioned[Job]]]
+  def findSubmissionSnapshot(id: JobId): RepositoryF[F, Option[JobSubmissionSnapshot]]
+  def findOpen(filter: JobSearchFilter, page: JobPageRequest): RepositoryF[F, List[Job]]
+  def nearbyJobs(scope: HiringReadScope, query: NearbyJobsQuery, limit: Int): RepositoryF[F, List[NearbyJob]]
 
   /** `matchedIds`, when present, restricts the counted jobs to that set in addition to the eligibility predicate.
     * `maxTime`, when present, is the remaining shared time budget and may only shorten the configured query deadline.
@@ -30,22 +30,22 @@ trait JobRepository {
       query: JobFacetQuery,
       matchedIds: Option[Set[JobId]],
       maxTime: Option[scala.concurrent.duration.FiniteDuration]
-  ): RepositoryIO[JobDiscoveryFacets]
-  def findAll(page: JobPageRequest): RepositoryIO[List[Job]]
-  def findByRecruiter(recruiterId: UserId, page: JobPageRequest): RepositoryIO[List[Job]]
+  ): RepositoryF[F, JobDiscoveryFacets]
+  def findAll(page: JobPageRequest): RepositoryF[F, List[Job]]
+  def findByRecruiter(recruiterId: UserId, page: JobPageRequest): RepositoryF[F, List[Job]]
   def createWithEvents(
       job: Job,
       now: Instant,
       events: List[OperationalEventEnvelope],
       context: MutationWriteContext
-  ): RepositoryIO[Unit]
+  ): RepositoryF[F, Unit]
   def updateWithEvents(
       expected: Versioned[Job],
       replacement: Job,
       now: Instant,
       events: List[OperationalEventEnvelope],
       context: MutationWriteContext
-  ): RepositoryIO[Versioned[Job]]
-  def updateEmbedding(id: JobId, embedding: EntityEmbedding): RepositoryIO[Unit]
-  def updateEmbedding(observed: Versioned[Job], embedding: EntityEmbedding): RepositoryIO[Unit]
+  ): RepositoryF[F, Versioned[Job]]
+  def updateEmbedding(id: JobId, embedding: EntityEmbedding): RepositoryF[F, Unit]
+  def updateEmbedding(observed: Versioned[Job], embedding: EntityEmbedding): RepositoryF[F, Unit]
 }

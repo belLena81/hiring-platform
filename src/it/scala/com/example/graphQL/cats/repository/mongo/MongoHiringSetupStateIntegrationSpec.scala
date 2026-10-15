@@ -138,7 +138,7 @@ final class MongoHiringSetupStateIntegrationSpec extends MongoIntegrationSuite {
     mongoResource.use { fixture =>
       recording(fixture).use { case (database, commands) =>
         for {
-          _ <- MongoHiringSetup.initialize(database, Diagnostics.noop)
+          _ <- MongoHiringSetup.initialize(database, Diagnostics.noop[IO])
           observed <- commands.snapshot
           shape <- storedShape(database)
           ledger <- ledgerRows(database)
@@ -164,12 +164,12 @@ final class MongoHiringSetupStateIntegrationSpec extends MongoIntegrationSuite {
       recording(fixture).use { case (database, _) =>
         for {
           _ <- (
-            MongoHiringSetup.initialize(database, Diagnostics.noop),
-            MongoHiringSetup.initialize(database, Diagnostics.noop)
+            MongoHiringSetup.initialize(database, Diagnostics.noop[IO]),
+            MongoHiringSetup.initialize(database, Diagnostics.noop[IO])
           ).parTupled
           shape <- storedShape(database)
           ledger <- ledgerRows(database)
-          _ <- MongoHiringSetup.initialize(database, Diagnostics.noop)
+          _ <- MongoHiringSetup.initialize(database, Diagnostics.noop[IO])
           restarted <- storedShape(database)
         } yield {
           assertEquals(ledger.map(_.getString(MongoFields.Id)), ExpectedLedgerIds)
@@ -191,9 +191,9 @@ final class MongoHiringSetupStateIntegrationSpec extends MongoIntegrationSuite {
         for {
           jobs <- Mongo4catsCollections.documents(database, MongoCollections.Jobs)
           _ <- jobs.insertOne(job)
-          first <- MongoHiringSetup.initialize(database, Diagnostics.noop).attempt
+          first <- MongoHiringSetup.initialize(database, Diagnostics.noop[IO]).attempt
           proof <- ledgerRows(database).map(_.find(_.getString(MongoFields.Id) == MigrationIds.JobGeoPoints.value))
-          second <- MongoHiringSetup.initialize(database, Diagnostics.noop).attempt
+          second <- MongoHiringSetup.initialize(database, Diagnostics.noop[IO]).attempt
           _ <- jobs.updateOne(
             Filters.eq(MongoFields.Id, job.getString(MongoFields.Id)),
             com.mongodb.client.model.Updates.set(
@@ -201,7 +201,7 @@ final class MongoHiringSetupStateIntegrationSpec extends MongoIntegrationSuite {
               new Document("type", "Point").append("coordinates", java.util.List.of(Double.box(20d), Double.box(0d)))
             )
           )
-          _ <- MongoHiringSetup.initialize(database, Diagnostics.noop)
+          _ <- MongoHiringSetup.initialize(database, Diagnostics.noop[IO])
           repaired <- ledgerRows(database).map(_.find(_.getString(MongoFields.Id) == MigrationIds.JobGeoPoints.value))
         } yield {
           val expected =
@@ -222,11 +222,11 @@ final class MongoHiringSetupStateIntegrationSpec extends MongoIntegrationSuite {
     mongoResource.use { fixture =>
       recording(fixture).use { case (database, _) =>
         for {
-          _ <- MongoHiringSetup.initialize(database, Diagnostics.noop)
+          _ <- MongoHiringSetup.initialize(database, Diagnostics.noop[IO])
           setup <- MongoHiringSetup.setupDatabase(database)
           _ <- setup.runCommand(new Document("collMod", MongoCollections.Users).append("validator", new Document()))
           ledgerBefore <- ledgerRows(database)
-          drifted <- MongoHiringSetup.initialize(database, Diagnostics.noop).attempt
+          drifted <- MongoHiringSetup.initialize(database, Diagnostics.noop[IO]).attempt
           ledgerAfterDrift <- ledgerRows(database)
           stillDrifted <- MongoHiringValidators.userValidatorMatches(setup)
           _ <- MongoHiringValidators.createUserValidator(setup)
@@ -237,7 +237,7 @@ final class MongoHiringSetupStateIntegrationSpec extends MongoIntegrationSuite {
                 Filters.eq(MongoFields.Id, MigrationIds.UserJobRevisions.value),
                 com.mongodb.client.model.Updates.set(MongoFields.Version, Int.box(1))
               )
-            ) *> MongoHiringSetup.initialize(database, Diagnostics.noop).attempt
+            ) *> MongoHiringSetup.initialize(database, Diagnostics.noop[IO]).attempt
           ledgerAfterCorrupt <- ledgerRows(database)
         } yield {
           assertEquals(ledgerAfterDrift.size, 19)
@@ -264,10 +264,10 @@ final class MongoHiringSetupStateIntegrationSpec extends MongoIntegrationSuite {
     mongoResource.use { fixture =>
       recording(fixture).use { case (database, commands) =>
         for {
-          _ <- MongoHiringSetup.initialize(database, Diagnostics.noop)
+          _ <- MongoHiringSetup.initialize(database, Diagnostics.noop[IO])
           before <- storedShape(database)
           _ <- commands.clear
-          _ <- MongoHiringSetup.initialize(database, Diagnostics.noop)
+          _ <- MongoHiringSetup.initialize(database, Diagnostics.noop[IO])
           observed <- commands.snapshot
           after <- storedShape(database)
           _ <- dump("restart-state.json", after.toJson(ExtendedJson))

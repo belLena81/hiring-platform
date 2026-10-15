@@ -24,7 +24,7 @@ private[runtime] object InterviewSchedulingRuntime {
       config: KafkaConfig,
       repository: MongoInterviewWorkflowRepository,
       cleanup: MongoInterviewSubjectCleanup,
-      diagnostics: Diagnostics
+      diagnostics: Diagnostics[IO]
   ): Resource[IO, Unit] = {
     val settings = config.interview
     if (!settings.enabled) Resource.unit[IO]
@@ -45,7 +45,7 @@ private[runtime] object InterviewSchedulingRuntime {
               Some(fencerUsername),
               Some(fencerPassword)
             ) =>
-          val worker = new InterviewWorkflowWorker(
+          val worker = new InterviewWorkflowWorker[IO](
             repository,
             LedgerInterviewCalendarProvider.durable(repository),
             LedgerInterviewNotificationProvider.durable(repository),
@@ -88,10 +88,10 @@ private[runtime] object InterviewSchedulingRuntime {
             restartMaxDelaySeconds = config.restartMaxDelaySeconds
           )
           def receive(
-              handler: InterviewMessage => RepositoryIO[Unit]
-          )(value: Either[String, InterviewMessage]): RepositoryIO[Unit] =
+              handler: InterviewMessage => RepositoryF[IO, Unit]
+          )(value: Either[String, InterviewMessage]): RepositoryF[IO, Unit] =
             value.fold(
-              identity => RepositoryIO.lift(IO.realTimeInstant).flatMap(repository.quarantine(identity, _)),
+              identity => RepositoryF.lift(IO.realTimeInstant).flatMap(repository.quarantine(identity, _)),
               handler
             )
           def generation: Stream[IO, Unit] = Stream
@@ -102,8 +102,8 @@ private[runtime] object InterviewSchedulingRuntime {
               ).tupled
             )
             .flatMap { case (commands, results) =>
-              val routing = new InterviewTransport {
-                private def owner(message: InterviewMessage): InterviewTransport =
+              val routing = new InterviewTransport[IO] {
+                private def owner(message: InterviewMessage): InterviewTransport[IO] =
                   if (message.result.isDefined) results else commands
                 def generationFor(message: InterviewMessage): InterviewPublisherGeneration =
                   owner(message).generationFor(message)
@@ -135,7 +135,7 @@ private[runtime] object InterviewSchedulingRuntime {
             _ <- BackgroundWorker.resource(PublicationWorker, diagnostics)(
               Stream.suspend(generation).repeat.compile.drain
             )
-            _ <- new InterviewSubjectCleanupWorker(
+            _ <- new InterviewSubjectCleanupWorker[IO](
               cleanup,
               fencer,
               retention.capture,

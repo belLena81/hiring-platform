@@ -30,29 +30,33 @@ class MongoSearchSessionRetryIntegrationSpec extends MongoIntegrationSuite {
       val event =
         OperationalEvents.searchPerformed(UUID.randomUUID(), session).fold(error => fail(error.toString), identity)
       val underlying =
-        MongoSearchSessionWorkRepository.transactional(fixture.database, fixture.client, Diagnostics.noop)
+        MongoSearchSessionWorkRepository.transactional(fixture.database, fixture.client, Diagnostics.noop[IO])
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- underlying.enqueue(PendingSearchSessionWork(session, event), now).value.flatMap(result)
         executions <- Ref.of[IO, Vector[Int]](Vector.empty)
         terminal <- Deferred[IO, Unit]
-        repository = new SearchSessionWorkRepository {
-          def enqueue(work: PendingSearchSessionWork, at: Instant): RepositoryIO[Unit] = underlying.enqueue(work, at)
-          def findForActor(actor: UserId, id: UUID): RepositoryIO[Option[SearchSessionLookup]] =
+        repository = new SearchSessionWorkRepository[IO] {
+          def enqueue(work: PendingSearchSessionWork, at: Instant): RepositoryF[IO, Unit] = underlying.enqueue(work, at)
+          def findForActor(actor: UserId, id: UUID): RepositoryF[IO, Option[SearchSessionLookup]] =
             underlying.findForActor(actor, id)
-          def claim(worker: String, at: Instant, until: Instant): RepositoryIO[Option[ClaimedSearchSessionWork]] =
+          def claim(worker: String, at: Instant, until: Instant): RepositoryF[IO, Option[ClaimedSearchSessionWork]] =
             underlying.claim(worker, at, until)
-          def complete(claim: ClaimedSearchSessionWork, at: Instant): RepositoryIO[Unit] =
-            RepositoryIO.fromIOEither(executions.update(_ :+ claim.attempts).as(Left(RepositoryError.Unavailable)))
-          def retry(claim: ClaimedSearchSessionWork, at: Instant): RepositoryIO[Unit] = underlying.retry(claim, at)
-          def fail(claim: ClaimedSearchSessionWork, reason: SearchSessionWorkFailure, at: Instant): RepositoryIO[Unit] =
+          def complete(claim: ClaimedSearchSessionWork, at: Instant): RepositoryF[IO, Unit] =
+            RepositoryF.fromFEither(executions.update(_ :+ claim.attempts).as(Left(RepositoryError.Unavailable)))
+          def retry(claim: ClaimedSearchSessionWork, at: Instant): RepositoryF[IO, Unit] = underlying.retry(claim, at)
+          def fail(
+              claim: ClaimedSearchSessionWork,
+              reason: SearchSessionWorkFailure,
+              at: Instant
+          ): RepositoryF[IO, Unit] =
             underlying.fail(claim, reason, at).semiflatTap(_ => terminal.complete(()).void)
         }
         _ <- SearchSessionHandoff
-          .resource(
+          .resource[IO](
             repository,
             SearchSessionHandoffConfig(parallelism = 1, retryDelay = 1.millis, pollInterval = 5.millis),
-            Diagnostics.noop
+            Diagnostics.noop[IO]
           )
           .use(_ => terminal.get.timeout(20.seconds))
         observed <- executions.get
@@ -86,9 +90,9 @@ class MongoSearchSessionRetryIntegrationSpec extends MongoIntegrationSuite {
       val event =
         OperationalEvents.searchPerformed(UUID.randomUUID(), session).fold(error => fail(error.toString), identity)
       val repository =
-        MongoSearchSessionWorkRepository.transactional(fixture.database, fixture.client, Diagnostics.noop)
+        MongoSearchSessionWorkRepository.transactional(fixture.database, fixture.client, Diagnostics.noop[IO])
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- repository.enqueue(PendingSearchSessionWork(session, event), now).value.flatMap(result)
         first <- repository
           .claim("first", now, now.plusSeconds(1))
@@ -137,9 +141,9 @@ class MongoSearchSessionRetryIntegrationSpec extends MongoIntegrationSuite {
       val event =
         OperationalEvents.searchPerformed(UUID.randomUUID(), session).fold(error => fail(error.toString), identity)
       val repository =
-        MongoSearchSessionWorkRepository.transactional(fixture.database, fixture.client, Diagnostics.noop)
+        MongoSearchSessionWorkRepository.transactional(fixture.database, fixture.client, Diagnostics.noop[IO])
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- repository.enqueue(PendingSearchSessionWork(session, event), now).value.flatMap(result)
         first <- repository.claim("first", now, leaseUntil).value.flatMap(result)
         held <- repository.claim("second", leaseUntil.minusMillis(1L), leaseUntil.plusSeconds(30)).value.flatMap(result)

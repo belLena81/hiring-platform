@@ -1,7 +1,8 @@
 package com.example.graphQL.cats.service.job
 
 import cats.data.EitherT
-import cats.effect.{Clock, IO}
+import cats.MonadThrow
+import cats.effect.Clock
 import cats.effect.std.UUIDGen
 import cats.syntax.all.*
 import com.example.graphQL.cats.service.{ActorContext, Diagnostics, SearchError, UseCaseError}
@@ -10,7 +11,7 @@ import com.example.graphQL.cats.service.port.{
   LexicalJobMatcher,
   MutationEntityReference,
   MutationWriteContext,
-  RepositoryIO,
+  RepositoryF,
   UserRepository,
   Versioned
 }
@@ -25,7 +26,7 @@ import com.example.graphQL.cats.service.events.OperationalEventEnvelope
 import com.example.graphQL.cats.service.read.HiringReadScope
 import com.example.graphQL.cats.service.auth.ActorAuthorization
 import com.example.graphQL.cats.service.mutation.Idempotent
-import com.example.graphQL.cats.service.protocol.{IdempotencyRequest, JobUseCases, UseCaseIO}
+import com.example.graphQL.cats.service.protocol.{IdempotencyRequest, JobUseCases, UseCaseF}
 import com.example.graphQL.cats.service.search.EmbeddingWorkPublisher
 import com.example.graphQL.cats.domain.pagination.JobPageRequest
 import com.example.graphQL.cats.service.search.JobSearchFilter
@@ -59,19 +60,19 @@ final case class UpdateJobInput(
     location: Location
 )
 
-final class JobService(
-    users: UserRepository,
-    jobs: JobRepository,
-    embeddingWork: EmbeddingWorkPublisher,
-    idempotent: Idempotent,
-    diagnostics: Diagnostics,
-    clock: Clock[IO] = Clock[IO],
-    uuidGen: UUIDGen[IO] = UUIDGen[IO],
-    lexicalMatcher: Option[LexicalJobMatcher] = None,
+final class JobService[F[_]: MonadThrow](
+    users: UserRepository[F],
+    jobs: JobRepository[F],
+    embeddingWork: EmbeddingWorkPublisher[F],
+    idempotent: Idempotent[F],
+    diagnostics: Diagnostics[F],
+    clock: Clock[F],
+    uuidGen: UUIDGen[F],
+    lexicalMatcher: Option[LexicalJobMatcher[F]] = None,
     lexicalFacetMatchLimit: LexicalMatchLimit = LexicalMatchLimit.Default,
     /** Total time budget shared by the lexical match and the recount; absent means each step keeps its own bound. */
     lexicalFacetDeadline: Option[FiniteDuration] = None
-) extends JobUseCases {
+) extends JobUseCases[F] {
   private val authorization = ActorAuthorization(users)
   private val authorizedJobs = AuthorizedJobAccess(authorization, jobs)
 
@@ -79,14 +80,14 @@ final class JobService(
       request: IdempotencyRequest,
       actor: ActorContext,
       input: CreateJobInput
-  ): UseCaseIO[Job] =
+  ): UseCaseF[F, Job] =
     idempotent.executeFor(actor, "createJob", request, jobReference, replayJob(actor)) { context =>
       for {
         user <- authorization.resolve(actor)
-        _ <- UseCaseIO.ensure(authorization.canManageJobs(user), UseCaseError.Domain(DomainError.Forbidden))
+        _ <- UseCaseF.ensure[F](authorization.canManageJobs(user), UseCaseError.Domain(DomainError.Forbidden))
         now <- EitherT.liftF(clock.realTimeInstant)
         jobId <- EitherT.liftF(uuidGen.randomUUID.map(JobId.apply))
-        job <- EitherT.fromEither[IO](
+        job <- EitherT.fromEither[F](
           validateNewJob(user.id, input, now, jobId).flatMap(JobLifecycle.create(_).leftMap(UseCaseError.Domain.apply))
         )
         created <- persist(job, JobKind.Created, job.createdAt, user.id)(
@@ -100,13 +101,13 @@ final class JobService(
       actor: ActorContext,
       jobId: JobId,
       input: UpdateJobInput
-  ): UseCaseIO[Job] =
+  ): UseCaseF[F, Job] =
     idempotent.executeFor(actor, "updateJob", request, jobReference, replayJob(actor)) { context =>
       authorizedJobs.manageVersioned(actor, jobId) { observed =>
         for {
           now <- EitherT.liftF(clock.realTimeInstant)
-          edited <- EitherT.fromEither[IO](validateUpdatedJob(observed.value, input, now))
-          replacement <- EitherT.fromEither[IO](
+          edited <- EitherT.fromEither[F](validateUpdatedJob(observed.value, input, now))
+          replacement <- EitherT.fromEither[F](
             JobLifecycle.update(edited).runS(observed.value).leftMap(UseCaseError.Domain.apply)
           )
           updated <- persistUpdate(observed, replacement, JobKind.Updated, actor.userId, context)
@@ -114,48 +115,48 @@ final class JobService(
       }
     }
 
-  override def publishJob(request: IdempotencyRequest, actor: ActorContext, jobId: JobId): UseCaseIO[Job] =
+  override def publishJob(request: IdempotencyRequest, actor: ActorContext, jobId: JobId): UseCaseF[F, Job] =
     transition("publishJob", JobKind.Updated, request, actor, jobId)(JobLifecycle.publish)
 
-  override def closeJob(request: IdempotencyRequest, actor: ActorContext, jobId: JobId): UseCaseIO[Job] =
+  override def closeJob(request: IdempotencyRequest, actor: ActorContext, jobId: JobId): UseCaseF[F, Job] =
     transition("closeJob", JobKind.Closed, request, actor, jobId)(JobLifecycle.close)
 
-  def viewJob(actor: ActorContext, jobId: JobId): UseCaseIO[Job] =
+  def viewJob(actor: ActorContext, jobId: JobId): UseCaseF[F, Job] =
     for {
       user <- authorization.resolve(actor)
-      job <- UseCaseIO.found(jobs.find(jobId), "job")
-      _ <- UseCaseIO.ensure(authorization.canView(user, job), UseCaseError.Domain(DomainError.Forbidden))
+      job <- UseCaseF.found(jobs.find(jobId), "job")
+      _ <- UseCaseF.ensure[F](authorization.canView(user, job), UseCaseError.Domain(DomainError.Forbidden))
     } yield job
 
-  def searchOpenJobs(actor: ActorContext, filter: JobSearchFilter, page: JobPageRequest): UseCaseIO[List[Job]] =
-    authorization.resolve(actor) *> UseCaseIO.repository(jobs.findOpen(filter, page))
+  def searchOpenJobs(actor: ActorContext, filter: JobSearchFilter, page: JobPageRequest): UseCaseF[F, List[Job]] =
+    authorization.resolve(actor) *> UseCaseF.repository(jobs.findOpen(filter, page))
 
-  def nearbyJobs(actor: ActorContext, query: NearbyJobsQuery, limit: Int): UseCaseIO[List[NearbyJob]] =
+  def nearbyJobs(actor: ActorContext, query: NearbyJobsQuery, limit: Int): UseCaseF[F, List[NearbyJob]] =
     for {
-      normalized <- EitherT.fromEither[IO](
+      normalized <- EitherT.fromEither[F](
         JobDiscoveryValidation
           .nearby(query)
           .toEither
           .leftMap(errors => UseCaseError.Search(SearchError.accumulated(errors)))
       )
-      _ <- UseCaseIO.ensure(
+      _ <- UseCaseF.ensure[F](
         limit >= 1 && limit <= com.example.graphQL.cats.domain.pagination.PageSize.Max,
         UseCaseError.Search(SearchError.InvalidFilter("pageSize"))
       )
       scope <- discoveryScope(actor)
-      results <- UseCaseIO.repository(jobs.nearbyJobs(scope, normalized, limit + 1))
+      results <- UseCaseF.repository(jobs.nearbyJobs(scope, normalized, limit + 1))
     } yield results
 
-  def jobDiscoveryFacets(actor: ActorContext, query: JobFacetQuery): UseCaseIO[JobDiscoveryFacets] =
+  def jobDiscoveryFacets(actor: ActorContext, query: JobFacetQuery): UseCaseF[F, JobDiscoveryFacets] =
     for {
-      normalized <- EitherT.fromEither[IO](
+      normalized <- EitherT.fromEither[F](
         JobDiscoveryValidation
           .facets(query)
           .toEither
           .leftMap(errors => UseCaseError.Search(SearchError.accumulated(errors)))
       )
       scope <- discoveryScope(actor)
-      results <- normalized.text.fold(UseCaseIO.repository(jobs.jobDiscoveryFacets(scope, normalized, None, None)))(
+      results <- normalized.text.fold(UseCaseF.repository(jobs.jobDiscoveryFacets(scope, normalized, None, None)))(
         lexicalFacets(scope, normalized, _)
       )
     } yield results
@@ -163,20 +164,24 @@ final class JobService(
   /** Step 1 reads index evidence after authorization; step 2 recounts from operational truth restricted to those IDs.
     * Both steps share one time budget: step 1's elapsed monotonic time is deducted and step 2 receives what remains.
     */
-  private def lexicalFacets(scope: HiringReadScope, query: JobFacetQuery, text: String): UseCaseIO[JobDiscoveryFacets] =
+  private def lexicalFacets(
+      scope: HiringReadScope,
+      query: JobFacetQuery,
+      text: String
+  ): UseCaseF[F, JobDiscoveryFacets] =
     for {
-      matcher <- EitherT.fromOption[IO](lexicalMatcher, facetsUnavailable)
-      started <- EitherT.liftF[IO, UseCaseError, FiniteDuration](clock.monotonic)
-      matched <- UseCaseIO
+      matcher <- EitherT.fromOption[F](lexicalMatcher, facetsUnavailable)
+      started <- EitherT.liftF[F, UseCaseError, FiniteDuration](clock.monotonic)
+      matched <- UseCaseF
         .repository(matcher.matches(text, query.filter, lexicalFacetMatchLimit.value))
         .leftMap(_ => facetsUnavailable)
-      finished <- EitherT.liftF[IO, UseCaseError, FiniteDuration](clock.monotonic)
+      finished <- EitherT.liftF[F, UseCaseError, FiniteDuration](clock.monotonic)
       remaining = lexicalFacetDeadline.map(_ - (finished - started))
       counted <-
-        if (matched.ids.isEmpty) EitherT.rightT[IO, UseCaseError](JobDiscoveryFacets.fromJobs(Nil))
-        else if (remaining.exists(_ < MinimumRecountBudget)) EitherT.leftT[IO, JobDiscoveryFacets](facetsUnavailable)
+        if (matched.ids.isEmpty) EitherT.rightT[F, UseCaseError](JobDiscoveryFacets.fromJobs(Nil))
+        else if (remaining.exists(_ < MinimumRecountBudget)) EitherT.leftT[F, JobDiscoveryFacets](facetsUnavailable)
         else
-          UseCaseIO.repository(jobs.jobDiscoveryFacets(scope, query, Some(matched.ids), remaining)).leftMap {
+          UseCaseF.repository(jobs.jobDiscoveryFacets(scope, query, Some(matched.ids), remaining)).leftMap {
             case UseCaseError.Repository(_) => facetsUnavailable
             case other                      => other
           }
@@ -188,9 +193,9 @@ final class JobService(
   private val facetsUnavailable: UseCaseError = UseCaseError.Search(SearchError.FacetsUnavailable)
 
   /** Candidates and the Admin discover jobs; the read scope comes from the persisted actor. */
-  private def discoveryScope(actor: ActorContext): UseCaseIO[HiringReadScope] =
+  private def discoveryScope(actor: ActorContext): UseCaseF[F, HiringReadScope] =
     authorization.readScope(actor).flatMap { (user, scope) =>
-      UseCaseIO
+      UseCaseF
         .ensure(
           user.role == UserRole.Candidate || user.role == UserRole.Admin,
           UseCaseError.Domain(DomainError.Forbidden)
@@ -198,20 +203,20 @@ final class JobService(
         .as(scope)
     }
 
-  def myJobs(actor: ActorContext, page: JobPageRequest): UseCaseIO[List[Job]] =
+  def myJobs(actor: ActorContext, page: JobPageRequest): UseCaseF[F, List[Job]] =
     for {
       user <- authorization.resolve(actor)
       manageableJobs <- {
         user.role match {
-          case UserRole.Admin     => UseCaseIO.repository(jobs.findAll(page))
-          case UserRole.Recruiter => UseCaseIO.repository(jobs.findByRecruiter(user.id, page))
-          case UserRole.Candidate => EitherT.leftT[IO, List[Job]](UseCaseError.Domain(DomainError.Forbidden))
+          case UserRole.Admin     => UseCaseF.repository(jobs.findAll(page))
+          case UserRole.Recruiter => UseCaseF.repository(jobs.findByRecruiter(user.id, page))
+          case UserRole.Candidate => EitherT.leftT[F, List[Job]](UseCaseError.Domain(DomainError.Forbidden))
         }
       }
     } yield manageableJobs
 
-  private def replayJob(actor: ActorContext): MutationEntityReference => UseCaseIO[Job] =
-    Idempotent.replayById("job", JobId.apply)(viewJob(actor, _))
+  private def replayJob(actor: ActorContext): MutationEntityReference => UseCaseF[F, Job] =
+    Idempotent.replayById[F, JobId, Job]("job", JobId.apply)(viewJob(actor, _))
 
   private def jobReference(job: Job): MutationEntityReference =
     MutationEntityReference.of("job", job.id.value)
@@ -222,12 +227,12 @@ final class JobService(
       request: IdempotencyRequest,
       actor: ActorContext,
       jobId: JobId
-  )(program: Instant => LifecycleProgram[Job, Unit]): UseCaseIO[Job] =
+  )(program: Instant => LifecycleProgram[Job, Unit]): UseCaseF[F, Job] =
     idempotent.executeFor(actor, operation, request, jobReference, replayJob(actor)) { context =>
       authorizedJobs.manageVersioned(actor, jobId) { observed =>
         for {
           now <- EitherT.liftF(clock.realTimeInstant)
-          changed <- EitherT.fromEither[IO](program(now).runS(observed.value).leftMap(UseCaseError.Domain.apply))
+          changed <- EitherT.fromEither[F](program(now).runS(observed.value).leftMap(UseCaseError.Domain.apply))
           saved <- persistUpdate(observed, changed, kind, actor.userId, context)
         } yield saved
       }
@@ -283,24 +288,24 @@ final class JobService(
       kind: JobKind,
       actorId: UserId,
       context: MutationWriteContext
-  ): UseCaseIO[Job] =
+  ): UseCaseF[F, Job] =
     persist(job, kind, job.updatedAt, actorId)(
       jobs.updateWithEvents(expected, job, job.updatedAt, _, context).map(_.value)
     )
 
   /** Builds the job's operational event, then runs `write` with it and wakes the embedding worker after commit. */
   private def persist(job: Job, kind: JobKind, occurredAt: Instant, actorId: UserId)(
-      write: List[OperationalEventEnvelope] => RepositoryIO[Job]
-  ): UseCaseIO[Job] =
+      write: List[OperationalEventEnvelope] => RepositoryF[F, Job]
+  ): UseCaseF[F, Job] =
     EitherT
-      .fromEither[IO](
+      .fromEither[F](
         OperationalEvents
           .jobEvent(kind, eventId(job, kind, occurredAt), job, actorId, occurredAt)
           .leftMap(_ => UseCaseError.Repository(RepositoryError.InvalidEvent))
       )
-      .flatMap(event => notifyAfterCommit(UseCaseIO.repository(write(List(event)))))
+      .flatMap(event => notifyAfterCommit(UseCaseF.repository(write(List(event)))))
 
-  private def notifyAfterCommit(result: UseCaseIO[Job]): UseCaseIO[Job] =
+  private def notifyAfterCommit(result: UseCaseF[F, Job]): UseCaseF[F, Job] =
     result.semiflatTap(_ => embeddingWork.wakeAfterCommit(diagnostics))
 
   private def eventId(job: Job, kind: JobKind, occurredAt: Instant): UUID =

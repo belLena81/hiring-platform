@@ -187,20 +187,21 @@ class OperationalEventComposeIntegrationSpec extends KafkaIntegrationSuite {
           val jobs = MongoJobRepository.transactional(
             database,
             client,
-            new MongoEmbeddingWorkRepository(database, com.example.graphQL.cats.service.Diagnostics.noop),
-            com.example.graphQL.cats.service.Diagnostics.noop
+            new MongoEmbeddingWorkRepository(database, com.example.graphQL.cats.service.Diagnostics.noop[IO]),
+            com.example.graphQL.cats.service.Diagnostics.noop[IO]
           )
           val outbox = MongoOperationalEventOutboxRepository.transactional(
             database,
             client,
-            com.example.graphQL.cats.service.Diagnostics.noop
+            com.example.graphQL.cats.service.Diagnostics.noop[IO]
           )
-          val receipts = new MongoConsumerReceiptRepository(database, com.example.graphQL.cats.service.Diagnostics.noop)
+          val receipts =
+            new MongoConsumerReceiptRepository(database, com.example.graphQL.cats.service.Diagnostics.noop[IO])
           val quarantine =
-            new MongoEventQuarantineRepository(database, com.example.graphQL.cats.service.Diagnostics.noop)
+            new MongoEventQuarantineRepository(database, com.example.graphQL.cats.service.Diagnostics.noop[IO])
           val diagnosticEvents = Ref.of[IO, Vector[String]](Vector.empty)
           val diagnosticsIO = diagnosticEvents.map { events =>
-            val diagnostics = new Diagnostics {
+            val diagnostics = new Diagnostics[IO] {
               override def event(
                   event: LogEvent,
                   requestId: Option[String],
@@ -236,7 +237,7 @@ class OperationalEventComposeIntegrationSpec extends KafkaIntegrationSuite {
             }
             (events, evidence, work)
           }
-          MongoHiringSetup.initialize(database, com.example.graphQL.cats.service.Diagnostics.noop) *> diagnosticsIO
+          MongoHiringSetup.initialize(database, com.example.graphQL.cats.service.Diagnostics.noop[IO]) *> diagnosticsIO
             .flatMap { case (observedEvents, evidence, work) =>
               evidence.use { _ =>
                 for {

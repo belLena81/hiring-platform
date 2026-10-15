@@ -20,7 +20,7 @@ trait MongoEmbeddingWorkEnqueuer {
       session: Option[ClientSession[IO]],
       key: EmbeddingWorkKey,
       now: Instant
-  ): RepositoryIO[Unit]
+  ): RepositoryF[IO, Unit]
 }
 
 object MongoEmbeddingWorkEnqueuer {
@@ -33,16 +33,16 @@ object MongoEmbeddingWorkEnqueuer {
         _session: Option[ClientSession[IO]],
         _key: EmbeddingWorkKey,
         _now: Instant
-    ): RepositoryIO[Unit] = ().pure[RepositoryIO]
+    ): RepositoryF[IO, Unit] = ().pure[[A] =>> RepositoryF[IO, A]]
   }
 }
 
 /** Durable, coalesced embedding work. A newer enqueue increments generation so an older lease cannot delete it. */
 final class MongoEmbeddingWorkRepository(
     database: MongoDatabase[IO],
-    diagnostics: Diagnostics,
+    diagnostics: Diagnostics[IO],
     uuidGen: UUIDGen[IO] = UUIDGen[IO]
-) extends EmbeddingWorkRepository
+) extends EmbeddingWorkRepository[IO]
     with MongoEmbeddingWorkEnqueuer {
   override val requiresTransaction: Boolean = true
   private val processing = MongoFilter.eq(MongoFields.State, EmbeddingWorkState.Processing.toString)
@@ -51,23 +51,25 @@ final class MongoEmbeddingWorkRepository(
       key: EmbeddingWorkKey,
       adminId: com.example.graphQL.cats.domain.model.Identifiers.UserId,
       transactions: MongoTransactionRunner
-  ): RepositoryIO[Option[EmbeddingWorkInspection]] = transactions.run { session =>
+  ): RepositoryF[IO, Option[EmbeddingWorkInspection]] = transactions.run { session =>
     for {
       _ <- authorizeAdmin(adminId, session)
-      row <- RepositoryIO.lift(
+      row <- RepositoryF.lift(
         MongoSessionOperations.findOne(collection, session, MongoFilter.eq(MongoFields.Id, key.value))
       )
       result <- row.traverse(document =>
-        RepositoryIO.fromEither(MongoDocumentFields.toRepository(for {
-          generation <- MongoDocumentFields.requiredNumberAsLong(document, MongoFields.Generation)
-          attempts <- MongoDocumentFields.requiredNumberAsInt(document, MongoFields.Attempts)
-          state <- MongoDocumentFields.requiredEnum(document, MongoFields.State)(
-            MongoDocumentFields.byName(EmbeddingWorkState.values)
-          )
-          failure <- MongoDocumentFields.optionalEnum(document, MongoFields.Failure)(
-            MongoDocumentFields.byName(EmbeddingWorkFailure.values)
-          )
-        } yield EmbeddingWorkInspection(generation, attempts, state, failure)))
+        RepositoryF
+          .at[IO]
+          .fromEither(MongoDocumentFields.toRepository(for {
+            generation <- MongoDocumentFields.requiredNumberAsLong(document, MongoFields.Generation)
+            attempts <- MongoDocumentFields.requiredNumberAsInt(document, MongoFields.Attempts)
+            state <- MongoDocumentFields.requiredEnum(document, MongoFields.State)(
+              MongoDocumentFields.byName(EmbeddingWorkState.values)
+            )
+            failure <- MongoDocumentFields.optionalEnum(document, MongoFields.Failure)(
+              MongoDocumentFields.byName(EmbeddingWorkFailure.values)
+            )
+          } yield EmbeddingWorkInspection(generation, attempts, state, failure)))
       )
     } yield result
   }
@@ -75,7 +77,7 @@ final class MongoEmbeddingWorkRepository(
   private def authorizeAdmin(
       adminId: com.example.graphQL.cats.domain.model.Identifiers.UserId,
       session: Option[ClientSession[IO]]
-  ): RepositoryIO[Unit] = RepositoryIO
+  ): RepositoryF[IO, Unit] = RepositoryF
     .lift(
       MongoSessionOperations.updateOne(
         Mongo4catsCollections.documents(database, MongoCollections.Users),
@@ -101,14 +103,14 @@ final class MongoEmbeddingWorkRepository(
       adminId: com.example.graphQL.cats.domain.model.Identifiers.UserId,
       now: Instant,
       transactions: MongoTransactionRunner
-  ): RepositoryIO[Boolean] =
+  ): RepositoryF[IO, Boolean] =
     if (expectedGeneration < 1L || expectedGeneration == Long.MaxValue)
-      RepositoryIO.raise(RepositoryError.InvalidStoredData)
+      RepositoryF.at[IO].raise(RepositoryError.InvalidStoredData)
     else
       transactions.run { session =>
         for {
           _ <- authorizeAdmin(adminId, session)
-          repaired <- RepositoryIO.lift(
+          repaired <- RepositoryF.lift(
             MongoSessionOperations.updateOne(
               collection,
               session,
@@ -133,26 +135,26 @@ final class MongoEmbeddingWorkRepository(
       }
   private val collection = Mongo4catsCollections.documents(database, MongoCollections.EmbeddingWork)
 
-  override def enqueue(key: EmbeddingWorkKey, now: Instant): RepositoryIO[Unit] =
+  override def enqueue(key: EmbeddingWorkKey, now: Instant): RepositoryF[IO, Unit] =
     enqueue(None, key, now)
 
   /** Persists work in the caller's Mongo transaction. This is deliberately a concrete Mongo capability: the generic
     * work port has no transaction/session concept.
     */
-  def enqueue(session: ClientSession[IO], key: EmbeddingWorkKey, now: Instant): RepositoryIO[Unit] =
+  def enqueue(session: ClientSession[IO], key: EmbeddingWorkKey, now: Instant): RepositoryF[IO, Unit] =
     enqueue(Some(session), key, now)
 
   override def enqueue(
       session: Option[ClientSession[IO]],
       key: EmbeddingWorkKey,
       now: Instant
-  ): RepositoryIO[Unit] = {
+  ): RepositoryF[IO, Unit] = {
     val pipeline = List(enqueueStage(key, now))
     // A state predicate in an upsert filter attempts a duplicate insert for an active lease.
     // Conditional pipeline fields instead inspect state within one identity-only atomic write.
     MongoRepositorySupport
       .transactionGuard(diagnostics, "embeddingWork.enqueue", session) {
-        RepositoryIO
+        RepositoryF
           .lift(
             MongoSessionOperations.updateOnePipeline(
               collection,
@@ -222,8 +224,8 @@ final class MongoEmbeddingWorkRepository(
       workerId: String,
       now: Instant,
       leaseUntil: Instant
-  ): RepositoryIO[Option[ClaimedEmbeddingWork]] =
-    RepositoryIO.lift(uuidGen.randomUUID.map(_.toString)).flatMap { token =>
+  ): RepositoryF[IO, Option[ClaimedEmbeddingWork]] =
+    RepositoryF.lift(uuidGen.randomUUID.map(_.toString)).flatMap { token =>
       val available = MongoFilter.and(
         MongoFilter.in(MongoFields.State, List(EmbeddingWorkState.Ready, EmbeddingWorkState.Retry).map(_.toString)),
         MongoFilter.lte(MongoFields.AvailableAt, now.toDate)
@@ -236,22 +238,22 @@ final class MongoEmbeddingWorkRepository(
             MongoLeaseQueue.claimable(available, processing, now),
             MongoLeaseQueue.leaseStamp(EmbeddingWorkState.Processing.toString, workerId, token, leaseUntil, now),
             Sorts.ascending(MongoFields.AvailableAt, MongoFields.Id)
-          )(document => RepositoryIO.fromEither(readClaim(document)))
+          )(document => RepositoryF.at[IO].fromEither(readClaim(document)))
         }
     }
 
-  override def renew(claim: ClaimedEmbeddingWork, now: Instant, leaseUntil: Instant): RepositoryIO[Boolean] =
-    if (!leaseUntil.isAfter(now)) RepositoryIO.raise(RepositoryError.InvalidStoredData)
+  override def renew(claim: ClaimedEmbeddingWork, now: Instant, leaseUntil: Instant): RepositoryF[IO, Boolean] =
+    if (!leaseUntil.isAfter(now)) RepositoryF.at[IO].raise(RepositoryError.InvalidStoredData)
     else
       MongoRepositorySupport.repositoryGuard(diagnostics, "embeddingWork.renew") {
         MongoLeaseQueue
           .renewHeld(collection, None, MongoFilter.and(leaseFilter(claim), MongoLeaseQueue.leaseHeld(now)), leaseUntil)
       }
 
-  override def complete(claim: ClaimedEmbeddingWork): RepositoryIO[Unit] =
+  override def complete(claim: ClaimedEmbeddingWork): RepositoryF[IO, Unit] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "embeddingWork.complete") {
-        RepositoryIO
+        RepositoryF
           .lift(MongoSessionOperations.deleteOne(collection, None, leaseFilter(claim)))
           .subflatMap(MongoRepositorySupport.deletedOne(_))
       }
@@ -260,7 +262,7 @@ final class MongoEmbeddingWorkRepository(
       claim: ClaimedEmbeddingWork,
       availableAt: Instant,
       chargeAttempt: Boolean = true
-  ): RepositoryIO[Unit] = {
+  ): RepositoryF[IO, Unit] = {
     val updates = List(
       MongoUpdate.set(MongoFields.State, EmbeddingWorkState.Retry.toString),
       MongoUpdate.set(MongoFields.AvailableAt, availableAt.toDate),
@@ -273,7 +275,7 @@ final class MongoEmbeddingWorkRepository(
       claim: ClaimedEmbeddingWork,
       failure: EmbeddingWorkFailure,
       now: Instant
-  ): RepositoryIO[Unit] =
+  ): RepositoryF[IO, Unit] =
     transition(
       claim,
       MongoUpdate.combine(
@@ -287,10 +289,10 @@ final class MongoEmbeddingWorkRepository(
   private def transition(
       claim: ClaimedEmbeddingWork,
       update: MongoUpdate
-  ): RepositoryIO[Unit] =
+  ): RepositoryF[IO, Unit] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "embeddingWork.transition") {
-        RepositoryIO
+        RepositoryF
           .lift(
             MongoSessionOperations
               .updateOne(collection, None, leaseFilter(claim), update)

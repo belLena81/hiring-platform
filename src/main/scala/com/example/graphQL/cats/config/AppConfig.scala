@@ -23,7 +23,8 @@ final case class AppConfig(
     resetOnStart: Boolean = false,
     discovery: DiscoveryConfig = DiscoveryConfig(),
     adminSeed: AdminSeedConfig = AdminSeedConfig(),
-    interviewActionRateLimit: RateLimitConfig
+    interviewActionRateLimit: RateLimitConfig,
+    resilience: ResilienceConfig = ResilienceConfig()
 ) {
   override def toString: String = "AppConfig([REDACTED])"
 }

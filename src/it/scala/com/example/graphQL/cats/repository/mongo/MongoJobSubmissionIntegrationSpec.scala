@@ -26,7 +26,7 @@ final class MongoJobSubmissionIntegrationSpec extends MongoIntegrationSuite {
         fixture.database,
         fixture.client,
         MongoEmbeddingWorkEnqueuer.disabled,
-        Diagnostics.noop
+        Diagnostics.noop[IO]
       )
       for {
         _ <- MongoRepositoryTestSupport.insertOne(
@@ -58,7 +58,7 @@ final class MongoJobSubmissionIntegrationSpec extends MongoIntegrationSuite {
         fixture.database,
         fixture.client,
         MongoEmbeddingWorkEnqueuer.disabled,
-        Diagnostics.noop
+        Diagnostics.noop[IO]
       )
       for {
         absent <- repository.findSubmissionSnapshot(id).value
@@ -81,9 +81,9 @@ final class MongoJobSubmissionIntegrationSpec extends MongoIntegrationSuite {
         fixture.database,
         fixture.client,
         MongoEmbeddingWorkEnqueuer.disabled,
-        Diagnostics.noop
+        Diagnostics.noop[IO]
       )
-      val repository = MongoApplicationRepository.transactional(fixture.database, fixture.client, Diagnostics.noop)
+      val repository = MongoApplicationRepository.transactional(fixture.database, fixture.client, Diagnostics.noop[IO])
       val now = Instant.parse("2026-10-07T12:00:00Z")
       val application = Application.create(ApplicationId(UUID.randomUUID()), UserId(UUID.randomUUID()), id, now)
       val event = ApplicationEvent(

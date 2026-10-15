@@ -18,15 +18,15 @@ import org.bson.Document
 import java.time.Instant
 import scala.concurrent.duration.FiniteDuration
 
-extension [A](found: RepositoryIO[Option[A]])
+extension [A](found: RepositoryF[IO, Option[A]])
   /** An absent document is a lost race with another writer. */
-  private[mongo] def orConflict: RepositoryIO[A] = found.subflatMap(_.toRight(RepositoryError.Conflict))
+  private[mongo] def orConflict: RepositoryF[IO, A] = found.subflatMap(_.toRight(RepositoryError.Conflict))
 
 /** Collections and write fences shared by the interview workflow components. */
 final class MongoInterviewWorkflowStore(
     val database: MongoDatabase[IO],
     val transactionRunner: MongoTransactionRunner,
-    val diagnostics: Diagnostics,
+    val diagnostics: Diagnostics[IO],
     val completedEvidenceRetention: FiniteDuration,
     val clock: Clock[IO],
     val uuids: UUIDGen[IO]
@@ -54,8 +54,8 @@ final class MongoInterviewWorkflowStore(
       session: Option[ClientSession[IO]],
       filter: MongoFilter,
       update: MongoUpdate
-  ): RepositoryIO[Unit] =
-    RepositoryIO
+  ): RepositoryF[IO, Unit] =
+    RepositoryF
       .lift(MongoSessionOperations.updateOne(collection, session, filter, update))
       .subflatMap(MongoRepositorySupport.matchedOne(_))
 
@@ -67,9 +67,9 @@ final class MongoInterviewWorkflowStore(
       session: Option[ClientSession[IO]],
       workflow: InterviewWorkflow,
       extra: List[UserId] = Nil
-  ): RepositoryIO[Unit] = fenceSubjects(session, participantsOf(workflow) ++ extra)
+  ): RepositoryF[IO, Unit] = fenceSubjects(session, participantsOf(workflow) ++ extra)
 
-  private[mongo] def fenceSubjects(session: Option[ClientSession[IO]], subjects: List[UserId]): RepositoryIO[Unit] =
+  private[mongo] def fenceSubjects(session: Option[ClientSession[IO]], subjects: List[UserId]): RepositoryF[IO, Unit] =
     subjects.distinct
       .sortBy(_.value.toString)
       .traverse_(id =>
@@ -82,7 +82,7 @@ final class MongoInterviewWorkflowStore(
           ),
           MongoUpdate.inc(MongoFields.Version, 1L)
         ) *>
-          RepositoryIO
+          RepositoryF
             .lift(
               MongoSessionOperations.updateOne(
                 subjectFences,
@@ -99,11 +99,11 @@ final class MongoInterviewWorkflowStore(
       session: Option[ClientSession[IO]],
       workflowId: InterviewWorkflowId,
       execution: Option[ClaimedInterviewWorkflowCommand]
-  ): RepositoryIO[Unit] = execution match {
-    case None                                                 => ().pure[RepositoryIO]
-    case Some(claim) if claim.record.workflowId != workflowId => RepositoryIO.raise(RepositoryError.Conflict)
+  ): RepositoryF[IO, Unit] = execution match {
+    case None                                                 => ().pure[[A] =>> RepositoryF[IO, A]]
+    case Some(claim) if claim.record.workflowId != workflowId => RepositoryF.at[IO].raise(RepositoryError.Conflict)
     case Some(claim)                                          =>
-      RepositoryIO
+      RepositoryF
         .lift(clock.realTimeInstant)
         .flatMap(now =>
           guardWrite(
@@ -128,8 +128,8 @@ final class MongoInterviewWorkflowStore(
       next: InterviewWorkflow,
       extraFilters: List[MongoFilter] = Nil,
       extraUpdates: List[MongoUpdate] = Nil
-  ): RepositoryIO[UpdateResult] =
-    RepositoryIO.lift(
+  ): RepositoryF[IO, UpdateResult] =
+    RepositoryF.lift(
       MongoSessionOperations.updateOne(
         workflows,
         session,
@@ -151,7 +151,7 @@ final class MongoInterviewWorkflowStore(
       workflowId: InterviewWorkflowId,
       revision: Long,
       emitted: List[C]
-  )(shape: C => (InterviewWorkflowCommandState, Instant, Instant)): RepositoryIO[Unit] =
+  )(shape: C => (InterviewWorkflowCommandState, Instant, Instant)): RepositoryF[IO, Unit] =
     emitted.zipWithIndex.traverse_ { case (command, ordinal) =>
       val (state, availableAt, occurredAt) = shape(command)
       insert(
@@ -177,7 +177,7 @@ final class MongoInterviewWorkflowStore(
       session: Option[ClientSession[IO]],
       workflowId: InterviewWorkflowId,
       phase: InterviewWorkflowPhase
-  ): RepositoryIO[Unit] =
+  ): RepositoryF[IO, Unit] =
     guardWrite(
       workflows,
       session,
@@ -193,7 +193,7 @@ final class MongoInterviewWorkflowStore(
       session: Option[ClientSession[IO]],
       jobId: String,
       recruiterId: UserId
-  ): RepositoryIO[Unit] =
+  ): RepositoryF[IO, Unit] =
     guardWrite(
       jobs,
       session,
@@ -209,7 +209,7 @@ final class MongoInterviewWorkflowStore(
       applicationId: ApplicationId,
       previous: ApplicationStatus,
       updated: Application
-  ): RepositoryIO[Unit] =
+  ): RepositoryF[IO, Unit] =
     guardWrite(
       applications,
       session,
@@ -223,31 +223,31 @@ final class MongoInterviewWorkflowStore(
       )
     )
 
-  private[mongo] def readApplication(document: Document): RepositoryIO[Application] =
-    RepositoryIO.fromEither(MongoStoredDocumentDecoding.repository(MongoHiringCodecs.readApplication(document)))
+  private[mongo] def readApplication(document: Document): RepositoryF[IO, Application] =
+    RepositoryF.at[IO].fromEither(MongoStoredDocumentDecoding.repository(MongoHiringCodecs.readApplication(document)))
 
   private def retention(
       session: Option[ClientSession[IO]],
       workflow: InterviewWorkflow,
       update: MongoUpdate
-  ): RepositoryIO[Unit] =
+  ): RepositoryF[IO, Unit] =
     MongoInterviewFields
       .retentionTargets(workflow.id)
       .traverse_((name, related) =>
-        RepositoryIO.lift(MongoSessionOperations.updateMany(collection(name), session, related, update)).void
+        RepositoryF.lift(MongoSessionOperations.updateMany(collection(name), session, related, update)).void
       )
 
   private[mongo] def releaseRetention(
       session: Option[ClientSession[IO]],
       workflow: InterviewWorkflow
-  ): RepositoryIO[Unit] =
+  ): RepositoryF[IO, Unit] =
     retention(session, workflow, MongoUpdate.unset(MongoFields.RetentionExpiresAt))
 
   private[mongo] def retainCompleted(
       session: Option[ClientSession[IO]],
       workflow: InterviewWorkflow,
       now: Instant
-  ): RepositoryIO[Unit] =
+  ): RepositoryF[IO, Unit] =
     // One expiry for all evidence: it outlives the interview, so a far-future interview stays cancellable.
     retention(
       session,
@@ -260,7 +260,7 @@ final class MongoInterviewWorkflowStore(
       )
     )
 
-  private[mongo] def mapProvider[A](result: RepositoryIO[A]): InterviewProviderIO[A] =
+  private[mongo] def mapProvider[A](result: RepositoryF[IO, A]): InterviewProviderF[IO, A] =
     result.leftMap {
       case RepositoryError.Conflict | RepositoryError.DuplicateApplication => InterviewProviderError.Conflict
       case _                                                               => InterviewProviderError.Unavailable
@@ -270,16 +270,16 @@ final class MongoInterviewWorkflowStore(
       session: Option[ClientSession[IO]],
       collection: IO[MongoSessionOperations.Documents],
       document: Document
-  ): RepositoryIO[Unit] =
-    RepositoryIO.lift(MongoSessionOperations.insertOne(collection, session, document)).void
+  ): RepositoryF[IO, Unit] =
+    RepositoryF.lift(MongoSessionOperations.insertOne(collection, session, document)).void
 
   /** The workflow with this identity that also satisfies `visibleTo`, the acting role's ownership predicate. */
   private[mongo] def loadWorkflow(
       id: InterviewWorkflowId,
       session: Option[ClientSession[IO]],
       visibleTo: List[MongoFilter] = Nil
-  ): RepositoryIO[Option[InterviewWorkflow]] =
-    RepositoryIO
+  ): RepositoryF[IO, Option[InterviewWorkflow]] =
+    RepositoryF
       .lift(
         MongoSessionOperations.findOne(
           workflows,
@@ -290,5 +290,5 @@ final class MongoInterviewWorkflowStore(
           )
         )
       )
-      .flatMap(_.traverse(document => RepositoryIO.fromEither(decodeWorkflow(document))))
+      .flatMap(_.traverse(document => RepositoryF.at[IO].fromEither(decodeWorkflow(document))))
 }

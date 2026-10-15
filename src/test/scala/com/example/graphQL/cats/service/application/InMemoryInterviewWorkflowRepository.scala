@@ -39,7 +39,7 @@ private[cats] final class InMemoryInterviewWorkflowRepository(
   }
 
   override def findForActor(workflowId: InterviewWorkflowId, access: InterviewWorkflowAccess) =
-    RepositoryIO.lift(
+    RepositoryF.lift(
       store.get.map(
         _.workflows
           .get(workflowId)
@@ -55,7 +55,7 @@ private[cats] final class InMemoryInterviewWorkflowRepository(
     )
 
   override def findForAdmin(workflowId: InterviewWorkflowId) =
-    RepositoryIO.lift(store.get.map(_.workflows.get(workflowId)))
+    RepositoryF.lift(store.get.map(_.workflows.get(workflowId)))
 
   override def applyLifecycle(
       workflowId: InterviewWorkflowId,
@@ -64,7 +64,7 @@ private[cats] final class InMemoryInterviewWorkflowRepository(
       origin: InterviewLifecycleOrigin,
       now: Instant,
       availableAt: Option[Instant]
-  ) = RepositoryIO
+  ) = RepositoryF
     .lift(for {
       status <- applicationStatus.get
       outcome <- store.modify(state => transition(state, status, workflowId, expectedRevision, event, origin))
@@ -73,7 +73,7 @@ private[cats] final class InMemoryInterviewWorkflowRepository(
         case _         => IO.unit
       }
     } yield outcome._1)
-    .flatMap(either => RepositoryIO.fromEither(either))
+    .flatMap(either => RepositoryF.at[IO].fromEither(either))
 
   private def transition(
       state: InterviewLifecycleStore,

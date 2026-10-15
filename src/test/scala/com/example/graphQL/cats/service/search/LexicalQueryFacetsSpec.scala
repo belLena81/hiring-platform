@@ -1,10 +1,12 @@
 package com.example.graphQL.cats.service.search
 
+import cats.effect.IO
+
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.{AccountStatus, GeoPoint, Job, JobStatus, Location}
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.service.{ActorContext, RepositoryError, SearchError, ServiceFixtures, UseCaseError}
-import com.example.graphQL.cats.service.port.{JobRepository, RepositoryIO}
+import com.example.graphQL.cats.service.port.{JobRepository, RepositoryF}
 import com.example.graphQL.cats.service.read.HiringReadScope
 import java.time.Instant
 import java.util.UUID
@@ -261,9 +263,9 @@ final class LexicalQueryFacetsSpec extends CatsEffectSuite {
           nanos.get.map(scala.concurrent.duration.FiniteDuration(_, scala.concurrent.duration.NANOSECONDS))
         def realTime = cats.effect.IO.pure(scala.concurrent.duration.Duration.Zero)
       }
-      spending = new com.example.graphQL.cats.service.port.LexicalJobMatcher {
+      spending = new com.example.graphQL.cats.service.port.LexicalJobMatcher[IO] {
         def matches(text: String, filter: JobSearchFilter, limit: Int) =
-          RepositoryIO
+          RepositoryF
             .lift(nanos.update(_ + spent.toNanos))
             .as(LexicalJobMatches.fromWindow(List(ScoredJobId(jobId(1), 1d)), limit))
       }
@@ -371,7 +373,7 @@ final class LexicalQueryFacetsSpec extends CatsEffectSuite {
   }
 
   /** Recount failure: the operational store is down after the matcher succeeded. */
-  private final class UnavailableFacets(delegate: JobRepository) extends JobRepository {
+  private final class UnavailableFacets(delegate: JobRepository[IO]) extends JobRepository[IO] {
     export delegate.{
       relatedJobs,
       find,
@@ -390,6 +392,6 @@ final class LexicalQueryFacetsSpec extends CatsEffectSuite {
         query: JobFacetQuery,
         matchedIds: Option[Set[JobId]],
         maxTime: Option[scala.concurrent.duration.FiniteDuration]
-    ): RepositoryIO[JobDiscoveryFacets] = RepositoryIO.raise(RepositoryError.Unavailable)
+    ): RepositoryF[IO, JobDiscoveryFacets] = RepositoryF.at[IO].raise(RepositoryError.Unavailable)
   }
 }

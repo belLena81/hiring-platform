@@ -19,7 +19,7 @@ class MongoDatabaseProbeSpec extends CatsEffectSuite {
     cats.effect.Resource.fromAutoCloseable(IO.blocking(new ServerSocket(0))).use { socket =>
       for {
         events <- Ref.of[IO, Vector[(LogEvent, Option[String], Map[LogField, String])]](Vector.empty)
-        sink = new Diagnostics {
+        sink = new Diagnostics[IO] {
           def event(event: LogEvent, id: Option[String], fields: => Map[LogField, String]): IO[Unit] =
             events.update(_ :+ ((event, id, fields)))
         }
@@ -86,7 +86,7 @@ class MongoDatabaseProbeSpec extends CatsEffectSuite {
     cats.effect.Resource.fromAutoCloseable(IO.blocking(new ServerSocket(0))).use { socket =>
       for {
         events <- Ref.of[IO, Vector[(LogEvent, Option[String], Map[LogField, String])]](Vector.empty)
-        sink = new Diagnostics {
+        sink = new Diagnostics[IO] {
           def event(event: LogEvent, id: Option[String], fields: => Map[LogField, String]): IO[Unit] =
             events
               .update(_ :+ ((event, id, fields))) *> IO.raiseError(new IllegalStateException("synthetic-sink-secret"))

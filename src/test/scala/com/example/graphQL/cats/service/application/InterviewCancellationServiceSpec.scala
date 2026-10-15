@@ -67,7 +67,7 @@ final class InterviewCancellationServiceSpec extends CatsEffectSuite {
   private val otherRecruiterActor = ActorContext(otherRecruiterId, UserRole.Recruiter)
 
   private final case class Arrangement(
-      service: InterviewSchedulingService,
+      service: InterviewSchedulingService[IO],
       repository: InMemoryInterviewWorkflowRepository
   ) {
     def stored: IO[InterviewWorkflow] = repository.store.get.map(_.workflows(workflowId))
@@ -101,7 +101,7 @@ final class InterviewCancellationServiceSpec extends CatsEffectSuite {
       errors <- Ref.of[IO, Option[RepositoryError]](None)
       repository <- InMemoryInterviewWorkflowRepository.create(workflow, status)
     } yield Arrangement(
-      new InterviewSchedulingService(
+      new InterviewSchedulingService[IO](
         new InMemoryUsers(users),
         new InMemoryJobs(jobs),
         new InMemoryApplications(applications, events, errors),
@@ -262,7 +262,8 @@ final class InterviewCancellationServiceSpec extends CatsEffectSuite {
         applicationRepository,
         HiringReadService(userRepository, jobRepository, applicationRepository),
         com.example.graphQL.cats.service.mutation.TestIdempotency.noop,
-        clock = FixedTestClock.at(now)
+        clock = FixedTestClock.at(now),
+        uuidGen = cats.effect.std.UUIDGen[IO]
       )
       results <- ApplicationStatus.values.toList.traverse(target =>
         service

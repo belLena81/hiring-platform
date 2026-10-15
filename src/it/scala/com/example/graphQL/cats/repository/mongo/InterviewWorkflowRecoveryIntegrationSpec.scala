@@ -20,7 +20,7 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
   private val settings =
     InterviewWorkerSettings("recovery-worker", 10.millis, 60.seconds, 10.seconds, 5, 1.second, 30.seconds)
 
-  private def success[A](operation: RepositoryIO[A]): IO[A] = operation.value.flatMap {
+  private def success[A](operation: RepositoryF[IO, A]): IO[A] = operation.value.flatMap {
     case Right(value) => IO.pure(value)
     case Left(error)  => IO.raiseError(new AssertionError(s"Repository failure: $error"))
   }
@@ -44,14 +44,14 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
 
   private def drive(
       repository: MongoInterviewWorkflowRepository,
-      worker: InterviewWorkflowWorker,
+      worker: InterviewWorkflowWorker[IO],
       id: InterviewWorkflowId,
       phases: Set[InterviewWorkflowPhase],
       remaining: Int = 1000
   ): IO[InterviewWorkflow] =
     for {
       outgoing <- Ref.of[IO, Vector[InterviewMessage]](Vector.empty)
-      transport = new InterviewTransport {
+      transport = new InterviewTransport[IO] {
         private val commandGeneration =
           InterviewPublisherGeneration(InterviewPublisherRole.Orchestrator, UUID.randomUUID())
         private val resultGeneration = InterviewPublisherGeneration(InterviewPublisherRole.Worker, UUID.randomUUID())
@@ -78,14 +78,14 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
 
   test("a reserved slot surviving a provider crash is released after the precommit deadline") {
     mongoResource.use { fixture =>
-      val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
+      val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop[IO])
       val calendar = LedgerInterviewCalendarProvider.durable(repository)
       val notification = LedgerInterviewNotificationProvider.durable(repository)
-      val worker = new InterviewWorkflowWorker(repository, calendar, notification, settings, Diagnostics.noop)
+      val worker = new InterviewWorkflowWorker[IO](repository, calendar, notification, settings, Diagnostics.noop[IO])
       for {
         now <- IO.realTimeInstant
         original = workflow(now)
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- InterviewSchedulingFixtures.seed(fixture.database, List(original), now)
         acceptedAt <- IO.realTimeInstant
         value = original.copy(preCommitDeadline = acceptedAt.plusSeconds(10))
@@ -131,22 +131,22 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
 
   test("Admin repair reconciles a released reservation without reopening it or extending its deadline") {
     mongoResource.use { fixture =>
-      val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
+      val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop[IO])
       val calendar = LedgerInterviewCalendarProvider.durable(repository)
       for {
         now <- IO.realTimeInstant.map(_.truncatedTo(java.time.temporal.ChronoUnit.MILLIS))
         value = workflow(now)
         afterDeadline = value.preCommitDeadline.plusSeconds(1)
         clock <- Ref.of[IO, Instant](afterDeadline)
-        worker = new InterviewWorkflowWorker(
+        worker = new InterviewWorkflowWorker[IO](
           repository,
           calendar,
           LedgerInterviewNotificationProvider.durable(repository),
           settings,
-          Diagnostics.noop,
+          Diagnostics.noop[IO],
           currentTime = clock.getAndUpdate(_.plusSeconds(1))
         )
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- InterviewSchedulingFixtures.seed(fixture.database, List(value), now)
         _ <- success(
           repository.create(
@@ -205,9 +205,9 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
 
   test("compensation exhausts five durable attempts and retains uncertain reservation for visible repair") {
     mongoResource.use { fixture =>
-      val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
+      val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop[IO])
       val calendar = LedgerInterviewCalendarProvider.durable(repository)
-      val failedRelease = new InterviewCalendarProvider {
+      val failedRelease = new InterviewCalendarProvider[IO] {
         override def reserve(
             id: InterviewWorkflowId,
             key: String,
@@ -216,38 +216,38 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
             interval: InterviewInterval,
             at: Instant,
             execution: Option[ClaimedInterviewWorkflowCommand]
-        ): InterviewProviderIO[InterviewCalendarReservation] =
+        ): InterviewProviderF[IO, InterviewCalendarReservation] =
           calendar.reserve(id, key, candidate, recruiter, interval, at, execution)
         override def lookup(
             id: InterviewWorkflowId,
             lookupKey: String
-        ): InterviewProviderIO[Option[InterviewCalendarReservation]] =
+        ): InterviewProviderF[IO, Option[InterviewCalendarReservation]] =
           calendar.lookup(id, lookupKey)
         override def cancel(
             id: InterviewWorkflowId,
             key: String,
             at: Instant,
             execution: Option[ClaimedInterviewWorkflowCommand]
-        ): InterviewProviderIO[InterviewCalendarCancellation] =
+        ): InterviewProviderF[IO, InterviewCalendarCancellation] =
           calendar.cancel(id, key, at, execution)
         override def release(
             key: String,
             at: Instant,
             execution: Option[ClaimedInterviewWorkflowCommand]
-        ): InterviewProviderIO[Unit] =
+        ): InterviewProviderF[IO, Unit] =
           EitherT.leftT[IO, Unit](InterviewProviderError.Unavailable)
       }
-      val worker = new InterviewWorkflowWorker(
+      val worker = new InterviewWorkflowWorker[IO](
         repository,
         failedRelease,
         LedgerInterviewNotificationProvider.durable(repository),
         settings,
-        Diagnostics.noop
+        Diagnostics.noop[IO]
       )
       for {
         now <- IO.realTimeInstant
         value = workflow(now)
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- InterviewSchedulingFixtures.seed(fixture.database, List(value), now)
         _ <- success(
           repository.create(
@@ -288,10 +288,10 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
 
   test("notification exhaustion retains committed hiring and Admin repair resets the bounded attempt generation") {
     mongoResource.use { fixture =>
-      val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
+      val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop[IO])
       val calendar = LedgerInterviewCalendarProvider.durable(repository)
       val notification = LedgerInterviewNotificationProvider.durable(repository)
-      val failedNotification = new InterviewNotificationProvider {
+      val failedNotification = new InterviewNotificationProvider[IO] {
         override def notify(
             id: InterviewWorkflowId,
             recipient: UserId,
@@ -300,18 +300,19 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
             key: String,
             at: Instant,
             execution: Option[ClaimedInterviewWorkflowCommand]
-        ): InterviewProviderIO[InterviewNotificationReceipt] =
+        ): InterviewProviderF[IO, InterviewNotificationReceipt] =
           if (participant == InterviewParticipant.Candidate)
             EitherT.leftT[IO, InterviewNotificationReceipt](InterviewProviderError.Unavailable)
           else notification.notify(id, recipient, participant, kind, key, at, execution)
-        override def lookup(key: String): InterviewProviderIO[Option[InterviewNotificationReceipt]] =
+        override def lookup(key: String): InterviewProviderF[IO, Option[InterviewNotificationReceipt]] =
           if (key.endsWith(":Candidate"))
             EitherT.leftT[IO, Option[InterviewNotificationReceipt]](InterviewProviderError.Unavailable)
           else notification.lookup(key)
       }
       val failingWorker =
-        new InterviewWorkflowWorker(repository, calendar, failedNotification, settings, Diagnostics.noop)
-      val recoveredWorker = new InterviewWorkflowWorker(repository, calendar, notification, settings, Diagnostics.noop)
+        new InterviewWorkflowWorker[IO](repository, calendar, failedNotification, settings, Diagnostics.noop[IO])
+      val recoveredWorker =
+        new InterviewWorkflowWorker[IO](repository, calendar, notification, settings, Diagnostics.noop[IO])
       for {
         now <- IO.realTimeInstant
         value = workflow(now)
@@ -324,7 +325,7 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
           now,
           adminSingleton = true
         )
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- InterviewSchedulingFixtures.seed(fixture.database, List(value), now)
         _ <- Mongo4catsCollections
           .documents(fixture.database, MongoCollections.Users)
@@ -377,26 +378,26 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
 
   test("actual account deletion fences original command and result replay before and after workflow purge") {
     mongoResource.use { fixture =>
-      val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
+      val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop[IO])
       val calendar = LedgerInterviewCalendarProvider.durable(repository)
-      val worker = new InterviewWorkflowWorker(
+      val worker = new InterviewWorkflowWorker[IO](
         repository,
         calendar,
         LedgerInterviewNotificationProvider.durable(repository),
         settings,
-        Diagnostics.noop
+        Diagnostics.noop[IO]
       )
       val users = new MongoUserRepository(
         fixture.database,
-        MongoTransactionRunner.sessions(fixture.client, RepositoryError.Conflict, diagnostics = Diagnostics.noop),
+        MongoTransactionRunner.sessions(fixture.client, RepositoryError.Conflict, diagnostics = Diagnostics.noop[IO]),
         MongoEmbeddingWorkEnqueuer.disabled,
-        Diagnostics.noop
+        Diagnostics.noop[IO]
       )
       val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
       for {
         now <- IO.realTimeInstant
         value = workflow(now)
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- InterviewSchedulingFixtures.seed(fixture.database, List(value), now)
         _ <- success(
           repository.create(
@@ -408,7 +409,7 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
           )
         )
         outgoing <- Ref.of[IO, Vector[InterviewMessage]](Vector.empty)
-        transport = new InterviewTransport {
+        transport = new InterviewTransport[IO] {
           private val commandGeneration =
             InterviewPublisherGeneration(InterviewPublisherRole.Orchestrator, UUID.randomUUID())
           private val resultGeneration = InterviewPublisherGeneration(InterviewPublisherRole.Worker, UUID.randomUUID())
@@ -442,14 +443,14 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
           com.example.graphQL.cats.service.port.InterviewRetentionBarrier("hiring.interview-commands", 0, 1L),
           com.example.graphQL.cats.service.port.InterviewRetentionBarrier("hiring.interview-results", 0, 1L)
         )
-        cleaner = new com.example.graphQL.cats.service.application.InterviewSubjectCleanupWorker(
+        cleaner = new com.example.graphQL.cats.service.application.InterviewSubjectCleanupWorker[IO](
           cleanup,
-          new InterviewPublisherFencer {
-            override def fence(ids: Vector[String]): RepositoryIO[Unit] = RepositoryIO.pure(())
+          new InterviewPublisherFencer[IO] {
+            override def fence(ids: Vector[String]): RepositoryF[IO, Unit] = RepositoryF.at[IO].pure(())
           },
           IO.pure(barriers),
           _ => IO.pure(false),
-          Diagnostics.noop
+          Diagnostics.noop[IO]
         )
         _ <- success(cleaner.runOnce(None))
         _ <- success(cleaner.runOnce(None))

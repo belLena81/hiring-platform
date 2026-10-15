@@ -8,7 +8,7 @@ import com.example.graphQL.cats.service.auth.{AccessTokenIssuanceError, AccessTo
 import java.time.Instant
 import pdi.jwt.{JwtAlgorithm, JwtCirce, JwtClaim}
 
-final class JwtAccessTokenIssuer(config: JwtAuthConfig) extends AccessTokenIssuer {
+final class JwtAccessTokenIssuer(config: JwtAuthConfig) extends AccessTokenIssuer[IO] {
   override def issue(user: User, now: Instant): IO[Either[AccessTokenIssuanceError, AccountToken]] =
     // An unexpected signing failure stays in the error channel: UserAccountService records it with sanitized
     // diagnostics and reports the same unavailable outcome.

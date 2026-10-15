@@ -29,14 +29,14 @@ final class InterviewLifecycleAccountDeletionIntegrationSpec extends MongoIntegr
     InterviewRetentionBarrier("hiring.interview-commands", 0, 4L),
     InterviewRetentionBarrier("hiring.interview-results", 0, 5L)
   )
-  private val fencer = new InterviewPublisherFencer {
-    override def fence(ids: Vector[String]): RepositoryIO[Unit] = RepositoryIO.pure(())
+  private val fencer = new InterviewPublisherFencer[IO] {
+    override def fence(ids: Vector[String]): RepositoryF[IO, Unit] = RepositoryF.at[IO].pure(())
   }
 
   private def scenario[A](use: InterviewLifecycleScenario => IO[A]): IO[A] =
     InterviewLifecycleScenario.arranged(mongoResource)(use)
 
-  private def success[A](operation: RepositoryIO[A]): IO[A] =
+  private def success[A](operation: RepositoryF[IO, A]): IO[A] =
     operation.value.flatMap(_.fold(error => IO.raiseError(new AssertionError(s"$error")), IO.pure))
 
   /** One cancel request the cleanup made of the provider and what the ledger showed at that moment. */
@@ -47,8 +47,8 @@ final class InterviewLifecycleAccountDeletionIntegrationSpec extends MongoIntegr
       s: InterviewLifecycleScenario,
       val calls: Ref[IO, Vector[HoldCall]],
       answer: InterviewLiveHold => IO[Either[InterviewProviderError, InterviewCalendarCancellation]]
-  ) extends InterviewHoldCanceller {
-    override def cancel(hold: InterviewLiveHold, at: Instant): InterviewProviderIO[InterviewCalendarCancellation] =
+  ) extends InterviewHoldCanceller[IO] {
+    override def cancel(hold: InterviewLiveHold, at: Instant): InterviewProviderF[IO, InterviewCalendarCancellation] =
       EitherT(for {
         row <- MongoRepositoryTestSupport.findOne(
           s.fixture.database,
@@ -70,11 +70,11 @@ final class InterviewLifecycleAccountDeletionIntegrationSpec extends MongoIntegr
         IO.realTimeInstant.map(at => Right(InterviewCalendarCancellation.Cancelled(at)))
   ): IO[RecordingHolds] = Ref.of[IO, Vector[HoldCall]](Vector.empty).map(new RecordingHolds(s, _, answer))
 
-  private def cleanupOf(s: InterviewLifecycleScenario, canceller: InterviewHoldCanceller) =
+  private def cleanupOf(s: InterviewLifecycleScenario, canceller: InterviewHoldCanceller[IO]) =
     new MongoInterviewSubjectCleanup(s.fixture.database, holds = canceller)
 
   private def sweep(cleanup: MongoInterviewSubjectCleanup): IO[Option[RepositoryError]] =
-    new InterviewSubjectCleanupWorker(cleanup, fencer, IO.pure(barriers), _ => IO.pure(true), Diagnostics.noop)
+    new InterviewSubjectCleanupWorker[IO](cleanup, fencer, IO.pure(barriers), _ => IO.pure(true), Diagnostics.noop[IO])
       .runOnce(None)
       .value
       .map(_.fold(Some(_), _.firstFailure))
@@ -97,9 +97,9 @@ final class InterviewLifecycleAccountDeletionIntegrationSpec extends MongoIntegr
   private def usersOf(s: InterviewLifecycleScenario) =
     new MongoUserRepository(
       s.fixture.database,
-      MongoTransactionRunner.sessions(s.fixture.client, RepositoryError.Conflict, diagnostics = Diagnostics.noop),
+      MongoTransactionRunner.sessions(s.fixture.client, RepositoryError.Conflict, diagnostics = Diagnostics.noop[IO]),
       MongoEmbeddingWorkEnqueuer.disabled,
-      Diagnostics.noop
+      Diagnostics.noop[IO]
     )
 
   private def delete(s: InterviewLifecycleScenario, subject: UserId): IO[Unit] = {
@@ -190,13 +190,14 @@ final class InterviewLifecycleAccountDeletionIntegrationSpec extends MongoIntegr
   private val subjects: List[(String, InterviewLifecycleScenario => UserId)] =
     List("candidate" -> (_.workflow.candidateId), "recruiter" -> (_.workflow.recruiterId))
 
-  private def captureTransport(sink: Ref[IO, Vector[InterviewMessage]]): InterviewTransport = new InterviewTransport {
-    private val commands = InterviewPublisherGeneration(InterviewPublisherRole.Orchestrator, UUID.randomUUID())
-    private val results = InterviewPublisherGeneration(InterviewPublisherRole.Worker, UUID.randomUUID())
-    override def generationFor(message: InterviewMessage): InterviewPublisherGeneration =
-      if (message.result.nonEmpty) results else commands
-    override def publish(message: InterviewMessage): IO[Unit] = sink.update(_ :+ message)
-  }
+  private def captureTransport(sink: Ref[IO, Vector[InterviewMessage]]): InterviewTransport[IO] =
+    new InterviewTransport[IO] {
+      private val commands = InterviewPublisherGeneration(InterviewPublisherRole.Orchestrator, UUID.randomUUID())
+      private val results = InterviewPublisherGeneration(InterviewPublisherRole.Worker, UUID.randomUUID())
+      override def generationFor(message: InterviewMessage): InterviewPublisherGeneration =
+        if (message.result.nonEmpty) results else commands
+      override def publish(message: InterviewMessage): IO[Unit] = sink.update(_ :+ message)
+    }
 
   private def expiryMessage(workflow: InterviewWorkflow, row: InterviewWorkflowCommandRecord): InterviewMessage =
     InterviewMessage(
@@ -693,7 +694,7 @@ final class InterviewLifecycleAccountDeletionIntegrationSpec extends MongoIntegr
           .append("endsAt", java.util.Date.from(at.plusSeconds(7200)))
           .append("reservedAt", java.util.Date.from(at))
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- MongoRepositoryTestSupport.insertOne(
           fixture.database,
           MongoCollections.InterviewWorkflows,

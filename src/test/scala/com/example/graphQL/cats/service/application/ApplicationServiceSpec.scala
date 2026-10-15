@@ -215,7 +215,7 @@ class ApplicationServiceSpec extends CatsEffectSuite {
       ],
       currentTime: java.time.Instant,
       randomIds: List[UUID]
-  ): IO[(InMemoryJobs, InMemoryApplications, ApplicationService)] =
+  ): IO[(InMemoryJobs, InMemoryApplications, ApplicationService[IO])] =
     for {
       usersRef <- Ref.of[IO, Map[
         com.example.graphQL.cats.domain.model.Identifiers.UserId,

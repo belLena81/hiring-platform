@@ -25,7 +25,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
   private val startsAt = now.plusSeconds(172800)
   private val endsAt = startsAt.plusSeconds(3600)
 
-  private def success[A](value: RepositoryIO[A]): IO[A] =
+  private def success[A](value: RepositoryF[IO, A]): IO[A] =
     value.value.flatMap(_.fold(error => IO.raiseError(new AssertionError(s"Repository failure: $error")), IO.pure))
 
   private def executionClaim(outcome: InterviewExecutionClaimOutcome): IO[ClaimedInterviewWorkflowCommand] =
@@ -34,7 +34,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
       case other => IO.raiseError(new AssertionError(s"Expected execution claim, got $other"))
     }
 
-  private def providerSuccess[A](value: InterviewProviderIO[A]): IO[A] =
+  private def providerSuccess[A](value: InterviewProviderF[IO, A]): IO[A] =
     value.value.flatMap(_.fold(error => IO.raiseError(new AssertionError(s"Provider failure: $error")), IO.pure))
 
   private def seedSubjects(database: mongo4cats.database.MongoDatabase[IO], values: InterviewWorkflow*): IO[Unit] =
@@ -81,19 +81,19 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
       val candidate = UserId(UUID.randomUUID())
       val recruiter = UserId(UUID.randomUUID())
       val current = workflow(UUID.randomUUID(), UUID.randomUUID(), candidate, recruiter)
-      val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
+      val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop[IO])
       val users = MongoUserRepository.transactional(
         fixture.database,
         fixture.client,
         MongoEmbeddingWorkEnqueuer.disabled,
-        Diagnostics.noop
+        Diagnostics.noop[IO]
       )
       val embedding = com.example.graphQL.cats.domain.model.EntityEmbedding(
         List(0.1f),
         com.example.graphQL.cats.domain.model.EmbeddingMeta("voyage-4-lite", "candidate-source", now)
       )
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- seedSubjects(fixture.database, current)
         _ <- success(
           repository.create(
@@ -151,8 +151,8 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
     mongoResource.use { fixture =>
       val workflowRepository = MongoInterviewWorkflowRepository(
         fixture.database,
-        MongoTransactionRunner.sessions(fixture.client, RepositoryError.Conflict, diagnostics = Diagnostics.noop),
-        Diagnostics.noop
+        MongoTransactionRunner.sessions(fixture.client, RepositoryError.Conflict, diagnostics = Diagnostics.noop[IO]),
+        Diagnostics.noop[IO]
       )
       val candidate = UserId(UUID.randomUUID())
       val recruiter = UserId(UUID.randomUUID())
@@ -165,7 +165,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         .fold(error => fail(s"Unexpected policy error: $error"), identity)
       val createdAt = now
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- seedSubjects(fixture.database, value)
         created <- success(
           workflowRepository.create(
@@ -265,8 +265,8 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
     mongoResource.use { fixture =>
       val workflowRepository = MongoInterviewWorkflowRepository(
         fixture.database,
-        MongoTransactionRunner.sessions(fixture.client, RepositoryError.Conflict, diagnostics = Diagnostics.noop),
-        Diagnostics.noop
+        MongoTransactionRunner.sessions(fixture.client, RepositoryError.Conflict, diagnostics = Diagnostics.noop[IO]),
+        Diagnostics.noop[IO]
       )
       val calendar = LedgerInterviewCalendarProvider.durable(workflowRepository)
       val candidate = UserId(UUID.randomUUID())
@@ -280,7 +280,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         InterviewInterval(endsAt, endsAt.plusSeconds(3600))
       )
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- seedSubjects(fixture.database, first, second, adjacent)
         firstCreate <- success(
           workflowRepository.create(
@@ -378,8 +378,8 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
     mongoResource.use { fixture =>
       val workflowRepository = MongoInterviewWorkflowRepository(
         fixture.database,
-        MongoTransactionRunner.sessions(fixture.client, RepositoryError.Conflict, diagnostics = Diagnostics.noop),
-        Diagnostics.noop
+        MongoTransactionRunner.sessions(fixture.client, RepositoryError.Conflict, diagnostics = Diagnostics.noop[IO]),
+        Diagnostics.noop[IO]
       )
       val notification = LedgerInterviewNotificationProvider.durable(workflowRepository)
       val value = workflow(UUID.randomUUID(), UUID.randomUUID(), UserId(UUID.randomUUID()), UserId(UUID.randomUUID()))
@@ -394,7 +394,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         now.plusSeconds(5)
       )
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- seedSubjects(fixture.database, value)
         _ <- success(
           workflowRepository.create(
@@ -471,26 +471,27 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
 
   test("scheduling derives participants, scopes reads, rejects forbidden requests and replays durable requests") {
     mongoResource.use { fixture =>
-      val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
+      val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop[IO])
       val users = MongoUserRepository.transactional(
         fixture.database,
         fixture.client,
         MongoEmbeddingWorkEnqueuer.disabled,
-        Diagnostics.noop
+        Diagnostics.noop[IO]
       )
       val jobs = MongoJobRepository.transactional(
         fixture.database,
         fixture.client,
         MongoEmbeddingWorkEnqueuer.disabled,
-        Diagnostics.noop
+        Diagnostics.noop[IO]
       )
-      val applications = MongoApplicationRepository.transactional(fixture.database, fixture.client, Diagnostics.noop)
-      val service = new InterviewSchedulingService(users, jobs, applications, repository, 5.minutes)
+      val applications =
+        MongoApplicationRepository.transactional(fixture.database, fixture.client, Diagnostics.noop[IO])
+      val service = new InterviewSchedulingService[IO](users, jobs, applications, repository, 5.minutes)
       val own = workflow(UUID.randomUUID(), UUID.randomUUID(), UserId(UUID.randomUUID()), UserId(UUID.randomUUID()))
       val other = workflow(UUID.randomUUID(), UUID.randomUUID(), UserId(UUID.randomUUID()), UserId(UUID.randomUUID()))
       val key = UUID.randomUUID()
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- seedSubjects(fixture.database, own, other)
         candidateForbidden <- service
           .schedule(ActorContext(own.candidateId, UserRole.Candidate), own.applicationId, startsAt, endsAt, key)
@@ -546,8 +547,9 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
 
   test("Admin interview commit matches the lifecycle state, history and outbox and replays once") {
     mongoResource.use { fixture =>
-      val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
-      val applications = MongoApplicationRepository.transactional(fixture.database, fixture.client, Diagnostics.noop)
+      val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop[IO])
+      val applications =
+        MongoApplicationRepository.transactional(fixture.database, fixture.client, Diagnostics.noop[IO])
       val target = workflow(UUID.randomUUID(), UUID.randomUUID(), UserId(UUID.randomUUID()), UserId(UUID.randomUUID()))
       val admin = User(
         UserId(UUID.randomUUID()),
@@ -563,7 +565,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         UUID.nameUUIDFromBytes(s"${initiated.id.value}:status".getBytes(java.nio.charset.StandardCharsets.UTF_8))
       val calendar = LedgerInterviewCalendarProvider.durable(repository)
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- seedSubjects(fixture.database, target)
         _ <- Mongo4catsCollections
           .documents(fixture.database, MongoCollections.Users)
@@ -671,11 +673,11 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
 
   test("repair fences an in-flight notification result from its superseded live claim") {
     mongoResource.use { fixture =>
-      val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
+      val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop[IO])
       val value = workflow(UUID.randomUUID(), UUID.randomUUID(), UserId(UUID.randomUUID()), UserId(UUID.randomUUID()))
       val calendar = LedgerInterviewCalendarProvider.durable(repository)
       val notifications = LedgerInterviewNotificationProvider.durable(repository)
-      val worker = new com.example.graphQL.cats.service.application.InterviewWorkflowWorker(
+      val worker = new com.example.graphQL.cats.service.application.InterviewWorkflowWorker[IO](
         repository,
         calendar,
         notifications,
@@ -688,12 +690,12 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
           1.second,
           30.seconds
         ),
-        Diagnostics.noop
+        Diagnostics.noop[IO]
       )
       def stableId(identity: String): UUID =
         UUID.nameUUIDFromBytes(identity.getBytes(java.nio.charset.StandardCharsets.UTF_8))
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- seedSubjects(fixture.database, value)
         _ <- success(
           repository.create(
@@ -809,12 +811,12 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
 
   test("expired execution tokens cannot reserve and stale release cannot remove a committed reservation") {
     mongoResource.use { fixture =>
-      val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
+      val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop[IO])
       val calendar = LedgerInterviewCalendarProvider.durable(repository)
       val value = workflow(UUID.randomUUID(), UUID.randomUUID(), UserId(UUID.randomUUID()), UserId(UUID.randomUUID()))
       val key = s"${value.id.value}:reserve"
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- seedSubjects(fixture.database, value)
         _ <- success(
           repository.create(
@@ -878,21 +880,22 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
 
   test("Admin repair reconciles a partial notification receipt and completion retains deduplication evidence") {
     mongoResource.use { fixture =>
-      val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
+      val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop[IO])
       val users = MongoUserRepository.transactional(
         fixture.database,
         fixture.client,
         MongoEmbeddingWorkEnqueuer.disabled,
-        Diagnostics.noop
+        Diagnostics.noop[IO]
       )
       val jobs = MongoJobRepository.transactional(
         fixture.database,
         fixture.client,
         MongoEmbeddingWorkEnqueuer.disabled,
-        Diagnostics.noop
+        Diagnostics.noop[IO]
       )
-      val applications = MongoApplicationRepository.transactional(fixture.database, fixture.client, Diagnostics.noop)
-      val service = new InterviewSchedulingService(users, jobs, applications, repository, 5.minutes)
+      val applications =
+        MongoApplicationRepository.transactional(fixture.database, fixture.client, Diagnostics.noop[IO])
+      val service = new InterviewSchedulingService[IO](users, jobs, applications, repository, 5.minutes)
       val value = workflow(UUID.randomUUID(), UUID.randomUUID(), UserId(UUID.randomUUID()), UserId(UUID.randomUUID()))
       val admin = User(
         UserId(UUID.randomUUID()),
@@ -907,7 +910,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
       val notifications = LedgerInterviewNotificationProvider.durable(repository)
       val repairKey = UUID.randomUUID()
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- seedSubjects(fixture.database, value)
         _ <- Mongo4catsCollections
           .documents(fixture.database, MongoCollections.Users)
@@ -1059,11 +1062,11 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
   }
   test("obsolete hiring results terminalize without repair or reservation release") {
     mongoResource.use { fixture =>
-      val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
+      val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop[IO])
       val calendar = LedgerInterviewCalendarProvider.durable(repository)
       val value = workflow(UUID.randomUUID(), UUID.randomUUID(), UserId(UUID.randomUUID()), UserId(UUID.randomUUID()))
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- seedSubjects(fixture.database, value)
         _ <- success(
           repository.create(
@@ -1125,10 +1128,10 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
 
   test("failed terminal persistence does not permit another send after publication budget exhaustion") {
     mongoResource.use { fixture =>
-      val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
+      val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop[IO])
       val value = workflow(UUID.randomUUID(), UUID.randomUUID(), UserId(UUID.randomUUID()), UserId(UUID.randomUUID()))
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- seedSubjects(fixture.database, value)
         _ <- success(
           repository.create(
@@ -1141,20 +1144,20 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         )
         clock <- Ref.of[IO, Instant](now)
         sends <- Ref.of[IO, Int](0)
-        transport = new InterviewTransport {
+        transport = new InterviewTransport[IO] {
           private val generation = InterviewPublisherGeneration(InterviewPublisherRole.Orchestrator, UUID.randomUUID())
           override def generationFor(message: InterviewMessage): InterviewPublisherGeneration = generation
           override def publish(message: InterviewMessage): IO[Unit] =
             sends.update(_ + 1) *> clock.update(_.plusSeconds(61)) *>
               IO.raiseError(new java.io.IOException("simulated transport failure"))
         }
-        worker = new com.example.graphQL.cats.service.application.InterviewWorkflowWorker(
+        worker = new com.example.graphQL.cats.service.application.InterviewWorkflowWorker[IO](
           repository,
           LedgerInterviewCalendarProvider.durable(repository),
           LedgerInterviewNotificationProvider.durable(repository),
           com.example.graphQL.cats.service.application
             .InterviewWorkerSettings("budget", 1.second, 60.seconds, 10.seconds, 1, 1.second, 30.seconds),
-          Diagnostics.noop,
+          Diagnostics.noop[IO],
           currentTime = clock.get
         )
         _ <- worker.publishDue(transport)
@@ -1172,10 +1175,10 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
 
   test("concurrent execution claims charge one durable slot and expired claims queue reconciliation") {
     mongoResource.use { fixture =>
-      val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
+      val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop[IO])
       val value = workflow(UUID.randomUUID(), UUID.randomUUID(), UserId(UUID.randomUUID()), UserId(UUID.randomUUID()))
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- seedSubjects(fixture.database, value)
         _ <- success(
           repository.create(
@@ -1247,10 +1250,10 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         collection <- Mongo4catsCollections.documents(fixture.database, MongoCollections.InterviewWorkflowCommands)
         _ <- collection.insertMany(List(queued, uncertain))
         _ <- (
-          MongoHiringSetup.initialize(fixture.database, Diagnostics.noop),
-          MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+          MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO]),
+          MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         ).parTupled
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         saved <- MongoRepositoryTestSupport.findOne(
           fixture.database,
           MongoCollections.InterviewWorkflowCommands,
@@ -1279,10 +1282,10 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
 
   test("verified workflow validator rejects malformed updates and preserves valid execution accounting") {
     mongoResource.use { fixture =>
-      val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
+      val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop[IO])
       val value = workflow(UUID.randomUUID(), UUID.randomUUID(), UserId(UUID.randomUUID()), UserId(UUID.randomUUID()))
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- seedSubjects(fixture.database, value)
         _ <- success(
           repository.create(
@@ -1300,7 +1303,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
             com.mongodb.client.model.Updates.set("executionAttempts", -1)
           )
           .attempt
-        startup <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop).attempt
+        startup <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO]).attempt
         stored <- MongoRepositoryTestSupport.findOne(
           fixture.database,
           MongoCollections.InterviewWorkflowCommands,
@@ -1339,10 +1342,10 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
       for {
         collection <- Mongo4catsCollections.documents(fixture.database, MongoCollections.InterviewWorkflowCommands)
         _ <- collection.insertMany(rows :+ new org.bson.Document("_id", malformedId))
-        rejected <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop).attempt
+        rejected <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO]).attempt
         _ = assert(rejected.isLeft, "non-string identity after 500 string rows must not evade validation")
         _ <- collection.deleteOne(com.mongodb.client.model.Filters.eq("_id", malformedId))
-        valid <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop).attempt
+        valid <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO]).attempt
         _ = assert(valid.isRight)
         invalidWrite <- collection.insertOne(new org.bson.Document("_id", malformedId)).attempt
         _ = assert(
@@ -1359,7 +1362,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
           com.mongodb.client.model.Filters.eq("_id", "010_interview_workflow_attempts"),
           com.mongodb.client.model.Updates.set("version", Int.box(1))
         )
-        wrongType <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop).attempt
+        wrongType <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO]).attempt
         _ <- ledger.updateOne(
           com.mongodb.client.model.Filters.eq("_id", "010_interview_workflow_attempts"),
           com.mongodb.client.model.Updates.set("version", Long.box(1L))
@@ -1368,7 +1371,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
           com.mongodb.client.model.Filters.eq("_id", "003_event_outbox_subject_references"),
           com.mongodb.client.model.Updates.set("version", Int.box(1))
         )
-        wrongOutboxType <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop).attempt
+        wrongOutboxType <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO]).attempt
       } yield {
         assert(wrongType.isLeft, "numeric equality must not accept an unsupported command ledger shape")
         assert(wrongOutboxType.isLeft, "trusted cutover must not accept an unsupported outbox ledger shape")
@@ -1378,10 +1381,10 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
 
   test("necessary result exhaustion retains its receipt and enters repair; a prepaid final slot executes once") {
     mongoResource.use { fixture =>
-      val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
+      val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop[IO])
       val value = workflow(UUID.randomUUID(), UUID.randomUUID(), UserId(UUID.randomUUID()), UserId(UUID.randomUUID()))
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- seedSubjects(fixture.database, value)
         _ <- success(
           repository.create(
@@ -1422,10 +1425,10 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
 
   test("concurrent distinct intents cannot overdraw their shared capability budget") {
     mongoResource.use { fixture =>
-      val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
+      val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop[IO])
       val value = workflow(UUID.randomUUID(), UUID.randomUUID(), UserId(UUID.randomUUID()), UserId(UUID.randomUUID()))
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- seedSubjects(fixture.database, value)
         _ <- success(
           repository.create(

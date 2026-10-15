@@ -18,13 +18,23 @@ import com.mongodb.client.model.{
 }
 import com.mongodb.client.result.{DeleteResult, InsertOneResult, UpdateResult}
 import com.example.graphQL.cats.domain.model.ApplicationEvent
-import com.example.graphQL.cats.service.port.{RepositoryIO}
+import com.example.graphQL.cats.service.port.{RepositoryF}
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.events.OperationalEventEnvelope
 import com.example.graphQL.cats.domain.pagination.PageSize
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFields}
 import com.example.graphQL.cats.service.Diagnostics.*
-import com.mongodb.{MongoCommandException, MongoException, MongoWriteException}
+import com.mongodb.{
+  MongoCommandException,
+  MongoConnectionPoolClearedException,
+  MongoException,
+  MongoNodeIsRecoveringException,
+  MongoNotPrimaryException,
+  MongoSocketException,
+  MongoTimeoutException,
+  MongoWriteException
+}
+import com.example.graphQL.cats.shared.CauseChain
 import com.mongodb.client.model.{Filters, Sorts}
 import org.bson.Document
 
@@ -273,8 +283,8 @@ private[mongo] object MongoLeaseQueue {
       claimable: MongoFilter,
       claim: MongoUpdate,
       sort: Bson
-  )(decode: Document => RepositoryIO[A]): RepositoryIO[Option[A]] =
-    RepositoryIO
+  )(decode: Document => RepositoryF[IO, A]): RepositoryF[IO, Option[A]] =
+    RepositoryF
       .lift(
         MongoSessionOperations.findOneAndUpdate(
           collection,
@@ -293,8 +303,8 @@ private[mongo] object MongoLeaseQueue {
       held: MongoFilter,
       leaseUntil: Instant,
       leaseField: String = MongoFields.LeaseUntil
-  ): RepositoryIO[Boolean] =
-    RepositoryIO
+  ): RepositoryF[IO, Boolean] =
+    RepositoryF
       .lift(
         MongoSessionOperations
           .updateOne(collection, session, held, MongoUpdate.set(leaseField, leaseUntil.toDate))
@@ -318,44 +328,58 @@ private[mongo] object MongoRepositorySupport {
   ): Either[RepositoryError, Unit] =
     Either.cond(result.getDeletedCount == 1L, (), mismatch)
 
-  def reportFailure(diagnostics: Diagnostics, operation: String, error: Throwable): IO[Unit] =
+  def reportFailure(diagnostics: Diagnostics[IO], operation: String, error: Throwable): IO[Unit] =
     diagnostics.emit(
       LogEvent.MongoRepositoryFailed,
       fields = LogFields.failure(error) + (LogField.SpanName -> operation)
     )
 
-  def guard[A](diagnostics: Diagnostics, operation: String)(result: IO[A])(map: Throwable => A): IO[A] =
+  def guard[A](diagnostics: Diagnostics[IO], operation: String)(result: IO[A])(map: Throwable => A): IO[A] =
     result.handleErrorWith { error =>
       reportFailure(diagnostics, operation, error).as(map(error))
     }
 
   /** Preserve retry labels within an active transaction; the owning runner sanitizes final failure. */
   def transactionGuard[A](
-      diagnostics: Diagnostics,
+      diagnostics: Diagnostics[IO],
       operation: String,
       session: Option[ClientSession[IO]]
-  )(result: RepositoryIO[A])(map: Throwable => Either[RepositoryError, A]): RepositoryIO[A] =
-    RepositoryIO.fromIOEither(result.value.handleErrorWith {
+  )(result: RepositoryF[IO, A])(map: Throwable => Either[RepositoryError, A]): RepositoryF[IO, A] =
+    RepositoryF.fromFEither(result.value.handleErrorWith {
       case error: MongoException if session.nonEmpty && MongoErrors.isTransient(error) =>
         IO.raiseError(error)
       case error => reportFailure(diagnostics, operation, error).as(map(error))
     })
 
-  def transactionGuard[A](diagnostics: Diagnostics, operation: String, session: Option[ClientSession[IO]])(
-      result: RepositoryIO[A]
-  ): RepositoryIO[A] =
+  def transactionGuard[A](diagnostics: Diagnostics[IO], operation: String, session: Option[ClientSession[IO]])(
+      result: RepositoryF[IO, A]
+  ): RepositoryF[IO, A] =
     transactionGuard(diagnostics, operation, session)(result)(unavailable)
 
   def repositoryGuard[A](
-      diagnostics: Diagnostics,
+      diagnostics: Diagnostics[IO],
       operation: String
-  )(result: RepositoryIO[A])(map: Throwable => Either[RepositoryError, A]): RepositoryIO[A] =
+  )(result: RepositoryF[IO, A])(map: Throwable => Either[RepositoryError, A]): RepositoryF[IO, A] =
     // This boundary observes unexpected driver failures; typed failures pass through unchanged.
-    RepositoryIO.fromIOEither(guard(diagnostics, operation)(result.value)(map))
+    RepositoryF.fromFEither(guard(diagnostics, operation)(result.value)(map))
 
   /** Default boundary: an unexpected driver failure is reported and surfaces as `Unavailable`. */
-  def repositoryGuard[A](diagnostics: Diagnostics, operation: String)(result: RepositoryIO[A]): RepositoryIO[A] =
+  def repositoryGuard[A](diagnostics: Diagnostics[IO], operation: String)(
+      result: RepositoryF[IO, A]
+  ): RepositoryF[IO, A] =
     repositoryGuard(diagnostics, operation)(result)(unavailable)
+
+  /** Like `repositoryGuard`, but failures that count against the discovery breaker propagate to the policy boundary,
+    * which classifies and maps them once.
+    */
+  def discoveryGuard[A](diagnostics: Diagnostics[IO], operation: String)(
+      result: RepositoryF[IO, A]
+  ): RepositoryF[IO, A] =
+    RepositoryF.fromFEither(result.value.handleErrorWith { error =>
+      reportFailure(diagnostics, operation, error) *>
+        (if (DiscoveryQueryPolicy.countsAgainstBreaker(error)) IO.raiseError(error)
+         else IO.pure(unavailable[A](error)))
+    })
 
   def unavailable[A](@annotation.unused error: Throwable): Either[RepositoryError, A] = Left(
     RepositoryError.Unavailable
@@ -392,6 +416,18 @@ private[mongo] object MongoErrors {
     */
   def isCommitRetriable(error: Throwable): Boolean = isUnknownCommitResult(error) && !isTransient(error)
 
+  /** Connection, socket (including read timeout), server-selection, pool and no-primary failures: the deployment cannot
+    * be reached. Classified by exception type, never by label: the driver also labels these as transient inside a
+    * transaction. Command errors (write conflict, duplicate key, `maxTime` expiry) are never unavailability.
+    */
+  def isDependencyUnavailable(error: Throwable): Boolean =
+    CauseChain(error).exists {
+      case _: MongoTimeoutException | _: MongoSocketException | _: MongoNotPrimaryException |
+          _: MongoNodeIsRecoveringException | _: MongoConnectionPoolClearedException =>
+        true
+      case _ => false
+    }
+
   def isDuplicateKey(error: Throwable): Boolean = MongoDuplicateKey.unapply(error).nonEmpty
 
   def isWriteConflict(error: MongoCommandException): Boolean =
@@ -405,6 +441,7 @@ private[mongo] object MongoErrors {
   ): Either[RepositoryError, A] =
     error match {
       case MongoDuplicateKey(_)                                       => Left(duplicateKeyError)
+      case unreachable if isDependencyUnavailable(unreachable)        => Left(RepositoryError.Unavailable)
       case command: MongoCommandException if isWriteConflict(command) => Left(transientError)
       case mongo: MongoException if isTransient(mongo)                => Left(transientError)
       case _                                                          => Left(RepositoryError.Unavailable)
@@ -438,20 +475,20 @@ private[mongo] object MongoOperationalEventInsertion {
       session: Option[ClientSession[IO]],
       events: List[OperationalEventEnvelope],
       now: Instant,
-      diagnostics: Diagnostics
-  ): RepositoryIO[Unit] =
+      diagnostics: Diagnostics[IO]
+  ): RepositoryF[IO, Unit] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "repository.outbox.insert")(
         insertSequence(events, now)(document =>
-          RepositoryIO
-            .lift(MongoSessionOperations.insertOne(outbox, session, document).void)
+          RepositoryF.lift(MongoSessionOperations.insertOne(outbox, session, document).void)
         )
       )(MongoErrors.duplicateAsConflict)
 
   def insertSequence(events: List[OperationalEventEnvelope], now: Instant)(
-      write: Document => RepositoryIO[Unit]
-  ): RepositoryIO[Unit] =
-    RepositoryIO
+      write: Document => RepositoryF[IO, Unit]
+  ): RepositoryF[IO, Unit] =
+    RepositoryF
+      .at[IO]
       .fromEither(
         events.traverse { event =>
           com.example.graphQL.cats.service.events.OperationalEventJson
@@ -485,11 +522,11 @@ private[mongo] object MongoKeysetPaging {
       timestampField: String,
       pageSize: PageSize
   )(read: Document => ValidatedNel[MongoHiringCodecs.StoredDocumentError, A])(
-      diagnostics: Diagnostics
-  ): RepositoryIO[List[A]] =
+      diagnostics: Diagnostics[IO]
+  ): RepositoryF[IO, List[A]] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "repository.page")(
-        RepositoryIO
+        RepositoryF
           .lift(
             collection
               .flatMap(

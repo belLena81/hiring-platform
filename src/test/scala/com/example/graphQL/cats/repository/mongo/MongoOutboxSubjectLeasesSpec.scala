@@ -1,7 +1,9 @@
 package com.example.graphQL.cats.repository.mongo
 
+import cats.effect.IO
+
 import cats.effect.Ref
-import com.example.graphQL.cats.service.port.{RepositoryIO}
+import com.example.graphQL.cats.service.port.{RepositoryF}
 import com.example.graphQL.cats.service.RepositoryError
 import munit.CatsEffectSuite
 
@@ -11,8 +13,8 @@ final class MongoOutboxSubjectLeasesSpec extends CatsEffectSuite {
       acquired <- Ref.of[cats.effect.IO, List[String]](Nil)
       result <- MongoOutboxSubjectLeases
         .acquire(List("c", "b", "a")) { subject =>
-          RepositoryIO.lift(acquired.update(_ :+ subject)).flatMap { _ =>
-            RepositoryIO.fromEither(if (subject == "b") Left(RepositoryError.Conflict) else Right(()))
+          RepositoryF.lift(acquired.update(_ :+ subject)).flatMap { _ =>
+            RepositoryF.at[IO].fromEither(if (subject == "b") Left(RepositoryError.Conflict) else Right(()))
           }
         }
         .value
@@ -26,7 +28,7 @@ final class MongoOutboxSubjectLeasesSpec extends CatsEffectSuite {
   test("empty subjects fail without issuing a lease write") {
     for {
       acquired <- Ref.of[cats.effect.IO, List[String]](Nil)
-      result <- MongoOutboxSubjectLeases.acquire(Nil)(subject => RepositoryIO.lift(acquired.update(_ :+ subject))).value
+      result <- MongoOutboxSubjectLeases.acquire(Nil)(subject => RepositoryF.lift(acquired.update(_ :+ subject))).value
       seen <- acquired.get
     } yield {
       assertEquals(result, Left(RepositoryError.InvalidStoredData))
@@ -38,7 +40,7 @@ final class MongoOutboxSubjectLeasesSpec extends CatsEffectSuite {
     for {
       acquired <- Ref.of[cats.effect.IO, List[String]](Nil)
       result <- MongoOutboxSubjectLeases
-        .acquire(List("c", "a", "b"))(subject => RepositoryIO.lift(acquired.update(_ :+ subject)))
+        .acquire(List("c", "a", "b"))(subject => RepositoryF.lift(acquired.update(_ :+ subject)))
         .value
       seen <- acquired.get
     } yield {

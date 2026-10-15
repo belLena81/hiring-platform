@@ -18,7 +18,7 @@ final class InterviewRequestReceiptIndexMigrationIntegrationSpec extends MongoIn
   private val indexName = MongoIndexNames.InterviewWorkflowRequestReceipt
 
   private def initialize(database: MongoDatabase[IO]): IO[Unit] =
-    MongoHiringSetup.initialize(database, Diagnostics.noop)
+    MongoHiringSetup.initialize(database, Diagnostics.noop[IO])
 
   private def workflowIndexes(database: MongoDatabase[IO]): IO[List[Document]] =
     MongoRepositoryTestSupport

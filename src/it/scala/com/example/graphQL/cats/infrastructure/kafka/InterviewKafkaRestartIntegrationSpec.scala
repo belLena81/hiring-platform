@@ -38,8 +38,8 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
   )
   private def durably(
       receive: Either[String, InterviewMessage] => IO[Boolean]
-  ): Either[String, InterviewMessage] => RepositoryIO[Unit] = value =>
-    RepositoryIO.fromIOEither(receive(value).map(Either.cond(_, (), RepositoryError.Unavailable)))
+  ): Either[String, InterviewMessage] => RepositoryF[IO, Unit] = value =>
+    RepositoryF.fromFEither(receive(value).map(Either.cond(_, (), RepositoryError.Unavailable)))
 
   test("failed record restarts consumer and is replayed before a later command") {
     assume(enabled, "BLOCKED: isolated Kafka restart proof credentials absent")
@@ -60,7 +60,7 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
       failures <- Ref.of[IO, Int](0)
       durable <- Ref.of[IO, Vector[String]](Vector.empty)
       _ <- InterviewKafkaRuntime
-        .resource(config(worker = true), Diagnostics.noop)(durably {
+        .resource(config(worker = true), Diagnostics.noop[IO])(durably {
           case Right(message) if message.workflowId == workflowId =>
             if (message.stepId == first.stepId) failures.updateAndGet(_ + 1).flatMap {
               case 1 => IO.pure(false)
@@ -71,7 +71,7 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
         })
         .use { _ =>
           InterviewKafkaRuntime
-            .resource(config(worker = false), Diagnostics.noop)(_ => RepositoryIO.lift(IO.unit))
+            .resource(config(worker = false), Diagnostics.noop[IO])(_ => RepositoryF.lift(IO.unit))
             .use { publisher =>
               publisher.publish(first) *> publisher.publish(second) *>
                 IO.sleep(10.seconds) *> durable.get.flatMap(values =>
@@ -121,7 +121,7 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
       failures <- Ref.of[IO, Int](0)
       durable <- Ref.of[IO, Vector[(String, InterviewStep)]](Vector.empty)
       _ <- InterviewKafkaRuntime
-        .resource(config(worker = true), Diagnostics.noop)(durably {
+        .resource(config(worker = true), Diagnostics.noop[IO])(durably {
           case Right(message) if message.workflowId == workflowId =>
             if (message.stepId == failing.stepId) failures.updateAndGet(_ + 1).flatMap {
               case 1 => IO.pure(false)
@@ -132,7 +132,7 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
         })
         .use { _ =>
           InterviewKafkaRuntime
-            .resource(config(worker = false), Diagnostics.noop)(_ => RepositoryIO.lift(IO.unit))
+            .resource(config(worker = false), Diagnostics.noop[IO])(_ => RepositoryF.lift(IO.unit))
             .use { publisher =>
               messages.traverse_(publisher.publish) *>
                 awaitDurable(durable, messages.size).timeout(60.seconds)
@@ -170,7 +170,7 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
     for {
       observed <- Ref.of[IO, Vector[String]](Vector.empty)
       _ <- InterviewKafkaRuntime
-        .resource(config(worker = true), Diagnostics.noop)(durably {
+        .resource(config(worker = true), Diagnostics.noop[IO])(durably {
           case Left(identity) if identity.startsWith("transport:") =>
             observed.update(_ :+ "quarantined").as(true)
           case Right(value) if value.workflowId == workflowId => observed.update(_ :+ "valid").as(true)
@@ -208,7 +208,7 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
     )
     InterviewBrokerFixture.resource(topics).use { broker =>
       mongoResource.use { fixture =>
-        val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
+        val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop[IO])
         val workflowId = UUID.randomUUID()
         val now = Instant.now()
         val message = InterviewMessage(
@@ -229,7 +229,7 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
             KafkaClientSettings.security(Some(principal.username), Some(principal.password), principal.protocol)
           )
         for {
-          _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop, topics)
+          _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO], topics)
           metadata <- KafkaProducer.resource(settings).use { producer =>
             for {
               first <- producer
@@ -271,7 +271,7 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
           )
           partition = new TopicPartition(topics.commands, first.partition())
           _ <- InterviewKafkaRuntime
-            .consumerResource(broker.config(worker = true), Diagnostics.noop)(durably {
+            .consumerResource(broker.config(worker = true), Diagnostics.noop[IO])(durably {
               case Left(observed) =>
                 for {
                   _ <- IO(assertEquals(observed, identity))
@@ -353,8 +353,8 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
         )
       )
     operationalDatabase.use { database =>
-      val storedReceipts = new MongoConsumerReceiptRepository(database, Diagnostics.noop)
-      val storedQuarantine = new MongoEventQuarantineRepository(database, Diagnostics.noop)
+      val storedReceipts = new MongoConsumerReceiptRepository(database, Diagnostics.noop[IO])
+      val storedQuarantine = new MongoEventQuarantineRepository(database, Diagnostics.noop[IO])
       for {
         failedAttempt <- Deferred[IO, Unit]
         restore <- Deferred[IO, Unit]
@@ -385,26 +385,26 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
           Filters.eq("partition", first.partition()),
           Filters.eq("offset", first.offset())
         )
-        receipts = new ConsumerReceiptRepository {
+        receipts = new ConsumerReceiptRepository[IO] {
           def exists(group: String, id: UUID) = storedReceipts.exists(group, id)
           def record(group: String, event: OperationalEventEnvelope, at: Instant, expiresAt: Instant) =
             storedReceipts.record(group, event, at, expiresAt).flatMap { saved =>
-              if (event.eventId == value.eventId) RepositoryIO.lift(received.complete(()).void).as(saved)
-              else RepositoryIO.pure(saved)
+              if (event.eventId == value.eventId) RepositoryF.lift(received.complete(()).void).as(saved)
+              else RepositoryF.at[IO].pure(saved)
             }
         }
-        quarantine = new EventQuarantineRepository {
+        quarantine = new EventQuarantineRepository[IO] {
           def save(record: EventQuarantineRecord) =
             if (record.partition != first.partition() || record.offset != first.offset()) storedQuarantine.save(record)
             else
-              RepositoryIO.lift(attempts.updateAndGet(_ + 1)).flatMap {
+              RepositoryF.lift(attempts.updateAndGet(_ + 1)).flatMap {
                 case 1 =>
-                  RepositoryIO.lift(failedAttempt.complete(()).void *> restore.get) *>
-                    RepositoryIO.raise(RepositoryError.Unavailable)
+                  RepositoryF.lift(failedAttempt.complete(()).void *> restore.get) *>
+                    RepositoryF.at[IO].raise(RepositoryError.Unavailable)
                 case _ => storedQuarantine.save(record)
               }
         }
-        _ <- OperationalEventKafkaRuntime.consumerResource(kafka, receipts, quarantine, Diagnostics.noop).use { _ =>
+        _ <- OperationalEventKafkaRuntime.consumerResource(kafka, receipts, quarantine, Diagnostics.noop[IO]).use { _ =>
           for {
             _ <- failedAttempt.get.timeout(30.seconds)
             before <- committed(kafka, partition)
@@ -464,7 +464,7 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
   private def operationalDatabase: Resource[IO, mongo4cats.database.MongoDatabase[IO]] =
     mongoResource
       .map(_.database)
-      .evalTap(database => MongoHiringSetup.initialize(database, Diagnostics.noop, interviewTopics))
+      .evalTap(database => MongoHiringSetup.initialize(database, Diagnostics.noop[IO], interviewTopics))
 
   private def awaitDurable[A](seen: Ref[IO, Vector[A]], expected: Int): IO[Unit] =
     seen.get.flatMap { values =>

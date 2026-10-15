@@ -22,7 +22,7 @@ import scala.concurrent.duration.*
 final class InterviewSchedulingWorkerIntegrationSpec extends KafkaIntegrationSuite {
   override val munitIOTimeout: FiniteDuration = 8.minutes
 
-  private def success[A](operation: RepositoryIO[A]): IO[A] = operation.value.flatMap {
+  private def success[A](operation: RepositoryF[IO, A]): IO[A] = operation.value.flatMap {
     case Right(value) => IO.pure(value)
     case Left(error)  => IO.raiseError(new AssertionError(s"Interview repository failure: $error"))
   }
@@ -30,7 +30,7 @@ final class InterviewSchedulingWorkerIntegrationSpec extends KafkaIntegrationSui
   private def configuration: IO[Map[String, String]] = IO.delay(kafkaEnvironment)
 
   private def waitCompleted(
-      repository: InterviewWorkflowRepository,
+      repository: InterviewWorkflowRepository[IO],
       workflows: List[InterviewWorkflow],
       completionTimes: Ref[IO, Map[UUID, Long]],
       startedNanos: Long,
@@ -101,15 +101,15 @@ final class InterviewSchedulingWorkerIntegrationSpec extends KafkaIntegrationSui
   private def workers(
       repository: MongoInterviewWorkflowRepository,
       env: Map[String, String],
-      calendarOverride: Option[InterviewCalendarProvider] = None,
-      notificationOverride: Option[InterviewNotificationProvider] = None,
+      calendarOverride: Option[InterviewCalendarProvider[IO]] = None,
+      notificationOverride: Option[InterviewNotificationProvider[IO]] = None,
       counters: Ref[IO, Map[String, Long]]
   ): Resource[IO, Unit] = {
     def count(key: String): IO[Unit] = counters.update(values => values.updated(key, values.getOrElse(key, 0L) + 1L))
     val underlyingCalendar = calendarOverride.getOrElse(LedgerInterviewCalendarProvider.durable(repository))
     val underlyingNotifications =
       notificationOverride.getOrElse(LedgerInterviewNotificationProvider.durable(repository))
-    val calendar = new InterviewCalendarProvider {
+    val calendar = new InterviewCalendarProvider[IO] {
       override def reserve(
           id: InterviewWorkflowId,
           key: String,
@@ -118,7 +118,7 @@ final class InterviewSchedulingWorkerIntegrationSpec extends KafkaIntegrationSui
           interval: InterviewInterval,
           at: Instant,
           execution: Option[ClaimedInterviewWorkflowCommand]
-      ): InterviewProviderIO[InterviewCalendarReservation] =
+      ): InterviewProviderF[IO, InterviewCalendarReservation] =
         EitherT.liftF[IO, InterviewProviderError, Unit](count("calendarReserveRequests")) *> underlyingCalendar.reserve(
           id,
           key,
@@ -131,7 +131,7 @@ final class InterviewSchedulingWorkerIntegrationSpec extends KafkaIntegrationSui
       override def lookup(
           id: InterviewWorkflowId,
           lookupKey: String
-      ): InterviewProviderIO[Option[InterviewCalendarReservation]] =
+      ): InterviewProviderF[IO, Option[InterviewCalendarReservation]] =
         EitherT.liftF[IO, InterviewProviderError, Unit](count("calendarLookupRequests")) *> underlyingCalendar.lookup(
           id,
           lookupKey
@@ -141,20 +141,20 @@ final class InterviewSchedulingWorkerIntegrationSpec extends KafkaIntegrationSui
           key: String,
           at: Instant,
           execution: Option[ClaimedInterviewWorkflowCommand]
-      ): InterviewProviderIO[InterviewCalendarCancellation] =
+      ): InterviewProviderF[IO, InterviewCalendarCancellation] =
         underlyingCalendar.cancel(id, key, at, execution)
       override def release(
           key: String,
           at: Instant,
           execution: Option[ClaimedInterviewWorkflowCommand]
-      ): InterviewProviderIO[Unit] =
+      ): InterviewProviderF[IO, Unit] =
         EitherT.liftF[IO, InterviewProviderError, Unit](count("calendarReleaseRequests")) *> underlyingCalendar.release(
           key,
           at,
           execution
         )
     }
-    val notifications = new InterviewNotificationProvider {
+    val notifications = new InterviewNotificationProvider[IO] {
       override def notify(
           id: InterviewWorkflowId,
           recipient: UserId,
@@ -163,11 +163,11 @@ final class InterviewSchedulingWorkerIntegrationSpec extends KafkaIntegrationSui
           key: String,
           at: Instant,
           execution: Option[ClaimedInterviewWorkflowCommand]
-      ): InterviewProviderIO[InterviewNotificationReceipt] =
+      ): InterviewProviderF[IO, InterviewNotificationReceipt] =
         EitherT.liftF[IO, InterviewProviderError, Unit](
           count("notificationDeliveryRequests")
         ) *> underlyingNotifications.notify(id, recipient, participant, kind, key, at, execution)
-      override def lookup(key: String): InterviewProviderIO[Option[InterviewNotificationReceipt]] =
+      override def lookup(key: String): InterviewProviderF[IO, Option[InterviewNotificationReceipt]] =
         EitherT.liftF[IO, InterviewProviderError, Unit](count("notificationLookupRequests")) *> underlyingNotifications
           .lookup(key)
     }
@@ -176,18 +176,18 @@ final class InterviewSchedulingWorkerIntegrationSpec extends KafkaIntegrationSui
     // heartbeat (lease / 3) still protects live workers; production lease values are configured separately.
     val settings =
       InterviewWorkerSettings("interview-worker-a", 100.millis, 6.seconds, 10.seconds, 5, 1.second, 30.seconds)
-    val first = new InterviewWorkflowWorker(repository, calendar, notifications, settings, Diagnostics.noop)
+    val first = new InterviewWorkflowWorker[IO](repository, calendar, notifications, settings, Diagnostics.noop[IO])
     val second =
-      new InterviewWorkflowWorker(
+      new InterviewWorkflowWorker[IO](
         repository,
         calendar,
         notifications,
         settings.copy(workerId = "interview-worker-b"),
-        Diagnostics.noop
+        Diagnostics.noop[IO]
       )
     val bootstrap = env("INTERVIEW_KAFKA_BOOTSTRAP")
-    def invalid(identity: String): RepositoryIO[Unit] =
-      RepositoryIO.lift(IO.realTimeInstant).flatMap(repository.quarantine(identity, _))
+    def invalid(identity: String): RepositoryF[IO, Unit] =
+      RepositoryF.lift(IO.realTimeInstant).flatMap(repository.quarantine(identity, _))
     for {
       orchestrator <- InterviewKafkaRuntime.resource(
         InterviewKafkaConfig(
@@ -200,11 +200,11 @@ final class InterviewSchedulingWorkerIntegrationSpec extends KafkaIntegrationSui
           workerGroup = kafkaNamespace.workers,
           orchestratorGroup = kafkaNamespace.orchestrator
         ),
-        Diagnostics.noop
+        Diagnostics.noop[IO]
       ) {
         case Left(identity) => invalid(identity)
         case Right(message) =>
-          RepositoryIO.lift(count("brokerResultsConsumed")) *> first.receiveResult(message)
+          RepositoryF.lift(count("brokerResultsConsumed")) *> first.receiveResult(message)
       }
       workerTransport <- InterviewKafkaRuntime.resource(
         InterviewKafkaConfig(
@@ -217,11 +217,11 @@ final class InterviewSchedulingWorkerIntegrationSpec extends KafkaIntegrationSui
           workerGroup = kafkaNamespace.workers,
           orchestratorGroup = kafkaNamespace.orchestrator
         ),
-        Diagnostics.noop
+        Diagnostics.noop[IO]
       ) {
         case Left(identity) => invalid(identity)
         case Right(message) =>
-          RepositoryIO.lift(count("brokerCommandsConsumed")) *> first.receiveCommand(message)
+          RepositoryF.lift(count("brokerCommandsConsumed")) *> first.receiveCommand(message)
       }
       _ <- InterviewKafkaRuntime.resource(
         InterviewKafkaConfig(
@@ -234,13 +234,13 @@ final class InterviewSchedulingWorkerIntegrationSpec extends KafkaIntegrationSui
           workerGroup = kafkaNamespace.workers,
           orchestratorGroup = kafkaNamespace.orchestrator
         ),
-        Diagnostics.noop
+        Diagnostics.noop[IO]
       ) {
         case Left(identity) => invalid(identity)
         case Right(message) =>
-          RepositoryIO.lift(count("brokerCommandsConsumed")) *> second.receiveCommand(message)
+          RepositoryF.lift(count("brokerCommandsConsumed")) *> second.receiveCommand(message)
       }
-      routing = new InterviewTransport {
+      routing = new InterviewTransport[IO] {
         override def generationFor(message: InterviewMessage): InterviewPublisherGeneration =
           (if (message.result.nonEmpty) workerTransport else orchestrator).generationFor(message)
         override def publish(message: InterviewMessage): IO[Unit] =
@@ -259,10 +259,10 @@ final class InterviewSchedulingWorkerIntegrationSpec extends KafkaIntegrationSui
         IO.raiseError(new AssertionError("Isolated Kafka proof broker not configured"))
       else
         mongoResource.use { fixture =>
-          val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
+          val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop[IO])
           for {
             now <- IO.realTimeInstant
-            _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop, interviewTopics)
+            _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO], interviewTopics)
             recruiter = UserId(UUID.randomUUID())
             workflows = (0 until 32).toList.map { ordinal =>
               val interval =
@@ -304,7 +304,7 @@ final class InterviewSchedulingWorkerIntegrationSpec extends KafkaIntegrationSui
             _ <- persist(workflows.drop(16))
             reservedBeforeCrash <- Deferred[IO, InterviewCalendarReservation]
             calendar = LedgerInterviewCalendarProvider.durable(repository)
-            pausedCalendar = new InterviewCalendarProvider {
+            pausedCalendar = new InterviewCalendarProvider[IO] {
               override def reserve(
                   workflowId: InterviewWorkflowId,
                   key: String,
@@ -313,7 +313,7 @@ final class InterviewSchedulingWorkerIntegrationSpec extends KafkaIntegrationSui
                   interval: InterviewInterval,
                   at: Instant,
                   execution: Option[ClaimedInterviewWorkflowCommand]
-              ): InterviewProviderIO[InterviewCalendarReservation] =
+              ): InterviewProviderF[IO, InterviewCalendarReservation] =
                 calendar
                   .reserve(workflowId, key, candidate, recruiter, interval, at, execution)
                   .semiflatMap(receipt =>
@@ -322,20 +322,20 @@ final class InterviewSchedulingWorkerIntegrationSpec extends KafkaIntegrationSui
               override def lookup(
                   id: InterviewWorkflowId,
                   lookupKey: String
-              ): InterviewProviderIO[Option[InterviewCalendarReservation]] =
+              ): InterviewProviderF[IO, Option[InterviewCalendarReservation]] =
                 calendar.lookup(id, lookupKey)
               override def cancel(
                   id: InterviewWorkflowId,
                   key: String,
                   at: Instant,
                   execution: Option[ClaimedInterviewWorkflowCommand]
-              ): InterviewProviderIO[InterviewCalendarCancellation] =
+              ): InterviewProviderF[IO, InterviewCalendarCancellation] =
                 calendar.cancel(id, key, at, execution)
               override def release(
                   key: String,
                   at: Instant,
                   execution: Option[ClaimedInterviewWorkflowCommand]
-              ): InterviewProviderIO[Unit] =
+              ): InterviewProviderF[IO, Unit] =
                 calendar.release(key, at, execution)
             }
             _ <- workers(repository, env, Some(pausedCalendar), counters = counters).use { _ =>
@@ -348,7 +348,7 @@ final class InterviewSchedulingWorkerIntegrationSpec extends KafkaIntegrationSui
             }
             deliveredBeforeCrash <- Deferred[IO, InterviewNotificationReceipt]
             notifications = LedgerInterviewNotificationProvider.durable(repository)
-            pausedNotifications = new InterviewNotificationProvider {
+            pausedNotifications = new InterviewNotificationProvider[IO] {
               override def notify(
                   id: InterviewWorkflowId,
                   recipient: UserId,
@@ -357,13 +357,13 @@ final class InterviewSchedulingWorkerIntegrationSpec extends KafkaIntegrationSui
                   key: String,
                   at: Instant,
                   execution: Option[ClaimedInterviewWorkflowCommand]
-              ): InterviewProviderIO[InterviewNotificationReceipt] =
+              ): InterviewProviderF[IO, InterviewNotificationReceipt] =
                 notifications
                   .notify(id, recipient, participant, kind, key, at, execution)
                   .semiflatMap(receipt =>
                     deliveredBeforeCrash.complete(receipt).void *> IO.never[InterviewNotificationReceipt]
                   )
-              override def lookup(key: String): InterviewProviderIO[Option[InterviewNotificationReceipt]] =
+              override def lookup(key: String): InterviewProviderF[IO, Option[InterviewNotificationReceipt]] =
                 notifications.lookup(key)
             }
             _ <- workers(repository, env, notificationOverride = Some(pausedNotifications), counters = counters).use {

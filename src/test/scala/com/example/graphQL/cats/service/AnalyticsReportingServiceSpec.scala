@@ -3,7 +3,7 @@ package com.example.graphQL.cats.service
 import cats.effect.IO
 import com.example.graphQL.cats.domain.model.{AccountStatus, EntityEmbedding, User, UserRole}
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
-import com.example.graphQL.cats.service.port.{AnalyticsReportRepository, RepositoryIO}
+import com.example.graphQL.cats.service.port.{AnalyticsReportRepository, RepositoryF}
 import munit.CatsEffectSuite
 
 import java.time.Instant
@@ -138,15 +138,15 @@ final class AnalyticsReportingServiceSpec extends CatsEffectSuite {
   private final class TestReports(
       value: Option[AnalyticsReportSnapshot],
       failure: Option[RepositoryError] = None
-  ) extends AnalyticsReportRepository {
-    override def latest: RepositoryIO[Option[AnalyticsReportSnapshot]] =
-      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(failure.toLeft(value)))
+  ) extends AnalyticsReportRepository[IO] {
+    override def latest: RepositoryF[IO, Option[AnalyticsReportSnapshot]] =
+      com.example.graphQL.cats.service.port.RepositoryF.fromFEither(IO.pure(failure.toLeft(value)))
   }
 
   private final class TestUsers(values: Map[UserId, User]) extends ServiceFixtures.VersionedUserRepositoryTestAdapter {
-    override def find(id: UserId): RepositoryIO[Option[User]] =
-      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Right(values.get(id))))
-    override def updateEmbedding(id: UserId, embedding: EntityEmbedding): RepositoryIO[Unit] =
-      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Right(())))
+    override def find(id: UserId): RepositoryF[IO, Option[User]] =
+      com.example.graphQL.cats.service.port.RepositoryF.fromFEither(IO.pure(Right(values.get(id))))
+    override def updateEmbedding(id: UserId, embedding: EntityEmbedding): RepositoryF[IO, Unit] =
+      com.example.graphQL.cats.service.port.RepositoryF.fromFEither(IO.pure(Right(())))
   }
 }

@@ -4,7 +4,7 @@ Status: local implementation verified; full acceptance partial / external gates 
 
 ## Outcome and boundaries
 
-Protect deletion, embedding convergence and durable publication first; reduce retrieval work and eliminate growing producer attribution documents next. Preserve pure immutable decisions, the existing StateT lifecycle, concrete IO/EitherT ports, Mongo transactions, stable provider keys and Resource-owned workers. No generic Saga engine, paid activation, deployment, destructive reset, public event versioning or new frontend. MongoDB remains authoritative; Search/index data only supplies retrieval evidence.
+Protect deletion, embedding convergence and durable publication first; reduce retrieval work and eliminate growing producer attribution documents next. Preserve pure immutable decisions, the existing StateT lifecycle, concrete IO/EitherT ports (for this slice; later migration: [effect-polymorphic services](effect-polymorphic-services.md)), Mongo transactions, stable provider keys and Resource-owned workers. No generic Saga engine in this slice (the separately scoped engine in [hiring saga orchestration](hiring-saga-orchestration.md) ports only interview scheduling), paid activation, deployment, destructive reset, public event versioning or new frontend. MongoDB remains authoritative; Search/index data only supplies retrieval evidence.
 
 ## Acceptance
 

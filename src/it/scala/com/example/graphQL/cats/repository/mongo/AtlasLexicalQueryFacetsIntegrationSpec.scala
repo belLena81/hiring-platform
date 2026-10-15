@@ -108,30 +108,32 @@ final class AtlasLexicalQueryFacetsIntegrationSpec extends CatsEffectSuite {
     )
 
   private def matcher(db: MongoDatabase[IO], policy: DiscoveryQueryPolicy) =
-    new MongoLexicalJobMatcher(db, indexes.jobLexicalIndex, Diagnostics.noop, policy)
+    new MongoLexicalJobMatcher(db, indexes.jobLexicalIndex, Diagnostics.noop[IO], policy)
 
-  private def service(db: MongoDatabase[IO], policy: DiscoveryQueryPolicy, limit: Int): JobService = {
+  private def service(db: MongoDatabase[IO], policy: DiscoveryQueryPolicy, limit: Int): JobService[IO] = {
     val jobs = new MongoJobRepository(
       db,
       MongoRepositoryTestSupport.noTransaction,
       MongoEmbeddingWorkEnqueuer.disabled,
-      Diagnostics.noop,
+      Diagnostics.noop[IO],
       Some(policy)
     )
     val users = new MongoUserRepository(
       db,
       MongoRepositoryTestSupport.noTransaction,
       MongoEmbeddingWorkEnqueuer.disabled,
-      Diagnostics.noop
+      Diagnostics.noop[IO]
     )
     new JobService(
       users,
       jobs,
       com.example.graphQL.cats.service.search.TestEmbeddingWorkPublisher.noop,
       com.example.graphQL.cats.service.mutation.Idempotent(
-        new MongoMutationReceiptRepository(db, MongoRepositoryTestSupport.noTransaction, Diagnostics.noop)
+        new MongoMutationReceiptRepository(db, MongoRepositoryTestSupport.noTransaction, Diagnostics.noop[IO])
       ),
-      Diagnostics.noop,
+      Diagnostics.noop[IO],
+      cats.effect.Clock[IO],
+      cats.effect.std.UUIDGen[IO],
       lexicalMatcher = Some(matcher(db, policy)),
       lexicalFacetMatchLimit = LexicalMatchLimit.from(limit).get,
       lexicalFacetDeadline = Some(policy.maxTime)
@@ -151,10 +153,10 @@ final class AtlasLexicalQueryFacetsIntegrationSpec extends CatsEffectSuite {
   }
 
   private def initialized(db: MongoDatabase[IO], policy: DiscoveryQueryPolicy, jobs: List[Job]): IO[Unit] =
-    MongoHiringSetup.initialize(db, Some(indexes), Diagnostics.noop) *> seed(db, jobs) *>
+    MongoHiringSetup.initialize(db, Some(indexes), Diagnostics.noop[IO]) *> seed(db, jobs) *>
       awaitIndexed(db, policy, jobs.count(_.title.startsWith("Scala")))
 
-  private def facets(svc: JobService, query: JobFacetQuery) =
+  private def facets(svc: JobService[IO], query: JobFacetQuery) =
     svc.jobDiscoveryFacets(actor, query).value
 
   private def writeRecord(name: String, record: Json): IO[Unit] = IO.blocking {

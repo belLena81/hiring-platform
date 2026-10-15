@@ -1,18 +1,22 @@
 package com.example.graphQL.cats.service
 
-import cats.effect.IO
+import cats.Applicative
+import cats.effect.Temporal
+import cats.syntax.all.*
+import cats.effect.syntax.all.*
 import scala.concurrent.duration.*
 import Diagnostics.*
 
 private final case class ProbeOutcome(result: ProbeResult, failure: Map[LogField, String], elapsed: FiniteDuration)
 
-final class HealthService(probe: DatabaseProbe, diagnostics: Diagnostics) {
-  def readiness(requestId: Option[String]): IO[ProbeResult] =
-    IO.defer(probe.check(requestId))
+final class HealthService[F[_]: Temporal](probe: DatabaseProbe[F], diagnostics: Diagnostics[F]) {
+  def readiness(requestId: Option[String]): F[ProbeResult] =
+    Applicative[F].unit
+      .flatMap(_ => probe.check(requestId))
       .map(result => ProbeOutcome(result, Map.empty, Duration.Zero))
       .timeoutTo(
         2.seconds,
-        IO.delay(
+        Applicative[F].unit.map(_ =>
           ProbeOutcome(
             ProbeResult.Unavailable,
             LogFields.failure(
@@ -41,7 +45,7 @@ final class HealthService(probe: DatabaseProbe, diagnostics: Diagnostics) {
              else FailureReason.DatabaseUnavailable.reason)
         ) ++ failure
         val diagnostic = result match {
-          case ProbeResult.Ready       => IO.unit
+          case ProbeResult.Ready       => Applicative[F].unit
           case ProbeResult.Unavailable => diagnostics.emit(LogEvent.MongoUnavailable, requestId, fields = fields)
           case ProbeResult.AuthenticationFailed =>
             diagnostics.emit(LogEvent.MongoAuthFailed, requestId, fields = fields)

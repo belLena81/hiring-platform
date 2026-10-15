@@ -5,7 +5,7 @@ import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.JobId
 import com.example.graphQL.cats.domain.model.Identifiers.parse as parseIdentifier
 import com.example.graphQL.cats.service.{Diagnostics, RepositoryError}
-import com.example.graphQL.cats.service.port.{LexicalJobMatcher, RepositoryIO}
+import com.example.graphQL.cats.service.port.{LexicalJobMatcher, RepositoryF}
 import com.example.graphQL.cats.service.search.{
   JobSearchFilter,
   LexicalJobMatches,
@@ -21,27 +21,30 @@ import org.bson.Document
 final class MongoLexicalJobMatcher(
     database: MongoDatabase[IO],
     jobLexicalIndex: String,
-    diagnostics: Diagnostics,
+    diagnostics: Diagnostics[IO],
     policy: DiscoveryQueryPolicy
-) extends LexicalJobMatcher {
+) extends LexicalJobMatcher[IO] {
 
-  override def matches(text: String, filter: JobSearchFilter, limit: Int): RepositoryIO[LexicalJobMatches] = {
+  override def matches(text: String, filter: JobSearchFilter, limit: Int): RepositoryF[IO, LexicalJobMatches] = {
     val window = limit + 1
     val pipeline = MongoLexicalJobMatcher.pipeline(jobLexicalIndex, text, filter, window)
     MongoRepositorySupport.repositoryGuard(diagnostics, "MongoLexicalJobMatcher.matches")(
-      RepositoryIO
-        .lift(
-          policy.run(
-            Mongo4catsCollections
-              .documents(database, MongoCollections.Jobs)
-              .flatMap(jobs =>
-                MongoBoundedResults.collect(
-                  jobs.aggregate[Document](pipeline).maxTime(policy.maxTime).boundedStream(32),
-                  window,
-                  MongoSetupError("Lexical job match window exceeded its limit")
+      RepositoryF
+        .fromFEither(
+          policy
+            .run(
+              Mongo4catsCollections
+                .documents(database, MongoCollections.Jobs)
+                .flatMap(jobs =>
+                  MongoBoundedResults.collect(
+                    jobs.aggregate[Document](pipeline).maxTime(policy.maxTime).boundedStream(32),
+                    window,
+                    MongoSetupError("Lexical job match window exceeded its limit")
+                  )
                 )
-              )
-          )
+            )
+            .map(Right(_))
+            .recover { case DiscoveryQueryPolicy.Rejected => Left(RepositoryError.Unavailable) }
         )
         .subflatMap(documents => MongoLexicalJobMatcher.decode(documents).map(LexicalJobMatches.fromWindow(_, limit)))
     )

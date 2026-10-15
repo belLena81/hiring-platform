@@ -12,7 +12,7 @@ final class Argon2PasswordHasher private (
     config: PasswordHashConfig,
     permits: Semaphore[IO],
     unknownUserHash: PasswordHash
-) extends PasswordHasher {
+) extends PasswordHasher[IO] {
   override def hash(password: String): IO[PasswordHash] =
     permits.permit.use(_ => Argon2PasswordHasher.hashWith(argon2, config, password))
 

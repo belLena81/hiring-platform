@@ -87,7 +87,7 @@ final class HiringPersistenceScalingIntegrationSpec extends MongoIntegrationSuit
   private final case class Sample(milliseconds: Double, result: Result)
   private final case class Measurement(report: Json, p95: Double, throughput: Double)
   private final case class OutboxRun(measurement: Measurement, write: Measurement, indexBytes: Long)
-  private def requireResult[A](effect: RepositoryIO[A]): IO[A] = effect.value.flatMap {
+  private def requireResult[A](effect: RepositoryF[IO, A]): IO[A] = effect.value.flatMap {
     case Right(value) => IO.pure(value)
     case Left(error)  => IO.raiseError(new AssertionError(s"Unexpected repository result: $error"))
   }
@@ -197,9 +197,9 @@ final class HiringPersistenceScalingIntegrationSpec extends MongoIntegrationSuit
       fixture.database,
       fixture.client,
       MongoEmbeddingWorkEnqueuer.disabled,
-      Diagnostics.noop
+      Diagnostics.noop[IO]
     )
-    val applications = MongoApplicationRepository.transactional(fixture.database, fixture.client, Diagnostics.noop)
+    val applications = MongoApplicationRepository.transactional(fixture.database, fixture.client, Diagnostics.noop[IO])
     def operation(index: Int): IO[Result] = {
       val selected = jobIds(if (hot) 0 else index % 256)
       val read =
@@ -329,7 +329,7 @@ final class HiringPersistenceScalingIntegrationSpec extends MongoIntegrationSuit
       concurrency: Int
   ): IO[OutboxRun] = {
     val repository =
-      MongoOperationalEventOutboxRepository.transactional(fixture.database, fixture.client, Diagnostics.noop)
+      MongoOperationalEventOutboxRepository.transactional(fixture.database, fixture.client, Diagnostics.noop[IO])
     def operation(workers: Queue[IO, String]): IO[Result] = workers.take.bracket { worker =>
       for {
         claimed <- requireResult(
@@ -572,14 +572,14 @@ final class HiringPersistenceScalingIntegrationSpec extends MongoIntegrationSuit
       fixture.database,
       fixture.client,
       MongoEmbeddingWorkEnqueuer.disabled,
-      Diagnostics.noop,
+      Diagnostics.noop[IO],
       Some(policy)
     )
     users = MongoUserRepository.transactional(
       fixture.database,
       fixture.client,
       MongoEmbeddingWorkEnqueuer.disabled,
-      Diagnostics.noop
+      Diagnostics.noop[IO]
     )
     scope <- IO.fromEither(
       HiringReadScope

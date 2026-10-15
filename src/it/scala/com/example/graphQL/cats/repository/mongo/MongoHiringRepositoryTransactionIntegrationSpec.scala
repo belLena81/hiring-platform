@@ -22,7 +22,7 @@ import com.example.graphQL.cats.domain.model.{
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.mutation.Idempotent
-import com.example.graphQL.cats.service.protocol.{IdempotencyRequest, UseCaseIO}
+import com.example.graphQL.cats.service.protocol.{IdempotencyRequest, UseCaseF}
 import com.example.graphQL.cats.service.events.{OperationalEventEnvelope, OperationalEventType}
 import com.mongodb.client.model.{Filters, InsertOneOptions}
 import io.circe.Json
@@ -69,7 +69,7 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends MongoIntegrationSu
         LocalTestServices.database(client).use { database =>
           for {
             failures <- Ref.of[IO, Vector[Map[LogField, String]]](Vector.empty)
-            diagnostics = new Diagnostics {
+            diagnostics = new Diagnostics[IO] {
               override def event(
                   event: LogEvent,
                   requestId: Option[String],
@@ -81,7 +81,7 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends MongoIntegrationSu
             documents <- Mongo4catsCollections.documents(database, "transaction_cleanup")
             runner = MongoTransactionRunner.sessions(client, RepositoryError.Conflict, diagnostics = diagnostics)
             insert = (id: String, session: Option[mongo4cats.client.ClientSession[IO]]) =>
-              RepositoryIO
+              RepositoryF
                 .lift(
                   MongoSessionOperations.insertOne(IO.pure(documents), session, new Document("_id", id))
                 )
@@ -89,17 +89,17 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends MongoIntegrationSu
             first <- runner.run(session => insert("committed-1", session).as(1)).value
             second <- runner.run(session => insert("committed-2", session).as(2)).value
             rejected <- runner.run { session =>
-              insert("rejected", session) *> RepositoryIO.fromEither[Unit](Left(RepositoryError.Conflict))
+              insert("rejected", session) *> RepositoryF.at[IO].fromEither[Unit](Left(RepositoryError.Conflict))
             }.value
             failed <- runner.run { session =>
-              insert("failed", session) *> RepositoryIO.lift[Unit](
+              insert("failed", session) *> RepositoryF.lift[IO, Unit](
                 IO.raiseError(new IllegalStateException("injected operation failure"))
               )
             }.value
             entered <- Deferred[IO, Unit]
             fiber <- runner
               .run { session =>
-                insert("cancelled", session) *> RepositoryIO.lift(entered.complete(()) *> IO.never[Unit])
+                insert("cancelled", session) *> RepositoryF.lift(entered.complete(()) *> IO.never[Unit])
               }
               .value
               .start
@@ -158,7 +158,7 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends MongoIntegrationSu
             _ <- MongoRepositoryTestSupport
               .first(database.getCollection(MongoCollections.Users).insertOne(legacyCandidate))
               .void
-            _ <- MongoHiringSetup.initialize(database, com.example.graphQL.cats.service.Diagnostics.noop)
+            _ <- MongoHiringSetup.initialize(database, com.example.graphQL.cats.service.Diagnostics.noop[IO])
             migratedJob <- MongoRepositoryTestSupport.first(
               database.getCollection(MongoCollections.Jobs).find(Filters.eq("_id", legacyJob.getString("_id")))
             )
@@ -192,7 +192,7 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends MongoIntegrationSu
                   .insertOne(invalidVersionUser, new InsertOneOptions().bypassDocumentValidation(true))
               )
               .void
-            _ <- MongoHiringSetup.initialize(database, com.example.graphQL.cats.service.Diagnostics.noop)
+            _ <- MongoHiringSetup.initialize(database, com.example.graphQL.cats.service.Diagnostics.noop[IO])
             completedMigration <- MongoRepositoryTestSupport.first(
               database
                 .getCollection(MongoCollections.HiringMigrationLedger)
@@ -242,15 +242,15 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends MongoIntegrationSu
           val jobs = MongoJobRepository.transactional(
             database,
             client,
-            new MongoEmbeddingWorkRepository(database, com.example.graphQL.cats.service.Diagnostics.noop),
-            com.example.graphQL.cats.service.Diagnostics.noop
+            new MongoEmbeddingWorkRepository(database, com.example.graphQL.cats.service.Diagnostics.noop[IO]),
+            com.example.graphQL.cats.service.Diagnostics.noop[IO]
           )
           val original = job(JobId(UUID.randomUUID()), UserId(UUID.randomUUID()))
           val legacyDocument = MongoHiringCodecs.job(original)
           val ids = List(original.id.value.toString)
           val _ = legacyDocument.remove("version")
           for {
-            _ <- MongoHiringSetup.initialize(database, com.example.graphQL.cats.service.Diagnostics.noop)
+            _ <- MongoHiringSetup.initialize(database, com.example.graphQL.cats.service.Diagnostics.noop[IO])
             _ <- MongoRepositoryTestSupport.first(
               database
                 .getCollection(MongoCollections.Jobs)
@@ -299,17 +299,17 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends MongoIntegrationSu
       MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
         LocalTestServices.database(client).use { database =>
           val embeddingWork =
-            new MongoEmbeddingWorkRepository(database, com.example.graphQL.cats.service.Diagnostics.noop)
+            new MongoEmbeddingWorkRepository(database, com.example.graphQL.cats.service.Diagnostics.noop[IO])
           val jobs = MongoJobRepository.transactional(
             database,
             client,
             embeddingWork,
-            com.example.graphQL.cats.service.Diagnostics.noop
+            com.example.graphQL.cats.service.Diagnostics.noop[IO]
           )
           val receipts = MongoMutationReceiptRepository.transactional(
             database,
             client,
-            com.example.graphQL.cats.service.Diagnostics.noop
+            com.example.graphQL.cats.service.Diagnostics.noop[IO]
           )
           val recruiterId = UserId(UUID.randomUUID())
           val directJob = job(JobId(UUID.randomUUID()), recruiterId)
@@ -324,7 +324,7 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends MongoIntegrationSu
           val receiptFingerprint = MutationReceiptFingerprint.fromCanonicalInput(receiptJob.id.value.toString)
 
           for {
-            _ <- MongoHiringSetup.initialize(database, com.example.graphQL.cats.service.Diagnostics.noop)
+            _ <- MongoHiringSetup.initialize(database, com.example.graphQL.cats.service.Diagnostics.noop[IO])
             _ <- jobs
               .createWithEvents(directJob, now, List(directEvent), MutationWriteContext.directWrite)
               .value
@@ -347,7 +347,7 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends MongoIntegrationSu
                 MutationReceiptFingerprint.fromCanonicalInput("rejected-write"),
                 now,
                 now.plusSeconds(3600)
-              )(_ => RepositoryIO.pure(MutationWriteOutcome.Rejected("business rejection")))
+              )(_ => RepositoryF.at[IO].pure(MutationWriteOutcome.Rejected("business rejection")))
               .value
               .flatMap(requireResult)
             receiptRollback <- Idempotent(receipts)
@@ -358,7 +358,7 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends MongoIntegrationSu
                 value => MutationEntityReference("Job", value.id.value.toString),
                 _ => EitherT.rightT(receiptRolledBackJob)
               ) { context =>
-                UseCaseIO
+                UseCaseF
                   .repository(jobs.createWithEvents(receiptRolledBackJob, now, List(receiptDuplicateEvent), context))
                   .as(receiptRolledBackJob)
               }
@@ -426,7 +426,7 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends MongoIntegrationSu
     replicaSet.use { instance =>
       MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
         LocalTestServices.database(client).use { database =>
-          val diagnostics = com.example.graphQL.cats.service.Diagnostics.noop
+          val diagnostics = com.example.graphQL.cats.service.Diagnostics.noop[IO]
           val embeddingWork = new MongoEmbeddingWorkRepository(database, diagnostics)
           val jobs = MongoJobRepository.transactional(database, client, embeddingWork, diagnostics)
           val receipts = MongoMutationReceiptRepository.transactional(database, client, diagnostics)
@@ -444,7 +444,7 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends MongoIntegrationSu
                 receipts
                   .execute[Unit, String](key, fingerprint, now, now.plusSeconds(3600)) { context =>
                     jobs.createWithEvents(value, now, List(created), context) *>
-                      RepositoryIO.lift(
+                      RepositoryF.lift(
                         written.complete(()).void *> IO.never[MutationWriteOutcome[Unit, String]]
                       )
                   }
@@ -485,14 +485,14 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends MongoIntegrationSu
             database,
             client,
             MongoEmbeddingWorkEnqueuer.disabled,
-            com.example.graphQL.cats.service.Diagnostics.noop
+            com.example.graphQL.cats.service.Diagnostics.noop[IO]
           )
           val recruiterId = UserId(UUID.randomUUID())
           val value = job(JobId(UUID.randomUUID()), recruiterId)
           val created = event(value, recruiterId)
 
           for {
-            _ <- MongoHiringSetup.initialize(database, com.example.graphQL.cats.service.Diagnostics.noop)
+            _ <- MongoHiringSetup.initialize(database, com.example.graphQL.cats.service.Diagnostics.noop[IO])
             result <- jobs.createWithEvents(value, now, List(created), MutationWriteContext.directWrite).value
             storedJobs <- MongoRepositoryTestSupport.first(
               database.getCollection(MongoCollections.Jobs).countDocuments()
@@ -519,18 +519,18 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends MongoIntegrationSu
       MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
         LocalTestServices.database(client).use { database =>
           val embeddingWork =
-            new MongoEmbeddingWorkRepository(database, com.example.graphQL.cats.service.Diagnostics.noop)
+            new MongoEmbeddingWorkRepository(database, com.example.graphQL.cats.service.Diagnostics.noop[IO])
           val jobs = MongoJobRepository.transactional(
             database,
             client,
             embeddingWork,
-            com.example.graphQL.cats.service.Diagnostics.noop
+            com.example.graphQL.cats.service.Diagnostics.noop[IO]
           )
           val users = MongoUserRepository.transactional(
             database,
             client,
             embeddingWork,
-            com.example.graphQL.cats.service.Diagnostics.noop
+            com.example.graphQL.cats.service.Diagnostics.noop[IO]
           )
           val recruiterId = UserId(UUID.randomUUID())
           val recruiter = recruiterUser(recruiterId)
@@ -544,7 +544,7 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends MongoIntegrationSu
           val deletionTime = now.plusSeconds(2)
 
           for {
-            _ <- MongoHiringSetup.initialize(database, com.example.graphQL.cats.service.Diagnostics.noop)
+            _ <- MongoHiringSetup.initialize(database, com.example.graphQL.cats.service.Diagnostics.noop[IO])
             _ <- users.insert(recruiter).value.flatMap(requireResult)
             _ <- List(firstOpen, secondOpen, alreadyClosed).traverse_ { value =>
               MongoRepositoryTestSupport
@@ -599,14 +599,14 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends MongoIntegrationSu
           val users = MongoUserRepository.transactional(
             database,
             client,
-            new MongoEmbeddingWorkRepository(database, com.example.graphQL.cats.service.Diagnostics.noop),
-            com.example.graphQL.cats.service.Diagnostics.noop
+            new MongoEmbeddingWorkRepository(database, com.example.graphQL.cats.service.Diagnostics.noop[IO]),
+            com.example.graphQL.cats.service.Diagnostics.noop[IO]
           )
           val recruiterId = UserId(UUID.randomUUID())
           val recruiter = recruiterUser(recruiterId)
 
           for {
-            _ <- MongoHiringSetup.initialize(database, com.example.graphQL.cats.service.Diagnostics.noop)
+            _ <- MongoHiringSetup.initialize(database, com.example.graphQL.cats.service.Diagnostics.noop[IO])
             _ <- users.insert(recruiter).value.flatMap(requireResult)
             _ <- MongoRepositoryTestSupport.first(
               database
@@ -648,7 +648,7 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends MongoIntegrationSu
           val receipts = MongoMutationReceiptRepository.transactional(
             database,
             client,
-            com.example.graphQL.cats.service.Diagnostics.noop
+            com.example.graphQL.cats.service.Diagnostics.noop[IO]
           )
           val key = MutationReceiptKey("createJob", "actor", UUID.randomUUID())
           val legacyFingerprint = MutationReceiptFingerprint.fromCanonicalInput(
@@ -660,15 +660,15 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends MongoIntegrationSu
           val entity = MutationEntityReference("job", UUID.randomUUID().toString)
 
           for {
-            _ <- MongoHiringSetup.initialize(database, com.example.graphQL.cats.service.Diagnostics.noop)
+            _ <- MongoHiringSetup.initialize(database, com.example.graphQL.cats.service.Diagnostics.noop[IO])
             oldReceipt <- receipts
               .execute[Unit, String](key, legacyFingerprint, now, now.plusSeconds(3600)) { _ =>
-                RepositoryIO.pure(MutationWriteOutcome.Applied(MutationReceiptWrite((), entity)))
+                RepositoryF.at[IO].pure(MutationWriteOutcome.Applied(MutationReceiptWrite((), entity)))
               }
               .value
             newFormatRetry <- receipts
               .execute[Unit, String](key, canonicalFingerprint, now, now.plusSeconds(3600)) { _ =>
-                RepositoryIO.lift(
+                RepositoryF.lift(
                   IO.raiseError(new AssertionError("a prior-format receipt must not replay under the new fingerprint"))
                 )
               }
@@ -743,10 +743,20 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends MongoIntegrationSu
             )
           )
           val users =
-            MongoUserRepository.transactional(database, client, MongoEmbeddingWorkEnqueuer.disabled, Diagnostics.noop)
+            MongoUserRepository.transactional(
+              database,
+              client,
+              MongoEmbeddingWorkEnqueuer.disabled,
+              Diagnostics.noop[IO]
+            )
           val jobs =
-            MongoJobRepository.transactional(database, client, MongoEmbeddingWorkEnqueuer.disabled, Diagnostics.noop)
-          val repository = MongoApplicationRepository.transactional(database, client, Diagnostics.noop)
+            MongoJobRepository.transactional(
+              database,
+              client,
+              MongoEmbeddingWorkEnqueuer.disabled,
+              Diagnostics.noop[IO]
+            )
+          val repository = MongoApplicationRepository.transactional(database, client, Diagnostics.noop[IO])
           val read = HiringReadService(users, jobs, repository)
           def scope(user: User): HiringReadScope = HiringReadScope
             .validated(ActorContext(user.id, user.role), user, ActorAuthorization(users))
@@ -757,7 +767,7 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends MongoIntegrationSu
           val appPage = ApplicationPageRequest(None, None, pageSize)
           val eventPage = ApplicationEventPageRequest(None, pageSize)
           for {
-            _ <- MongoHiringSetup.initialize(database, Diagnostics.noop)
+            _ <- MongoHiringSetup.initialize(database, Diagnostics.noop[IO])
             _ <- (List(recruiter, otherRecruiter, otherCandidate, admin) ++ applicants)
               .traverse_(user => users.insert(user).value.flatMap(requireResult))
             _ <- jobs

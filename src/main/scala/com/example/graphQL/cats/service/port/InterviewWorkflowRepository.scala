@@ -102,46 +102,49 @@ enum InterviewPublicationResolution {
   * must enforce workflow/step and inbox-message uniqueness, revision CAS, actor-scoped reads, and fencing-token checks
   * for claims.
   */
-trait InterviewWorkflowRepository {
+trait InterviewWorkflowRepository[F[_]] {
   def claimExecution(
       command: InterviewWorkflowCommandRecord,
       workerId: String,
       now: Instant,
       leaseUntil: Instant,
       maxAttempts: Int
-  ): RepositoryIO[InterviewExecutionClaimOutcome]
+  ): RepositoryF[F, InterviewExecutionClaimOutcome]
   def authorizePublication(
       claim: ClaimedInterviewWorkflowCommand,
       generation: InterviewPublisherGeneration,
       now: Instant
-  ): RepositoryIO[Boolean]
-  def attemptCount(workflowId: InterviewWorkflowId, command: InterviewCommand): RepositoryIO[Long]
-  def quarantine(identity: String, now: Instant): RepositoryIO[Unit]
+  ): RepositoryF[F, Boolean]
+  def attemptCount(workflowId: InterviewWorkflowId, command: InterviewCommand): RepositoryF[F, Long]
+  def quarantine(identity: String, now: Instant): RepositoryF[F, Unit]
   def recordResult(
       claim: ClaimedInterviewWorkflowCommand,
       result: InterviewResult,
       now: Instant
-  ): RepositoryIO[Unit]
+  ): RepositoryF[F, Unit]
   def findRequest(
       actorId: UserId,
       requestKey: UUID,
       fingerprint: MutationReceiptFingerprint
-  ): RepositoryIO[Option[InterviewWorkflow]]
-  def findCommand(workflowId: InterviewWorkflowId, stepId: String): RepositoryIO[Option[InterviewWorkflowCommandRecord]]
+  ): RepositoryF[F, Option[InterviewWorkflow]]
+  def findCommand(
+      workflowId: InterviewWorkflowId,
+      stepId: String
+  ): RepositoryF[F, Option[InterviewWorkflowCommandRecord]]
   def repair(
       workflow: InterviewWorkflow,
       expectedRevision: Long,
       requestKey: UUID,
       now: Instant,
       actorId: UserId
-  ): RepositoryIO[InterviewWorkflow]
+  ): RepositoryF[F, InterviewWorkflow]
 
   def commitHiring(
       workflow: InterviewWorkflow,
       now: Instant,
       execution: Option[ClaimedInterviewWorkflowCommand] = None
-  ): RepositoryIO[Unit]
-  def hasHiringReceipt(workflowId: InterviewWorkflowId): RepositoryIO[Boolean]
+  ): RepositoryF[F, Unit]
+  def hasHiringReceipt(workflowId: InterviewWorkflowId): RepositoryF[F, Boolean]
 
   def create(
       workflow: InterviewWorkflow,
@@ -149,14 +152,14 @@ trait InterviewWorkflowRepository {
       requestKey: UUID,
       fingerprint: MutationReceiptFingerprint,
       createdAt: Instant
-  ): RepositoryIO[InterviewWorkflowAdvanceResult]
+  ): RepositoryF[F, InterviewWorkflowAdvanceResult]
 
   def findForActor(
       workflowId: InterviewWorkflowId,
       access: InterviewWorkflowAccess
-  ): RepositoryIO[Option[InterviewWorkflow]]
+  ): RepositoryF[F, Option[InterviewWorkflow]]
 
-  def findForAdmin(workflowId: InterviewWorkflowId): RepositoryIO[Option[InterviewWorkflow]]
+  def findForAdmin(workflowId: InterviewWorkflowId): RepositoryF[F, Option[InterviewWorkflow]]
 
   def advance(
       workflow: InterviewWorkflow,
@@ -165,7 +168,7 @@ trait InterviewWorkflowRepository {
       commands: List[InterviewWorkflowCommand],
       occurredAt: Instant,
       availableAt: Option[Instant] = None
-  ): RepositoryIO[InterviewWorkflowAdvanceResult]
+  ): RepositoryF[F, InterviewWorkflowAdvanceResult]
 
   /** The one canonical write path for cancel, reschedule request and proposal transitions.
     *
@@ -182,7 +185,7 @@ trait InterviewWorkflowRepository {
       origin: InterviewLifecycleOrigin,
       now: Instant,
       availableAt: Option[Instant]
-  ): RepositoryIO[InterviewLifecycleOutcome]
+  ): RepositoryF[F, InterviewLifecycleOutcome]
 
   /** The guarded part of the reschedule swap, run by the executor while the workflow is `RescheduleSwapPending`.
     *
@@ -195,9 +198,9 @@ trait InterviewWorkflowRepository {
       workflow: InterviewWorkflow,
       now: Instant,
       execution: ClaimedInterviewWorkflowCommand
-  ): RepositoryIO[Unit]
+  ): RepositoryF[F, Unit]
 
-  def hasRescheduleApproval(workflowId: InterviewWorkflowId, generation: Int): RepositoryIO[Boolean]
+  def hasRescheduleApproval(workflowId: InterviewWorkflowId, generation: Int): RepositoryF[F, Boolean]
 
   /** Settles a failed informational notification (retry later, or command-level repair) without touching the workflow.
     * Idempotent: `false` means the command was no longer in a failed-result state.
@@ -206,17 +209,17 @@ trait InterviewWorkflowRepository {
       record: InterviewWorkflowCommandRecord,
       settlement: InterviewNotificationSettlement,
       now: Instant
-  ): RepositoryIO[Boolean]
+  ): RepositoryF[F, Boolean]
 
   /** Puts a proposal-expiry row back to `Pending`, available at `availableAt` (not before its own expiry time), because
     * its message arrived before that time (clock skew). Rows that are pending, published or still claimed by the
     * publisher qualify; a claiming publisher's later `markPublished` then fails its claim check harmlessly. `false`
     * means the row is in none of those states (already settled, superseded or gone).
     */
-  def deferExpiry(record: InterviewWorkflowCommandRecord, availableAt: Instant): RepositoryIO[Boolean]
+  def deferExpiry(record: InterviewWorkflowCommandRecord, availableAt: Instant): RepositoryF[F, Boolean]
 
   /** Informational notification commands of a workflow that are in command-level `RepairRequired` (bounded). */
-  def findNotificationRepairs(workflowId: InterviewWorkflowId): RepositoryIO[List[InterviewWorkflowCommandRecord]]
+  def findNotificationRepairs(workflowId: InterviewWorkflowId): RepositoryF[F, List[InterviewWorkflowCommandRecord]]
 
   /** Admin repair of command-level notification failures: requeues them with a fresh attempt budget and records the
     * actor. A repeated request key returns the earlier count. Returns the number of requeued commands.
@@ -226,29 +229,33 @@ trait InterviewWorkflowRepository {
       requestKey: UUID,
       now: Instant,
       actorId: UserId
-  ): RepositoryIO[Int]
+  ): RepositoryF[F, Int]
 
   def claimDueCommands(
       workerId: String,
       now: Instant,
       leaseUntil: Instant,
       limit: Int
-  ): RepositoryIO[List[ClaimedInterviewWorkflowCommand]]
+  ): RepositoryF[F, List[ClaimedInterviewWorkflowCommand]]
 
-  def renewPublication(claim: ClaimedInterviewWorkflowCommand, now: Instant, leaseUntil: Instant): RepositoryIO[Boolean]
+  def renewPublication(
+      claim: ClaimedInterviewWorkflowCommand,
+      now: Instant,
+      leaseUntil: Instant
+  ): RepositoryF[F, Boolean]
 
-  def markPublished(claim: ClaimedInterviewWorkflowCommand, publishedAt: Instant): RepositoryIO[Unit]
+  def markPublished(claim: ClaimedInterviewWorkflowCommand, publishedAt: Instant): RepositoryF[F, Unit]
 
   def retry(
       claim: ClaimedInterviewWorkflowCommand,
       now: Instant,
       availableAt: Instant,
       failureCode: InterviewFailureCode
-  ): RepositoryIO[Unit]
+  ): RepositoryF[F, Unit]
 
   def requireRepair(
       claim: ClaimedInterviewWorkflowCommand,
       now: Instant,
       failureCode: InterviewFailureCode
-  ): RepositoryIO[InterviewPublicationResolution]
+  ): RepositoryF[F, InterviewPublicationResolution]
 }

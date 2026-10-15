@@ -19,7 +19,7 @@ final class InterviewProposalExpiryIntegrationSpec extends MongoIntegrationSuite
   private def scenario[A](use: InterviewLifecycleScenario => IO[A]): IO[A] =
     InterviewLifecycleScenario.arranged(mongoResource)(use)
 
-  private def success[A](operation: RepositoryIO[A]): IO[A] =
+  private def success[A](operation: RepositoryF[IO, A]): IO[A] =
     operation.value.flatMap(_.fold(error => IO.raiseError(new AssertionError(s"$error")), IO.pure))
 
   private def proposed(s: InterviewLifecycleScenario): IO[InterviewWorkflow] =

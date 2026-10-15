@@ -1,6 +1,5 @@
 package com.example.graphQL.cats.service.port
 
-import cats.effect.IO
 import java.time.Instant
 import java.util.UUID
 
@@ -42,11 +41,11 @@ final case class InterviewMessage(
     result: Option[InterviewResult],
     occurredAt: Instant
 )
-trait InterviewTransport {
+trait InterviewTransport[F[_]] {
 
   /** This identity and publish must belong to the same immutable initialized producer resource. */
   def generationFor(message: InterviewMessage): InterviewPublisherGeneration
 
   /** Send completion means Kafka acknowledged publication; caller then durably marks its intent sent. */
-  def publish(message: InterviewMessage): IO[Unit]
+  def publish(message: InterviewMessage): F[Unit]
 }

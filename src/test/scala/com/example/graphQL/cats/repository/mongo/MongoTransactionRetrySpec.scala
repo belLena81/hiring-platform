@@ -2,7 +2,7 @@ package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.{IO, Ref}
 import cats.syntax.all.*
-import com.example.graphQL.cats.service.port.{MutationWriteContext, RepositoryIO}
+import com.example.graphQL.cats.service.port.{MutationWriteContext, RepositoryF}
 import com.example.graphQL.cats.service.RepositoryError
 import mongo4cats.client.ClientSession
 import munit.CatsEffectSuite
@@ -15,12 +15,12 @@ final class MongoTransactionRetrySpec extends CatsEffectSuite {
       runner = recordingRunner(runs)
       atomic <- MongoMutationWriteContext
         .run(MutationWriteContext.directWrite, runner, transactionRequired = true) { _ =>
-          RepositoryIO.lift(operations.update(_ + 1)).as("atomic")
+          RepositoryF.lift(operations.update(_ + 1)).as("atomic")
         }
         .value
       direct <- MongoMutationWriteContext
         .run(MutationWriteContext.directWrite, runner, transactionRequired = false) { _ =>
-          RepositoryIO.lift(operations.update(_ + 1)).as("direct")
+          RepositoryF.lift(operations.update(_ + 1)).as("direct")
         }
         .value
       runCount <- runs.get
@@ -39,7 +39,7 @@ final class MongoTransactionRetrySpec extends CatsEffectSuite {
       runner = recordingRunner(runs)
       result <- MongoMutationWriteContext
         .run(MongoMutationWriteContext(None), runner, transactionRequired = true) { session =>
-          RepositoryIO.pure(session)
+          RepositoryF.at[IO].pure(session)
         }
         .value
       runCount <- runs.get
@@ -56,7 +56,7 @@ final class MongoTransactionRetrySpec extends CatsEffectSuite {
       sessionFailure <- MongoMutationWriteContext.session(foreign).attempt
       runFailure <- MongoMutationWriteContext
         .run(foreign, recordingRunner(runs), transactionRequired = false)(_ =>
-          RepositoryIO.fromEither(Right("unused"): Either[RepositoryError, String])
+          RepositoryF.at[IO].fromEither(Right("unused"): Either[RepositoryError, String])
         )
         .value
         .attempt
@@ -71,7 +71,7 @@ final class MongoTransactionRetrySpec extends CatsEffectSuite {
   private def recordingRunner(runs: Ref[IO, Int]): MongoTransactionRunner =
     new MongoTransactionRunner {
       override def run[A](
-          operation: Option[ClientSession[IO]] => RepositoryIO[A]
-      ): RepositoryIO[A] = RepositoryIO.lift(runs.update(_ + 1)) *> operation(None)
+          operation: Option[ClientSession[IO]] => RepositoryF[IO, A]
+      ): RepositoryF[IO, A] = RepositoryF.lift(runs.update(_ + 1)) *> operation(None)
     }
 }

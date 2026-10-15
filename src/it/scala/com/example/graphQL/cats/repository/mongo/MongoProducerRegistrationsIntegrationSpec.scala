@@ -4,7 +4,7 @@ import cats.effect.{IO, Ref}
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.service.Diagnostics
-import com.example.graphQL.cats.service.port.{RepositoryIO}
+import com.example.graphQL.cats.service.port.{RepositoryF}
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.events.*
 import org.bson.Document
@@ -18,7 +18,7 @@ import scala.jdk.CollectionConverters.*
 final class MongoProducerRegistrationsIntegrationSpec extends MongoIntegrationSuite {
   override val munitIOTimeout = 5.minutes
   private val now = Instant.parse("2026-10-07T08:00:00Z")
-  private def success[A](effect: RepositoryIO[A]): IO[A] =
+  private def success[A](effect: RepositoryF[IO, A]): IO[A] =
     effect.value.flatMap(value => IO.fromEither(value.leftMap(error => new AssertionError(error.toString))))
 
   test("stopped generation retirement traverses 130 rows, retries broker failure and preserves unrelated generations") {
@@ -26,7 +26,7 @@ final class MongoProducerRegistrationsIntegrationSpec extends MongoIntegrationSu
       val selected = "hiring-interview-worker-" + UUID.randomUUID()
       val unrelated = "hiring-publisher-" + UUID.randomUUID()
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- (1 to 130).toList.traverse_(_ =>
           success(
             MongoProducerRegistrations.register(
@@ -53,9 +53,9 @@ final class MongoProducerRegistrationsIntegrationSpec extends MongoIntegrationSu
         failing = new MongoProducerGenerationMaintenance(
           fixture.database,
           _ =>
-            RepositoryIO
+            RepositoryF
               .lift(fenceCalls.update(_ + 1))
-              .flatMap(_ => RepositoryIO.fromEither[Unit](Left(RepositoryError.Unavailable))),
+              .flatMap(_ => RepositoryF.at[IO].fromEither[Unit](Left(RepositoryError.Unavailable))),
           IO.pure(now)
         )
         inventory <- success(failing.inventory(None))
@@ -65,7 +65,7 @@ final class MongoProducerRegistrationsIntegrationSpec extends MongoIntegrationSu
         stillActive <- rows.count(Filters.eq("state", "Active"), new com.mongodb.client.model.CountOptions())
         recovering = new MongoProducerGenerationMaintenance(
           fixture.database,
-          _ => RepositoryIO.lift(fenceCalls.update(_ + 1)),
+          _ => RepositoryF.lift(fenceCalls.update(_ + 1)),
           IO.pure(now)
         )
         _ <- success(recovering.retire(selected))
@@ -90,20 +90,20 @@ final class MongoProducerRegistrationsIntegrationSpec extends MongoIntegrationSu
     mongoResource.use { fixture =>
       val id = "hiring-interview-orchestrator-" + UUID.randomUUID()
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- success(
           MongoProducerRegistrations.register(fixture.database, None, UUID.randomUUID().toString, id, "Interview", now)
         )
         brokerConfirmed <- Ref.of[IO, Int](0)
         interrupted = new MongoProducerGenerationMaintenance(
           fixture.database,
-          _ => RepositoryIO.lift(brokerConfirmed.update(_ + 1)),
+          _ => RepositoryF.lift(brokerConfirmed.update(_ + 1)),
           IO.raiseError(new IllegalStateException("process stopped after fencing"))
         )
         interruptedResult <- interrupted.retire(id).value.attempt
         restarted = new MongoProducerGenerationMaintenance(
           fixture.database,
-          _ => RepositoryIO.lift(brokerConfirmed.update(_ + 1)),
+          _ => RepositoryF.lift(brokerConfirmed.update(_ + 1)),
           IO.pure(now)
         )
         before <- success(restarted.inventory(None))
@@ -125,7 +125,7 @@ final class MongoProducerRegistrationsIntegrationSpec extends MongoIntegrationSu
       val ids = Vector.fill(130)("hiring-interview-worker-" + UUID.randomUUID())
       val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- ids.traverse_(id =>
           success(
             MongoProducerRegistrations.register(fixture.database, None, subject.value.toString, id, "Interview", now)
@@ -159,7 +159,7 @@ final class MongoProducerRegistrationsIntegrationSpec extends MongoIntegrationSu
       val hot = UserId(UUID.randomUUID())
       val independent = UserId(UUID.randomUUID())
       val outbox =
-        MongoOperationalEventOutboxRepository.transactional(fixture.database, fixture.client, Diagnostics.noop)
+        MongoOperationalEventOutboxRepository.transactional(fixture.database, fixture.client, Diagnostics.noop[IO])
       def event(n: Long, actor: UserId): OperationalEventEnvelope = OperationalEventEnvelope(
         new UUID(0L, n),
         OperationalEventType.JOB_CREATED,
@@ -177,7 +177,7 @@ final class MongoProducerRegistrationsIntegrationSpec extends MongoIntegrationSu
       )
       val desired = event(200L, independent)
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- MongoRepositoryTestSupport.insertOne(
           fixture.database,
           MongoCollections.OutboxSubjectFences,
@@ -229,9 +229,9 @@ final class MongoProducerRegistrationsIntegrationSpec extends MongoIntegrationSu
             now
           )
         )
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         first <- success(MongoProducerRegistrations.batch(fixture.database, subject, "Interview"))
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         second <- success(MongoProducerRegistrations.batch(fixture.database, subject, "Interview"))
         fence <- MongoRepositoryTestSupport.findOne(
           fixture.database,

@@ -38,7 +38,7 @@ final class HiringStructuredAccessEvaluationIntegrationSpec extends MongoIntegra
   private val samples = 100
   private val pageSize = 7
   private val auth = JwtAuthConfig("synthetic-http-evaluation-key-0123456789", "synthetic", "synthetic")
-  private val publisher = new EmbeddingWorkPublisher { def wake: IO[Unit] = IO.unit }
+  private val publisher = new EmbeddingWorkPublisher[IO] { def wake: IO[Unit] = IO.unit }
   private def user(index: Int, role: UserRole): User =
     User(
       UserId(support.deterministicId(s"http-user:$index")),
@@ -147,41 +147,57 @@ final class HiringStructuredAccessEvaluationIntegrationSpec extends MongoIntegra
       fixture.database,
       fixture.client,
       MongoEmbeddingWorkEnqueuer.disabled,
-      Diagnostics.noop
+      Diagnostics.noop[IO]
     )
     val jobRepository = MongoJobRepository.transactional(
       fixture.database,
       fixture.client,
       MongoEmbeddingWorkEnqueuer.disabled,
-      Diagnostics.noop
+      Diagnostics.noop[IO]
     )
     val applicationRepository =
-      MongoApplicationRepository.transactional(fixture.database, fixture.client, Diagnostics.noop)
-    val receipts = MongoMutationReceiptRepository.transactional(fixture.database, fixture.client, Diagnostics.noop)
+      MongoApplicationRepository.transactional(fixture.database, fixture.client, Diagnostics.noop[IO])
+    val receipts = MongoMutationReceiptRepository.transactional(fixture.database, fixture.client, Diagnostics.noop[IO])
     val idempotent = Idempotent(receipts)
     val readModel = HiringReadService(users, jobRepository, applicationRepository)
     val services = HiringGraphQLServices(
       readModel,
-      new JobService(users, jobRepository, publisher, idempotent, Diagnostics.noop),
-      new ApplicationService(users, jobRepository, applicationRepository, readModel, idempotent),
+      new JobService(
+        users,
+        jobRepository,
+        publisher,
+        idempotent,
+        Diagnostics.noop[IO],
+        cats.effect.Clock[IO],
+        cats.effect.std.UUIDGen[IO]
+      ),
+      new ApplicationService(
+        users,
+        jobRepository,
+        applicationRepository,
+        readModel,
+        idempotent,
+        cats.effect.Clock[IO],
+        cats.effect.std.UUIDGen[IO]
+      ),
       CursorCodec.keyFromSecret(auth.hmacSecret),
       TestGraphQLSupport.accountService,
       TestGraphQLSupport.interactions,
       TestGraphQLSupport.searchSessions
     )
     val authenticator = new JwtActorAuthenticator(auth, UserAuthenticationService(users), cats.effect.Clock[IO])
-    val probe = MongoDatabaseProbe.fromDatabase(fixture.database, Map.empty, Diagnostics.noop)
+    val probe = MongoDatabaseProbe.fromDatabase(fixture.database, Map.empty, Diagnostics.noop[IO])
     for {
       dependencies <- TestGraphQLSupport.dependencies(services, authenticator.authenticate, IO.pure(ProbeResult.Ready))
       app <- Resource.eval(
-        new HiringApiRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, dependencies)
+        new HiringApiRoutes(new HealthService(probe, Diagnostics.noop[IO]), Diagnostics.noop[IO], dependencies)
           .httpApp(HiringApiRoutes.HttpConfig(16, 10.seconds))
       )
       bound <- HiringPlatformServer.resource(
         Host.fromString("127.0.0.1").getOrElse(fail("invalid host")),
         Port.fromInt(0).getOrElse(fail("invalid port")),
         app,
-        Diagnostics.noop
+        Diagnostics.noop[IO]
       )
     } yield bound.address.getPort
   }
@@ -342,7 +358,7 @@ final class HiringStructuredAccessEvaluationIntegrationSpec extends MongoIntegra
   test("authenticated structured HTTP reads record bounded local latency with verified access outcomes") {
     mongoResource.use { fixture =>
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- (candidates ++ recruiters).traverse_(value =>
           MongoRepositoryTestSupport.insertOne(fixture.database, MongoCollections.Users, MongoHiringCodecs.user(value))
         )

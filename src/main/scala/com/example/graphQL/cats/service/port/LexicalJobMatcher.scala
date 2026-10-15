@@ -6,6 +6,6 @@ import com.example.graphQL.cats.service.search.{JobSearchFilter, LexicalJobMatch
   * eligibility against operational data and never return the identities. Implementations read at most `limit + 1` hits
   * and report whether the match set was truncated.
   */
-trait LexicalJobMatcher {
-  def matches(text: String, filter: JobSearchFilter, limit: Int): RepositoryIO[LexicalJobMatches]
+trait LexicalJobMatcher[F[_]] {
+  def matches(text: String, filter: JobSearchFilter, limit: Int): RepositoryF[F, LexicalJobMatches]
 }

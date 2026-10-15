@@ -1,29 +1,35 @@
 package com.example.graphQL.cats.service.application
 
-import cats.effect.IO
+import cats.Applicative
+import cats.effect.Temporal
+import cats.effect.syntax.all.*
+import cats.syntax.all.*
 import com.example.graphQL.cats.domain.policy.RetryBackoff
 import com.example.graphQL.cats.domain.workflow.*
 import com.example.graphQL.cats.service.port.*
+import com.example.graphQL.cats.service.saga.{InterviewSchedulingOrchestrator, SagaSettlement}
 
 /** Admits command and result messages: replay-window checks, quarantine, execution claims and result application. A
   * message is acknowledged (`true`) only once its outcome is durable.
   */
-private[application] final class InterviewMessageReceiver(
-    repository: InterviewWorkflowRepository,
+private[application] final class InterviewMessageReceiver[F[_]: Temporal](
+    repository: InterviewWorkflowRepository[F],
     settings: InterviewWorkerSettings,
-    reporter: InterviewWorkerReporter,
-    currentTime: IO[java.time.Instant],
-    executor: InterviewProviderExecutor
+    reporter: InterviewWorkerReporter[F],
+    currentTime: F[java.time.Instant],
+    executor: InterviewProviderExecutor[F]
 ) {
   import reporter.report
 
+  private val scheduling = InterviewSchedulingOrchestrator(repository)
+
   private type Loaded = (Option[InterviewWorkflow], Option[InterviewWorkflowCommandRecord])
 
-  def receiveCommand(message: InterviewMessage): IO[Boolean] = withinReplayWindow(message)(processCommand(message))
+  def receiveCommand(message: InterviewMessage): F[Boolean] = withinReplayWindow(message)(processCommand(message))
 
-  def receiveResult(message: InterviewMessage): IO[Boolean] = withinReplayWindow(message)(processResult(message))
+  def receiveResult(message: InterviewMessage): F[Boolean] = withinReplayWindow(message)(processResult(message))
 
-  private def withLoaded(message: InterviewMessage, failure: String)(admit: Loaded => IO[Boolean]): IO[Boolean] = {
+  private def withLoaded(message: InterviewMessage, failure: String)(admit: Loaded => F[Boolean]): F[Boolean] = {
     val id = InterviewWorkflowId(message.workflowId)
     (for {
       workflow <- repository.findForAdmin(id)
@@ -35,13 +41,13 @@ private[application] final class InterviewMessageReceiver(
   }
 
   /** A stale revision or a failed write leaves the message unacknowledged for redelivery. */
-  private def advanced(result: RepositoryIO[InterviewWorkflowAdvanceResult]): IO[Boolean] =
+  private def advanced(result: RepositoryF[F, InterviewWorkflowAdvanceResult]): F[Boolean] =
     result.value.map {
       case Right(InterviewWorkflowAdvanceResult.StaleRevision) | Left(_) => false
       case Right(_)                                                      => true
     }
 
-  private def quarantineMessage(message: InterviewMessage, reason: InterviewMessageRejection): IO[Boolean] =
+  private def quarantineMessage(message: InterviewMessage, reason: InterviewMessageRejection): F[Boolean] =
     currentTime.flatMap(now =>
       reporter.succeeded(
         repository.quarantine(s"${message.workflowId}:${message.messageId}:${reason.code}", now),
@@ -49,10 +55,10 @@ private[application] final class InterviewMessageReceiver(
       )
     )
 
-  private def withinReplayWindow(message: InterviewMessage)(process: IO[Boolean]): IO[Boolean] =
+  private def withinReplayWindow(message: InterviewMessage)(process: F[Boolean]): F[Boolean] =
     currentTime.flatMap { now =>
       InterviewMessagePolicy.replayDisposition(message, now, settings.replayWindow, settings.clockSkewTolerance) match {
-        case InterviewReplayDisposition.Deferred => IO.pure(false)
+        case InterviewReplayDisposition.Deferred => Applicative[F].pure(false)
         case InterviewReplayDisposition.Future   => repairFutureMessage(message, now)
         case InterviewReplayDisposition.Timely   => process
         case InterviewReplayDisposition.Expired  =>
@@ -67,7 +73,7 @@ private[application] final class InterviewMessageReceiver(
                 InterviewMessageRejection.Expired,
                 cause,
                 now,
-                IO.pure(true)
+                Applicative[F].pure(true)
               )
             else
               InterviewMessagePolicy.expiredDecision(workflow, command, message) match {
@@ -79,7 +85,7 @@ private[application] final class InterviewMessageReceiver(
       }
     }
 
-  private def repairFutureMessage(message: InterviewMessage, now: java.time.Instant): IO[Boolean] =
+  private def repairFutureMessage(message: InterviewMessage, now: java.time.Instant): F[Boolean] =
     withLoaded(message, "interviewWorkflow.futureReceipt") { case (workflow, command) =>
       val cause = InterviewAdvanceCause.FutureMessage(message.messageId)
       val quarantine = quarantineMessage(message, InterviewMessageRejection.Future)
@@ -99,7 +105,7 @@ private[application] final class InterviewMessageReceiver(
           case Left(_)                                          => quarantine
           case Right(InterviewWorkflowDecision(next, commands)) =>
             advanced(repository.advance(next, next.revision - 1L, cause, commands, now))
-              .flatMap(if (_) quarantine else IO.pure(false))
+              .flatMap(if (_) quarantine else Applicative[F].pure(false))
         }
     }
 
@@ -108,13 +114,13 @@ private[application] final class InterviewMessageReceiver(
     case _                            => false
   }
 
-  private def deferExpiry(record: InterviewWorkflowCommandRecord, now: java.time.Instant): IO[Boolean] =
+  private def deferExpiry(record: InterviewWorkflowCommandRecord, now: java.time.Instant): F[Boolean] =
     record.command match {
       case InterviewLifecycleCommand.ExpireProposal(due) =>
         val availableAt =
           InterviewMessagePolicy.expiryDeferral(due, now, settings.initialBackoff, settings.maxBackoff)
         repository.deferExpiry(record, availableAt).value.flatMap {
-          case Right(true)  => IO.pure(true)
+          case Right(true)  => Applicative[F].pure(true)
           case Right(false) =>
             // Not requeued: acknowledge only if the row is settled elsewhere, otherwise redeliver the message.
             repository.findCommand(record.workflowId, record.stepId).value.map {
@@ -122,9 +128,9 @@ private[application] final class InterviewMessageReceiver(
               case Right(None)          => true
               case Left(_)              => false
             }
-          case Left(_) => IO.pure(false)
+          case Left(_) => Applicative[F].pure(false)
         }
-      case _ => IO.pure(false)
+      case _ => Applicative[F].pure(false)
     }
 
   private def settledElsewhere(record: InterviewWorkflowCommandRecord): Boolean =
@@ -148,19 +154,19 @@ private[application] final class InterviewMessageReceiver(
       rejection: InterviewMessageRejection,
       cause: InterviewAdvanceCause,
       now: java.time.Instant,
-      acknowledge: IO[Boolean]
-  ): IO[Boolean] = {
-    def settled(durable: IO[Boolean]): IO[Boolean] = durable.flatMap(if (_) acknowledge else IO.pure(false))
+      acknowledge: F[Boolean]
+  ): F[Boolean] = {
+    def settled(durable: F[Boolean]): F[Boolean] = durable.flatMap(if (_) acknowledge else Applicative[F].pure(false))
     InterviewMessagePolicy.lifecycleReplayFailure(workflow, command, message, step, rejection, now) match {
       case Left(reason)                                               => quarantineMessage(message, reason)
       case Right(InterviewMessagePolicy.LifecycleReplayFailure.Defer) =>
         // The expiry is simply not due on this node's clock: requeue it, with a backoff so a skewed consumer does not
         // receive it in a hot loop, and settle the message (without quarantining it) only when the row is requeued or
         // is already settled by another path.
-        command.fold(IO.pure(false))(record => deferExpiry(record, now))
+        command.fold(Applicative[F].pure(false))(record => deferExpiry(record, now))
       case Right(InterviewMessagePolicy.LifecycleReplayFailure.Notification) =>
         settled(
-          command.fold(IO.pure(false))(record =>
+          command.fold(Applicative[F].pure(false))(record =>
             repository
               .settleNotificationResult(record, InterviewNotificationSettlement.Exhausted(step), now)
               .value
@@ -169,7 +175,7 @@ private[application] final class InterviewMessageReceiver(
         )
       case Right(InterviewMessagePolicy.LifecycleReplayFailure.Workflow(event)) =>
         settled(
-          workflow.fold(IO.pure(false))(current =>
+          workflow.fold(Applicative[F].pure(false))(current =>
             repository
               .applyLifecycle(current.id, current.revision, event, InterviewLifecycleOrigin.Internal(cause), now, None)
               .value
@@ -182,10 +188,10 @@ private[application] final class InterviewMessageReceiver(
     }
   }
 
-  private def processCommand(message: InterviewMessage): IO[Boolean] =
+  private def processCommand(message: InterviewMessage): F[Boolean] =
     withLoaded(message, "interviewWorkflow.receive") { case (current, stored) =>
       InterviewMessagePolicy.commandAdmission(current, stored, message) match {
-        case InterviewCommandAdmission.Acknowledge                => IO.pure(true)
+        case InterviewCommandAdmission.Acknowledge                => Applicative[F].pure(true)
         case InterviewCommandAdmission.Quarantine(reason)         => quarantineMessage(message, reason)
         case InterviewCommandAdmission.Execute(workflow, command) =>
           currentTime.flatMap { claimAt =>
@@ -200,17 +206,17 @@ private[application] final class InterviewMessageReceiver(
               .value
               .flatMap {
                 case Left(_)                                    => report("interviewWorkflow.claimExecution").as(false)
-                case Right(InterviewExecutionClaimOutcome.Busy) => IO.pure(false)
+                case Right(InterviewExecutionClaimOutcome.Busy) => Applicative[F].pure(false)
                 case Right(
                       InterviewExecutionClaimOutcome.AlreadyHandled |
                       InterviewExecutionClaimOutcome.ReconciliationQueued |
                       InterviewExecutionClaimOutcome.RepairRequired
                     ) =>
-                  IO.pure(true)
+                  Applicative[F].pure(true)
                 case Right(InterviewExecutionClaimOutcome.Acquired(claim)) =>
                   executor
                     .execute(workflow, command.command, claim)
-                    .timeoutTo(settings.providerTimeout, IO.pure(InterviewResult.OutcomeUnknown))
+                    .timeoutTo(settings.providerTimeout, Applicative[F].pure(InterviewResult.OutcomeUnknown))
                     .flatMap(result =>
                       currentTime.flatMap(at =>
                         reporter.succeeded(
@@ -224,7 +230,7 @@ private[application] final class InterviewMessageReceiver(
       }
     }
 
-  private def processResult(message: InterviewMessage): IO[Boolean] =
+  private def processResult(message: InterviewMessage): F[Boolean] =
     withLoaded(message, "interviewWorkflow.receive") { case (current, stored) =>
       InterviewMessagePolicy.resultAdmission(current, stored, message) match {
         case Left(reason)               => quarantineMessage(message, reason)
@@ -236,21 +242,25 @@ private[application] final class InterviewMessageReceiver(
                 case lifecycle: InterviewLifecycleCommand =>
                   applyLifecycleResult(workflow, command, lifecycle, message, count)
                 case _: InterviewWorkflowCommand =>
-                  val selected = InterviewMessagePolicy.resultEvent(message, count, settings.maxAttempts)
-                  selected.flatMap(ev => InterviewWorkflow.decide(workflow, workflow.revision, ev).toOption) match {
-                    case None => quarantineMessage(message, InterviewMessageRejection.InvalidTransition)
-                    case Some(InterviewWorkflowDecision(next, commands)) =>
+                  InterviewMessagePolicy.resultEvent(message, count, settings.maxAttempts) match {
+                    case None     => quarantineMessage(message, InterviewMessageRejection.InvalidTransition)
+                    case Some(ev) =>
                       currentTime.flatMap(now =>
-                        advanced(
-                          repository.advance(
-                            next,
-                            workflow.revision,
+                        scheduling
+                          .settle(
+                            workflow,
+                            InterviewSchedulingSaga.input(workflow, ev),
                             InterviewAdvanceCause.ResultReceipt(message.messageId.toString),
-                            commands,
                             now,
                             retryAvailableAt(message, count, now)
                           )
-                        )
+                          .value
+                          .flatMap {
+                            case Right(SagaSettlement.Refused(_)) =>
+                              quarantineMessage(message, InterviewMessageRejection.InvalidTransition)
+                            case Right(SagaSettlement.StaleRevision) | Left(_) => Applicative[F].pure(false)
+                            case Right(_)                                      => Applicative[F].pure(true)
+                          }
                       )
                   }
               }
@@ -276,11 +286,11 @@ private[application] final class InterviewMessageReceiver(
       command: InterviewLifecycleCommand,
       message: InterviewMessage,
       attempts: Long
-  ): IO[Boolean] =
+  ): F[Boolean] =
     message.result.fold(quarantineMessage(message, InterviewMessageRejection.Inconsistent))(result =>
       currentTime.flatMap { now =>
         if (InterviewCommands.isInformational(command))
-          if (result == InterviewResult.Succeeded) IO.pure(true)
+          if (result == InterviewResult.Succeeded) Applicative[F].pure(true)
           else {
             val settlement =
               if (attempts >= settings.maxAttempts)
@@ -313,9 +323,9 @@ private[application] final class InterviewMessageReceiver(
                 .value
                 .flatMap {
                   case Right(InterviewLifecycleOutcome.Applied(_) | InterviewLifecycleOutcome.Duplicate(_)) =>
-                    IO.pure(true)
+                    Applicative[F].pure(true)
                   case Right(InterviewLifecycleOutcome.Rejected(InterviewWorkflowError.StaleRevision)) =>
-                    IO.pure(false)
+                    Applicative[F].pure(false)
                   case Right(_) => quarantineMessage(message, InterviewMessageRejection.InvalidTransition)
                   case Left(_)  => report("interviewWorkflow.applyLifecycleResult").as(false)
                 }

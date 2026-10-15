@@ -8,7 +8,7 @@ import com.example.graphQL.cats.service.port.{
   ApplicationRepository,
   JobRepository,
   MutationWriteContext,
-  RepositoryIO,
+  RepositoryF,
   UserRepository,
   Versioned
 }
@@ -150,19 +150,19 @@ private[cats] object ServiceFixtures {
         )
     }
 
-  private[cats] trait VersionedUserRepositoryTestAdapter extends UserRepository {
-    override def relatedUsers(scope: HiringReadScope, keys: List[UserRelationKey]): RepositoryIO[List[RelatedUser]] =
-      RepositoryIO.raise(RepositoryError.Unavailable)
+  private[cats] trait VersionedUserRepositoryTestAdapter extends UserRepository[IO] {
+    override def relatedUsers(scope: HiringReadScope, keys: List[UserRelationKey]): RepositoryF[IO, List[RelatedUser]] =
+      RepositoryF.at[IO].raise(RepositoryError.Unavailable)
 
-    override def findVersioned(id: UserId): RepositoryIO[Option[Versioned[User]]] =
-      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+    override def findVersioned(id: UserId): RepositoryF[IO, Option[Versioned[User]]] =
+      com.example.graphQL.cats.service.port.RepositoryF.fromFEither(
         find(id).value.map(_.map(_.map(Versioned(_, 0L))))
       )
 
     override def updateEmbedding(
         observed: Versioned[User],
         embedding: EntityEmbedding
-    ): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+    ): RepositoryF[IO, Unit] = com.example.graphQL.cats.service.port.RepositoryF.fromFEither(
       if (observed.version == 0L) updateEmbedding(observed.value.id, embedding).value
       else IO.pure(Left(RepositoryError.Conflict))
     )
@@ -181,22 +181,22 @@ private[cats] object ServiceFixtures {
   final class InMemoryUsers(
       protected val ref: Ref[IO, Map[UserId, User]],
       relationLookup: Option[(HiringReadScope, List[UserRelationKey]) => IO[List[RelatedUser]]] = None
-  ) extends UserRepository
+  ) extends UserRepository[IO]
       with RefBackedLookup[UserId, User] {
-    override def relatedUsers(scope: HiringReadScope, keys: List[UserRelationKey]): RepositoryIO[List[RelatedUser]] =
-      relationLookup.fold(RepositoryIO.fromEither[List[RelatedUser]](Left(RepositoryError.Unavailable)))(lookup =>
-        RepositoryIO.lift(lookup(scope, keys))
+    override def relatedUsers(scope: HiringReadScope, keys: List[UserRelationKey]): RepositoryF[IO, List[RelatedUser]] =
+      relationLookup.fold(RepositoryF.at[IO].fromEither[List[RelatedUser]](Left(RepositoryError.Unavailable)))(lookup =>
+        RepositoryF.lift(lookup(scope, keys))
       )
 
-    override def find(id: UserId): RepositoryIO[Option[User]] =
-      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(findOne(id).map(Right(_)))
+    override def find(id: UserId): RepositoryF[IO, Option[User]] =
+      com.example.graphQL.cats.service.port.RepositoryF.fromFEither(findOne(id).map(Right(_)))
 
-    override def findVersioned(id: UserId): RepositoryIO[Option[Versioned[User]]] =
-      com.example.graphQL.cats.service.port.RepositoryIO
-        .fromIOEither(findOne(id).map(value => Right(value.map(Versioned(_, 0L)))))
+    override def findVersioned(id: UserId): RepositoryF[IO, Option[Versioned[User]]] =
+      com.example.graphQL.cats.service.port.RepositoryF
+        .fromFEither(findOne(id).map(value => Right(value.map(Versioned(_, 0L)))))
 
-    override def updateEmbedding(id: UserId, embedding: EntityEmbedding): RepositoryIO[Unit] =
-      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(ref.modify { users =>
+    override def updateEmbedding(id: UserId, embedding: EntityEmbedding): RepositoryF[IO, Unit] =
+      com.example.graphQL.cats.service.port.RepositoryF.fromFEither(ref.modify { users =>
         users.get(id) match {
           case Some(user) => (users + (id -> user.copy(embedding = Some(embedding))), Right(()))
           case None       => (users, Left(RepositoryError.Conflict))
@@ -206,7 +206,7 @@ private[cats] object ServiceFixtures {
     override def updateEmbedding(
         observed: Versioned[User],
         embedding: EntityEmbedding
-    ): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(ref.modify { users =>
+    ): RepositoryF[IO, Unit] = com.example.graphQL.cats.service.port.RepositoryF.fromFEither(ref.modify { users =>
       users.get(observed.value.id) match {
         case Some(current)
             if observed.version == 0L && current.candidateProfile == observed.value.candidateProfile &&
@@ -223,25 +223,25 @@ private[cats] object ServiceFixtures {
       operationalEvents: Option[Ref[IO, Vector[OperationalEventEnvelope]]] = None,
       relationLookup: Option[(HiringReadScope, List[JobRelationKey]) => IO[List[RelatedJob]]] = None,
       discoveryActors: Option[Ref[IO, Map[UserId, User]]] = None
-  ) extends JobRepository
+  ) extends JobRepository[IO]
       with RefBackedLookup[JobId, Job] {
-    override def relatedJobs(scope: HiringReadScope, keys: List[JobRelationKey]): RepositoryIO[List[RelatedJob]] =
-      relationLookup.fold(RepositoryIO.fromEither[List[RelatedJob]](Left(RepositoryError.Unavailable)))(lookup =>
-        RepositoryIO.lift(lookup(scope, keys))
+    override def relatedJobs(scope: HiringReadScope, keys: List[JobRelationKey]): RepositoryF[IO, List[RelatedJob]] =
+      relationLookup.fold(RepositoryF.at[IO].fromEither[List[RelatedJob]](Left(RepositoryError.Unavailable)))(lookup =>
+        RepositoryF.lift(lookup(scope, keys))
       )
 
-    override def find(id: JobId): RepositoryIO[Option[Job]] =
-      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(findOne(id).map(Right(_)))
+    override def find(id: JobId): RepositoryF[IO, Option[Job]] =
+      com.example.graphQL.cats.service.port.RepositoryF.fromFEither(findOne(id).map(Right(_)))
 
-    override def findVersioned(id: JobId): RepositoryIO[Option[Versioned[Job]]] =
-      com.example.graphQL.cats.service.port.RepositoryIO
-        .fromIOEither(findOne(id).map(value => Right(value.map(Versioned(_, 0L)))))
+    override def findVersioned(id: JobId): RepositoryF[IO, Option[Versioned[Job]]] =
+      com.example.graphQL.cats.service.port.RepositoryF
+        .fromFEither(findOne(id).map(value => Right(value.map(Versioned(_, 0L)))))
 
-    override def findSubmissionSnapshot(id: JobId): RepositoryIO[Option[JobSubmissionSnapshot]] =
+    override def findSubmissionSnapshot(id: JobId): RepositoryF[IO, Option[JobSubmissionSnapshot]] =
       findVersioned(id).map(_.map(job => JobSubmissionSnapshot(job.value.id, job.value.status, job.version)))
 
-    override def findOpen(filter: JobSearchFilter, page: JobPageRequest): RepositoryIO[List[Job]] =
-      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+    override def findOpen(filter: JobSearchFilter, page: JobPageRequest): RepositoryF[IO, List[Job]] =
+      com.example.graphQL.cats.service.port.RepositoryF.fromFEither(
         ref.get
           .map(
             _.values
@@ -267,30 +267,29 @@ private[cats] object ServiceFixtures {
         query: com.example.graphQL.cats.service.search.NearbyJobsQuery,
         limit: Int
     ) =
-      requireDiscoveryActor(scope) *> com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(ref.get.map {
-        all =>
-          def distance(point: com.example.graphQL.cats.domain.model.GeoPoint): Double = {
-            val lat1 = Math.toRadians(query.center.latitude)
-            val lat2 = Math.toRadians(point.latitude)
-            val dLat = lat2 - lat1
-            val dLon = Math.toRadians(point.longitude - query.center.longitude)
-            val a = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(lat1) * Math.cos(lat2) *
-              Math.sin(dLon / 2) * Math.sin(dLon / 2)
-            6371d * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+      requireDiscoveryActor(scope) *> com.example.graphQL.cats.service.port.RepositoryF.fromFEither(ref.get.map { all =>
+        def distance(point: com.example.graphQL.cats.domain.model.GeoPoint): Double = {
+          val lat1 = Math.toRadians(query.center.latitude)
+          val lat2 = Math.toRadians(point.latitude)
+          val dLat = lat2 - lat1
+          val dLon = Math.toRadians(point.longitude - query.center.longitude)
+          val a = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(lat1) * Math.cos(lat2) *
+            Math.sin(dLon / 2) * Math.sin(dLon / 2)
+          6371d * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+        }
+        val selected = all.values.toList
+          .flatMap { job =>
+            job.location.coordinates
+              .filter(point => distance(point) <= query.radiusKm)
+              .map(point => com.example.graphQL.cats.service.search.NearbyJob(job, distance(point)))
           }
-          val selected = all.values.toList
-            .flatMap { job =>
-              job.location.coordinates
-                .filter(point => distance(point) <= query.radiusKm)
-                .map(point => com.example.graphQL.cats.service.search.NearbyJob(job, distance(point)))
-            }
-            .filter(value =>
-              value.job.status == JobStatus.Open && !value.job.location.remote &&
-                query.filter.city.forall(_ == value.job.location.city) && query.filter.skills
-                  .subsetOf(value.job.skills) &&
-                query.filter.createdAfter.forall(!value.job.createdAt.isBefore(_))
-            )
-          Right(selected.sortBy(value => (value.distanceKm, value.job.id.value.toString)).take(limit))
+          .filter(value =>
+            value.job.status == JobStatus.Open && !value.job.location.remote &&
+              query.filter.city.forall(_ == value.job.location.city) && query.filter.skills
+                .subsetOf(value.job.skills) &&
+              query.filter.createdAfter.forall(!value.job.createdAt.isBefore(_))
+          )
+        Right(selected.sortBy(value => (value.distanceKm, value.job.id.value.toString)).take(limit))
       })
 
     override def jobDiscoveryFacets(
@@ -299,25 +298,24 @@ private[cats] object ServiceFixtures {
         matchedIds: Option[Set[JobId]],
         maxTime: Option[scala.concurrent.duration.FiniteDuration]
     ) =
-      requireDiscoveryActor(scope) *> com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(ref.get.map {
-        all =>
-          val filter = query.filter
-          val eligible = all.values.toList.filter(job =>
-            job.status == JobStatus.Open && matchedIds.forall(_.contains(job.id)) &&
-              filter.city.forall(_ == job.location.city) && filter.skills.subsetOf(
-                job.skills
-              ) &&
-              filter.createdAfter.forall(!job.createdAt.isBefore(_)) && query.radius.forall(radius =>
-                !job.location.remote &&
-                  job.location.coordinates.exists(point => haversine(radius.center, point) <= radius.radiusKm)
-              )
-          )
-          Right(com.example.graphQL.cats.service.search.JobDiscoveryFacets.fromJobs(eligible))
+      requireDiscoveryActor(scope) *> com.example.graphQL.cats.service.port.RepositoryF.fromFEither(ref.get.map { all =>
+        val filter = query.filter
+        val eligible = all.values.toList.filter(job =>
+          job.status == JobStatus.Open && matchedIds.forall(_.contains(job.id)) &&
+            filter.city.forall(_ == job.location.city) && filter.skills.subsetOf(
+              job.skills
+            ) &&
+            filter.createdAfter.forall(!job.createdAt.isBefore(_)) && query.radius.forall(radius =>
+              !job.location.remote &&
+                job.location.coordinates.exists(point => haversine(radius.center, point) <= radius.radiusKm)
+            )
+        )
+        Right(com.example.graphQL.cats.service.search.JobDiscoveryFacets.fromJobs(eligible))
       })
 
-    private def requireDiscoveryActor(scope: HiringReadScope): RepositoryIO[Unit] =
-      discoveryActors.fold(RepositoryIO.fromEither[Unit](Left(RepositoryError.AuthorityRevoked))) { users =>
-        RepositoryIO.fromIOEither(users.get.map { values =>
+    private def requireDiscoveryActor(scope: HiringReadScope): RepositoryF[IO, Unit] =
+      discoveryActors.fold(RepositoryF.at[IO].fromEither[Unit](Left(RepositoryError.AuthorityRevoked))) { users =>
+        RepositoryF.fromFEither(users.get.map { values =>
           Either.cond(
             values
               .get(scope.userId)
@@ -343,8 +341,8 @@ private[cats] object ServiceFixtures {
       6371d * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
     }
 
-    override def findAll(page: JobPageRequest): RepositoryIO[List[Job]] =
-      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+    override def findAll(page: JobPageRequest): RepositoryF[IO, List[Job]] =
+      com.example.graphQL.cats.service.port.RepositoryF.fromFEither(
         ref.get
           .map(
             _.values
@@ -361,8 +359,8 @@ private[cats] object ServiceFixtures {
           .map(Right(_))
       )
 
-    override def findByRecruiter(recruiterId: UserId, page: JobPageRequest): RepositoryIO[List[Job]] =
-      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+    override def findByRecruiter(recruiterId: UserId, page: JobPageRequest): RepositoryF[IO, List[Job]] =
+      com.example.graphQL.cats.service.port.RepositoryF.fromFEither(
         ref.get
           .map(
             _.values
@@ -385,7 +383,7 @@ private[cats] object ServiceFixtures {
         now: Instant,
         events: List[OperationalEventEnvelope],
         context: MutationWriteContext
-    ): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+    ): RepositoryF[IO, Unit] = com.example.graphQL.cats.service.port.RepositoryF.fromFEither(
       ref.update(_ + (job.id -> job)).as(Right(())).flatTap(_ => operationalEvents.fold(IO.unit)(_.update(_ ++ events)))
     )
 
@@ -395,7 +393,7 @@ private[cats] object ServiceFixtures {
         now: Instant,
         events: List[OperationalEventEnvelope],
         context: MutationWriteContext
-    ): RepositoryIO[Versioned[Job]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+    ): RepositoryF[IO, Versioned[Job]] = com.example.graphQL.cats.service.port.RepositoryF.fromFEither(
       ref
         .modify { jobs =>
           jobs.get(expected.value.id) match {
@@ -413,8 +411,8 @@ private[cats] object ServiceFixtures {
     def allOperationalEvents: IO[Vector[OperationalEventEnvelope]] =
       operationalEvents.fold(IO.pure(Vector.empty[OperationalEventEnvelope]))(_.get)
 
-    override def updateEmbedding(id: JobId, embedding: EntityEmbedding): RepositoryIO[Unit] =
-      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(ref.modify { jobs =>
+    override def updateEmbedding(id: JobId, embedding: EntityEmbedding): RepositoryF[IO, Unit] =
+      com.example.graphQL.cats.service.port.RepositoryF.fromFEither(ref.modify { jobs =>
         jobs.get(id) match {
           case Some(job) if embedding.meta.sourceHash == SourceHash.sha256(SearchableText.job(job)) =>
             (jobs + (id -> job.copy(embedding = Some(embedding))), Right(()))
@@ -425,7 +423,7 @@ private[cats] object ServiceFixtures {
     override def updateEmbedding(
         observed: Versioned[Job],
         embedding: EntityEmbedding
-    ): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(ref.modify { jobs =>
+    ): RepositoryF[IO, Unit] = com.example.graphQL.cats.service.port.RepositoryF.fromFEither(ref.modify { jobs =>
       jobs.get(observed.value.id) match {
         case Some(current)
             if observed.version == 0L && current.updatedAt == observed.value.updatedAt &&
@@ -448,14 +446,14 @@ private[cats] object ServiceFixtures {
       nextOperationalEventError: Option[Ref[IO, Option[RepositoryError]]] = None,
       jobLookup: JobId => IO[Option[Job]] = id =>
         IO.pure(Option.when(id == ServiceFixtures.openJob.id)(ServiceFixtures.openJob))
-  ) extends ApplicationRepository {
-    override def find(id: ApplicationId): RepositoryIO[Option[Application]] =
-      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(applications.get.map(_.get(id)).map(Right(_)))
+  ) extends ApplicationRepository[IO] {
+    override def find(id: ApplicationId): RepositoryF[IO, Option[Application]] =
+      com.example.graphQL.cats.service.port.RepositoryF.fromFEither(applications.get.map(_.get(id)).map(Right(_)))
 
     override def findByCandidate(
         scope: HiringReadScope,
         page: ApplicationPageRequest
-    ): RepositoryIO[List[Application]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+    ): RepositoryF[IO, List[Application]] = com.example.graphQL.cats.service.port.RepositoryF.fromFEither(
       applications.get
         .map(
           _.values
@@ -477,8 +475,8 @@ private[cats] object ServiceFixtures {
         scope: HiringReadScope,
         jobId: JobId,
         page: ApplicationPageRequest
-    ): RepositoryIO[List[Application]] =
-      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+    ): RepositoryF[IO, List[Application]] =
+      com.example.graphQL.cats.service.port.RepositoryF.fromFEither(
         jobLookup(jobId).flatMap {
           case Some(job)
               if scope.role == UserRole.Admin || (scope.role == UserRole.Recruiter && job.recruiterId == scope.userId) =>
@@ -505,7 +503,7 @@ private[cats] object ServiceFixtures {
         scope: HiringReadScope,
         applicationId: ApplicationId,
         page: ApplicationEventPageRequest
-    ): RepositoryIO[List[ApplicationEvent]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+    ): RepositoryF[IO, List[ApplicationEvent]] = com.example.graphQL.cats.service.port.RepositoryF.fromFEither(
       applications.get
         .flatMap(values =>
           values
@@ -531,8 +529,8 @@ private[cats] object ServiceFixtures {
         .map(Right(_))
     )
 
-    private def create(application: Application, initialEvent: ApplicationEvent): RepositoryIO[Unit] =
-      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+    private def create(application: Application, initialEvent: ApplicationEvent): RepositoryF[IO, Unit] =
+      com.example.graphQL.cats.service.port.RepositoryF.fromFEither(
         applications
           .modify { current =>
             if (
@@ -555,8 +553,8 @@ private[cats] object ServiceFixtures {
         observedJob: JobSubmissionSnapshot,
         application: Application,
         initialEvent: ApplicationEvent
-    ): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO
-      .fromIOEither(nextCreateError.modify(error => (None, error)) flatMap {
+    ): RepositoryF[IO, Unit] = com.example.graphQL.cats.service.port.RepositoryF
+      .fromFEither(nextCreateError.modify(error => (None, error)) flatMap {
         case Some(error) => IO.pure(Left(error))
         case None
             if observedJob.status == JobStatus.Open && observedJob.id == application.jobId &&
@@ -571,8 +569,8 @@ private[cats] object ServiceFixtures {
         initialEvent: ApplicationEvent,
         outboxEvents: List[OperationalEventEnvelope],
         context: MutationWriteContext
-    ): RepositoryIO[Unit] =
-      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(rejectNextOperationalEvent.flatMap {
+    ): RepositoryF[IO, Unit] =
+      com.example.graphQL.cats.service.port.RepositoryF.fromFEither(rejectNextOperationalEvent.flatMap {
         case Some(error) => IO.pure(Left(error))
         case None        =>
           createForOpenJob(observedJob, application, initialEvent).value.flatTap {
@@ -584,7 +582,7 @@ private[cats] object ServiceFixtures {
     private def updateStatus(
         application: Application,
         event: ApplicationEvent
-    ): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+    ): RepositoryF[IO, Unit] = com.example.graphQL.cats.service.port.RepositoryF.fromFEither(
       applications
         .modify { current =>
           current.get(application.id) match {
@@ -605,8 +603,8 @@ private[cats] object ServiceFixtures {
         event: ApplicationEvent,
         outboxEvents: List[OperationalEventEnvelope],
         context: MutationWriteContext
-    ): RepositoryIO[Unit] =
-      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(rejectNextOperationalEvent.flatMap {
+    ): RepositoryF[IO, Unit] =
+      com.example.graphQL.cats.service.port.RepositoryF.fromFEither(rejectNextOperationalEvent.flatMap {
         case Some(error) => IO.pure(Left(error))
         case None        =>
           updateStatus(application, event).value.flatTap {

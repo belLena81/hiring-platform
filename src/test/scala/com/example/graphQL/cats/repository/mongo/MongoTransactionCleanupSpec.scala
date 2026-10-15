@@ -67,7 +67,7 @@ final class MongoTransactionCleanupSpec extends CatsEffectSuite {
   test("state inspection failure stays inside the sanitized abort guard") {
     for {
       entries <- Ref.of[IO, List[(LogEvent, Map[LogField, String])]](Nil)
-      diagnostics = new Diagnostics {
+      diagnostics = new Diagnostics[IO] {
         override def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]): IO[Unit] =
           entries.update((event, fields) :: _)
       }

@@ -12,7 +12,7 @@ final class ProducerGenerationLifecycleSpec extends CatsEffectSuite {
     for {
       released <- Ref.of[IO, Boolean](false)
       observations <- Ref.of[IO, Vector[(LogEvent, Boolean, Map[LogField, String])]](Vector.empty)
-      diagnostics = new Diagnostics {
+      diagnostics = new Diagnostics[IO] {
         def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]) =
           released.get.flatMap(closed => observations.update(_ :+ ((event, closed, fields))))
       }
@@ -34,7 +34,7 @@ final class ProducerGenerationLifecycleSpec extends CatsEffectSuite {
   test("failed acquisition emits no initialized or closed generation") {
     for {
       count <- Ref.of[IO, Int](0)
-      diagnostics = new Diagnostics {
+      diagnostics = new Diagnostics[IO] {
         def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]) = count.update(_ + 1)
       }
       result <- KafkaRuntimeSupport
@@ -55,7 +55,7 @@ final class ProducerGenerationLifecycleSpec extends CatsEffectSuite {
       acquiring <- Deferred[IO, Unit]
       released <- Ref.of[IO, Boolean](false)
       events <- Ref.of[IO, Vector[LogEvent]](Vector.empty)
-      diagnostics = new Diagnostics {
+      diagnostics = new Diagnostics[IO] {
         def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]) =
           events.update(_ :+ event)
       }
@@ -75,7 +75,7 @@ final class ProducerGenerationLifecycleSpec extends CatsEffectSuite {
   test("diagnostic failures cannot prevent producer release") {
     for {
       released <- Ref.of[IO, Boolean](false)
-      diagnostics = new Diagnostics {
+      diagnostics = new Diagnostics[IO] {
         def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]) =
           IO.raiseError(new IllegalStateException("diagnostics unavailable"))
       }
@@ -91,7 +91,7 @@ final class ProducerGenerationLifecycleSpec extends CatsEffectSuite {
   test("failed producer release does not emit a successful close event") {
     for {
       events <- Ref.of[IO, Vector[LogEvent]](Vector.empty)
-      diagnostics = new Diagnostics {
+      diagnostics = new Diagnostics[IO] {
         def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]) =
           events.update(_ :+ event)
       }

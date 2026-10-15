@@ -19,8 +19,8 @@ object MongoAdminSeed {
 
   def run(
       database: MongoDatabase[IO],
-      accounts: UserAccountRepository,
-      hasher: PasswordHasher,
+      accounts: UserAccountRepository[IO],
+      hasher: PasswordHasher[IO],
       config: AdminSeedConfig,
       clock: Clock[IO] = Clock[IO],
       uuidGen: UUIDGen[IO] = UUIDGen[IO]

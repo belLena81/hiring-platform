@@ -21,7 +21,7 @@ object Main extends IOApp {
       diagnostics.emit(LogEvent.RuntimeFailed, fields = LogFields.failure(error))
     }
 
-  private def program(config: AppConfig, diagnostics: Diagnostics): Resource[IO, Unit] = for {
+  private def program(config: AppConfig, diagnostics: Diagnostics[IO]): Resource[IO, Unit] = for {
     telemetry <- TelemetryRuntime.resource
     runtime <- MongoHiringRuntime.resource(config, diagnostics)
     contextFactory <- RequestContextFactory.resource
@@ -62,7 +62,7 @@ object Main extends IOApp {
   } yield ()
 
   /** One `CONFIG_INVALID` event per distinct public key; values never leave the validation boundary. */
-  private[cats] def configInvalidEvents(diagnostics: Diagnostics, errors: NonEmptyList[ConfigError]): IO[Unit] =
+  private[cats] def configInvalidEvents(diagnostics: Diagnostics[IO], errors: NonEmptyList[ConfigError]): IO[Unit] =
     errors.map(_.key).distinct.traverse_ { key =>
       diagnostics.emit(LogEvent.ConfigInvalid, fields = Map(LogField.ConfigKey -> key))
     }

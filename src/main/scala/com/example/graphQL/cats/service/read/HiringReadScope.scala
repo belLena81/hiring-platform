@@ -8,10 +8,10 @@ import com.example.graphQL.cats.service.auth.ActorAuthorization
 /** Only a freshly persisted, validated actor can grant a repository read scope. */
 final class HiringReadScope private (val userId: UserId, val role: UserRole)
 object HiringReadScope {
-  def validated(
+  def validated[F[_]](
       actor: ActorContext,
       user: User,
-      authorization: ActorAuthorization
+      authorization: ActorAuthorization[F]
   ): Either[UseCaseError, HiringReadScope] =
     authorization.validate(actor, user).map(current => new HiringReadScope(current.id, current.role))
 }

@@ -52,7 +52,7 @@ final class AtlasHiringSearchIntegrationSpec extends CatsEffectSuite {
       100,
       strategy,
       rerank,
-      diagnostics = Diagnostics.noop,
+      diagnostics = Diagnostics.noop[IO],
       discoveryPolicy = Some(policy)
     )
 
@@ -205,7 +205,7 @@ final class AtlasHiringSearchIntegrationSpec extends CatsEffectSuite {
     live { (db, policy) =>
       for {
         // Production order: indexes and migrations run on the empty database before any account exists.
-        _ <- MongoHiringSetup.initialize(db, Some(indexes), Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(db, Some(indexes), Diagnostics.noop[IO])
         seeded <- fixture(db)
         (job, expected) = seeded
         repo = repository(db, SearchFusionStrategy.ApplicationRrf, policy)
@@ -226,15 +226,15 @@ final class AtlasHiringSearchIntegrationSpec extends CatsEffectSuite {
             db,
             MongoRepositoryTestSupport.noTransaction,
             MongoEmbeddingWorkEnqueuer.disabled,
-            Diagnostics.noop
+            Diagnostics.noop[IO]
           ),
           new MongoJobRepository(
             db,
             MongoRepositoryTestSupport.noTransaction,
             MongoEmbeddingWorkEnqueuer.disabled,
-            Diagnostics.noop
+            Diagnostics.noop[IO]
           ),
-          new EmbeddingService {
+          new EmbeddingService[IO] {
             def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] =
               IO.raiseError(new IllegalStateException("Synthetic vector gate must not call an embedding provider"))
           },
@@ -279,7 +279,7 @@ final class AtlasHiringSearchIntegrationSpec extends CatsEffectSuite {
     test(s"MVR-04.L explicit production $strategy capability gate") {
       live { (db, policy) =>
         for {
-          _ <- MongoHiringSetup.initialize(db, Some(indexes), Diagnostics.noop)
+          _ <- MongoHiringSetup.initialize(db, Some(indexes), Diagnostics.noop[IO])
           seeded <- fixture(db)
           _ <- awaitIngestion(db, seeded._1, seeded._2, policy)
           result <- repository(db, strategy, policy).candidateMatches(query(seeded._1, true)).value
@@ -299,7 +299,7 @@ final class AtlasHiringSearchIntegrationSpec extends CatsEffectSuite {
       IO.unit
     } *> live { (db, policy) =>
       for {
-        _ <- MongoHiringSetup.initialize(db, Some(indexes), Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(db, Some(indexes), Diagnostics.noop[IO])
         seeded <- fixture(db)
         _ <- awaitIngestion(db, seeded._1, seeded._2, policy)
         result <- repository(db, SearchFusionStrategy.MongoRankFusion, policy, rerank = true)

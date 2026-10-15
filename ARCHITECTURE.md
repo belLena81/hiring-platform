@@ -32,7 +32,7 @@ The Hiring Management Platform is designed around the following engineering goal
 - Clean separation between domain, application, API, and infrastructure code
 - Functional effect management using Cats Effect
 - MongoDB data modeling optimized for GraphQL access patterns
-- Saga-based coordination for future cross-boundary workflows with retries, compensation, and recovery
+- Saga-based coordination for cross-boundary workflows with retries, compensation, and recovery; the pure Saga engine currently runs the interview scheduling workflow only
 - High read performance with minimal unnecessary data duplication
 
 The architecture should remain simple enough for an MVP while allowing individual infrastructure components to be replaced without changing business logic.
@@ -204,7 +204,7 @@ The October 5 user decision schedules analytics latency and burst drain-time qua
 
 Phase 8 first establishes MongoDB/vector access baselines, Phase 10 completes evaluated AI discovery, and Phase 11 applies durable Saga and pure State decisions to operational workflows. Further Spark refinement follows in Phase 13. See the planned Kafka contracts below; their proposed topics are not currently provisioned.
 
-The [remaining capability specifications](docs/development-milestones.md#remaining-delivery-order-and-acceptance) define concrete behavior and boundaries for Phases 8–15. They retain the application's service-owned `IO`/`EitherT` ports, analytics' `F[_]` ports, and resource-owned adapters. Proposed contracts and provider/deployment alternatives are labelled separately from current source facts; an unresolved choice blocks its dependent implementation. Specification readiness does not replace implementation, privacy, recovery or deployed acceptance evidence.
+The [remaining capability specifications](docs/development-milestones.md#remaining-delivery-order-and-acceptance) define concrete behavior and boundaries for Phases 8–15. They keep resource-owned adapters and analytics' `F[_]` ports; the application's ports and services are written over `F[_]` ([effect-polymorphic services](docs/specs/effect-polymorphic-services.md)), and a generic Saga engine is planned ([hiring saga orchestration](docs/specs/hiring-saga-orchestration.md)), both user-approved 2026-10-14. Proposed contracts and provider/deployment alternatives are labelled separately from current source facts; an unresolved choice blocks its dependent implementation. Specification readiness does not replace implementation, privacy, recovery or deployed acceptance evidence.
 
 Other pattern use remains conditional: Decorator for shared instrumentation across multiple provider adapters (preserving error and cancellation behavior without duplicate retries); Observer as managed streams for new local notifications while restart-recoverable work keeps durable handoffs; Bridge only for integrations with two independently varying dimensions; typed Filter criteria as discovery requirements grow; recursive Composite only for accepted nested Boolean criteria; and additional ranking strategies only when evaluation demonstrates benefit. See [development milestones](docs/development-milestones.md) for phase placement and acceptance conditions.
 
@@ -212,21 +212,21 @@ Other pattern use remains conditional: Decorator for shared instrumentation acro
 
 # 5. Ports
 
-Infrastructure dependencies are represented through interfaces in `service.port`. The active application specializes those ports to Cats Effect `IO`: use cases use `UseCaseIO[A] = EitherT[IO, UseCaseError, A]`, while operational ports return `RepositoryIO[A] = EitherT[IO, RepositoryError, A]`. This is a deliberate single-runtime choice; typed ports and fake adapters provide service-test seams, while a second effect runtime would require a broader contract change.
+Infrastructure dependencies are represented through interfaces in `service.port`. Ports are written over `F[_]`: use cases return `UseCaseF[F, A] = EitherT[F, UseCaseError, A]`, while operational ports return `RepositoryF[F, A] = EitherT[F, RepositoryError, A]`. Services take the weakest Cats Effect capability they need; Mongo, Kafka and HTTP adapters, `runtime/` wiring and the Sangria interop fix `IO`. Typed ports, fake adapters and `TestControl` provide the service-test seams.
 
 ```scala
-trait JobRepository:
-  def find(id: JobId): RepositoryIO[Option[Job]]
+trait JobRepository[F[_]]:
+  def find(id: JobId): RepositoryF[F, Option[Job]]
 
-trait JobUseCases:
-  def viewJob(actor: ActorContext, jobId: JobId): UseCaseIO[Job]
+trait JobUseCases[F[_]]:
+  def viewJob(actor: ActorContext, jobId: JobId): UseCaseF[F, Job]
 ```
 
 AI infrastructure is also hidden behind ports:
 
 ```scala
-trait EmbeddingService:
-  def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]]
+trait EmbeddingService[F[_]]:
+  def embed(input: EmbeddingInput): F[Either[EmbeddingError, EmbeddingVector]]
 ```
 
 Application services depend on these interfaces. `RepositoryError` belongs to this service boundary; adapters translate driver failures into it.
@@ -237,7 +237,7 @@ Application services depend on these interfaces. `RepositoryError` belongs to th
 
 Cats Effect controls all side effects.
 
-The main Hiring runtime intentionally selects `IO` at service and repository boundaries. `UseCaseIO` and `RepositoryIO` keep expected failures typed in `EitherT`; neither alias makes the application effect-polymorphic. See [local engineering quality](docs/engineering-quality.md) for the rationale and revisit condition.
+Services are effect-polymorphic; `IO` is selected only in `Main`, `runtime/` wiring, the `api/` boundary (Sangria interop, HTTP, admission), configuration loading, and the adapters that deliberately fix it (Mongo, Kafka, auth, embedding, logging and telemetry). `UseCaseF` and `RepositoryF` keep expected failures typed in `EitherT`. See [local engineering quality](docs/engineering-quality.md) for the rule.
 
 ```text
                     IOApp
@@ -765,7 +765,7 @@ Saga is not a substitute for:
 - transactional outbox for reliable event handoff
 - idempotent Kafka consumers
 
-Future implementation should add Saga in the smallest vertical slice that includes one real external boundary, durable state, retry and compensation tests, and observability. Do not add a generic Saga framework before there is a concrete workflow that needs it.
+Future implementation should add Saga in the smallest vertical slice that includes one real external boundary, durable state, retry and compensation tests, and observability. The earlier rule against a generic Saga framework is superseded by the user-approved [hiring saga orchestration](docs/specs/hiring-saga-orchestration.md) (2026-10-14; in review). Its pure engine (`shared/saga`, compiled by the root build only) currently drives only the interview scheduling workflow. Interview cancel/reschedule was evaluated and not ported; interview subject cleanup and analytics erasure were not ported by decision and keep their existing pure policies. The analytics build does not compile the shared module.
 
 
 ### Planned Kafka workflow contracts

@@ -1,9 +1,11 @@
 package com.example.graphQL.cats.repository.mongo
 
-import cats.effect.{IO, Resource}
-import com.example.graphQL.cats.service.port.{RepositoryIO}
+import cats.effect.{IO, Outcome, Ref, Resource}
+import com.example.graphQL.cats.domain.policy.CircuitBreakerPolicy.Completion
+import com.example.graphQL.cats.service.port.{RepositoryF}
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.Diagnostics
+import com.example.graphQL.cats.service.resilience.CircuitBreaker
 import cats.syntax.all.*
 import mongo4cats.client.{ClientSession, MongoClient}
 import mongo4cats.models.client.ClientSessionOptions
@@ -13,7 +15,7 @@ import retry.RetryPolicies.*
 import scala.concurrent.duration.*
 
 private[mongo] trait MongoTransactionRunner {
-  def run[A](operation: Option[ClientSession[IO]] => RepositoryIO[A]): RepositoryIO[A]
+  def run[A](operation: Option[ClientSession[IO]] => RepositoryF[IO, A]): RepositoryF[IO, A]
 }
 
 private[mongo] object MongoTransactionRunner {
@@ -28,13 +30,14 @@ private[mongo] object MongoTransactionRunner {
       client: MongoClient[IO],
       duplicateKeyError: RepositoryError,
       retryPolicy: RetryPolicy = RetryPolicy(),
-      diagnostics: Diagnostics,
-      transientExhaustionError: RepositoryError = RepositoryError.Conflict
+      diagnostics: Diagnostics[IO],
+      transientExhaustionError: RepositoryError = RepositoryError.Conflict,
+      breaker: CircuitBreaker[IO] = CircuitBreaker.disabled[IO]
   ): MongoTransactionRunner =
     new MongoTransactionRunner {
       override def run[A](
-          operation: Option[ClientSession[IO]] => RepositoryIO[A]
-      ): RepositoryIO[A] = RepositoryIO.fromIOEither {
+          operation: Option[ClientSession[IO]] => RepositoryF[IO, A]
+      ): RepositoryF[IO, A] = RepositoryF.fromFEither {
         // The error channel carries the original driver exception until the single final mapping below.
         def retrying[B](maxAttempts: Int, retriable: Throwable => Boolean)(action: IO[B]): IO[B] =
           retryingOnErrors(action)(
@@ -66,13 +69,43 @@ private[mongo] object MongoTransactionRunner {
             }
           }
 
-        retrying(retryPolicy.maxTransactionAttempts, MongoErrors.isTransient)(attemptOnce)
-          .handleError(MongoErrors.toRepositoryError(_, duplicateKeyError, transientExhaustionError))
+        // The breaker sees the outcome after the runner's own retries; an open breaker starts no session at all.
+        Ref.of[IO, Boolean](false).flatMap { sawUnreachable =>
+          // Retries can outlast the request timeout, so a call cancelled mid-retry still reports what it observed.
+          val observed = attemptOnce.onError {
+            case error if MongoErrors.isDependencyUnavailable(error) =>
+              sawUnreachable.set(true)
+          }
+          breaker
+            .protect(retrying(retryPolicy.maxTransactionAttempts, MongoErrors.isTransient)(observed))(
+              classify(sawUnreachable.get)
+            )
+            .map(_.leftMap(_ => RepositoryError.Unavailable).flatten)
+            .handleError(MongoErrors.toRepositoryError(_, duplicateKeyError, transientExhaustionError))
+        }
       }
     }
 
+  /** Only a committed result counts as success. A typed business rejection says nothing about the dependency's health,
+    * so it cannot close the breaker; a cancelled call counts only if an earlier attempt already saw the dependency
+    * fail.
+    */
+  private[mongo] def classify[A](
+      sawUnreachable: IO[Boolean]
+  )(outcome: Outcome[IO, Throwable, Either[RepositoryError, A]]): IO[Completion] =
+    outcome match {
+      case Outcome.Succeeded(result) =>
+        result.map(_.fold(_ => Completion.IgnoredFailure, _ => Completion.Success))
+      case Outcome.Errored(error) =>
+        IO.pure(
+          if (MongoErrors.isDependencyUnavailable(error)) Completion.CountedFailure else Completion.IgnoredFailure
+        )
+      case Outcome.Canceled() =>
+        sawUnreachable.map(if (_) Completion.CountedFailure else Completion.IgnoredFailure)
+    }
+
   private[mongo] def abortActiveTransaction(
-      diagnostics: Diagnostics,
+      diagnostics: Diagnostics[IO],
       isActive: IO[Boolean],
       abort: IO[Unit]
   ): IO[Unit] =

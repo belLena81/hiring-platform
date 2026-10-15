@@ -1,6 +1,9 @@
 package com.example.graphQL.cats.service
 
-import cats.effect.IO
+import cats.{Applicative, MonadThrow}
+import cats.syntax.all.*
+import com.example.graphQL.cats.domain.policy.CircuitBreakerPolicy
+import com.example.graphQL.cats.service.resilience.CircuitBreakerName
 import com.example.graphQL.cats.shared.{HiringHttpPaths, Parsing}
 import java.util.Locale
 
@@ -43,6 +46,20 @@ enum LogEvent(val category: String, val component: String, val message: String, 
         "SEARCH_SESSION_VERIFICATION_FAILED",
         "MONGO",
         "Retained search session verification failed",
+        LogLevel.Warn
+      )
+  case CircuitBreakerStateChanged
+      extends LogEvent(
+        "CIRCUIT_BREAKER_STATE_CHANGED",
+        "RESILIENCE",
+        "Dependency circuit breaker changed state",
+        LogLevel.Warn
+      )
+  case CircuitBreakerDisabled
+      extends LogEvent(
+        "CIRCUIT_BREAKER_DISABLED",
+        "RESILIENCE",
+        "Dependency circuit breaker is disabled by configuration",
         LogLevel.Warn
       )
   case LocalUnmasked
@@ -94,6 +111,8 @@ enum LogField(val key: String, val sensitive: Boolean = false) {
   case Skills extends LogField("skills", true)
   case Remote extends LogField("remote")
   case JobStatus extends LogField("jobStatus")
+  case Breaker extends LogField("breaker")
+  case BreakerTransition extends LogField("breakerTransition")
 }
 
 /** Startup-injected allow-lists of values owned by outer layers (adapter/driver failure classes, configuration keys).
@@ -166,24 +185,28 @@ object LogFields {
       case LogField.Worker                      => value.matches("[A-Za-z][A-Za-z0-9_.-]{0,63}")
       case LogField.Remote                      => Set("true", "false").contains(value)
       case LogField.JobStatus                   => Set("Draft", "Open", "Closed").contains(value)
+      case LogField.Breaker                     => CircuitBreakerName.values.exists(_.wire == value)
+      case LogField.BreakerTransition           => CircuitBreakerPolicy.Transition.values.exists(_.wire == value)
       case _                                    => false
     }
 }
 
-trait Diagnostics {
-  def event(event: LogEvent, requestId: Option[String] = None, fields: => Map[LogField, String] = Map.empty): IO[Unit]
+trait Diagnostics[F[_]] {
+  def event(event: LogEvent, requestId: Option[String] = None, fields: => Map[LogField, String] = Map.empty): F[Unit]
 }
 
 object Diagnostics {
-  val noop: Diagnostics = new Diagnostics {
-    def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]): IO[Unit] = IO.unit
+  def noop[F[_]: Applicative]: Diagnostics[F] = new Diagnostics[F] {
+    def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]): F[Unit] =
+      Applicative[F].unit
   }
 
-  extension (diagnostics: Diagnostics)
+  extension [F[_]](diagnostics: Diagnostics[F])
+    /** Emits a diagnostic event; neither a synchronous throw nor an effect failure of the sink reaches the caller. */
     def emit(
         event: LogEvent,
         requestId: Option[String] = None,
         fields: => Map[LogField, String] = Map.empty
-    ): IO[Unit] =
-      IO.defer(diagnostics.event(event, requestId, fields)).handleError(_ => ())
+    )(using F: MonadThrow[F]): F[Unit] =
+      F.catchNonFatal(diagnostics.event(event, requestId, fields)).flatten.handleError(_ => ())
 }

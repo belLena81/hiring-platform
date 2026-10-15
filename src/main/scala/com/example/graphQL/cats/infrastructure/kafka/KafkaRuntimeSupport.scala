@@ -2,7 +2,7 @@ package com.example.graphQL.cats.infrastructure.kafka
 
 import cats.effect.{IO, Resource}
 import com.example.graphQL.cats.service.RepositoryError
-import com.example.graphQL.cats.service.port.RepositoryIO
+import com.example.graphQL.cats.service.port.RepositoryF
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFields}
 import com.example.graphQL.cats.service.Diagnostics.*
 import com.example.graphQL.cats.shared.CauseChain
@@ -18,7 +18,7 @@ private[kafka] object KafkaRuntimeSupport {
   /** The outer finalizer reports release only after the acquired producer has actually closed. */
   def observedGeneration[A](
       transactionalId: String,
-      diagnostics: Diagnostics
+      diagnostics: Diagnostics[IO]
   )(producer: Resource[IO, A]): Resource[IO, A] =
     Resource
       .makeFull[IO, (A, IO[Unit])](poll =>
@@ -38,7 +38,7 @@ private[kafka] object KafkaRuntimeSupport {
       topic: String,
       partition: Int,
       offset: Long
-  )(process: RepositoryIO[Unit])(commit: IO[Unit]): IO[Unit] =
+  )(process: RepositoryF[IO, Unit])(commit: IO[Unit]): IO[Unit] =
     process.value.flatMap {
       case Right(()) => commit
       // Stop this stream before reading a later offset. Continuing here could
@@ -47,7 +47,7 @@ private[kafka] object KafkaRuntimeSupport {
     }
 
   def resilientStream(
-      diagnostics: Diagnostics,
+      diagnostics: Diagnostics[IO],
       stream: Stream[IO, Unit],
       baseDelay: FiniteDuration,
       stopRetrying: Throwable => Boolean = _ => false,

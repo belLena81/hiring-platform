@@ -2,7 +2,7 @@ package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.IO
 import cats.syntax.all.*
-import com.example.graphQL.cats.service.port.{RepositoryIO}
+import com.example.graphQL.cats.service.port.{RepositoryF}
 import com.example.graphQL.cats.service.RepositoryError
 import mongo4cats.client.ClientSession
 import mongo4cats.database.MongoDatabase
@@ -25,8 +25,8 @@ private[mongo] object MongoProducerRegistrations {
       transactionalId: String,
       kind: String,
       now: Instant
-  ): RepositoryIO[Unit] =
-    RepositoryIO
+  ): RepositoryF[IO, Unit] =
+    RepositoryF
       .lift(
         MongoSessionOperations.updateOne(
           Mongo4catsCollections.documents(database, Collection),
@@ -44,8 +44,8 @@ private[mongo] object MongoProducerRegistrations {
       )
       .void
 
-  def batch(database: MongoDatabase[IO], subject: String, kind: String): RepositoryIO[Vector[String]] =
-    RepositoryIO
+  def batch(database: MongoDatabase[IO], subject: String, kind: String): RepositoryF[IO, Vector[String]] =
+    RepositoryF
       .lift(
         Mongo4catsCollections
           .documents(database, Collection)
@@ -76,10 +76,10 @@ private[mongo] object MongoProducerRegistrations {
       kind: String,
       ids: Vector[String],
       now: Instant
-  ): RepositoryIO[Unit] =
-    if (ids.isEmpty || ids.size > BatchSize) RepositoryIO.raise(RepositoryError.InvalidStoredData)
+  ): RepositoryF[IO, Unit] =
+    if (ids.isEmpty || ids.size > BatchSize) RepositoryF.at[IO].raise(RepositoryError.InvalidStoredData)
     else
-      RepositoryIO
+      RepositoryF
         .lift(
           MongoSessionOperations.updateMany(
             Mongo4catsCollections.documents(database, Collection),

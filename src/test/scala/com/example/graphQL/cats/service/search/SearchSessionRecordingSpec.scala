@@ -22,7 +22,7 @@ final class SearchSessionRecordingSpec extends CatsEffectSuite {
 
   private def recording(sink: Ref[IO, Vector[(SearchSession, OperationalEventEnvelope)]]) =
     SearchSessionRecording(
-      new SearchSessionHandoff {
+      new SearchSessionHandoff[IO] {
         def enqueue(session: SearchSession, event: OperationalEventEnvelope): IO[Unit] =
           sink.update(_ :+ (session -> event))
       },

@@ -27,7 +27,7 @@ final class InterviewBrokerOutageIntegrationSpec extends MongoIntegrationSuite {
     case Left(error)  => IO.raiseError(new AssertionError(s"Hiring operation failed: $error"))
   }
 
-  private def awaitCompleted(repository: InterviewWorkflowRepository, id: InterviewWorkflowId): IO[Unit] =
+  private def awaitCompleted(repository: InterviewWorkflowRepository[IO], id: InterviewWorkflowId): IO[Unit] =
     success(repository.findForAdmin(id).value).flatMap {
       case Some(value) if value.phase == InterviewWorkflowPhase.Completed      => IO.unit
       case Some(value) if value.phase == InterviewWorkflowPhase.RepairRequired =>
@@ -38,38 +38,43 @@ final class InterviewBrokerOutageIntegrationSpec extends MongoIntegrationSuite {
   test("Mongo hiring and scheduling continue during a dedicated broker process outage and recover once") {
     InterviewBrokerFixture.resource(InterviewBrokerFixture.uniqueTopics).use { broker =>
       mongoResource.use { fixture =>
-        val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
+        val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop[IO])
         val users = MongoUserRepository.transactional(
           fixture.database,
           fixture.client,
           MongoEmbeddingWorkEnqueuer.disabled,
-          Diagnostics.noop
+          Diagnostics.noop[IO]
         )
         val jobs = MongoJobRepository.transactional(
           fixture.database,
           fixture.client,
           MongoEmbeddingWorkEnqueuer.disabled,
-          Diagnostics.noop
+          Diagnostics.noop[IO]
         )
-        val applications = MongoApplicationRepository.transactional(fixture.database, fixture.client, Diagnostics.noop)
+        val applications =
+          MongoApplicationRepository.transactional(fixture.database, fixture.client, Diagnostics.noop[IO])
         val hiring = new ApplicationService(
           users,
           jobs,
           applications,
           HiringReadService(users, jobs, applications),
-          Idempotent(MongoMutationReceiptRepository.transactional(fixture.database, fixture.client, Diagnostics.noop))
+          Idempotent(
+            MongoMutationReceiptRepository.transactional(fixture.database, fixture.client, Diagnostics.noop[IO])
+          ),
+          cats.effect.Clock[IO],
+          cats.effect.std.UUIDGen[IO]
         )
-        val scheduling = new InterviewSchedulingService(users, jobs, applications, repository, 3.minutes)
-        val worker = new InterviewWorkflowWorker(
+        val scheduling = new InterviewSchedulingService[IO](users, jobs, applications, repository, 3.minutes)
+        val worker = new InterviewWorkflowWorker[IO](
           repository,
           LedgerInterviewCalendarProvider.durable(repository),
           LedgerInterviewNotificationProvider.durable(repository),
           InterviewWorkerSettings("broker-outage-worker", 100.millis, 30.seconds, 5.seconds, 5, 100.millis, 1.second),
-          Diagnostics.noop
+          Diagnostics.noop[IO]
         )
         for {
           now <- IO.realTimeInstant
-          _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop, broker.topics)
+          _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO], broker.topics)
           template = InterviewWorkflow
             .create(
               InterviewWorkflowId(UUID.randomUUID()),
@@ -93,14 +98,14 @@ final class InterviewBrokerOutageIntegrationSpec extends MongoIntegrationSuite {
           replayTarget <- Ref.of[IO, Option[UUID]](None)
           replayProcessed <- Deferred[IO, Unit]
           scheduled <- {
-            def invalid(identity: String): RepositoryIO[Unit] =
-              RepositoryIO.lift(IO.realTimeInstant).flatMap(repository.quarantine(identity, _))
+            def invalid(identity: String): RepositoryF[IO, Unit] =
+              RepositoryF.lift(IO.realTimeInstant).flatMap(repository.quarantine(identity, _))
             val transports = for {
-              orchestrator <- InterviewKafkaRuntime.resource(broker.config(worker = false), Diagnostics.noop) {
+              orchestrator <- InterviewKafkaRuntime.resource(broker.config(worker = false), Diagnostics.noop[IO]) {
                 case Left(identity) => invalid(identity)
                 case Right(message) => worker.receiveResult(message)
               }
-              executor <- InterviewKafkaRuntime.resource(broker.config(worker = true), Diagnostics.noop) {
+              executor <- InterviewKafkaRuntime.resource(broker.config(worker = true), Diagnostics.noop[IO]) {
                 case Left(identity) => invalid(identity)
                 case Right(message) =>
                   worker.receiveCommand(message).semiflatTap { _ =>
@@ -110,7 +115,7 @@ final class InterviewBrokerOutageIntegrationSpec extends MongoIntegrationSuite {
                     }
                   }
               }
-              routing = new InterviewTransport {
+              routing = new InterviewTransport[IO] {
                 def generationFor(message: InterviewMessage): InterviewPublisherGeneration =
                   (if (message.result.nonEmpty) executor else orchestrator).generationFor(message)
                 def publish(message: InterviewMessage): IO[Unit] =

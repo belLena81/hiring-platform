@@ -16,7 +16,7 @@ import com.example.graphQL.cats.domain.model.{
   UserRole
 }
 import com.example.graphQL.cats.service.{AnalyticsFunnelDay, AnalyticsReportSnapshot, AnalyticsSkillPostingDay}
-import com.example.graphQL.cats.service.port.{MutationWriteContext, RepositoryIO}
+import com.example.graphQL.cats.service.port.{MutationWriteContext, RepositoryF}
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.events.{
   OperationalAggregateType,
@@ -190,7 +190,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
             _ <- MongoRepositoryTestSupport.first(outbox.insertOne(legacyClick)).void
             _ <- MongoRepositoryTestSupport.first(outbox.insertOne(outboxRecord(performed))).void
             _ <- MongoRepositoryTestSupport.first(outbox.insertOne(incompleteLegacyRecord)).void
-            failed <- MongoHiringSetup.initialize(database, Diagnostics.noop).attempt
+            failed <- MongoHiringSetup.initialize(database, Diagnostics.noop[IO]).attempt
             _ = assert(failed.isLeft, "migration must fail while a search click cannot be attributed")
             first <- MongoRepositoryTestSupport.first(outbox.find(org.bson.Document("_id", uuid(1L).toString)))
             _ = assertEquals(
@@ -214,7 +214,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
                   )
               )
               .void
-            _ <- MongoHiringSetup.initialize(database, Diagnostics.noop)
+            _ <- MongoHiringSetup.initialize(database, Diagnostics.noop[IO])
             clickDocument <- MongoRepositoryTestSupport.first(outbox.find(org.bson.Document("_id", uuid(2L).toString)))
             performedDocument <- MongoRepositoryTestSupport.first(
               outbox.find(org.bson.Document("_id", uuid(3L).toString))
@@ -265,13 +265,14 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
     replicaSet.use { instance =>
       MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
         LocalTestServices.database(client).use { database =>
-          val reports = MongoAnalyticsReportRepository.transactional(database, client, Diagnostics.noop)
-          val erasures = MongoAnalyticsErasureRequestRepository.transactional(database, client, Diagnostics.noop)
-          val runner = MongoTransactionRunner.sessions(client, RepositoryError.Conflict, diagnostics = Diagnostics.noop)
+          val reports = MongoAnalyticsReportRepository.transactional(database, client, Diagnostics.noop[IO])
+          val erasures = MongoAnalyticsErasureRequestRepository.transactional(database, client, Diagnostics.noop[IO])
+          val runner =
+            MongoTransactionRunner.sessions(client, RepositoryError.Conflict, diagnostics = Diagnostics.noop[IO])
           val deletedUser = UserId(UUID.randomUUID())
 
           for {
-            _ <- MongoHiringSetup.initialize(database, Diagnostics.noop)
+            _ <- MongoHiringSetup.initialize(database, Diagnostics.noop[IO])
             _ <- MongoRepositoryTestSupport.first(
               database
                 .getCollection(MongoCollections.Users)
@@ -304,7 +305,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
             _ = assertEquals(initial.map(_.getString("state")), Some("Unpublished"))
             rolledBack <- runner.run { session =>
               erasures.enqueue(deletedUser, now, MongoMutationWriteContext(session)) *>
-                RepositoryIO.raise(RepositoryError.Unavailable)
+                RepositoryF.at[IO].raise(RepositoryError.Unavailable)
             }.value
             _ = assertEquals(rolledBack, Left(RepositoryError.Unavailable))
             afterRollback <- MongoRepositoryTestSupport.first(
@@ -337,7 +338,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
             _ <- seedPublishedReport(database, 0L, 2L, 2L)
             visibleAfterRetry <- reports.latest.value
             _ = assertEquals(visibleAfterRetry.map(_.map(_.funnel.head.created)), Right(Some(2L)))
-            _ <- MongoHiringSetup.initialize(database, Diagnostics.noop)
+            _ <- MongoHiringSetup.initialize(database, Diagnostics.noop[IO])
             receiptIdResult <- erasures
               .enqueue(deletedUser, now.plusSeconds(3L), MutationWriteContext.directWrite)
               .value
@@ -454,11 +455,11 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
           val users = MongoUserRepository.transactional(
             database,
             client,
-            new MongoEmbeddingWorkRepository(database, Diagnostics.noop),
-            Diagnostics.noop
+            new MongoEmbeddingWorkRepository(database, Diagnostics.noop[IO]),
+            Diagnostics.noop[IO]
           )
-          val mutationReceipts = MongoMutationReceiptRepository.transactional(database, client, Diagnostics.noop)
-          val erasures = MongoAnalyticsErasureRequestRepository.transactional(database, client, Diagnostics.noop)
+          val mutationReceipts = MongoMutationReceiptRepository.transactional(database, client, Diagnostics.noop[IO])
+          val erasures = MongoAnalyticsErasureRequestRepository.transactional(database, client, Diagnostics.noop[IO])
           val userId = UserId(UUID.randomUUID())
           val actor = ActorContext(userId, UserRole.Recruiter)
           val serviceNow = Instant.now()
@@ -477,12 +478,13 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
             erasures,
             com.example.graphQL.cats.service.search.TestEmbeddingWorkPublisher.noop,
             idempotent = Idempotent(mutationReceipts),
-            diagnostics = Diagnostics.noop,
-            clock = com.example.graphQL.cats.FixedTestClock.at(serviceNow)
+            diagnostics = Diagnostics.noop[IO],
+            clock = com.example.graphQL.cats.FixedTestClock.at(serviceNow),
+            uuidGen = cats.effect.std.UUIDGen[IO]
           )
 
           for {
-            _ <- MongoHiringSetup.initialize(database, Diagnostics.noop)
+            _ <- MongoHiringSetup.initialize(database, Diagnostics.noop[IO])
             _ <- users.insert(recruiterUser(userId)).value.flatMap {
               case Right(())   => IO.unit
               case Left(error) => IO.raiseError(new AssertionError(s"Could not insert deletion-test user: $error"))
@@ -543,13 +545,13 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
     }
   }
 
-  private object NoopPasswordHasher extends PasswordHasher {
+  private object NoopPasswordHasher extends PasswordHasher[IO] {
     override def hash(password: String): IO[PasswordHash] = IO.pure(PasswordHash.fromEncoded(password))
     override def verify(encoded: PasswordHash, password: String): IO[Boolean] = IO.pure(encoded.encoded == password)
     override def verifyUnknown(password: String): IO[Unit] = IO.unit
   }
 
-  private object NoopAccessTokenIssuer extends AccessTokenIssuer {
+  private object NoopAccessTokenIssuer extends AccessTokenIssuer[IO] {
     override def issue(user: User, at: Instant): IO[Either[AccessTokenIssuanceError, AccountToken]] =
       IO.raiseError(new AssertionError("Deletion receipt replay must not issue an account token"))
   }
@@ -558,15 +560,16 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
     replicaSet.use { instance =>
       MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
         LocalTestServices.database(client).use { database =>
-          val erasures = MongoAnalyticsErasureRequestRepository.transactional(database, client, Diagnostics.noop)
-          val runner = MongoTransactionRunner.sessions(client, RepositoryError.Conflict, diagnostics = Diagnostics.noop)
+          val erasures = MongoAnalyticsErasureRequestRepository.transactional(database, client, Diagnostics.noop[IO])
+          val runner =
+            MongoTransactionRunner.sessions(client, RepositoryError.Conflict, diagnostics = Diagnostics.noop[IO])
           val userId = UserId(UUID.randomUUID())
           val transactionalIds = List(
             "hiring-publisher-00000000-0000-0000-0000-000000000385",
             "hiring-publisher-00000000-0000-0000-0000-000000000386"
           )
           for {
-            _ <- MongoHiringSetup.initialize(database, Diagnostics.noop)
+            _ <- MongoHiringSetup.initialize(database, Diagnostics.noop[IO])
             _ <- MongoRepositoryTestSupport.first(
               database
                 .getCollection(MongoCollections.OutboxSubjectFences)
@@ -612,7 +615,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
     replicaSet.use { instance =>
       MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
         LocalTestServices.database(client).use { database =>
-          val outbox = MongoOperationalEventOutboxRepository.transactional(database, client, Diagnostics.noop)
+          val outbox = MongoOperationalEventOutboxRepository.transactional(database, client, Diagnostics.noop[IO])
           val actor = UserId(UUID.randomUUID())
           val value = event(
             700L,
@@ -631,7 +634,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
           val secondValue = value.copy(eventId = uuid(702L))
           val transactionalId = "hiring-publisher-00000000-0000-0000-0000-000000000389"
           for {
-            _ <- MongoHiringSetup.initialize(database, Diagnostics.noop)
+            _ <- MongoHiringSetup.initialize(database, Diagnostics.noop[IO])
             _ <- MongoRepositoryTestSupport.first(
               MongoRepositoryTestSupport
                 .collection(database, MongoCollections.EventOutbox)
@@ -659,7 +662,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
     replicaSet.use { instance =>
       MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
         LocalTestServices.database(client).use { database =>
-          val outbox = MongoOperationalEventOutboxRepository.transactional(database, client, Diagnostics.noop)
+          val outbox = MongoOperationalEventOutboxRepository.transactional(database, client, Diagnostics.noop[IO])
           val actor = UserId(UUID.randomUUID())
           val value = event(
             900L,
@@ -677,7 +680,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
           )
           val leaseUntil = now.plusSeconds(60L)
           for {
-            _ <- MongoHiringSetup.initialize(database, Diagnostics.noop)
+            _ <- MongoHiringSetup.initialize(database, Diagnostics.noop[IO])
             _ <- MongoRepositoryTestSupport.first(
               database.getCollection(MongoCollections.EventOutbox).insertOne(outboxRecord(value))
             )
@@ -736,19 +739,20 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
               )
             )
           )
-          val erasures = MongoAnalyticsErasureRequestRepository.transactional(database, client, Diagnostics.noop)
-          val outbox = MongoOperationalEventOutboxRepository.transactional(database, client, Diagnostics.noop)
+          val erasures = MongoAnalyticsErasureRequestRepository.transactional(database, client, Diagnostics.noop[IO])
+          val outbox = MongoOperationalEventOutboxRepository.transactional(database, client, Diagnostics.noop[IO])
           val users = MongoUserRepository.transactional(
             database,
             client,
-            new MongoEmbeddingWorkRepository(database, Diagnostics.noop),
-            Diagnostics.noop
+            new MongoEmbeddingWorkRepository(database, Diagnostics.noop[IO]),
+            Diagnostics.noop[IO]
           )
-          val runner = MongoTransactionRunner.sessions(client, RepositoryError.Conflict, diagnostics = Diagnostics.noop)
+          val runner =
+            MongoTransactionRunner.sessions(client, RepositoryError.Conflict, diagnostics = Diagnostics.noop[IO])
           val deletionAt = now.plusSeconds(122L)
 
           for {
-            _ <- MongoHiringSetup.initialize(database, Diagnostics.noop)
+            _ <- MongoHiringSetup.initialize(database, Diagnostics.noop[IO])
             _ <- users.insert(recruiterUser(userId)).value.flatMap {
               case Right(())   => IO.unit
               case Left(error) => IO.raiseError(new AssertionError(s"Could not insert race-test user: $error"))
@@ -802,7 +806,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
                 val context = MongoMutationWriteContext(session)
                 for {
                   receiptId <- erasures.enqueue(userId, deletionAt, context)
-                  _ <- RepositoryIO.lift(requestWritten.complete(()).void *> allowDeletionToContinue.get)
+                  _ <- RepositoryF.lift(requestWritten.complete(()).void *> allowDeletionToContinue.get)
                   _ <- users.deleteAccount(userId, deletionAt, "deleted-race-account", context)
                 } yield receiptId
               }

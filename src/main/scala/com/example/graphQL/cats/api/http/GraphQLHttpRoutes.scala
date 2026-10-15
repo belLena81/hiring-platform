@@ -39,8 +39,8 @@ private[http] enum HttpRejection(val status: Status, val message: String, val re
 }
 
 private[http] final class GraphQLHttpRoutes(
-    service: HealthService,
-    diagnostics: Diagnostics,
+    service: HealthService[IO],
+    diagnostics: Diagnostics[IO],
     dependencies: HiringApiRoutes.Dependencies,
     tracer: Tracer[IO] = Tracer.noop[IO]
 ) {

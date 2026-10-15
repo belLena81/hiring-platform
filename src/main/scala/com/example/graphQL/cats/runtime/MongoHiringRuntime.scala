@@ -69,26 +69,32 @@ import com.example.graphQL.cats.repository.mongo.{
   AtlasSearchIndexConfig
 }
 import com.example.graphQL.cats.service.port.LexicalJobMatcher
+import com.example.graphQL.cats.service.resilience.CircuitBreaker
 import mongo4cats.database.MongoDatabase
 
 final case class MongoHiringRuntime(
-    probe: DatabaseProbe,
+    probe: DatabaseProbe[IO],
     services: HiringGraphQLServices,
-    userAuthenticator: UserAuthenticator,
+    userAuthenticator: UserAuthenticator[IO],
     hiringReadiness: IO[ProbeResult]
 )
 
 object MongoHiringRuntime {
-  private val disabledEmbeddingPublisher = new EmbeddingWorkPublisher {
+  private val disabledEmbeddingPublisher = new EmbeddingWorkPublisher[IO] {
     override def wake: IO[Unit] = IO.unit
   }
 
-  def resource(config: AppConfig, diagnostics: Diagnostics): Resource[IO, MongoHiringRuntime] =
+  def resource(config: AppConfig, diagnostics: Diagnostics[IO]): Resource[IO, MongoHiringRuntime] =
     for {
       passwordHashPermits <- Resource.eval(Semaphore[IO](Runtime.getRuntime.availableProcessors.toLong))
       embeddingHealth <- Resource.eval(Ref.of[IO, Boolean](config.vectorSearch == VectorSearchConfig.Disabled))
+      breakers <- Resource.eval(DependencyBreakers.create(config.resilience, diagnostics))
       discoveryPolicy <- Resource.eval(
-        DiscoveryQueryPolicy.create(config.discovery.maxTimeMillis.millis, config.discovery.permits)
+        DiscoveryQueryPolicy.create(
+          config.discovery.maxTimeMillis.millis,
+          config.discovery.permits,
+          breakers.atlasSearch
+        )
       )
       client <- MongoDatabaseProbe.clientResource(config.mongoUri)
       database <- Resource.eval(client.getDatabase(config.mongoDatabase))
@@ -113,27 +119,55 @@ object MongoHiringRuntime {
       enqueuer =
         if (config.vectorSearch == VectorSearchConfig.Disabled) MongoEmbeddingWorkEnqueuer.disabled
         else embeddingWork
-      users = MongoUserRepository.transactional(database, client, enqueuer, diagnostics)
-      jobs = MongoJobRepository.transactional(database, client, enqueuer, diagnostics, Some(discoveryPolicy))
-      applications = MongoApplicationRepository.transactional(database, client, diagnostics)
-      searchSessions = MongoSearchSessionRepository.transactional(database, client, diagnostics)
-      searchSessionWork = MongoSearchSessionWorkRepository.transactional(database, client, diagnostics, UUIDGen[IO])
-      outbox = MongoOperationalEventOutboxRepository.transactional(database, client, diagnostics, UUIDGen[IO])
+      users = MongoUserRepository.transactional(database, client, enqueuer, diagnostics, breakers.mongoWrites)
+      jobs = MongoJobRepository.transactional(
+        database,
+        client,
+        enqueuer,
+        diagnostics,
+        Some(discoveryPolicy),
+        breakers.mongoWrites
+      )
+      applications = MongoApplicationRepository.transactional(database, client, diagnostics, breakers.mongoWrites)
+      searchSessions = MongoSearchSessionRepository.transactional(database, client, diagnostics, breakers.mongoWrites)
+      searchSessionWork = MongoSearchSessionWorkRepository.transactional(
+        database,
+        client,
+        diagnostics,
+        UUIDGen[IO],
+        breakers.mongoWrites
+      )
+      outbox = MongoOperationalEventOutboxRepository.transactional(
+        database,
+        client,
+        diagnostics,
+        UUIDGen[IO],
+        breakers.mongoWrites
+      )
       receipts = new MongoConsumerReceiptRepository(database, diagnostics)
-      mutationReceipts = MongoMutationReceiptRepository.transactional(database, client, diagnostics)
+      mutationReceipts = MongoMutationReceiptRepository.transactional(
+        database,
+        client,
+        diagnostics,
+        UUIDGen[IO],
+        breakers.mongoWrites
+      )
       erasureRequests = MongoAnalyticsErasureRequestRepository.transactional(
         database,
         client,
         diagnostics,
-        config.kafka.interview.topics
+        config.kafka.interview.topics,
+        breakers.mongoWrites
       )
-      analyticsReports = MongoAnalyticsReportRepository.transactional(database, client, diagnostics)
+      analyticsReports =
+        MongoAnalyticsReportRepository.transactional(database, client, diagnostics, breakers.mongoWrites)
       quarantine = new MongoEventQuarantineRepository(database, diagnostics)
       interviewRepository = MongoInterviewWorkflowRepository.live(
         database,
         client,
         diagnostics,
-        config.kafka.interview.completedDedupRetentionSeconds.seconds
+        config.kafka.interview.completedDedupRetentionSeconds.seconds,
+        breakers.mongoWrites
       )
       // Fail closed: a lifetime the domain rejects stops startup instead of silently becoming the default.
       proposalTtl <- Resource.eval(
@@ -150,13 +184,18 @@ object MongoHiringRuntime {
         )
       )
       searchSessionHandoff <- SearchSessionHandoff
-        .resource(searchSessionWork, SearchSessionHandoffConfig(), diagnostics, Clock[IO])
+        .resource[IO](searchSessionWork, SearchSessionHandoffConfig(), diagnostics, Clock[IO])
       // One branch decides the embedding capability; everything below is shared by both modes.
       embedding <- config.vectorSearch match {
         case VectorSearchConfig.Disabled =>
           Resource.pure[
             IO,
-            (EmbeddingWorkPublisher, Option[SemanticSearchService], EmbeddingCoverageService, Option[LexicalJobMatcher])
+            (
+                EmbeddingWorkPublisher[IO],
+                Option[SemanticSearchService[IO]],
+                EmbeddingCoverageService[IO],
+                Option[LexicalJobMatcher[IO]]
+            )
           ](
             (disabledEmbeddingPublisher, None, EmbeddingCoverageService.vectorSearchDisabled(users), None)
           )
@@ -176,9 +215,10 @@ object MongoHiringRuntime {
               voyage.model,
               voyage.dimension,
               embeddingSettings.timeoutMs.millis,
-              diagnostics = diagnostics
+              diagnostics = diagnostics,
+              breaker = breakers.voyage
             )
-            publisher <- EmbeddingPipeline.resource(
+            publisher <- EmbeddingPipeline.resource[IO](
               embeddingWork,
               users,
               jobs,
@@ -198,8 +238,7 @@ object MongoHiringRuntime {
               ),
               embeddingSettings.workerRestartDelayMillis.millis,
               embeddingHealth.set,
-              Clock[IO],
-              UUIDGen[IO]
+              Clock[IO]
             )
             search = new MongoSemanticSearchRepository(
               database,
@@ -216,7 +255,7 @@ object MongoHiringRuntime {
               Some(discoveryPolicy)
             )
           } yield (
-            publisher: EmbeddingWorkPublisher,
+            publisher: EmbeddingWorkPublisher[IO],
             Some(SemanticSearchService(users, jobs, provider, search, voyage.model)),
             EmbeddingCoverageService.live(
               users,
@@ -238,7 +277,9 @@ object MongoHiringRuntime {
         erasureRequests,
         publisher,
         idempotent,
-        diagnostics
+        diagnostics,
+        Clock[IO],
+        UUIDGen[IO]
       )
       readModel = HiringReadService(users, jobs, applications)
       services = HiringGraphQLServices(
@@ -249,19 +290,21 @@ object MongoHiringRuntime {
           publisher,
           idempotent,
           diagnostics,
+          Clock[IO],
+          UUIDGen[IO],
           lexicalMatcher = lexicalMatcher,
           lexicalFacetMatchLimit = facetLimit,
           lexicalFacetDeadline = Some(config.discovery.maxTimeMillis.millis)
         ),
-        new ApplicationService(users, jobs, applications, readModel, idempotent),
+        new ApplicationService(users, jobs, applications, readModel, idempotent, Clock[IO], UUIDGen[IO]),
         CursorCodec.keyFromSecret(config.jwtAuth.hmacSecret, config.jwtAuth.cursorTtlSeconds),
         accountService,
-        new OperationalTelemetryService(users, jobs, searchSessions, searchSessionWork, idempotent),
+        new OperationalTelemetryService(users, jobs, searchSessions, searchSessionWork, idempotent, Clock[IO]),
         SearchSessionRecording(searchSessionHandoff),
         semanticSearch,
         AnalyticsReportingService(users, analyticsReports),
         Option.when(config.kafka.interview.enabled)(
-          new InterviewSchedulingService(
+          new InterviewSchedulingService[IO](
             users,
             jobs,
             applications,
@@ -273,7 +316,16 @@ object MongoHiringRuntime {
         coverage
       )
       _ <- OperationalEventKafkaRuntime
-        .resource(config.kafka, outbox, receipts, quarantine, diagnostics, Clock[IO], UUIDGen[IO])
+        .resource(
+          config.kafka,
+          outbox,
+          receipts,
+          quarantine,
+          diagnostics,
+          Clock[IO],
+          UUIDGen[IO],
+          breakers.kafkaPublisher
+        )
       _ <- InterviewSchedulingRuntime.resource(
         config.kafka,
         interviewRepository,
@@ -282,7 +334,7 @@ object MongoHiringRuntime {
       )
       metadata = MongoDatabaseProbe.connectionMetadata(config.mongoUri, config.mongoDatabase)
     } yield MongoHiringRuntime(
-      probe(database, metadata, diagnostics, embeddingHealth.get),
+      probe(database, metadata, diagnostics, embeddingHealth.get, breakers.mongoWrites),
       services,
       UserAuthenticationService(users),
       embeddingHealth.get.map(if (_) ProbeResult.Ready else ProbeResult.Unavailable)
@@ -291,19 +343,32 @@ object MongoHiringRuntime {
   private def probe(
       database: MongoDatabase[IO],
       metadata: Map[LogField, String],
-      diagnostics: Diagnostics,
-      embeddingHealthy: IO[Boolean]
-  ): DatabaseProbe = new DatabaseProbe {
+      diagnostics: Diagnostics[IO],
+      embeddingHealthy: IO[Boolean],
+      mongoWrites: CircuitBreaker[IO]
+  ): DatabaseProbe[IO] = new DatabaseProbe[IO] {
     private val delegate = MongoDatabaseProbe.fromDatabase(database, metadata, diagnostics)
 
     override def check(requestId: Option[String]): IO[ProbeResult] =
-      delegate.check(requestId).flatMap {
-        case ProbeResult.Ready => embeddingHealthy.map(if (_) ProbeResult.Ready else ProbeResult.Unavailable)
-        case other             => IO.pure(other)
-      }
+      // The ping goes straight to the database; only its result is combined with dependency health.
+      delegate.check(requestId).flatMap(readiness(_, embeddingHealthy, mongoWrites))
   }
 
-  private def setupEffect(database: MongoDatabase[IO], config: AppConfig, diagnostics: Diagnostics): IO[Unit] =
+  /** Once the open period ends the breaker admits again, so readiness recovers and traffic can probe it. */
+  private[runtime] def readiness(
+      ping: ProbeResult,
+      embeddingHealthy: IO[Boolean],
+      mongoWrites: CircuitBreaker[IO]
+  ): IO[ProbeResult] =
+    ping match {
+      case ProbeResult.Ready =>
+        (embeddingHealthy, mongoWrites.admits).mapN((embedding, writable) =>
+          if (embedding && writable) ProbeResult.Ready else ProbeResult.Unavailable
+        )
+      case other => IO.pure(other)
+    }
+
+  private def setupEffect(database: MongoDatabase[IO], config: AppConfig, diagnostics: Diagnostics[IO]): IO[Unit] =
     MongoHiringSetup.initialize(
       database,
       config.vectorSearch match {

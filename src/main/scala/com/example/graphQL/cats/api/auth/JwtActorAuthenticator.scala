@@ -18,7 +18,7 @@ enum AuthFailure {
   case MalformedCredentials, InvalidToken, UnknownActor, Unavailable
 }
 
-final class JwtActorAuthenticator(config: JwtAuthConfig, users: UserAuthenticator, clock: EffectClock[IO]) {
+final class JwtActorAuthenticator(config: JwtAuthConfig, users: UserAuthenticator[IO], clock: EffectClock[IO]) {
   def authenticate(request: Request[IO]): IO[Either[AuthFailure, Option[ActorContext]]] =
     (for {
       token <- EitherT.fromEither[IO](bearerToken(request))

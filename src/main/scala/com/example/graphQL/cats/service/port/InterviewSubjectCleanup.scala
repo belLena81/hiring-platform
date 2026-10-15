@@ -2,6 +2,7 @@ package com.example.graphQL.cats.service.port
 
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.service.RepositoryError
+import cats.Applicative
 import cats.data.EitherT
 import com.example.graphQL.cats.domain.workflow.{InterviewSubjectCleanup, InterviewWorkflowId}
 import java.time.Instant
@@ -27,24 +28,27 @@ final case class InterviewCleanupProgress(
 type InterviewRetentionBarrier = com.example.graphQL.cats.domain.workflow.InterviewRetentionBarrier
 val InterviewRetentionBarrier = com.example.graphQL.cats.domain.workflow.InterviewRetentionBarrier
 
-trait InterviewPublisherFencer {
+trait InterviewPublisherFencer[F[_]] {
 
   /** Success confirms broker fencing for every captured generation, including an otherwise idle producer. */
-  def fence(transactionalIds: Vector[String]): RepositoryIO[Unit]
+  def fence(transactionalIds: Vector[String]): RepositoryF[F, Unit]
 }
 
 enum InterviewCleanupUpdate {
   case Applied, StaleRevision
 }
 
-trait InterviewSubjectCleanupRepository {
-  def producerBatch(subject: UserId): RepositoryIO[Vector[String]]
-  def markProducersFenced(subject: UserId, ids: Vector[String], now: Instant): RepositoryIO[Unit]
-  def pendingPage(cursor: Option[InterviewCleanupCursor], observedAt: Instant): RepositoryIO[InterviewCleanupPage]
-  def find(subject: UserId): RepositoryIO[Option[InterviewSubjectCleanup]]
-  def transition(expected: InterviewSubjectCleanup, next: InterviewSubjectCleanup): RepositoryIO[InterviewCleanupUpdate]
-  def purge(subject: UserId): RepositoryIO[Unit]
-  def absent(subject: UserId): RepositoryIO[Boolean]
+trait InterviewSubjectCleanupRepository[F[_]] {
+  def producerBatch(subject: UserId): RepositoryF[F, Vector[String]]
+  def markProducersFenced(subject: UserId, ids: Vector[String], now: Instant): RepositoryF[F, Unit]
+  def pendingPage(cursor: Option[InterviewCleanupCursor], observedAt: Instant): RepositoryF[F, InterviewCleanupPage]
+  def find(subject: UserId): RepositoryF[F, Option[InterviewSubjectCleanup]]
+  def transition(
+      expected: InterviewSubjectCleanup,
+      next: InterviewSubjectCleanup
+  ): RepositoryF[F, InterviewCleanupUpdate]
+  def purge(subject: UserId): RepositoryF[F, Unit]
+  def absent(subject: UserId): RepositoryF[F, Boolean]
 }
 
 /** A provider reservation that is still held for a workflow of a deleted subject. */
@@ -54,8 +58,8 @@ final case class InterviewLiveHold(workflowId: InterviewWorkflowId, reserveKey: 
   * only after this answers with a confirmed cancellation, so deleting an account never leaks a provider slot. The
   * answer is idempotent per cancel key: a retry after a crash between the provider and the local write is safe.
   */
-trait InterviewHoldCanceller {
-  def cancel(hold: InterviewLiveHold, now: Instant): InterviewProviderIO[InterviewCalendarCancellation]
+trait InterviewHoldCanceller[F[_]] {
+  def cancel(hold: InterviewLiveHold, now: Instant): InterviewProviderF[F, InterviewCalendarCancellation]
 }
 
 object InterviewHoldCanceller {
@@ -63,14 +67,15 @@ object InterviewHoldCanceller {
   /** The platform's own calendar ledger is the provider: the cleanup writes the confirmed release into that ledger
     * itself, so there is no other system to ask. A deleted subject is fenced out of the ledger's normal cancel path.
     */
-  val ledgerOwned: InterviewHoldCanceller = new InterviewHoldCanceller {
-    override def cancel(hold: InterviewLiveHold, now: Instant): InterviewProviderIO[InterviewCalendarCancellation] =
-      EitherT.rightT(InterviewCalendarCancellation.Cancelled(now))
+  def ledgerOwned[F[_]: Applicative]: InterviewHoldCanceller[F] = new InterviewHoldCanceller[F] {
+    override def cancel(hold: InterviewLiveHold, now: Instant): InterviewProviderF[F, InterviewCalendarCancellation] =
+      EitherT.rightT[F, InterviewProviderError](InterviewCalendarCancellation.Cancelled(now))
   }
 
   /** An external calendar provider: the same-key confirmed cancel, with no workflow execution to fence. */
-  def external(calendar: InterviewCalendarProvider): InterviewHoldCanceller = new InterviewHoldCanceller {
-    override def cancel(hold: InterviewLiveHold, now: Instant): InterviewProviderIO[InterviewCalendarCancellation] =
-      calendar.cancel(hold.workflowId, hold.cancelKey, now)
-  }
+  def external[F[_]](calendar: InterviewCalendarProvider[F]): InterviewHoldCanceller[F] =
+    new InterviewHoldCanceller[F] {
+      override def cancel(hold: InterviewLiveHold, now: Instant): InterviewProviderF[F, InterviewCalendarCancellation] =
+        calendar.cancel(hold.workflowId, hold.cancelKey, now)
+    }
 }

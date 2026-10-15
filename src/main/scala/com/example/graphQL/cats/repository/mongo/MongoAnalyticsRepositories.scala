@@ -1,5 +1,7 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.service.resilience.CircuitBreaker
+
 import cats.data.OptionT
 import cats.effect.{Clock, IO}
 import cats.effect.std.UUIDGen
@@ -16,7 +18,7 @@ import com.example.graphQL.cats.service.port.{
   AnalyticsErasureRequestRepository,
   AnalyticsReportRepository,
   MutationWriteContext,
-  RepositoryIO
+  RepositoryF
 }
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.Diagnostics
@@ -34,10 +36,10 @@ import scala.jdk.CollectionConverters.*
 final class MongoAnalyticsErasureRequestRepository(
     database: MongoDatabase[IO],
     transactionRunner: MongoTransactionRunner,
-    diagnostics: Diagnostics,
+    diagnostics: Diagnostics[IO],
     topics: com.example.graphQL.cats.domain.workflow.InterviewTopicPair =
       com.example.graphQL.cats.domain.workflow.InterviewTopicPair.Default
-) extends AnalyticsErasureRequestRepository {
+) extends AnalyticsErasureRequestRepository[IO] {
   private val collection = Mongo4catsCollections.documents(database, MongoCollections.AnalyticsErasureRequests)
   private val outbox = Mongo4catsCollections.documents(database, MongoCollections.EventOutbox)
   private val users = Mongo4catsCollections.documents(database, MongoCollections.Users)
@@ -47,10 +49,10 @@ final class MongoAnalyticsErasureRequestRepository(
   private def storedString(document: Document, field: String): Either[RepositoryError, Option[String]] =
     MongoDocumentFields.toRepository(MongoDocumentFields.optionalString(document, field))
 
-  override def workerReady(now: Instant): RepositoryIO[Unit] =
+  override def workerReady(now: Instant): RepositoryF[IO, Unit] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "analyticsErasure.workerReady")(
-        RepositoryIO
+        RepositoryF
           .lift(
             MongoSessionOperations.findOne(
               workerHeartbeats,
@@ -71,13 +73,13 @@ final class MongoAnalyticsErasureRequestRepository(
       session: Option[ClientSession[IO]],
       requestId: String,
       freshReceiptId: String
-  ): OptionT[RepositoryIO, String] = {
+  ): OptionT[[A] =>> RepositoryF[IO, A], String] = {
     val byId = MongoFilter.eq(MongoFields.Id, requestId)
-    OptionT(RepositoryIO.lift(MongoSessionOperations.findOne(documents, session, byId))).semiflatMap { document =>
-      RepositoryIO.fromEither(storedString(document, MongoFields.ReceiptId)).flatMap {
-        case Some(receipt) => receipt.pure[RepositoryIO]
+    OptionT(RepositoryF.lift(MongoSessionOperations.findOne(documents, session, byId))).semiflatMap { document =>
+      RepositoryF.at[IO].fromEither(storedString(document, MongoFields.ReceiptId)).flatMap {
+        case Some(receipt) => receipt.pure[[A] =>> RepositoryF[IO, A]]
         case None          =>
-          RepositoryIO
+          RepositoryF
             .lift(
               MongoSessionOperations
                 .updateOne(documents, session, byId, MongoUpdate.set(MongoFields.ReceiptId, freshReceiptId))
@@ -91,10 +93,10 @@ final class MongoAnalyticsErasureRequestRepository(
       userId: UserId,
       now: Instant,
       context: MutationWriteContext
-  ): RepositoryIO[String] =
+  ): RepositoryF[IO, String] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "analyticsErasure.enqueue")(
-        RepositoryIO.lift(UUIDGen[IO].randomUUID.map(_.toString)).flatMap { freshReceiptId =>
+        RepositoryF.lift(UUIDGen[IO].randomUUID.map(_.toString)).flatMap { freshReceiptId =>
           MongoMutationWriteContext.run(context, transactionRunner, transactionRequired = true) { session =>
             val requestId = userId.value.toString
             receiptOrAssign(completions, session, requestId, freshReceiptId)
@@ -109,7 +111,7 @@ final class MongoAnalyticsErasureRequestRepository(
       freshReceiptId: String,
       now: Instant,
       session: Option[ClientSession[IO]]
-  ): RepositoryIO[String] = {
+  ): RepositoryF[IO, String] = {
     val request = new Document(MongoFields.Id, requestId)
       .append(MongoFields.RequestedAt, now.toDate)
       .append(MongoFields.ReceiptId, freshReceiptId)
@@ -123,8 +125,8 @@ final class MongoAnalyticsErasureRequestRepository(
       MongoUpdate.set(MongoFields.HiddenAt, now.toDate)
     )
     for {
-      _ <- RepositoryIO.lift(MongoSessionOperations.insertOne(collection, session, request))
-      hidden <- RepositoryIO.lift(
+      _ <- RepositoryF.lift(MongoSessionOperations.insertOne(collection, session, request))
+      hidden <- RepositoryF.lift(
         MongoSessionOperations.updateOne(
           reportControl,
           session,
@@ -133,15 +135,15 @@ final class MongoAnalyticsErasureRequestRepository(
           new UpdateOptions
         )
       )
-      _ <- RepositoryIO.fromEither(MongoRepositorySupport.matchedOne(hidden))
+      _ <- RepositoryF.at[IO].fromEither(MongoRepositorySupport.matchedOne(hidden))
     } yield freshReceiptId
   }
 
   override def statusForSubject(
       userId: UserId,
       receiptId: String
-  ): RepositoryIO[AccountDeletionStatus] =
-    if (Parsing.parseUuid(receiptId).isLeft) AccountDeletionStatus.NotFound.pure[RepositoryIO]
+  ): RepositoryF[IO, AccountDeletionStatus] =
+    if (Parsing.parseUuid(receiptId).isLeft) AccountDeletionStatus.NotFound.pure[[A] =>> RepositoryF[IO, A]]
     else
       MongoRepositorySupport
         .repositoryGuard(diagnostics, "analyticsErasure.statusForSubject")({
@@ -153,17 +155,19 @@ final class MongoAnalyticsErasureRequestRepository(
             MongoFilter.eq(MongoFields.Id, userId.value.toString),
             MongoFilter.eq(MongoFields.ReceiptId, receiptId)
           )
-          RepositoryIO
+          RepositoryF
             .lift(MongoSessionOperations.findOne(collection, None, requestFilter))
             .flatMap {
               case Some(document) =>
-                RepositoryIO.fromEither(storedString(document, MongoFields.State).flatMap {
-                  case Some("Complete")               => Right(AccountDeletionStatus.Complete)
-                  case Some("Pending" | "Processing") => Right(AccountDeletionStatus.Pending)
-                  case _                              => Left(RepositoryError.InvalidStoredData)
-                })
+                RepositoryF
+                  .at[IO]
+                  .fromEither(storedString(document, MongoFields.State).flatMap {
+                    case Some("Complete")               => Right(AccountDeletionStatus.Complete)
+                    case Some("Pending" | "Processing") => Right(AccountDeletionStatus.Pending)
+                    case _                              => Left(RepositoryError.InvalidStoredData)
+                  })
               case None =>
-                RepositoryIO
+                RepositoryF
                   .lift(MongoSessionOperations.findOne(completions, None, completionFilter))
                   .subflatMap(
                     _.fold[Either[RepositoryError, AccountDeletionStatus]](Right(AccountDeletionStatus.NotFound))(_ =>
@@ -174,16 +178,16 @@ final class MongoAnalyticsErasureRequestRepository(
         })
         .flatMap {
           case AccountDeletionStatus.Complete =>
-            RepositoryIO
+            RepositoryF
               .lift(new MongoInterviewSubjectCleanup(database, diagnostics, topics).complete(userId))
               .map(if (_) AccountDeletionStatus.Complete else AccountDeletionStatus.Pending)
-          case other => other.pure[RepositoryIO]
+          case other => other.pure[[A] =>> RepositoryF[IO, A]]
         }
 
-  override def purgeSubjectOutbox(userId: UserId): RepositoryIO[Unit] =
+  override def purgeSubjectOutbox(userId: UserId): RepositoryF[IO, Unit] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "analyticsErasure.purgeSubjectOutbox")(
-        RepositoryIO
+        RepositoryF
           .lift(
             outbox
               .flatMap(_.deleteMany(MongoFilter.in(MongoFields.SubjectIds, List(userId.value.toString)).bson))
@@ -191,12 +195,12 @@ final class MongoAnalyticsErasureRequestRepository(
           .void
       )
 
-  override def markComplete(userId: UserId, now: Instant): RepositoryIO[Unit] =
+  override def markComplete(userId: UserId, now: Instant): RepositoryF[IO, Unit] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "analyticsErasure.markComplete")(transactionRunner.run { session =>
         val requestId = userId.value.toString
         val user =
-          RepositoryIO.lift(MongoSessionOperations.findOne(users, session, MongoFilter.eq(MongoFields.Id, requestId)))
+          RepositoryF.lift(MongoSessionOperations.findOne(users, session, MongoFilter.eq(MongoFields.Id, requestId)))
         user
           .flatMap {
             case Some(document) if storedString(document, MongoFields.AccountStatus).contains(Some("Deleted")) =>
@@ -210,13 +214,13 @@ final class MongoAnalyticsErasureRequestRepository(
                 MongoUpdate.set(MongoFields.ExpiresAt, Date.from(now.plusSeconds(31L * 24L * 60L * 60L)))
               )
               val requests =
-                RepositoryIO.lift(
+                RepositoryF.lift(
                   MongoSessionOperations.updateOne(collection, session, filter, update, new UpdateOptions)
                 )
               requests.flatMap { result =>
                 if (result.getMatchedCount == 1L) persistCompletion(session, requestId, now)
                 else {
-                  val completed = RepositoryIO.lift(
+                  val completed = RepositoryF.lift(
                     MongoSessionOperations.findOne(
                       collection,
                       session,
@@ -225,13 +229,13 @@ final class MongoAnalyticsErasureRequestRepository(
                     )
                   )
                   completed.flatMap(
-                    _.fold(RepositoryIO.raise(RepositoryError.Conflict))(_ =>
+                    _.fold(RepositoryF.at[IO].raise(RepositoryError.Conflict))(_ =>
                       persistCompletion(session, requestId, now)
                     )
                   )
                 }
               }
-            case _ => RepositoryIO.raise(RepositoryError.Conflict)
+            case _ => RepositoryF.at[IO].raise(RepositoryError.Conflict)
           }
       })
 
@@ -239,9 +243,9 @@ final class MongoAnalyticsErasureRequestRepository(
       session: Option[ClientSession[IO]],
       userId: String,
       now: Instant
-  ): RepositoryIO[Unit] = {
+  ): RepositoryF[IO, Unit] = {
     val request =
-      RepositoryIO.lift(MongoSessionOperations.findOne(collection, session, MongoFilter.eq(MongoFields.Id, userId)))
+      RepositoryF.lift(MongoSessionOperations.findOne(collection, session, MongoFilter.eq(MongoFields.Id, userId)))
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "analyticsErasure.persistCompletion")(
         request
@@ -254,7 +258,7 @@ final class MongoAnalyticsErasureRequestRepository(
             ).flatten
             val filter = MongoFilter.eq(MongoFields.Id, userId)
             val update = MongoUpdate.combine(updates*)
-            val result = RepositoryIO.lift(
+            val result = RepositoryF.lift(
               MongoSessionOperations.updateOne(completions, session, filter, update, new UpdateOptions().upsert(true))
             )
             result.void
@@ -267,13 +271,14 @@ object MongoAnalyticsErasureRequestRepository {
   def transactional(
       database: MongoDatabase[IO],
       client: MongoClient[IO],
-      diagnostics: Diagnostics,
+      diagnostics: Diagnostics[IO],
       topics: com.example.graphQL.cats.domain.workflow.InterviewTopicPair =
-        com.example.graphQL.cats.domain.workflow.InterviewTopicPair.Default
+        com.example.graphQL.cats.domain.workflow.InterviewTopicPair.Default,
+      breaker: CircuitBreaker[IO] = CircuitBreaker.disabled[IO]
   ): MongoAnalyticsErasureRequestRepository =
     new MongoAnalyticsErasureRequestRepository(
       database,
-      MongoTransactionRunner.sessions(client, RepositoryError.Conflict, diagnostics = diagnostics),
+      MongoTransactionRunner.sessions(client, RepositoryError.Conflict, diagnostics = diagnostics, breaker = breaker),
       diagnostics,
       topics
     )
@@ -283,34 +288,36 @@ object MongoAnalyticsErasureRequestRepository {
 final class MongoAnalyticsReportRepository(
     database: MongoDatabase[IO],
     transactionRunner: MongoTransactionRunner,
-    diagnostics: Diagnostics,
+    diagnostics: Diagnostics[IO],
     clock: Clock[IO] = Clock[IO]
-) extends AnalyticsReportRepository {
+) extends AnalyticsReportRepository[IO] {
   private val collection = Mongo4catsCollections.documents(database, MongoCollections.AnalyticsReportSnapshots)
   private val control = Mongo4catsCollections.documents(database, MongoCollections.AnalyticsReportControl)
 
-  override def latest: RepositoryIO[Option[AnalyticsReportSnapshot]] =
+  override def latest: RepositoryF[IO, Option[AnalyticsReportSnapshot]] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "analyticsReport.latest")(transactionRunner.run { session =>
         for {
-          stored <- RepositoryIO.lift(
+          stored <- RepositoryF.lift(
             MongoSessionOperations
               .findOne(control, session, MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.ControlId))
           )
-          state <- RepositoryIO.fromEither(
-            stored.traverse(
-              MongoHiringPersistenceCodecs
-                .decodeAnalyticsReportControl(_)
-                .leftMap(_ => RepositoryError.InvalidStoredData)
+          state <- RepositoryF
+            .at[IO]
+            .fromEither(
+              stored.traverse(
+                MongoHiringPersistenceCodecs
+                  .decodeAnalyticsReportControl(_)
+                  .leftMap(_ => RepositoryError.InvalidStoredData)
+              )
             )
-          )
           published = state.filter(value =>
             value.state == AnalyticsReportSnapshotDocument.Published && value.generation >= 0L &&
               value.lastPublishedRevision >= 0L
           )
-          now <- RepositoryIO.lift(clock.realTimeInstant)
+          now <- RepositoryF.lift(clock.realTimeInstant)
           snapshot <- published.flatTraverse { control =>
-            RepositoryIO
+            RepositoryF
               .lift(
                 MongoSessionOperations.findOne(
                   collection,
@@ -336,11 +343,12 @@ object MongoAnalyticsReportRepository {
   def transactional(
       database: MongoDatabase[IO],
       client: MongoClient[IO],
-      diagnostics: Diagnostics
+      diagnostics: Diagnostics[IO],
+      breaker: CircuitBreaker[IO] = CircuitBreaker.disabled[IO]
   ): MongoAnalyticsReportRepository =
     new MongoAnalyticsReportRepository(
       database,
-      MongoTransactionRunner.sessions(client, RepositoryError.Conflict, diagnostics = diagnostics),
+      MongoTransactionRunner.sessions(client, RepositoryError.Conflict, diagnostics = diagnostics, breaker = breaker),
       diagnostics
     )
 }

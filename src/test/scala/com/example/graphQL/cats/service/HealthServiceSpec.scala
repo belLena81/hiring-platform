@@ -8,13 +8,13 @@ import scala.concurrent.duration.*
 class HealthServiceSpec extends CatsEffectSuite {
   private val requestId = Some("fe211944-7015-4e73-8dc1-000000000001")
 
-  private def diagnostics(events: Ref[IO, Vector[(LogEvent, Option[String])]]): Diagnostics =
-    new Diagnostics {
+  private def diagnostics(events: Ref[IO, Vector[(LogEvent, Option[String])]]): Diagnostics[IO] =
+    new Diagnostics[IO] {
       def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]): IO[Unit] =
         events.update(_ :+ (event -> requestId))
     }
 
-  private def probe(result: IO[ProbeResult]): DatabaseProbe = new DatabaseProbe {
+  private def probe(result: IO[ProbeResult]): DatabaseProbe[IO] = new DatabaseProbe[IO] {
     def check(requestId: Option[String]): IO[ProbeResult] = result
   }
 
@@ -22,11 +22,11 @@ class HealthServiceSpec extends CatsEffectSuite {
     for {
       forwarded <- Ref.of[IO, Option[String]](None)
       recorded <- Ref.of[IO, Map[LogField, String]](Map.empty)
-      contextual = new DatabaseProbe {
+      contextual = new DatabaseProbe[IO] {
         def check(id: Option[String]): IO[ProbeResult] =
           forwarded.set(id) *> IO.raiseError(new IllegalStateException("synthetic-service-secret"))
       }
-      sink = new Diagnostics {
+      sink = new Diagnostics[IO] {
         def event(event: LogEvent, id: Option[String], fields: => Map[LogField, String]): IO[Unit] =
           recorded.set(fields)
       }
@@ -46,7 +46,7 @@ class HealthServiceSpec extends CatsEffectSuite {
 
   test("synchronous and effectful diagnostic failures cannot change probe outcomes") {
     List(true, false).traverse_ { synchronous =>
-      val sink = new Diagnostics {
+      val sink = new Diagnostics[IO] {
         def event(event: LogEvent, id: Option[String], fields: => Map[LogField, String]): IO[Unit] =
           if (synchronous) throw new IllegalStateException("synthetic-sink-secret")
           else IO.raiseError(new IllegalStateException("synthetic-sink-secret"))
@@ -63,7 +63,7 @@ class HealthServiceSpec extends CatsEffectSuite {
     for {
       finalized <- Ref.of[IO, Boolean](false)
       captured <- Ref.of[IO, Map[LogField, String]](Map.empty)
-      sink = new Diagnostics {
+      sink = new Diagnostics[IO] {
         def event(event: LogEvent, id: Option[String], fields: => Map[LogField, String]): IO[Unit] =
           finalized.get.flatMap(done => IO(assert(done))) *> captured.set(fields)
       }

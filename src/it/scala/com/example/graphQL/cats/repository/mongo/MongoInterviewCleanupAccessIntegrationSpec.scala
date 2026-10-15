@@ -100,7 +100,7 @@ final class MongoInterviewCleanupAccessIntegrationSpec extends MongoIntegrationS
           .all
           .flatMap(rows => IO(assertEquals(rows.size, 32)))
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         queue <- Mongo4catsCollections.documents(fixture.database, MongoCollections.InterviewSubjectCleanup)
         _ <- (1 to completedCount + activeCount)
           .grouped(500)

@@ -21,7 +21,7 @@ import com.example.graphQL.cats.service.protocol.{
   JobUseCases,
   LoginInput,
   SignUpInput,
-  UseCaseIO
+  UseCaseF
 }
 import com.example.graphQL.cats.domain.pagination.{ApplicationEventPageRequest, ApplicationPageRequest, JobPageRequest}
 import com.example.graphQL.cats.service.events.{OperationalEventEnvelope, SearchSession, SearchSessionHandoff}
@@ -30,13 +30,13 @@ import io.circe.Json
 import org.http4s.Request
 
 object TestGraphQLSupport {
-  private def unsupported[A]: UseCaseIO[A] =
+  private def unsupported[A]: UseCaseF[IO, A] =
     EitherT.liftF(IO.raiseError(new IllegalStateException("Request context services are not configured")))
 
   val cursorKey: CursorCodec.CursorKey =
     CursorCodec.keyFromSecret("test-cursor-secret-01234567890123456789")
 
-  val accountService: AccountUseCases = new AccountUseCases {
+  val accountService: AccountUseCases[IO] = new AccountUseCases[IO] {
     def signUp(request: IdempotencyRequest, input: SignUpInput) = unsupported
     def login(request: IdempotencyRequest, input: LoginInput) = unsupported
     def me(actor: ActorContext) = unsupported
@@ -47,7 +47,7 @@ object TestGraphQLSupport {
   }
 
   /** Test fixture: accepts interaction events without durable recording. */
-  val interactions: InteractionUseCases = new InteractionUseCases {
+  val interactions: InteractionUseCases[IO] = new InteractionUseCases[IO] {
     def recordJobView(
         request: IdempotencyRequest,
         actor: ActorContext,
@@ -65,14 +65,14 @@ object TestGraphQLSupport {
   }
 
   /** Test fixture: real recording service over a handoff that drops every session. */
-  val searchSessions: SearchSessionRecording = SearchSessionRecording(
-    new SearchSessionHandoff {
+  val searchSessions: SearchSessionRecording[IO] = SearchSessionRecording(
+    new SearchSessionHandoff[IO] {
       def enqueue(session: SearchSession, event: OperationalEventEnvelope): IO[Unit] = IO.unit
     }
   )
 
   val emptyServices: HiringGraphQLServices = HiringGraphQLServices(
-    new HiringReadModel {
+    new HiringReadModel[IO] {
       def viewer(actor: ActorContext) = unsupported
       def canViewUserEmails(actor: ActorContext, userIds: List[UserId]) = unsupported
       def application(id: ApplicationId) = unsupported
@@ -84,7 +84,7 @@ object TestGraphQLSupport {
       def applicationHistory(actor: ActorContext, applicationId: ApplicationId, page: ApplicationEventPageRequest) =
         unsupported
     },
-    new JobUseCases {
+    new JobUseCases[IO] {
       def createJob(request: IdempotencyRequest, actor: ActorContext, input: CreateJobInput) = unsupported
       def updateJob(request: IdempotencyRequest, actor: ActorContext, jobId: JobId, input: UpdateJobInput) = unsupported
       def publishJob(request: IdempotencyRequest, actor: ActorContext, jobId: JobId) = unsupported
@@ -97,7 +97,7 @@ object TestGraphQLSupport {
         unsupported
       def myJobs(actor: ActorContext, page: JobPageRequest) = unsupported
     },
-    new ApplicationUseCases {
+    new ApplicationUseCases[IO] {
       def submitApplication(request: IdempotencyRequest, actor: ActorContext, jobId: JobId) = unsupported
       def myApplications(actor: ActorContext, page: ApplicationPageRequest) = unsupported
       def jobApplications(actor: ActorContext, jobId: JobId, page: ApplicationPageRequest) = unsupported
@@ -121,7 +121,7 @@ object TestGraphQLSupport {
       actor: Option[ActorContext] = None,
       hiring: HiringGraphQLServices = emptyServices,
       hiringReady: IO[ProbeResult] = IO.pure(ProbeResult.Ready),
-      diagnostics: Diagnostics = Diagnostics.noop,
+      diagnostics: Diagnostics[IO] = Diagnostics.noop,
       requestId: Option[String] = None,
       interviewActionRateLimit: UserId => IO[Either[FixedWindowRateLimiter.RateLimited, Unit]] = _ => IO.pure(Right(()))
   ): Resource[IO, RequestContext] =

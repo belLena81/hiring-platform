@@ -1,7 +1,8 @@
 package com.example.graphQL.cats.service.application
 
 import cats.data.EitherT
-import cats.effect.{Clock, IO}
+import cats.Monad
+import cats.effect.Clock
 import cats.effect.std.UUIDGen
 import cats.syntax.all.*
 import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
@@ -20,20 +21,20 @@ import com.example.graphQL.cats.domain.policy.{ApplicationLifecycle, Application
 import com.example.graphQL.cats.service.auth.ActorAuthorization
 import com.example.graphQL.cats.service.job.AuthorizedJobAccess
 import com.example.graphQL.cats.service.mutation.Idempotent
-import com.example.graphQL.cats.service.protocol.{ApplicationUseCases, HiringReadModel, IdempotencyRequest, UseCaseIO}
+import com.example.graphQL.cats.service.protocol.{ApplicationUseCases, HiringReadModel, IdempotencyRequest, UseCaseF}
 import com.example.graphQL.cats.domain.pagination.ApplicationPageRequest
 import com.example.graphQL.cats.shared.StableIds
 import java.util.UUID
 
-final class ApplicationService(
-    users: UserRepository,
-    jobs: JobRepository,
-    applications: ApplicationRepository,
-    readModel: HiringReadModel,
-    idempotent: Idempotent,
-    clock: Clock[IO] = Clock[IO],
-    uuidGen: UUIDGen[IO] = UUIDGen[IO]
-) extends ApplicationUseCases {
+final class ApplicationService[F[_]: Monad](
+    users: UserRepository[F],
+    jobs: JobRepository[F],
+    applications: ApplicationRepository[F],
+    readModel: HiringReadModel[F],
+    idempotent: Idempotent[F],
+    clock: Clock[F],
+    uuidGen: UUIDGen[F]
+) extends ApplicationUseCases[F] {
   private val authorization = ActorAuthorization(users)
   private val authorizedJobs = AuthorizedJobAccess(authorization, jobs)
 
@@ -41,17 +42,17 @@ final class ApplicationService(
       request: IdempotencyRequest,
       actor: ActorContext,
       jobId: JobId
-  ): UseCaseIO[Application] =
+  ): UseCaseF[F, Application] =
     idempotent.executeFor(actor, "submitApplication", request, applicationReference, replayApplication(actor)) {
       context =>
         for {
           candidate <- authorization.resolve(actor)
-          _ <- UseCaseIO.ensure(candidate.role == UserRole.Candidate, UseCaseError.Domain(DomainError.Forbidden))
-          job <- UseCaseIO.found(jobs.findSubmissionSnapshot(jobId), "job")
+          _ <- UseCaseF.ensure[F](candidate.role == UserRole.Candidate, UseCaseError.Domain(DomainError.Forbidden))
+          job <- UseCaseF.found(jobs.findSubmissionSnapshot(jobId), "job")
           now <- EitherT.liftF(clock.realTimeInstant)
           applicationId <- EitherT.liftF(uuidGen.randomUUID.map(uuid => ApplicationId(uuid)))
           eventId <- EitherT.liftF(uuidGen.randomUUID.map(uuid => ApplicationEventId(uuid)))
-          application <- EitherT.fromEither[IO](
+          application <- EitherT.fromEither[F](
             ApplicationSubmission.create(candidate, job, applicationId, now).leftMap(UseCaseError.Domain.apply)
           )
           initialEvent = ApplicationEvent(
@@ -65,7 +66,7 @@ final class ApplicationService(
             None
           )
           event = OperationalEvents.applicationCreated(eventId.value, application, candidate.id, now)
-          _ <- UseCaseIO.repository(
+          _ <- UseCaseF.repository(
             applications.createForOpenJobWithEvents(job, application, initialEvent, List(event), context)
           )
         } yield application
@@ -74,22 +75,22 @@ final class ApplicationService(
   def myApplications(
       actor: ActorContext,
       page: ApplicationPageRequest
-  ): UseCaseIO[List[Application]] =
+  ): UseCaseF[F, List[Application]] =
     for {
       (user, scope) <- authorization.readScope(actor)
-      _ <- UseCaseIO.ensure(user.role == UserRole.Candidate, UseCaseError.Domain(DomainError.Forbidden))
-      applications <- UseCaseIO.repository(this.applications.findByCandidate(scope, page))
+      _ <- UseCaseF.ensure[F](user.role == UserRole.Candidate, UseCaseError.Domain(DomainError.Forbidden))
+      applications <- UseCaseF.repository(this.applications.findByCandidate(scope, page))
     } yield applications
 
   def jobApplications(
       actor: ActorContext,
       jobId: JobId,
       page: ApplicationPageRequest
-  ): UseCaseIO[List[Application]] =
+  ): UseCaseF[F, List[Application]] =
     authorizedJobs.manage(actor, jobId) { job =>
       authorization
         .readScope(actor)
-        .flatMap((_, scope) => UseCaseIO.repository(applications.findByJob(scope, job.id, page)))
+        .flatMap((_, scope) => UseCaseF.repository(applications.findByJob(scope, job.id, page)))
     }
 
   override def changeStatus(
@@ -99,30 +100,30 @@ final class ApplicationService(
       target: ApplicationStatus,
       feedback: Option[String],
       reason: Option[String]
-  ): UseCaseIO[Application] =
+  ): UseCaseF[F, Application] =
     idempotent.executeFor(actor, statusOperation(target), request, applicationReference, replayApplication(actor)) {
       context =>
         for {
           actorUser <- authorization.resolve(actor)
-          application <- UseCaseIO.found(applications.find(applicationId), "application")
-          job <- UseCaseIO.found(jobs.find(application.jobId), "job")
-          _ <- UseCaseIO.ensure(authorization.canManage(actorUser, job), UseCaseError.Domain(DomainError.Forbidden))
+          application <- UseCaseF.found(applications.find(applicationId), "application")
+          job <- UseCaseF.found(jobs.find(application.jobId), "job")
+          _ <- UseCaseF.ensure[F](authorization.canManage(actorUser, job), UseCaseError.Domain(DomainError.Forbidden))
           now <- EitherT.liftF(clock.realTimeInstant)
           eventId <- EitherT.liftF(uuidGen.randomUUID.map(uuid => ApplicationEventId(uuid)))
-          (persistedApplication, change) <- EitherT.fromEither[IO](
+          (persistedApplication, change) <- EitherT.fromEither[F](
             ApplicationLifecycle
               .changeStatus(target, actorUser.id, now, feedback, reason)
               .run(application)
               .leftMap(UseCaseError.Domain.apply)
           )
-          (event, events) <- EitherT.fromEither[IO](statusEvents(persistedApplication, change, eventId))
-          _ <- UseCaseIO.repository(applications.updateStatusWithEvents(persistedApplication, event, events, context))
+          (event, events) <- EitherT.fromEither[F](statusEvents(persistedApplication, change, eventId))
+          _ <- UseCaseF.repository(applications.updateStatusWithEvents(persistedApplication, event, events, context))
         } yield persistedApplication
     }
 
-  private def replayApplication(actor: ActorContext): MutationEntityReference => UseCaseIO[Application] =
-    Idempotent.replayById("application", ApplicationId.apply)(id =>
-      readModel.canViewApplication(actor, id) *> UseCaseIO.found(applications.find(id), "application")
+  private def replayApplication(actor: ActorContext): MutationEntityReference => UseCaseF[F, Application] =
+    Idempotent.replayById[F, ApplicationId, Application]("application", ApplicationId.apply)(id =>
+      readModel.canViewApplication(actor, id) *> UseCaseF.found(applications.find(id), "application")
     )
 
   private def applicationReference(application: Application): MutationEntityReference =

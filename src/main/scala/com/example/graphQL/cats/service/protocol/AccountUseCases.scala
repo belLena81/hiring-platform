@@ -7,12 +7,12 @@ final case class SignUpInput(name: String, role: UserRole, password: String, pro
 final case class LoginInput(name: String, password: String)
 final case class AccountProfileInput(profile: UserProfile)
 
-trait AccountUseCases {
-  def signUp(request: IdempotencyRequest, input: SignUpInput): UseCaseIO[(User, AccountToken)]
-  def login(request: IdempotencyRequest, input: LoginInput): UseCaseIO[(User, AccountToken)]
-  def me(actor: ActorContext): UseCaseIO[User]
-  def updateMyProfile(request: IdempotencyRequest, actor: ActorContext, input: AccountProfileInput): UseCaseIO[User]
-  def deleteMyAccount(request: IdempotencyRequest, actor: ActorContext): UseCaseIO[String]
-  def accountDeletionStatus(actor: ActorContext, receiptId: String): UseCaseIO[AccountDeletionStatus]
-  def listUsers(actor: ActorContext, page: UserPageRequest): UseCaseIO[List[User]]
+trait AccountUseCases[F[_]] {
+  def signUp(request: IdempotencyRequest, input: SignUpInput): UseCaseF[F, (User, AccountToken)]
+  def login(request: IdempotencyRequest, input: LoginInput): UseCaseF[F, (User, AccountToken)]
+  def me(actor: ActorContext): UseCaseF[F, User]
+  def updateMyProfile(request: IdempotencyRequest, actor: ActorContext, input: AccountProfileInput): UseCaseF[F, User]
+  def deleteMyAccount(request: IdempotencyRequest, actor: ActorContext): UseCaseF[F, String]
+  def accountDeletionStatus(actor: ActorContext, receiptId: String): UseCaseF[F, AccountDeletionStatus]
+  def listUsers(actor: ActorContext, page: UserPageRequest): UseCaseF[F, List[User]]
 }

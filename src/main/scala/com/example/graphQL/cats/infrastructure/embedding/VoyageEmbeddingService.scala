@@ -12,6 +12,8 @@ import com.example.graphQL.cats.service.port.{
 }
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogFields}
 import com.example.graphQL.cats.service.Diagnostics.*
+import com.example.graphQL.cats.service.resilience.CircuitBreaker
+import scala.util.control.NoStackTrace
 import io.circe.{Decoder, Encoder}
 import io.circe.derivation.{Configuration, ConfiguredEncoder}
 import org.http4s.{AuthScheme, Credentials, Headers, Method, Request, Uri}
@@ -34,8 +36,9 @@ final class VoyageEmbeddingService(
     dimension: Int,
     timeout: FiniteDuration,
     tracer: Tracer[IO] = Tracer.noop[IO],
-    diagnostics: Diagnostics
-) extends EmbeddingService {
+    diagnostics: Diagnostics[IO],
+    breaker: CircuitBreaker[IO] = CircuitBreaker.disabled[IO]
+) extends EmbeddingService[IO] {
   private given TextMapUpdater[Headers] with
     def updated(headers: Headers, key: String, value: String): Headers =
       headers.put(org.http4s.Header.Raw(CIString(key), value))
@@ -56,10 +59,13 @@ final class VoyageEmbeddingService(
 
     tracer.span("voyage.embeddings").surround {
       tracer.propagate(request.headers).flatMap { propagatedHeaders =>
-        client
+        // Only timeouts, transport failures, 5xx and 429 are raised, so only they count against the breaker.
+        val call = client
           .run(request.withHeaders(propagatedHeaders))
           .use { response =>
-            if (!response.status.isSuccess)
+            if (response.status.code == 429 || response.status.code >= 500)
+              IO.raiseError(VoyageEmbeddingService.ProviderOverloaded)
+            else if (!response.status.isSuccess)
               IO.pure(Left(EmbeddingError.ProviderUnavailable))
             else
               response.body.take(maximumResponseBytes + 1L).compile.to(Chunk).flatMap { bytes =>
@@ -75,6 +81,9 @@ final class VoyageEmbeddingService(
               }
           }
           .timeout(timeout)
+        breaker
+          .protect(call)(CircuitBreaker.classifier(_ => true))
+          .map(_.leftMap(_ => EmbeddingError.CircuitOpen).flatten)
           .handleErrorWith(error =>
             diagnostics
               .emit(LogEvent.EmbeddingProviderFailed, fields = LogFields.failure(error))
@@ -123,6 +132,10 @@ private final case class VoyageEmbeddingResponse(
 ) derives Decoder
 
 object VoyageEmbeddingService {
+
+  /** The provider answered 429 or 5xx; raised inside the breaker so it counts, then mapped to unavailable. */
+  private case object ProviderOverloaded extends RuntimeException("embedding provider overloaded") with NoStackTrace
+
   def resource(
       apiKey: String,
       endpoint: Uri,
@@ -130,13 +143,14 @@ object VoyageEmbeddingService {
       dimension: Int,
       timeout: FiniteDuration,
       tracer: Tracer[IO] = Tracer.noop[IO],
-      diagnostics: Diagnostics
-  ): Resource[IO, EmbeddingService] =
+      diagnostics: Diagnostics[IO],
+      breaker: CircuitBreaker[IO] = CircuitBreaker.disabled[IO]
+  ): Resource[IO, EmbeddingService[IO]] =
     EmberClientBuilder
       .default[IO]
       .withTimeout(timeout)
       .build
       .map(client =>
-        new VoyageEmbeddingService(client, apiKey, endpoint, model, dimension, timeout, tracer, diagnostics)
+        new VoyageEmbeddingService(client, apiKey, endpoint, model, dimension, timeout, tracer, diagnostics, breaker)
       )
 }

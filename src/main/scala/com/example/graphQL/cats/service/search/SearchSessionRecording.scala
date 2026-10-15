@@ -1,7 +1,7 @@
 package com.example.graphQL.cats.service.search
 
 import cats.data.EitherT
-import cats.effect.IO
+import cats.Monad
 import cats.effect.kernel.Clock
 import cats.effect.std.UUIDGen
 import cats.syntax.all.*
@@ -15,7 +15,7 @@ import com.example.graphQL.cats.service.events.{
 }
 import io.circe.Json
 
-import com.example.graphQL.cats.service.protocol.UseCaseIO
+import com.example.graphQL.cats.service.protocol.UseCaseF
 import com.example.graphQL.cats.service.{RepositoryError, UseCaseError}
 import com.example.graphQL.cats.shared.StableIds
 import java.util.UUID
@@ -25,10 +25,10 @@ import scala.concurrent.duration.*
 final case class SearchSessionEntry(resultId: String, score: Double)
 
 /** Service-owned search session capture: id generation, clock, retention, event identity and durable handoff. */
-trait SearchSessionRecording {
+trait SearchSessionRecording[F[_]] {
 
   /** Reuses a client-supplied search id so retries stay correlated; otherwise generates one. */
-  def searchId(clientSupplied: Option[UUID]): IO[UUID]
+  def searchId(clientSupplied: Option[UUID]): F[UUID]
 
   def record(
       actorId: UserId,
@@ -37,7 +37,7 @@ trait SearchSessionRecording {
       filter: Json,
       model: Option[String],
       results: List[SearchSessionEntry]
-  ): UseCaseIO[Unit]
+  ): UseCaseF[F, Unit]
 }
 
 object SearchSessionRecording {
@@ -46,12 +46,15 @@ object SearchSessionRecording {
   def eventId(searchId: UUID): UUID =
     StableIds.uuid(s"search-performed:$searchId")
 
-  def apply(
-      handoff: SearchSessionHandoff,
-      clock: Clock[IO] = Clock[IO],
-      uuids: UUIDGen[IO] = UUIDGen[IO]
-  ): SearchSessionRecording = new SearchSessionRecording {
-    def searchId(clientSupplied: Option[UUID]): IO[UUID] = clientSupplied.fold(uuids.randomUUID)(IO.pure)
+  def apply[F[_]: Monad: Clock: UUIDGen](handoff: SearchSessionHandoff[F]): SearchSessionRecording[F] =
+    apply(handoff, Clock[F], UUIDGen[F])
+
+  def apply[F[_]: Monad](
+      handoff: SearchSessionHandoff[F],
+      clock: Clock[F],
+      uuids: UUIDGen[F]
+  ): SearchSessionRecording[F] = new SearchSessionRecording[F] {
+    def searchId(clientSupplied: Option[UUID]): F[UUID] = clientSupplied.fold(uuids.randomUUID)(_.pure[F])
 
     def record(
         actorId: UserId,
@@ -60,8 +63,8 @@ object SearchSessionRecording {
         filter: Json,
         model: Option[String],
         results: List[SearchSessionEntry]
-    ): UseCaseIO[Unit] =
-      EitherT.liftF(clock.realTimeInstant).flatMap { now =>
+    ): UseCaseF[F, Unit] =
+      EitherT.liftF[F, UseCaseError, java.time.Instant](clock.realTimeInstant).flatMap { now =>
         val session = SearchSession(
           searchId,
           actorId,
@@ -76,12 +79,12 @@ object SearchSessionRecording {
           now.plusSeconds(Retention.toSeconds)
         )
         EitherT
-          .fromEither[IO](
+          .fromEither[F](
             OperationalEvents
               .searchPerformed(eventId(searchId), session)
               .leftMap(_ => UseCaseError.Repository(RepositoryError.InvalidEvent))
           )
-          .flatMap(event => EitherT.liftF(handoff.enqueue(session, event)))
+          .flatMap(event => EitherT.liftF[F, UseCaseError, Unit](handoff.enqueue(session, event)))
       }
   }
 }

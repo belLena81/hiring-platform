@@ -12,14 +12,14 @@ final class MongoAdminSeedIntegrationSpec extends MongoIntegrationSuite {
   test("disabled seed has no writes; concurrent seed preserves singleton and existing password") {
     mongoResource.use { fixture =>
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         permits <- Semaphore[IO](2)
         _ <- Argon2PasswordHasher.create(PasswordHashConfig(1, 8192, 1), permits).flatMap { hasher =>
           val accounts = MongoUserRepository.transactional(
             fixture.database,
             fixture.client,
             MongoEmbeddingWorkEnqueuer.disabled,
-            Diagnostics.noop
+            Diagnostics.noop[IO]
           )
           val seed = AdminSeedConfig(true, Some("Seed Admin"), Some("original-password"))
           for {

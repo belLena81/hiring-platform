@@ -181,7 +181,19 @@ enum ConfigError(val key: String, val paths: Set[String] = Set.empty) {
   case InvalidInterviewGroupPair extends ConfigError("INTERVIEW_GROUP_PAIR")
   case InvalidInterviewProposalTtl
       extends ConfigError("INTERVIEW_PROPOSAL_TTL_SECONDS", Set("kafka.interview.proposal-ttl-seconds"))
+  case InvalidBreakerEnabled extends ConfigError("BREAKER_ENABLED", breakerPaths("enabled"))
+  case InvalidBreakerFailureThreshold
+      extends ConfigError("BREAKER_FAILURE_THRESHOLD", breakerPaths("failure-threshold"))
+  case InvalidBreakerWindow extends ConfigError("BREAKER_WINDOW_MS", breakerPaths("window-ms"))
+  case InvalidBreakerOpen extends ConfigError("BREAKER_OPEN_MS", breakerPaths("open-ms"))
+  case InvalidBreakerMaxOpen extends ConfigError("BREAKER_MAX_OPEN_MS", breakerPaths("max-open-ms"))
+  case InvalidBreakerHalfOpenProbes extends ConfigError("BREAKER_HALF_OPEN_PROBES", breakerPaths("half-open-probes"))
+  case InvalidBreakerOpenWindow extends ConfigError("BREAKER_OPEN_WINDOW")
 }
+
+private val breakerNames = List("voyage", "atlas-search", "kafka-publisher", "mongo-writes")
+private def breakerPaths(setting: String): Set[String] =
+  breakerNames.map(name => s"resilience.breakers.$name.$setting").toSet
 
 object ConfigError {
   val publicKeys: Set[String] = values.iterator.map(_.key).toSet
@@ -402,4 +414,29 @@ final case class AdminSeedConfig(
     password: Option[String] = None
 ) derives ConfigReader {
   override def toString: String = "AdminSeedConfig([REDACTED])"
+}
+
+/** One breaker's settings. A disabled breaker passes every call through; `openMs <= maxOpenMs` is checked at startup.
+  */
+final case class CircuitBreakerConfig(
+    enabled: Boolean,
+    failureThreshold: Int,
+    windowMs: Int,
+    openMs: Int,
+    maxOpenMs: Int,
+    halfOpenProbes: Int
+)
+
+final case class ResilienceConfig(
+    voyage: CircuitBreakerConfig = ResilienceConfig.Voyage,
+    atlasSearch: CircuitBreakerConfig = ResilienceConfig.AtlasSearch,
+    kafkaPublisher: CircuitBreakerConfig = ResilienceConfig.KafkaPublisher,
+    mongoWrites: CircuitBreakerConfig = ResilienceConfig.MongoWrites
+)
+
+object ResilienceConfig {
+  val Voyage: CircuitBreakerConfig = CircuitBreakerConfig(true, 5, 30000, 10000, 120000, 1)
+  val AtlasSearch: CircuitBreakerConfig = CircuitBreakerConfig(true, 8, 20000, 5000, 60000, 2)
+  val KafkaPublisher: CircuitBreakerConfig = CircuitBreakerConfig(true, 3, 30000, 5000, 60000, 1)
+  val MongoWrites: CircuitBreakerConfig = CircuitBreakerConfig(true, 20, 10000, 2000, 30000, 1)
 }

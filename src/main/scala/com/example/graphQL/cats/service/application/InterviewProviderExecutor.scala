@@ -1,6 +1,7 @@
 package com.example.graphQL.cats.service.application
 
-import cats.effect.IO
+import cats.Monad
+import cats.syntax.all.*
 import com.example.graphQL.cats.domain.workflow.*
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.RepositoryError
@@ -8,13 +9,13 @@ import com.example.graphQL.cats.service.RepositoryError
 /** Runs one claimed command against the calendar, notification or hiring-status authority and reads the provider's
   * answer as an `InterviewResult`.
   */
-private[application] final class InterviewProviderExecutor(
-    repository: InterviewWorkflowRepository,
-    calendar: InterviewCalendarProvider,
-    notifications: InterviewNotificationProvider,
-    currentTime: IO[java.time.Instant]
+private[application] final class InterviewProviderExecutor[F[_]: Monad](
+    repository: InterviewWorkflowRepository[F],
+    calendar: InterviewCalendarProvider[F],
+    notifications: InterviewNotificationProvider[F],
+    currentTime: F[java.time.Instant]
 ) {
-  private def provider[A](operation: InterviewProviderIO[A]): IO[InterviewResult] = operation.value.map {
+  private def provider[A](operation: InterviewProviderF[F, A]): F[InterviewResult] = operation.value.map {
     case Right(_)                              => InterviewResult.Succeeded
     case Left(InterviewProviderError.Conflict) => InterviewResult.Rejected
     case Left(_)                               => InterviewResult.OutcomeUnknown
@@ -29,14 +30,14 @@ private[application] final class InterviewProviderExecutor(
 
   private def reservationLookup(workflowId: InterviewWorkflowId, key: String)(
       found: InterviewCalendarReservation => Boolean
-  ): IO[InterviewResult] =
+  ): F[InterviewResult] =
     calendar.lookup(workflowId, key).value.map(answer => lookedUp(answer.map(_.exists(found))))
 
-  private def receiptLookup(key: String): IO[InterviewResult] =
+  private def receiptLookup(key: String): F[InterviewResult] =
     notifications.lookup(key).value.map(answer => lookedUp(answer.map(_.nonEmpty)))
 
   /** A write the repository refuses as a conflict is a definitive rejection; any other failure is unknown. */
-  private def repositoryResult(operation: RepositoryIO[?]): IO[InterviewResult] = operation.value.map {
+  private def repositoryResult(operation: RepositoryF[F, ?]): F[InterviewResult] = operation.value.map {
     case Right(_)                       => InterviewResult.Succeeded
     case Left(RepositoryError.Conflict) => InterviewResult.Rejected
     case Left(_)                        => InterviewResult.OutcomeUnknown
@@ -49,7 +50,7 @@ private[application] final class InterviewProviderExecutor(
       workflow: InterviewWorkflow,
       command: InterviewCommand,
       claim: ClaimedInterviewWorkflowCommand
-  ): IO[InterviewResult] = command match {
+  ): F[InterviewResult] = command match {
     case lifecycle: InterviewLifecycleCommand => currentTime.flatMap(executeLifecycle(workflow, lifecycle, claim, _))
     case scheduling: InterviewWorkflowCommand => executeScheduling(workflow, scheduling, claim)
   }
@@ -62,7 +63,7 @@ private[application] final class InterviewProviderExecutor(
       command: InterviewLifecycleCommand,
       claim: ClaimedInterviewWorkflowCommand,
       now: java.time.Instant
-  ): IO[InterviewResult] = {
+  ): F[InterviewResult] = {
     import InterviewLifecycleCommand as C
     command match {
       case C.CancelCalendarSlot(key) =>
@@ -86,18 +87,18 @@ private[application] final class InterviewProviderExecutor(
               case InterviewResult.Absent => InterviewResult.Rejected
               case unknown                => unknown
             }
-          case result => IO.pure(result)
+          case result => Monad[F].pure(result)
         }
       case C.LookupReplacementHold(key) =>
         reservationLookup(workflow.id, key)(_.releasedAt.isEmpty)
       case C.CommitRescheduledInterval(_, _) =>
-        if (!now.isBefore(InterviewCalendarFence.swapDeadline(workflow))) IO.pure(InterviewResult.Rejected)
+        if (!now.isBefore(InterviewCalendarFence.swapDeadline(workflow))) Monad[F].pure(InterviewResult.Rejected)
         else
           repositoryResult(repository.approveRescheduledInterval(workflow, now, claim))
       case C.LookupRescheduleCommitReceipt(id, generation) =>
         repository.hasRescheduleApproval(id, generation).value.map(lookedUp)
       // Due work: the command is only claimed once the proposal's expiry time has been reached.
-      case C.ExpireProposal(_)              => IO.pure(InterviewResult.Succeeded)
+      case C.ExpireProposal(_)              => Monad[F].pure(InterviewResult.Succeeded)
       case C.Notify(kind, participant, key) =>
         val send = provider(
           notifications.notify(
@@ -114,12 +115,12 @@ private[application] final class InterviewProviderExecutor(
         if (!InterviewCommands.isInformational(command)) send
         else
           notifications.lookup(key).value.flatMap {
-            case Right(Some(_)) => IO.pure(InterviewResult.Succeeded)
+            case Right(Some(_)) => Monad[F].pure(InterviewResult.Succeeded)
             case Right(None)    => send
-            case Left(_)        => IO.pure(InterviewResult.OutcomeUnknown)
+            case Left(_)        => Monad[F].pure(InterviewResult.OutcomeUnknown)
           }
       case C.LookupNotificationReceipt(_, _, key) => receiptLookup(key)
-      case C.RequireRepair(_)                     => IO.pure(InterviewResult.Rejected)
+      case C.RequireRepair(_)                     => Monad[F].pure(InterviewResult.Rejected)
     }
   }
 
@@ -127,11 +128,11 @@ private[application] final class InterviewProviderExecutor(
       workflow: InterviewWorkflow,
       command: InterviewWorkflowCommand,
       claim: ClaimedInterviewWorkflowCommand
-  ): IO[InterviewResult] =
+  ): F[InterviewResult] =
     currentTime.flatMap { now =>
       command match {
         case InterviewWorkflowCommand.ReserveCalendarSlot(key) =>
-          def reconcile: IO[InterviewResult] =
+          def reconcile: F[InterviewResult] =
             calendar.lookup(workflow.id, InterviewWorkflow.reservationKey(workflow.id, 0)).value.map {
               case Right(Some(reservation)) if reservation.releasedAt.isEmpty => InterviewResult.Succeeded
               case Right(_)                                                   => InterviewResult.Rejected
@@ -151,7 +152,7 @@ private[application] final class InterviewProviderExecutor(
               )
             ).flatMap {
               case InterviewResult.Rejected => reconcile
-              case result                   => IO.pure(result)
+              case result                   => Monad[F].pure(result)
             }
         case InterviewWorkflowCommand.LookupCalendarReservation(id) =>
           reservationLookup(id, InterviewWorkflow.reservationKey(id, 0))(_.releasedAt.isEmpty)
@@ -174,7 +175,7 @@ private[application] final class InterviewProviderExecutor(
           )
         case InterviewWorkflowCommand.LookupNotificationReceipt(_, key) => receiptLookup(key)
         case InterviewWorkflowCommand.RequireRepair(_)                  =>
-          IO.pure(InterviewResult.Rejected)
+          Monad[F].pure(InterviewResult.Rejected)
       }
     }
 }

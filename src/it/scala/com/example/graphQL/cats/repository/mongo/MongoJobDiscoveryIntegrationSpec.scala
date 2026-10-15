@@ -22,7 +22,7 @@ final class MongoJobDiscoveryIntegrationSpec extends MongoJobDiscoveryFixture {
         fixture.database,
         fixture.client,
         MongoEmbeddingWorkEnqueuer.disabled,
-        Diagnostics.noop,
+        Diagnostics.noop[IO],
         Some(policy)
       )
       val base = NearbyJobsQuery(center, 10d, filter)
@@ -52,7 +52,7 @@ final class MongoJobDiscoveryIntegrationSpec extends MongoJobDiscoveryFixture {
         fixture.database,
         fixture.client,
         MongoEmbeddingWorkEnqueuer.disabled,
-        Diagnostics.noop,
+        Diagnostics.noop[IO],
         Some(policy)
       )
       val query = NearbyJobsQuery(center, 10d, filter)
@@ -63,7 +63,7 @@ final class MongoJobDiscoveryIntegrationSpec extends MongoJobDiscoveryFixture {
         job(27).copy(status = JobStatus.Closed)
       )
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- values.traverse_(value =>
           MongoRepositoryTestSupport.insertOne(fixture.database, MongoCollections.Jobs, MongoHiringCodecs.job(value))
         )
@@ -89,7 +89,7 @@ final class MongoJobDiscoveryIntegrationSpec extends MongoJobDiscoveryFixture {
         ).parTupled
         closed <- success(repository.nearbyJobs(scope, query, 30))
         _ = assertEquals(closed.size, 22)
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
       } yield ()
     }
   }
@@ -100,13 +100,13 @@ final class MongoJobDiscoveryIntegrationSpec extends MongoJobDiscoveryFixture {
         fixture.database,
         fixture.client,
         MongoEmbeddingWorkEnqueuer.disabled,
-        Diagnostics.noop,
+        Diagnostics.noop[IO],
         Some(policy)
       )
       val values = (1 to 24).toList
         .map(job(_)) ++ List(job(25, remote = true), job(26, None), job(27).copy(status = JobStatus.Closed))
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- values.traverse_(value =>
           MongoRepositoryTestSupport.insertOne(fixture.database, MongoCollections.Jobs, MongoHiringCodecs.job(value))
         )
@@ -147,12 +147,12 @@ final class MongoJobDiscoveryIntegrationSpec extends MongoJobDiscoveryFixture {
         fixture.database,
         fixture.client,
         MongoEmbeddingWorkEnqueuer.disabled,
-        Diagnostics.noop,
+        Diagnostics.noop[IO],
         Some(policy)
       )
       val value = job(1, Some(GeoPoint(center.latitude + 0.01d, center.longitude)))
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- MongoRepositoryTestSupport.insertOne(fixture.database, MongoCollections.Jobs, MongoHiringCodecs.job(value))
         measured <- success(repository.nearbyJobs(scope, NearbyJobsQuery(center, 10d, filter), 2))
         distance = measured.head.distanceKm
@@ -179,7 +179,7 @@ final class MongoJobDiscoveryIntegrationSpec extends MongoJobDiscoveryFixture {
           fixture.database,
           fixture.client,
           MongoEmbeddingWorkEnqueuer.disabled,
-          Diagnostics.noop,
+          Diagnostics.noop[IO],
           Some(policy)
         )
         val values = List(
@@ -218,7 +218,7 @@ final class MongoJobDiscoveryIntegrationSpec extends MongoJobDiscoveryFixture {
         fixture.database,
         fixture.client,
         MongoEmbeddingWorkEnqueuer.disabled,
-        Diagnostics.noop,
+        Diagnostics.noop[IO],
         Some(policy)
       )
       val query = NearbyJobsQuery(center, 10d, filter)
@@ -256,7 +256,7 @@ final class MongoJobDiscoveryIntegrationSpec extends MongoJobDiscoveryFixture {
       val _ = existing.get("location", classOf[Document]).put("point", invalid)
       for {
         _ <- MongoRepositoryTestSupport.insertOne(fixture.database, MongoCollections.Jobs, existing)
-        failure <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop).attempt
+        failure <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO]).attempt
         _ = assert(failure.isLeft)
         ledger <- MongoRepositoryTestSupport.findOne(
           fixture.database,
@@ -274,8 +274,8 @@ final class MongoJobDiscoveryIntegrationSpec extends MongoJobDiscoveryFixture {
             new Document("type", "Point").append("coordinates", List(center.longitude, center.latitude).asJava)
           )
         )
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         completed <- MongoRepositoryTestSupport.findOne(
           fixture.database,
           MongoCollections.HiringMigrationLedger,

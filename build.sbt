@@ -63,6 +63,8 @@ lazy val root = (project in file("."))
     IntegrationTest / jacocoMergedReportSettings := JacocoReportSettings()
       .withThresholds(JacocoThresholds(line = 85))
       .withFormats(JacocoReportFormats.ScalaHTML, JacocoReportFormats.XML),
+    // Pure saga vocabulary and engine (standard library only, no effects). Compiled by this build only.
+    Compile / unmanagedSourceDirectories += baseDirectory.value / "shared" / "saga" / "src" / "main" / "scala",
     Test / unmanagedSourceDirectories += baseDirectory.value / "test-support" / "src" / "main" / "scala",
     Test / javaOptions += "-Dcats.effect.trackFiberContext=true",
     IntegrationTest / javaOptions += "-Dcats.effect.trackFiberContext=true",
@@ -113,6 +115,7 @@ lazy val root = (project in file("."))
       "ch.qos.logback" % "logback-classic" % logbackVersion,
       "org.scalameta" %% "munit" % munitVersion % Test,
       "org.typelevel" %% "munit-cats-effect" % munitCatsEffectVersion % Test,
+      "org.typelevel" %% "cats-effect-testkit" % catsEffectVersion % Test,
       "org.testcontainers" % "testcontainers" % testcontainersVersion % Test
     )
   )

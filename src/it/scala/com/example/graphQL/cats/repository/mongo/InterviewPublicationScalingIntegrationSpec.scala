@@ -32,7 +32,7 @@ final class InterviewPublicationScalingIntegrationSpec extends KafkaIntegrationS
   private def identity(value: String): UUID =
     UUID.nameUUIDFromBytes(s"$seed:$value".getBytes(StandardCharsets.UTF_8))
 
-  private def success[A](effect: RepositoryIO[A]): IO[A] = effect.value.flatMap {
+  private def success[A](effect: RepositoryF[IO, A]): IO[A] = effect.value.flatMap {
     case Right(value) => IO.pure(value)
     case Left(error)  => IO.raiseError(new AssertionError(s"Publication repository failed: $error"))
   }
@@ -132,13 +132,13 @@ final class InterviewPublicationScalingIntegrationSpec extends KafkaIntegrationS
       }
   }
 
-  private def worker(repository: MongoInterviewWorkflowRepository): InterviewWorkflowWorker =
-    new InterviewWorkflowWorker(
+  private def worker(repository: MongoInterviewWorkflowRepository): InterviewWorkflowWorker[IO] =
+    new InterviewWorkflowWorker[IO](
       repository,
       LedgerInterviewCalendarProvider.durable(repository),
       LedgerInterviewNotificationProvider.durable(repository),
       InterviewWorkerSettings("publication-measurement", 1.second, 60.seconds, 10.seconds, 5, 1.second, 30.seconds),
-      Diagnostics.noop
+      Diagnostics.noop[IO]
     )
 
   private def drain(
@@ -151,7 +151,7 @@ final class InterviewPublicationScalingIntegrationSpec extends KafkaIntegrationS
       for {
         completions <- Ref.of[IO, Vector[(Double, Double)]](Vector.empty)
         start <- IO.monotonic
-        routing = new InterviewTransport {
+        routing = new InterviewTransport[IO] {
           def generationFor(message: InterviewMessage) = transport.generationFor(message)
           def publish(message: InterviewMessage) = for {
             before <- IO.monotonic
@@ -181,11 +181,11 @@ final class InterviewPublicationScalingIntegrationSpec extends KafkaIntegrationS
     values.sorted.lift((math.ceil(values.size * fraction).toInt - 1).max(0)).getOrElse(0d)
 
   private def observe(pair: Int, legacy: Boolean): IO[Json] = mongoResource.use { fixture =>
-    val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
+    val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop[IO])
     val label = s"pair-$pair-${if (legacy) "legacy" else "immediate"}"
     for {
       at <- IO.realTimeInstant
-      _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop, interviewTopics)
+      _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO], interviewTopics)
       initial = workflows(s"$label-warmup", warmup, at)
       _ <- seedWork(fixture, repository, initial, at)
       _ <- drain(fixture, repository, initial, legacy)

@@ -10,7 +10,7 @@ import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, UserId}
 import com.example.graphQL.cats.service.{ActorContext, AvailabilityError, SearchError, UseCaseError}
 import com.example.graphQL.cats.service.ProbeResult
-import com.example.graphQL.cats.service.protocol.{IdempotencyRequest, UseCaseIO}
+import com.example.graphQL.cats.service.protocol.{IdempotencyRequest, UseCaseF}
 import com.example.graphQL.cats.service.events.OperationalEventPayload
 import com.example.graphQL.cats.domain.pagination.*
 import com.example.graphQL.cats.service.search.{JobSearchFilter, SearchSessionEntry}
@@ -24,13 +24,13 @@ import java.util.{Locale, UUID}
 private[graphql] object HiringGraphQLResolverSupport {
   private val CanonicalJsonPrinter = Printer.noSpaces.copy(sortKeys = true)
 
-  def raiseOnUseCaseError[A](value: UseCaseIO[A]): HiringGraphQLResult[A] =
+  def raiseOnUseCaseError[A](value: UseCaseF[IO, A]): HiringGraphQLResult[A] =
     EitherT(value.value.map(_.leftMap(HiringGraphQLFailure.UseCase(_))))
 
   def inputResult[A](value: Either[GraphQLFailure, A]): HiringGraphQLResult[A] =
     EitherT.fromEither[IO](value.leftMap(HiringGraphQLFailure.Input(_)))
 
-  def mutationResult[A](value: UseCaseIO[A]): HiringGraphQLResult[MutationOutcome[A]] =
+  def mutationResult[A](value: UseCaseF[IO, A]): HiringGraphQLResult[MutationOutcome[A]] =
     EitherT(value.value.flatMap {
       case Right(result)                               => IO.pure(Right(result))
       case Left(UseCaseError.ValidationFailed(errors)) => IO.pure(Right(validationError(errors)))
@@ -109,7 +109,7 @@ private[graphql] object HiringGraphQLResolverSupport {
   def authenticatedSearch(
       context: Context[RequestContext, Unit]
   ): HiringGraphQLResult[
-    (ActorContext, HiringGraphQLServices, com.example.graphQL.cats.service.protocol.SearchUseCases)
+    (ActorContext, HiringGraphQLServices, com.example.graphQL.cats.service.protocol.SearchUseCases[IO])
   ] =
     authenticated(context).flatMap { case (actor, hiring) =>
       hiring.semanticSearchService match {

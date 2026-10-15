@@ -1,5 +1,7 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.service.resilience.CircuitBreaker
+
 import com.example.graphQL.cats.shared.StableIds
 import cats.data.EitherT
 import cats.effect.IO
@@ -23,37 +25,35 @@ final class MongoUserRepository(
     database: MongoDatabase[IO],
     transactionRunner: MongoTransactionRunner,
     embeddingWork: MongoEmbeddingWorkEnqueuer,
-    diagnostics: Diagnostics
-) extends UserRepository
-    with UserAccountRepository {
+    diagnostics: Diagnostics[IO]
+) extends UserRepository[IO]
+    with UserAccountRepository[IO] {
   private def collection = Mongo4catsCollections.documents(database, MongoCollections.Users)
   private def registry = Mongo4catsCollections.documents(database, MongoCollections.AccountRegistry)
   private def outbox = Mongo4catsCollections.documents(database, MongoCollections.EventOutbox)
   private def subjectFences = Mongo4catsCollections.documents(database, MongoCollections.OutboxSubjectFences)
   private val MaxJobsClosedByAccountDeletion = 1000
 
-  def insert(user: User): RepositoryIO[Unit] =
-    if (!user.roleProfileIsValid) RepositoryIO.raise(RepositoryError.Conflict)
+  def insert(user: User): RepositoryF[IO, Unit] =
+    if (!user.roleProfileIsValid) RepositoryF.at[IO].raise(RepositoryError.Conflict)
     else
       MongoRepositorySupport
         .repositoryGuard(diagnostics, "MongoUserRepository.insert")(
-          RepositoryIO
-            .lift(MongoSessionOperations.insertOne(collection, None, MongoHiringCodecs.user(user)))
-            .void
+          RepositoryF.lift(MongoSessionOperations.insertOne(collection, None, MongoHiringCodecs.user(user))).void
         )(MongoErrors.duplicateAsConflict)
 
-  override def find(id: UserId): RepositoryIO[Option[User]] =
+  override def find(id: UserId): RepositoryF[IO, Option[User]] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "MongoUserRepository.find")(
-        RepositoryIO
+        RepositoryF
           .lift(MongoSessionOperations.findById(collection, None, id.value.toString))
           .subflatMap(document => MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readUser)))
       )
 
-  override def findVersioned(id: UserId): RepositoryIO[Option[Versioned[User]]] =
+  override def findVersioned(id: UserId): RepositoryF[IO, Option[Versioned[User]]] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "MongoUserRepository.findVersioned")(
-        RepositoryIO
+        RepositoryF
           .lift(MongoSessionOperations.findById(collection, None, id.value.toString))
           .subflatMap(document =>
             MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readVersionedUser))
@@ -63,15 +63,15 @@ final class MongoUserRepository(
   private def findWithSession(
       id: UserId,
       session: Option[ClientSession[IO]]
-  ): RepositoryIO[Option[User]] =
+  ): RepositoryF[IO, Option[User]] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "MongoUserRepository.findWithSession")(
-        RepositoryIO
+        RepositoryF
           .lift(MongoSessionOperations.findOne(collection, session, MongoFilter.eq(MongoFields.Id, id.value.toString)))
           .subflatMap(document => MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readUser)))
       )
 
-  override def relatedUsers(scope: HiringReadScope, keys: List[UserRelationKey]): RepositoryIO[List[RelatedUser]] = {
+  override def relatedUsers(scope: HiringReadScope, keys: List[UserRelationKey]): RepositoryF[IO, List[RelatedUser]] = {
     import MongoAuthorizedReadQueries.*
     val distinct = keys.distinct
     val candidates = distinct.collect { case key: UserRelationKey.ApplicationCandidate => key }
@@ -83,8 +83,8 @@ final class MongoUserRepository(
         predicate: K => org.bson.conversions.Bson,
         access: List[Document],
         matches: (K, Document) => Boolean
-    ): RepositoryIO[List[RelatedUser]] =
-      if (requested.isEmpty) RepositoryIO.pure(Nil)
+    ): RepositoryF[IO, List[RelatedUser]] =
+      if (requested.isEmpty) RepositoryF.at[IO].pure(Nil)
       else {
         val pipeline = List(matching(Filters.or(requested.map(predicate)*))) ++ actor(scope) ++ access ++ List(
           lookup(MongoCollections.Users, relatedField, MongoFields.Id, "related"),
@@ -138,7 +138,7 @@ final class MongoUserRepository(
     } yield candidateUsers ++ recruiterUsers
   }
 
-  override def updateEmbedding(id: UserId, embedding: EntityEmbedding): RepositoryIO[Unit] =
+  override def updateEmbedding(id: UserId, embedding: EntityEmbedding): RepositoryF[IO, Unit] =
     findVersioned(id).flatMap {
       case Some(user) => updateEmbedding(user, embedding)
       case None       => EitherT.leftT[IO, Unit](RepositoryError.Conflict)
@@ -147,9 +147,9 @@ final class MongoUserRepository(
   override def updateEmbedding(
       observed: Versioned[User],
       embedding: EntityEmbedding
-  ): RepositoryIO[Unit] = {
+  ): RepositoryF[IO, Unit] = {
     val encoded = MongoHiringCodecs.embeddingDocument(embedding)
-    RepositoryIO
+    RepositoryF
       .lift(
         MongoSessionOperations
           .updateOne(
@@ -176,10 +176,10 @@ final class MongoUserRepository(
       )
   }
 
-  override def initialized: RepositoryIO[Boolean] =
+  override def initialized: RepositoryF[IO, Boolean] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "MongoUserRepository.initialized")(
-        RepositoryIO
+        RepositoryF
           .lift(MongoSessionOperations.findById(registry, None, "user-account-registry"))
           .map(document => document.exists(value => Option(value.getString(MongoFields.State)).contains("Initialized")))
       )
@@ -188,7 +188,7 @@ final class MongoUserRepository(
       user: User,
       passwordHash: PasswordHash,
       context: MutationWriteContext
-  ): RepositoryIO[Unit] =
+  ): RepositoryF[IO, Unit] =
     if (!user.roleProfileIsValid || user.role != UserRole.Admin || !user.adminSingleton)
       EitherT.leftT[IO, Unit](RepositoryError.Conflict)
     else
@@ -205,20 +205,20 @@ final class MongoUserRepository(
       user: User,
       passwordHash: PasswordHash,
       session: Option[ClientSession[IO]]
-  ): RepositoryIO[Unit] =
+  ): RepositoryF[IO, Unit] =
     val stateFilter = MongoFilter.and(
       MongoFilter.eq(MongoFields.Id, "user-account-registry"),
       MongoFilter.eq(MongoFields.State, "Uninitialized")
     )
     for {
-      state <- RepositoryIO.lift(MongoSessionOperations.findOne(registry, session, stateFilter))
-      _ <- RepositoryIO.fromEither(state.toRight(RepositoryError.Conflict))
-      existing <- RepositoryIO.lift(MongoSessionOperations.findOne(collection, session, MongoFilter.and()))
-      _ <- RepositoryIO.fromEither(Either.cond(existing.isEmpty, (), RepositoryError.Conflict))
-      _ <- RepositoryIO.lift(
+      state <- RepositoryF.lift(MongoSessionOperations.findOne(registry, session, stateFilter))
+      _ <- RepositoryF.at[IO].fromEither(state.toRight(RepositoryError.Conflict))
+      existing <- RepositoryF.lift(MongoSessionOperations.findOne(collection, session, MongoFilter.and()))
+      _ <- RepositoryF.at[IO].fromEither(Either.cond(existing.isEmpty, (), RepositoryError.Conflict))
+      _ <- RepositoryF.lift(
         MongoSessionOperations.insertOne(collection, session, MongoHiringCodecs.userWithPassword(user, passwordHash))
       )
-      _ <- RepositoryIO.lift(
+      _ <- RepositoryF.lift(
         MongoSessionOperations.updateOne(
           registry,
           session,
@@ -236,9 +236,9 @@ final class MongoUserRepository(
       passwordHash: PasswordHash,
       now: Instant,
       session: Option[ClientSession[IO]]
-  ): RepositoryIO[Unit] =
+  ): RepositoryF[IO, Unit] =
     if (!user.roleProfileIsValid || user.role == UserRole.Admin)
-      RepositoryIO.raise(RepositoryError.Conflict)
+      RepositoryF.at[IO].raise(RepositoryError.Conflict)
     else
       {
         val stateFilter = MongoFilter.and(
@@ -246,9 +246,9 @@ final class MongoUserRepository(
           MongoFilter.eq(MongoFields.State, "Initialized")
         )
         for {
-          state <- RepositoryIO.lift(MongoSessionOperations.findOne(registry, session, stateFilter))
-          _ <- RepositoryIO.fromEither(state.toRight(RepositoryError.Conflict))
-          _ <- RepositoryIO.lift(
+          state <- RepositoryF.lift(MongoSessionOperations.findOne(registry, session, stateFilter))
+          _ <- RepositoryF.at[IO].fromEither(state.toRight(RepositoryError.Conflict))
+          _ <- RepositoryF.lift(
             MongoSessionOperations
               .insertOne(collection, session, MongoHiringCodecs.userWithPassword(user, passwordHash))
           )
@@ -259,7 +259,7 @@ final class MongoUserRepository(
                 EmbeddingWorkKey(EmbeddingWorkKind.CandidateProfile, user.id.value.toString),
                 now
               )
-            else ().pure[RepositoryIO]
+            else ().pure[[A] =>> RepositoryF[IO, A]]
           }
         } yield ()
       }.pipe(effect =>
@@ -273,7 +273,7 @@ final class MongoUserRepository(
       passwordHash: PasswordHash,
       now: Instant,
       context: MutationWriteContext
-  ): RepositoryIO[Unit] =
+  ): RepositoryF[IO, Unit] =
     MongoMutationWriteContext
       .run(
         context,
@@ -286,8 +286,8 @@ final class MongoUserRepository(
         )
       )
 
-  override def findByCanonicalName(nameCanonical: String): RepositoryIO[Option[AccountCredentials]] =
-    RepositoryIO
+  override def findByCanonicalName(nameCanonical: String): RepositoryF[IO, Option[AccountCredentials]] =
+    RepositoryF
       .lift(collection.flatMap(_.find(Filters.eq(MongoFields.NameCanonical, nameCanonical)).first))
       .subflatMap { document =>
         MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readCredentials)).map(_.flatten)
@@ -302,7 +302,7 @@ final class MongoUserRepository(
       profile: UserProfile,
       now: Instant,
       context: MutationWriteContext
-  ): RepositoryIO[User] =
+  ): RepositoryF[IO, User] =
     profile match {
       case _: UserProfile.Candidate =>
         MongoMutationWriteContext
@@ -332,8 +332,8 @@ final class MongoUserRepository(
       profile: UserProfile,
       now: Instant,
       session: Option[ClientSession[IO]]
-  ): RepositoryIO[User] =
-    RepositoryIO
+  ): RepositoryF[IO, User] =
+    RepositoryF
       .lift(
         MongoSessionOperations.updateOne(
           collection,
@@ -363,7 +363,7 @@ final class MongoUserRepository(
       profile: UserProfile,
       now: Instant,
       session: Option[ClientSession[IO]]
-  ): RepositoryIO[Unit] = {
+  ): RepositoryF[IO, Unit] = {
     val filter = MongoFilter.and(
       MongoFilter.eq(MongoFields.Id, userId.value.toString),
       MongoFilter.eq(MongoFields.Role, UserRole.Candidate.toString),
@@ -375,7 +375,7 @@ final class MongoUserRepository(
       MongoUpdate.set(MongoFields.UpdatedAt, now.toDate),
       MongoUpdate.inc(MongoFields.Version, 1L)
     )
-    RepositoryIO
+    RepositoryF
       .lift(MongoSessionOperations.updateOne(collection, session, filter, update))
       .subflatMap(MongoRepositorySupport.matchedOne(_))
       .flatMap(_ =>
@@ -392,7 +392,7 @@ final class MongoUserRepository(
       )
   }
 
-  override def listAccounts(page: UserPageRequest): RepositoryIO[List[User]] = {
+  override def listAccounts(page: UserPageRequest): RepositoryF[IO, List[User]] = {
     val filters = List(
       Some(MongoFilter.eq(MongoFields.AccountStatus, page.status.toString)),
       page.role.map(role => MongoFilter.eq(MongoFields.Role, role.toString)),
@@ -410,7 +410,7 @@ final class MongoUserRepository(
       now: Instant,
       tombstone: String,
       context: MutationWriteContext
-  ): RepositoryIO[Unit] =
+  ): RepositoryF[IO, Unit] =
     MongoMutationWriteContext
       .run(context, transactionRunner, transactionRequired = true) { session =>
         deleteAccountWithSession(userId, now, tombstone, session)
@@ -426,7 +426,7 @@ final class MongoUserRepository(
       now: Instant,
       tombstone: String,
       session: Option[ClientSession[IO]]
-  ): RepositoryIO[Unit] = {
+  ): RepositoryF[IO, Unit] = {
     val userFilter =
       MongoFilter.and(
         MongoFilter.eq(MongoFields.Id, userId.value.toString),
@@ -448,7 +448,7 @@ final class MongoUserRepository(
       MongoUpdate.inc(MongoFields.Version, 1L)
     )
     val userWrite = MongoSessionOperations.updateOne(collection, session, userFilter, userUpdate)
-    RepositoryIO
+    RepositoryF
       .lift(userWrite)
       .subflatMap(MongoRepositorySupport.matchedOne(_))
       .flatMap(_ =>
@@ -462,7 +462,7 @@ final class MongoUserRepository(
       session: Option[ClientSession[IO]],
       userId: UserId,
       now: Instant
-  ): RepositoryIO[Unit] = {
+  ): RepositoryF[IO, Unit] = {
     val filter = MongoFilter.eq(MongoFields.Id, userId.value.toString)
     val update = MongoUpdate.combine(
       MongoUpdate.setOnInsert(MongoFields.Id, userId.value.toString),
@@ -471,7 +471,7 @@ final class MongoUserRepository(
     )
     val operation =
       MongoSessionOperations.updateOne(subjectFences, session, filter, update, new UpdateOptions().upsert(true))
-    RepositoryIO
+    RepositoryF
       .lift(operation)
       .void
       .pipe(effect =>
@@ -484,30 +484,32 @@ final class MongoUserRepository(
       userId: UserId,
       now: Instant,
       session: Option[ClientSession[IO]]
-  ): RepositoryIO[Unit] = {
+  ): RepositoryF[IO, Unit] = {
     val jobFilter = MongoFilter.and(
       MongoFilter.eq(MongoFields.RecruiterId, userId.value.toString),
       MongoFilter.eq(MongoFields.Status, JobStatus.Open.toString)
     )
     val jobs = Mongo4catsCollections.documents(database, MongoCollections.Jobs)
-    def closeJobs(afterId: Option[String]): RepositoryIO[Unit] = {
+    def closeJobs(afterId: Option[String]): RepositoryF[IO, Unit] = {
       val batchFilter =
         MongoFilter.and(List(Some(jobFilter), afterId.map(id => MongoFilter.gt(MongoFields.Id, id))).flatten*)
-      RepositoryIO
+      RepositoryF
         .lift(MongoSessionOperations.findManyById(jobs, session, batchFilter, MaxJobsClosedByAccountDeletion))
         .subflatMap(documents => MongoStoredDocumentDecoding.values(documents.map(MongoHiringCodecs.readVersionedJob)))
         .flatMap {
-          case Nil           => ().pure[RepositoryIO]
+          case Nil           => ().pure[[A] =>> RepositoryF[IO, A]]
           case versionedJobs =>
             val openJobs = versionedJobs.map(_.value)
             val closedJobs =
               openJobs.map(job => job.copy(status = JobStatus.Closed, closedAt = Some(now), updatedAt = now))
             val closeWrites = versionedJobs.zip(closedJobs).traverse_ { case (observed, closed) =>
               for {
-                nextVersion <- RepositoryIO.fromEither(
-                  Versioned.nextVersion(observed.version).toRight(RepositoryError.Conflict)
-                )
-                result <- RepositoryIO.lift(
+                nextVersion <- RepositoryF
+                  .at[IO]
+                  .fromEither(
+                    Versioned.nextVersion(observed.version).toRight(RepositoryError.Conflict)
+                  )
+                result <- RepositoryF.lift(
                   MongoSessionOperations.replaceOne(
                     jobs,
                     session,
@@ -518,7 +520,7 @@ final class MongoUserRepository(
                     MongoHiringCodecs.job(closed, nextVersion)
                   )
                 )
-                _ <- RepositoryIO.fromEither(MongoRepositorySupport.matchedOne(result))
+                _ <- RepositoryF.at[IO].fromEither(MongoRepositorySupport.matchedOne(result))
               } yield ()
             }
             val closeEvents = closedJobs.traverse { closed =>
@@ -531,7 +533,7 @@ final class MongoUserRepository(
               )
             }
             for {
-              validEvents <- RepositoryIO.fromEither(closeEvents.leftMap(_ => RepositoryError.InvalidEvent))
+              validEvents <- RepositoryF.at[IO].fromEither(closeEvents.leftMap(_ => RepositoryError.InvalidEvent))
               _ <- closeWrites
               _ <- MongoOperationalEventInsertion.insert(outbox, session, validEvents, now, diagnostics)
               _ <- closeJobs(Some(openJobs.last.id.value.toString))
@@ -547,11 +549,12 @@ object MongoUserRepository {
       database: MongoDatabase[IO],
       client: MongoClient[IO],
       embeddingWork: MongoEmbeddingWorkEnqueuer,
-      diagnostics: Diagnostics
+      diagnostics: Diagnostics[IO],
+      breaker: CircuitBreaker[IO] = CircuitBreaker.disabled[IO]
   ): MongoUserRepository =
     new MongoUserRepository(
       database,
-      MongoTransactionRunner.sessions(client, RepositoryError.Conflict, diagnostics = diagnostics),
+      MongoTransactionRunner.sessions(client, RepositoryError.Conflict, diagnostics = diagnostics, breaker = breaker),
       embeddingWork,
       diagnostics
     )

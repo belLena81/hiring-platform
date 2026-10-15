@@ -301,7 +301,7 @@ class SafeDiagnosticsSpec extends CatsEffectSuite {
 
   test("LOG-04 synchronous and effectful diagnostic failures are swallowed without swallowing cancellation") {
     val secret = new IllegalStateException("synthetic-sink-secret")
-    val throwing = new Diagnostics {
+    val throwing = new Diagnostics[IO] {
       def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]): IO[Unit] = throw secret
     }
     for {

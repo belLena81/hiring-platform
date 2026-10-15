@@ -1,5 +1,7 @@
 package com.example.graphQL.cats.service
 
+import cats.effect.IO
+
 import com.example.graphQL.cats.service.HiringReadService
 import com.example.graphQL.cats.service.port.{ApplicationRepository, JobRepository, LexicalJobMatcher, UserRepository}
 import com.example.graphQL.cats.service.application.ApplicationService
@@ -9,35 +11,38 @@ import com.example.graphQL.cats.service.search.{LexicalMatchLimit, TestEmbedding
 
 private[cats] object TestHiringServices {
   def job(
-      users: UserRepository,
-      jobs: JobRepository,
-      lexicalMatcher: Option[LexicalJobMatcher] = None,
+      users: UserRepository[IO],
+      jobs: JobRepository[IO],
+      lexicalMatcher: Option[LexicalJobMatcher[IO]] = None,
       lexicalFacetMatchLimit: LexicalMatchLimit = LexicalMatchLimit.Default,
       lexicalFacetDeadline: Option[scala.concurrent.duration.FiniteDuration] = None,
       clock: cats.effect.Clock[cats.effect.IO] = cats.effect.Clock[cats.effect.IO]
-  ): JobService =
+  ): JobService[IO] =
     new JobService(
       users,
       jobs,
       TestEmbeddingWorkPublisher.noop,
       TestIdempotency.noop,
       Diagnostics.noop,
+      clock,
+      cats.effect.std.UUIDGen[IO],
       lexicalMatcher = lexicalMatcher,
-      clock = clock,
       lexicalFacetMatchLimit = lexicalFacetMatchLimit,
       lexicalFacetDeadline = lexicalFacetDeadline
     )
 
   def applications(
-      users: UserRepository,
-      jobs: JobRepository,
-      applications: ApplicationRepository
-  ): ApplicationService =
+      users: UserRepository[IO],
+      jobs: JobRepository[IO],
+      applications: ApplicationRepository[IO]
+  ): ApplicationService[IO] =
     new ApplicationService(
       users,
       jobs,
       applications,
       HiringReadService(users, jobs, applications),
-      TestIdempotency.noop
+      TestIdempotency.noop,
+      cats.effect.Clock[IO],
+      cats.effect.std.UUIDGen[IO]
     )
 }

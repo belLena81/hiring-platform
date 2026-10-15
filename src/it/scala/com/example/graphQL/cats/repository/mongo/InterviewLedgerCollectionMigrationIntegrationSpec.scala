@@ -18,7 +18,7 @@ final class InterviewLedgerCollectionMigrationIntegrationSpec extends MongoInteg
   private val ledgerId = MigrationIds.InterviewLedgerCollections.value
 
   private def initialize(database: MongoDatabase[IO]): IO[Unit] =
-    MongoHiringSetup.initialize(database, Diagnostics.noop)
+    MongoHiringSetup.initialize(database, Diagnostics.noop[IO])
 
   private def present(database: MongoDatabase[IO], names: List[String]): IO[Set[String]] =
     MongoHiringSetup.setupDatabase(database).flatMap(MongoHiringValidators.collectionOptions(_, names)).map(_.keySet)

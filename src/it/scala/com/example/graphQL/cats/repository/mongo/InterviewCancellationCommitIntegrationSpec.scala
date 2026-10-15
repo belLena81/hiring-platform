@@ -44,7 +44,7 @@ final class InterviewCancellationCommitIntegrationSpec extends MongoIntegrationS
 
   private def arranged[A](held: InterviewInterval = interval)(use: Arrangement => IO[A]): IO[A] =
     mongoResource.use { fixture =>
-      val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
+      val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop[IO])
       val base = InterviewWorkflow
         .create(
           InterviewWorkflowId(UUID.randomUUID()),
@@ -58,7 +58,7 @@ final class InterviewCancellationCommitIntegrationSpec extends MongoIntegrationS
         )
         .fold(error => fail(s"invalid workflow $error"), identity)
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- InterviewSchedulingFixtures.seed(fixture.database, List(base), now)
         _ <- repository
           .create(

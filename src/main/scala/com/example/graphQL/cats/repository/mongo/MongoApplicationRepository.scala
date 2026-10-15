@@ -1,5 +1,7 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.service.resilience.CircuitBreaker
+
 import cats.effect.IO
 import cats.data.EitherT
 import cats.syntax.all.*
@@ -20,17 +22,17 @@ import com.example.graphQL.cats.service.read.HiringReadScope
 final class MongoApplicationRepository private (
     database: MongoDatabase[IO],
     transactionRunner: MongoTransactionRunner,
-    diagnostics: Diagnostics
-) extends ApplicationRepository {
+    diagnostics: Diagnostics[IO]
+) extends ApplicationRepository[IO] {
   private def collection = Mongo4catsCollections.documents(database, MongoCollections.Applications)
   private def events = Mongo4catsCollections.documents(database, MongoCollections.ApplicationEvents)
   private def jobs = Mongo4catsCollections.documents(database, MongoCollections.Jobs)
   private def outbox = Mongo4catsCollections.documents(database, MongoCollections.EventOutbox)
 
-  override def find(id: ApplicationId): RepositoryIO[Option[Application]] =
+  override def find(id: ApplicationId): RepositoryF[IO, Option[Application]] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "applications.find") {
-        RepositoryIO
+        RepositoryF
           .lift(MongoSessionOperations.findById(collection, None, id.value.toString))
           .subflatMap(document =>
             MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readApplication))
@@ -40,9 +42,9 @@ final class MongoApplicationRepository private (
   override def findByCandidate(
       scope: HiringReadScope,
       page: ApplicationPageRequest
-  ): RepositoryIO[List[Application]] = {
+  ): RepositoryF[IO, List[Application]] = {
     import MongoAuthorizedReadQueries.*
-    if (scope.role != UserRole.Candidate) RepositoryIO.pure(Nil)
+    if (scope.role != UserRole.Candidate) RepositoryF.at[IO].pure(Nil)
     else {
       val pipeline = List(matching(baseFilter(MongoFields.CandidateId, scope.userId.value.toString, page).bson)) ++
         actor(scope) ++ List(new Document("$sort", new Document(MongoFields.CreatedAt, -1).append(MongoFields.Id, -1)))
@@ -55,7 +57,7 @@ final class MongoApplicationRepository private (
       scope: HiringReadScope,
       jobId: JobId,
       page: ApplicationPageRequest
-  ): RepositoryIO[List[Application]] = {
+  ): RepositoryF[IO, List[Application]] = {
     import MongoAuthorizedReadQueries.*
     val inner = List(
       matching(baseFilter(MongoFields.JobId, jobId.value.toString, page).bson),
@@ -76,7 +78,7 @@ final class MongoApplicationRepository private (
       scope: HiringReadScope,
       applicationId: ApplicationId,
       page: ApplicationEventPageRequest
-  ): RepositoryIO[List[ApplicationEvent]] = {
+  ): RepositoryF[IO, List[ApplicationEvent]] = {
     import MongoAuthorizedReadQueries.*
     val inner = List(
       matching(eventFilter(applicationId, page).bson),
@@ -99,7 +101,7 @@ final class MongoApplicationRepository private (
       initialEvent: ApplicationEvent,
       operationalEvents: List[OperationalEventEnvelope],
       context: MutationWriteContext
-  ): RepositoryIO[Unit] =
+  ): RepositoryF[IO, Unit] =
     if (!isConsistentSubmit(observedJob, application, initialEvent))
       EitherT.leftT[IO, Unit](RepositoryError.Conflict)
     else
@@ -115,7 +117,7 @@ final class MongoApplicationRepository private (
       event: ApplicationEvent,
       operationalEvents: List[OperationalEventEnvelope],
       context: MutationWriteContext
-  ): RepositoryIO[Unit] =
+  ): RepositoryF[IO, Unit] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "applications.updateStatusWithContext") {
         MongoMutationWriteContext.run(context, transactionRunner, transactionRequired = true)(session =>
@@ -128,20 +130,18 @@ final class MongoApplicationRepository private (
       event: ApplicationEvent,
       operationalEvents: List[OperationalEventEnvelope],
       session: Option[ClientSession[IO]]
-  ): RepositoryIO[Unit] =
+  ): RepositoryF[IO, Unit] =
     val statusGuard = event.previousStatus
       .map(status => MongoFilter.eq(MongoFields.Status, status.toString))
       .getOrElse(MongoFilter.exists(MongoFields.Status))
     val filter = MongoFilter.and(MongoFilter.eq(MongoFields.Id, application.id.value.toString), statusGuard)
     for {
-      result <- RepositoryIO.lift(
+      result <- RepositoryF.lift(
         MongoSessionOperations.replaceOne(collection, session, filter, MongoHiringCodecs.application(application))
       )
-      _ <- RepositoryIO.fromEither(MongoRepositorySupport.matchedOne(result))
+      _ <- RepositoryF.at[IO].fromEither(MongoRepositorySupport.matchedOne(result))
       _ <- MongoRepositorySupport.repositoryGuard(diagnostics, "applications.insertStatusEvent") {
-        RepositoryIO
-          .lift(MongoApplicationEventInsertion.insert(events, session, event))
-          .void
+        RepositoryF.lift(MongoApplicationEventInsertion.insert(events, session, event)).void
       }(MongoErrors.duplicateAs(RepositoryError.Conflict))
       _ <- MongoOperationalEventInsertion.insert(outbox, session, operationalEvents, application.updatedAt, diagnostics)
     } yield ()
@@ -181,7 +181,7 @@ final class MongoApplicationRepository private (
       initialEvent: ApplicationEvent,
       operationalEvents: List[OperationalEventEnvelope],
       session: Option[ClientSession[IO]]
-  ): RepositoryIO[Unit] =
+  ): RepositoryF[IO, Unit] =
     val guardFilter = MongoFilter.and(
       MongoFilter.eq(MongoFields.Id, observedJob.id.value.toString),
       MongoFilter.eq(MongoFields.Version, observedJob.revision),
@@ -193,8 +193,8 @@ final class MongoApplicationRepository private (
       MongoUpdate.inc(MongoFields.Version, 1L)
     )
     val guard = MongoSessionOperations.updateOne(jobs, session, guardFilter, update)
-    RepositoryIO.lift(guard).flatMap { result =>
-      RepositoryIO.fromEither(MongoRepositorySupport.matchedOne(result)) *>
+    RepositoryF.lift(guard).flatMap { result =>
+      RepositoryF.at[IO].fromEither(MongoRepositorySupport.matchedOne(result)) *>
         insertApplicationAndEvent(session, application, initialEvent, operationalEvents)
     }
 
@@ -203,17 +203,15 @@ final class MongoApplicationRepository private (
       application: Application,
       initialEvent: ApplicationEvent,
       operationalEvents: List[OperationalEventEnvelope]
-  ): RepositoryIO[Unit] =
+  ): RepositoryF[IO, Unit] =
     for {
       _ <- MongoRepositorySupport.repositoryGuard(diagnostics, "applications.insert") {
-        RepositoryIO
+        RepositoryF
           .lift(MongoSessionOperations.insertOne(collection, session, MongoHiringCodecs.application(application)))
           .void
       }(MongoErrors.duplicateAs(RepositoryError.DuplicateApplication))
       _ <- MongoRepositorySupport.repositoryGuard(diagnostics, "applications.insertInitialEvent") {
-        RepositoryIO
-          .lift(MongoApplicationEventInsertion.insert(events, session, initialEvent))
-          .void
+        RepositoryF.lift(MongoApplicationEventInsertion.insert(events, session, initialEvent)).void
       }(MongoErrors.duplicateAs(RepositoryError.Conflict))
       _ <- MongoOperationalEventInsertion.insert(outbox, session, operationalEvents, application.createdAt, diagnostics)
     } yield ()
@@ -224,11 +222,13 @@ object MongoApplicationRepository {
   def transactional(
       database: MongoDatabase[IO],
       client: MongoClient[IO],
-      diagnostics: Diagnostics
+      diagnostics: Diagnostics[IO],
+      breaker: CircuitBreaker[IO] = CircuitBreaker.disabled[IO]
   ): MongoApplicationRepository =
     new MongoApplicationRepository(
       database,
-      MongoTransactionRunner.sessions(client, RepositoryError.DuplicateApplication, diagnostics = diagnostics),
+      MongoTransactionRunner
+        .sessions(client, RepositoryError.DuplicateApplication, diagnostics = diagnostics, breaker = breaker),
       diagnostics
     )
 }

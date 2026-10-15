@@ -37,118 +37,125 @@ final class MongoInterviewCommandQueue(
       now: Instant,
       leaseUntil: Instant,
       maxAttempts: Int
-  ): RepositoryIO[InterviewExecutionClaimOutcome] =
+  ): RepositoryF[IO, InterviewExecutionClaimOutcome] =
     if (workerId.isEmpty || workerId.length > 128 || !leaseUntil.isAfter(now) || maxAttempts <= 0)
-      RepositoryIO.raise(RepositoryError.InvalidEvent)
+      RepositoryF.at[IO].raise(RepositoryError.InvalidEvent)
     else
-      RepositoryIO.lift(uuids.randomUUID).flatMap { token =>
+      RepositoryF.lift(uuids.randomUUID).flatMap { token =>
         transactionRunner.run { session =>
           loadWorkflow(command.workflowId, session).flatMap {
             case None =>
-              (InterviewExecutionClaimOutcome.AlreadyHandled: InterviewExecutionClaimOutcome).pure[RepositoryIO]
+              (InterviewExecutionClaimOutcome.AlreadyHandled: InterviewExecutionClaimOutcome)
+                .pure[[A] =>> RepositoryF[IO, A]]
             case Some(workflow) =>
               for {
                 _ <- fenceParticipants(session, workflow)
-                current <- RepositoryIO.lift(
+                current <- RepositoryF.lift(
                   MongoSessionOperations.findById(commands, session, commandId(command.workflowId, command.stepId))
                 )
                 outcome <- current match {
                   case None =>
-                    (InterviewExecutionClaimOutcome.AlreadyHandled: InterviewExecutionClaimOutcome).pure[RepositoryIO]
+                    (InterviewExecutionClaimOutcome.AlreadyHandled: InterviewExecutionClaimOutcome)
+                      .pure[[A] =>> RepositoryF[IO, A]]
                   case Some(document) =>
-                    RepositoryIO.fromEither(MongoInterviewWorkflowCommandCodec.decode(document)).flatMap { stored =>
-                      InterviewExecutionPolicy.admission(workflow, stored) match {
-                        case InterviewExecutionAdmission.AlreadyHandled =>
-                          (InterviewExecutionClaimOutcome.AlreadyHandled: InterviewExecutionClaimOutcome)
-                            .pure[RepositoryIO]
-                        case InterviewExecutionAdmission.InspectLease => {
-                          RepositoryIO.fromEither(readLease(document)).flatMap { lease =>
-                            InterviewExecutionPolicy.lease(lease, now) match {
-                              case InterviewExecutionLeaseDisposition.Busy =>
-                                RepositoryIO.pure(InterviewExecutionClaimOutcome.Busy)
-                              case InterviewExecutionLeaseDisposition.Reconcile =>
-                                guardWrite(
-                                  commands,
-                                  session,
-                                  MongoFilter.and(
-                                    MongoFilter.eq(MongoFields.Id, commandId(stored.workflowId, stored.stepId)),
-                                    MongoFilter.eq(CommandStateField, InterviewWorkflowCommandState.Executing.toString),
-                                    MongoFilter.eq(Lease.owner, lease.owner),
-                                    MongoFilter.eq(Lease.token, lease.token.toString),
-                                    MongoFilter.lte(Lease.until, now.toDate),
-                                    MongoFilter.exists("result", false)
-                                  ),
-                                  MongoUpdate.combine(
-                                    MongoUpdate.set("result", InterviewResult.OutcomeUnknown.toString),
-                                    MongoUpdate
-                                      .set(CommandStateField, InterviewWorkflowCommandState.ResultPending.toString),
-                                    availableFrom(stored.command, now),
-                                    Lease.release
-                                  )
-                                )
-                                  .as(InterviewExecutionClaimOutcome.ReconciliationQueued)
-                            }
-                          }
-                        }
-                        case InterviewExecutionAdmission.CheckBudget => {
-                          executionAttemptCount(stored.workflowId, stored.command, session).flatMap { consumed =>
-                            InterviewExecutionPolicy.budget(stored, consumed, maxAttempts) match {
-                              case InterviewExecutionBudgetDisposition.RequireRepair =>
-                                applyRepair(
-                                  session,
-                                  workflow,
-                                  stored.command,
-                                  InterviewAdvanceCause.ExecutionExhausted(stored.stepId),
-                                  InterviewFailureCode.ExecutionExhausted,
-                                  now
-                                ).void *>
+                    RepositoryF.at[IO].fromEither(MongoInterviewWorkflowCommandCodec.decode(document)).flatMap {
+                      stored =>
+                        InterviewExecutionPolicy.admission(workflow, stored) match {
+                          case InterviewExecutionAdmission.AlreadyHandled =>
+                            (InterviewExecutionClaimOutcome.AlreadyHandled: InterviewExecutionClaimOutcome)
+                              .pure[[A] =>> RepositoryF[IO, A]]
+                          case InterviewExecutionAdmission.InspectLease => {
+                            RepositoryF.at[IO].fromEither(readLease(document)).flatMap { lease =>
+                              InterviewExecutionPolicy.lease(lease, now) match {
+                                case InterviewExecutionLeaseDisposition.Busy =>
+                                  RepositoryF.at[IO].pure(InterviewExecutionClaimOutcome.Busy)
+                                case InterviewExecutionLeaseDisposition.Reconcile =>
                                   guardWrite(
                                     commands,
                                     session,
                                     MongoFilter.and(
                                       MongoFilter.eq(MongoFields.Id, commandId(stored.workflowId, stored.stepId)),
+                                      MongoFilter
+                                        .eq(CommandStateField, InterviewWorkflowCommandState.Executing.toString),
+                                      MongoFilter.eq(Lease.owner, lease.owner),
+                                      MongoFilter.eq(Lease.token, lease.token.toString),
+                                      MongoFilter.lte(Lease.until, now.toDate),
+                                      MongoFilter.exists("result", false)
+                                    ),
+                                    MongoUpdate.combine(
+                                      MongoUpdate.set("result", InterviewResult.OutcomeUnknown.toString),
+                                      MongoUpdate
+                                        .set(CommandStateField, InterviewWorkflowCommandState.ResultPending.toString),
+                                      availableFrom(stored.command, now),
+                                      Lease.release
+                                    )
+                                  )
+                                    .as(InterviewExecutionClaimOutcome.ReconciliationQueued)
+                              }
+                            }
+                          }
+                          case InterviewExecutionAdmission.CheckBudget => {
+                            executionAttemptCount(stored.workflowId, stored.command, session).flatMap { consumed =>
+                              InterviewExecutionPolicy.budget(stored, consumed, maxAttempts) match {
+                                case InterviewExecutionBudgetDisposition.RequireRepair =>
+                                  applyRepair(
+                                    session,
+                                    workflow,
+                                    stored.command,
+                                    InterviewAdvanceCause.ExecutionExhausted(stored.stepId),
+                                    InterviewFailureCode.ExecutionExhausted,
+                                    now
+                                  ).void *>
+                                    guardWrite(
+                                      commands,
+                                      session,
+                                      MongoFilter.and(
+                                        MongoFilter.eq(MongoFields.Id, commandId(stored.workflowId, stored.stepId)),
+                                        MongoFilter.eq(CommandStateField, stored.state.toString)
+                                      ),
+                                      MongoUpdate.combine(
+                                        MongoUpdate
+                                          .set(
+                                            CommandStateField,
+                                            InterviewWorkflowCommandState.RepairRequired.toString
+                                          ),
+                                        MongoUpdate.set(FailureCodeField, InterviewFailureCode.ExecutionExhausted.wire),
+                                        Lease.release
+                                      )
+                                    )
+                                      .as(InterviewExecutionClaimOutcome.RepairRequired)
+                                case InterviewExecutionBudgetDisposition.Acquire(additional) =>
+                                  guardWrite(
+                                    commands,
+                                    session,
+                                    MongoFilter.and(
+                                      MongoFilter.eq(MongoFields.Id, commandId(stored.workflowId, stored.stepId)),
+                                      MongoFilter.eq(RevisionField, stored.revision),
                                       MongoFilter.eq(CommandStateField, stored.state.toString)
                                     ),
                                     MongoUpdate.combine(
                                       MongoUpdate
-                                        .set(CommandStateField, InterviewWorkflowCommandState.RepairRequired.toString),
-                                      MongoUpdate.set(FailureCodeField, InterviewFailureCode.ExecutionExhausted.wire),
-                                      Lease.release
+                                        .set(CommandStateField, InterviewWorkflowCommandState.Executing.toString),
+                                      MongoUpdate.set(Lease.owner, workerId),
+                                      MongoUpdate.set(Lease.token, token.toString),
+                                      MongoUpdate.set(Lease.until, leaseUntil.toDate),
+                                      MongoUpdate.inc("executionAttempts", additional)
                                     )
                                   )
-                                    .as(InterviewExecutionClaimOutcome.RepairRequired)
-                              case InterviewExecutionBudgetDisposition.Acquire(additional) =>
-                                guardWrite(
-                                  commands,
-                                  session,
-                                  MongoFilter.and(
-                                    MongoFilter.eq(MongoFields.Id, commandId(stored.workflowId, stored.stepId)),
-                                    MongoFilter.eq(RevisionField, stored.revision),
-                                    MongoFilter.eq(CommandStateField, stored.state.toString)
-                                  ),
-                                  MongoUpdate.combine(
-                                    MongoUpdate
-                                      .set(CommandStateField, InterviewWorkflowCommandState.Executing.toString),
-                                    MongoUpdate.set(Lease.owner, workerId),
-                                    MongoUpdate.set(Lease.token, token.toString),
-                                    MongoUpdate.set(Lease.until, leaseUntil.toDate),
-                                    MongoUpdate.inc("executionAttempts", additional)
-                                  )
-                                )
-                                  .as(
-                                    InterviewExecutionClaimOutcome.Acquired(
-                                      ClaimedInterviewWorkflowCommand(
-                                        stored.copy(executionAttempts = stored.executionAttempts + additional),
-                                        workerId,
-                                        token,
-                                        leaseUntil
+                                    .as(
+                                      InterviewExecutionClaimOutcome.Acquired(
+                                        ClaimedInterviewWorkflowCommand(
+                                          stored.copy(executionAttempts = stored.executionAttempts + additional),
+                                          workerId,
+                                          token,
+                                          leaseUntil
+                                        )
                                       )
                                     )
-                                  )
+                              }
                             }
                           }
                         }
-                      }
                     }
                 }
               } yield outcome
@@ -160,7 +167,7 @@ final class MongoInterviewCommandQueue(
       claim: ClaimedInterviewWorkflowCommand,
       generation: InterviewPublisherGeneration,
       now: Instant
-  ): RepositoryIO[Boolean] = transactionRunner.run { session =>
+  ): RepositoryF[IO, Boolean] = transactionRunner.run { session =>
     for {
       workflow <- loadWorkflow(claim.record.workflowId, session).orConflict
       _ <- fenceParticipants(session, workflow)
@@ -189,7 +196,7 @@ final class MongoInterviewCommandQueue(
             MongoProducerRegistrations
               .register(database, session, subject.value.toString, generation.transactionalId, "Interview", now)
           )
-        else ().pure[RepositoryIO]
+        else ().pure[[A] =>> RepositoryF[IO, A]]
     } yield valid
   }
 
@@ -198,7 +205,7 @@ final class MongoInterviewCommandQueue(
       workflow: InterviewWorkflow,
       record: InterviewWorkflowCommandRecord,
       maximumAttempts: Int
-  ): RepositoryIO[InterviewPublicationDisposition] = {
+  ): RepositoryF[IO, InterviewPublicationDisposition] = {
     def decide(applied: Boolean): InterviewPublicationDisposition =
       InterviewWorkflowPolicy.publicationDisposition(
         workflow,
@@ -211,11 +218,11 @@ final class MongoInterviewCommandQueue(
       )
     val preliminary = decide(false)
     if (record.result.isEmpty || preliminary == InterviewPublicationDisposition.Supersede)
-      RepositoryIO.pure(preliminary)
+      RepositoryF.at[IO].pure(preliminary)
     else {
       val commandId = StableIds.uuid(record.stepId)
       val resultId = StableIds.uuid(s"$commandId:result")
-      RepositoryIO
+      RepositoryF
         .lift(
           MongoSessionOperations.findById(inbox, session, s"${workflow.id.value}:$resultId")
         )
@@ -223,7 +230,7 @@ final class MongoInterviewCommandQueue(
     }
   }
 
-  def attemptCount(workflowId: InterviewWorkflowId, command: InterviewCommand): RepositoryIO[Long] =
+  def attemptCount(workflowId: InterviewWorkflowId, command: InterviewCommand): RepositoryF[IO, Long] =
     executionAttemptCount(workflowId, command, None)
 
   /** The stored kinds and extra identity that make up one retry budget. `None` means the command is never retried. */
@@ -269,9 +276,9 @@ final class MongoInterviewCommandQueue(
       workflowId: InterviewWorkflowId,
       command: InterviewCommand,
       session: Option[ClientSession[IO]]
-  ): RepositoryIO[Long] =
-    attemptScope(command).fold(RepositoryIO.fromEither[Long](Right(0L))) { case (kinds, scope) =>
-      RepositoryIO
+  ): RepositoryF[IO, Long] =
+    attemptScope(command).fold(RepositoryF.at[IO].fromEither[Long](Right(0L))) { case (kinds, scope) =>
+      RepositoryF
         .lift(
           MongoSessionOperations.findById(workflows, session, workflowId.value.toString)
         )
@@ -282,14 +289,14 @@ final class MongoInterviewCommandQueue(
             case Some(number: java.lang.Long) if number.longValue >= 0L => Right(number.longValue)
             case _                                                      => Left(RepositoryError.InvalidStoredData)
           }
-          RepositoryIO.fromEither(observedEpoch).flatMap { epoch =>
+          RepositoryF.at[IO].fromEither(observedEpoch).flatMap { epoch =>
             val filters = List(
               MongoFilter.eq(WorkflowIdField, workflowId.value.toString),
               MongoFilter.gte(RevisionField, epoch),
               MongoFilter.in(s"$CommandField.kind", kinds)
             ) ++ scope
             val filter = MongoFilter.and(filters*)
-            RepositoryIO.fromIOEither(commands.flatMap { collection =>
+            RepositoryF.fromFEither(commands.flatMap { collection =>
               val query =
                 session.fold(collection.find(filter.bson))(active => collection.find(active, filter.sessionFilter))
               query.boundedStream(32).compile.fold[Either[RepositoryError, Long]](Right(0L)) { (sum, row) =>
@@ -303,10 +310,10 @@ final class MongoInterviewCommandQueue(
         }
     }
 
-  def quarantine(identity: String, now: Instant): RepositoryIO[Unit] =
-    if (identity.isEmpty || identity.length > 256) RepositoryIO.raise(RepositoryError.InvalidEvent)
+  def quarantine(identity: String, now: Instant): RepositoryF[IO, Unit] =
+    if (identity.isEmpty || identity.length > 256) RepositoryF.at[IO].raise(RepositoryError.InvalidEvent)
     else
-      RepositoryIO
+      RepositoryF
         .lift(
           MongoSessionOperations.updateOne(
             inbox,
@@ -330,11 +337,11 @@ final class MongoInterviewCommandQueue(
       claim: ClaimedInterviewWorkflowCommand,
       result: InterviewResult,
       now: Instant
-  ): RepositoryIO[Unit] =
+  ): RepositoryF[IO, Unit] =
     transactionRunner.run { session =>
       val command = claim.record
       loadWorkflow(command.workflowId, session).flatMap {
-        case None           => ().pure[RepositoryIO]
+        case None           => ().pure[[A] =>> RepositoryF[IO, A]]
         case Some(workflow) =>
           fenceParticipants(session, workflow) *>
             guardWrite(
@@ -361,19 +368,21 @@ final class MongoInterviewCommandQueue(
   def findCommand(
       workflowId: InterviewWorkflowId,
       stepId: String
-  ): RepositoryIO[Option[InterviewWorkflowCommandRecord]] =
-    RepositoryIO
+  ): RepositoryF[IO, Option[InterviewWorkflowCommandRecord]] =
+    RepositoryF
       .lift(
         MongoSessionOperations.findById(commands, None, commandId(workflowId, stepId))
       )
-      .flatMap(_.traverse(document => RepositoryIO.fromEither(MongoInterviewWorkflowCommandCodec.decode(document))))
+      .flatMap(
+        _.traverse(document => RepositoryF.at[IO].fromEither(MongoInterviewWorkflowCommandCodec.decode(document)))
+      )
 
   def settleNotificationResult(
       record: InterviewWorkflowCommandRecord,
       settlement: InterviewNotificationSettlement,
       now: Instant
-  ): RepositoryIO[Boolean] =
-    if (!InterviewCommands.isInformational(record.command)) RepositoryIO.raise(RepositoryError.InvalidEvent)
+  ): RepositoryF[IO, Boolean] =
+    if (!InterviewCommands.isInformational(record.command)) RepositoryF.at[IO].raise(RepositoryError.InvalidEvent)
     else
       MongoRepositorySupport.repositoryGuard(diagnostics, "interviewWorkflow.settleNotificationResult") {
         val target = MongoFilter.and(
@@ -423,16 +432,16 @@ final class MongoInterviewCommandQueue(
           case InterviewNotificationSettlement.Exhausted(code) =>
             terminalCommand(InterviewWorkflowCommandState.RepairRequired, code, now)
         }
-        RepositoryIO
+        RepositoryF
           .lift(MongoSessionOperations.updateOne(commands, None, failedResult, update))
           .map(_.getMatchedCount == 1L)
       }
 
-  def deferExpiry(record: InterviewWorkflowCommandRecord, availableAt: Instant): RepositoryIO[Boolean] =
+  def deferExpiry(record: InterviewWorkflowCommandRecord, availableAt: Instant): RepositoryF[IO, Boolean] =
     record.command match {
       case InterviewLifecycleCommand.ExpireProposal(due) if !availableAt.isBefore(due) =>
         MongoRepositorySupport.repositoryGuard(diagnostics, "interviewWorkflow.deferExpiry") {
-          RepositoryIO
+          RepositoryF
             .lift(
               MongoSessionOperations.updateOne(
                 commands,
@@ -457,7 +466,7 @@ final class MongoInterviewCommandQueue(
             )
             .map(_.getMatchedCount == 1L)
         }
-      case _ => RepositoryIO.raise(RepositoryError.InvalidEvent)
+      case _ => RepositoryF.at[IO].raise(RepositoryError.InvalidEvent)
     }
 
   private val NotificationRepairLimit = 32
@@ -475,14 +484,16 @@ final class MongoInterviewCommandQueue(
 
   def findNotificationRepairs(
       workflowId: InterviewWorkflowId
-  ): RepositoryIO[List[InterviewWorkflowCommandRecord]] =
+  ): RepositoryF[IO, List[InterviewWorkflowCommandRecord]] =
     MongoRepositorySupport.repositoryGuard(diagnostics, "interviewWorkflow.findNotificationRepairs") {
-      RepositoryIO
+      RepositoryF
         .lift(
           MongoSessionOperations
             .findManyById(commands, None, notificationRepairFilter(workflowId), NotificationRepairLimit)
         )
-        .flatMap(_.traverse(document => RepositoryIO.fromEither(MongoInterviewWorkflowCommandCodec.decode(document))))
+        .flatMap(
+          _.traverse(document => RepositoryF.at[IO].fromEither(MongoInterviewWorkflowCommandCodec.decode(document)))
+        )
     }
 
   def repairNotifications(
@@ -490,19 +501,19 @@ final class MongoInterviewCommandQueue(
       requestKey: UUID,
       now: Instant,
       actorId: UserId
-  ): RepositoryIO[Int] =
+  ): RepositoryF[IO, Int] =
     MongoRepositorySupport.repositoryGuard(diagnostics, "interviewWorkflow.repairNotifications") {
       transactionRunner.run { session =>
         val receiptId = s"${workflowId.value}:repair-notifications:$requestKey"
-        RepositoryIO
+        RepositoryF
           .lift(MongoSessionOperations.findById(inbox, session, receiptId))
           .flatMap {
-            case Some(receipt) => RepositoryIO.fromEither(int32(receipt, "repaired"))
+            case Some(receipt) => RepositoryF.at[IO].fromEither(int32(receipt, "repaired"))
             case None          =>
               for {
                 workflow <- loadWorkflow(workflowId, session).orConflict
                 _ <- fenceParticipants(session, workflow)
-                rows <- RepositoryIO.lift(
+                rows <- RepositoryF.lift(
                   MongoSessionOperations
                     .findManyById(commands, session, notificationRepairFilter(workflowId), NotificationRepairLimit)
                 )
@@ -541,13 +552,13 @@ final class MongoInterviewCommandQueue(
       now: Instant,
       leaseUntil: Instant,
       limit: Int
-  ): RepositoryIO[List[ClaimedInterviewWorkflowCommand]] =
+  ): RepositoryF[IO, List[ClaimedInterviewWorkflowCommand]] =
     if (workerId.isEmpty || workerId.length > 128 || !leaseUntil.isAfter(now) || limit < 0 || limit > 64)
-      RepositoryIO.raise(RepositoryError.InvalidEvent)
-    else if (limit == 0) List.empty[ClaimedInterviewWorkflowCommand].pure[RepositoryIO]
+      RepositoryF.at[IO].raise(RepositoryError.InvalidEvent)
+    else if (limit == 0) List.empty[ClaimedInterviewWorkflowCommand].pure[[A] =>> RepositoryF[IO, A]]
     else
       claimOne(workerId, now, leaseUntil).flatMap {
-        case None        => List.empty[ClaimedInterviewWorkflowCommand].pure[RepositoryIO]
+        case None        => List.empty[ClaimedInterviewWorkflowCommand].pure[[A] =>> RepositoryF[IO, A]]
         case Some(claim) => claimDueCommands(workerId, now, leaseUntil, limit - 1).map(claim :: _)
       }
 
@@ -555,8 +566,8 @@ final class MongoInterviewCommandQueue(
       workerId: String,
       now: Instant,
       leaseUntil: Instant
-  ): RepositoryIO[Option[ClaimedInterviewWorkflowCommand]] =
-    RepositoryIO.lift(uuids.randomUUID).flatMap { token =>
+  ): RepositoryF[IO, Option[ClaimedInterviewWorkflowCommand]] =
+    RepositoryF.lift(uuids.randomUUID).flatMap { token =>
       val available = MongoFilter.and(
         MongoFilter.in(
           CommandStateField,
@@ -579,7 +590,7 @@ final class MongoInterviewCommandQueue(
           MongoFilter.or(available, expired),
           update,
           Sorts.ascending(MongoFields.AvailableAt, MongoFields.Id)
-        )(document => RepositoryIO.fromEither(readClaim(document)))
+        )(document => RepositoryF.at[IO].fromEither(readClaim(document)))
       }
     }
 
@@ -587,14 +598,14 @@ final class MongoInterviewCommandQueue(
       claim: ClaimedInterviewWorkflowCommand,
       now: Instant,
       leaseUntil: Instant
-  ): RepositoryIO[Boolean] =
-    if (!leaseUntil.isAfter(now)) RepositoryIO.raise(RepositoryError.InvalidEvent)
+  ): RepositoryF[IO, Boolean] =
+    if (!leaseUntil.isAfter(now)) RepositoryF.at[IO].raise(RepositoryError.InvalidEvent)
     else
       MongoRepositorySupport.repositoryGuard(diagnostics, "interviewWorkflow.renewPublication") {
         MongoLeaseQueue.renewHeld(commands, None, claimFilter(claim, now), leaseUntil, Lease.until)
       }
 
-  def markPublished(claim: ClaimedInterviewWorkflowCommand, publishedAt: Instant): RepositoryIO[Unit] =
+  def markPublished(claim: ClaimedInterviewWorkflowCommand, publishedAt: Instant): RepositoryF[IO, Unit] =
     transitionClaim(
       claim,
       MongoUpdate.combine(
@@ -615,7 +626,7 @@ final class MongoInterviewCommandQueue(
       now: Instant,
       availableAt: Instant,
       failureCode: InterviewFailureCode
-  ): RepositoryIO[Unit] =
+  ): RepositoryF[IO, Unit] =
     transitionClaim(
       claim,
       MongoUpdate.combine(
@@ -632,7 +643,7 @@ final class MongoInterviewCommandQueue(
       claim: ClaimedInterviewWorkflowCommand,
       now: Instant,
       failureCode: InterviewFailureCode
-  ): RepositoryIO[InterviewPublicationResolution] =
+  ): RepositoryF[IO, InterviewPublicationResolution] =
     transactionRunner.run { session =>
       for {
         workflow <- loadWorkflow(claim.record.workflowId, session).orConflict
@@ -704,16 +715,17 @@ final class MongoInterviewCommandQueue(
       cause: InterviewAdvanceCause,
       reason: InterviewFailureCode,
       now: Instant
-  ): RepositoryIO[RepairOutcome] = command match {
-    case _ if InterviewCommands.isInformational(command) => RepairOutcome.CommandOnly.pure[RepositoryIO]
+  ): RepositoryF[IO, RepairOutcome] = command match {
+    case _ if InterviewCommands.isInformational(command) => RepairOutcome.CommandOnly.pure[[A] =>> RepositoryF[IO, A]]
     case lifecycle: InterviewLifecycleCommand            =>
       // Expiry has no external effect: giving up on it expires the proposal (and, if that is no longer possible, only
       // marks the command), so a proposal is never left open by a failed expiry and the claimer is never starved.
       val event = InterviewCommands.giveUpEvent(lifecycle, reason, now)
       InterviewLifecyclePolicy.decide(workflow, workflow.revision, event) match {
-        case Left(_) if InterviewCommands.isExpiry(lifecycle) => RepairOutcome.CommandOnly.pure[RepositoryIO]
-        case Left(_)                                          => RepositoryIO.raise(RepositoryError.Conflict)
-        case Right(decision)                                  =>
+        case Left(_) if InterviewCommands.isExpiry(lifecycle) =>
+          RepairOutcome.CommandOnly.pure[[A] =>> RepositoryF[IO, A]]
+        case Left(_)         => RepositoryF.at[IO].raise(RepositoryError.Conflict)
+        case Right(decision) =>
           lifecycleStore
             .commitLifecycle(session, workflow, decision, event, InterviewLifecycleOrigin.Internal(cause), now, None)
             .as(if (InterviewCommands.isExpiry(lifecycle)) RepairOutcome.ProposalExpired else RepairOutcome.CommandOnly)
@@ -728,8 +740,9 @@ final class MongoInterviewCommandQueue(
       cause: InterviewAdvanceCause,
       reason: InterviewFailureCode,
       now: Instant
-  ): RepositoryIO[Unit] =
-    RepositoryIO
+  ): RepositoryF[IO, Unit] =
+    RepositoryF
+      .at[IO]
       .fromEither(
         InterviewWorkflow
           .decide(workflow, workflow.revision, InterviewWorkflowEvent.RetryExhausted(reason))
@@ -758,9 +771,9 @@ final class MongoInterviewCommandQueue(
       update: MongoUpdate,
       operation: String,
       now: Instant
-  ): RepositoryIO[Unit] =
+  ): RepositoryF[IO, Unit] =
     MongoRepositorySupport.repositoryGuard(diagnostics, operation) {
-      RepositoryIO
+      RepositoryF
         .lift(
           MongoSessionOperations
             .updateOne(commands, None, claimFilter(claim, now), update)

@@ -59,7 +59,7 @@ final class MongoCandidateResidenceIntegrityIntegrationSpec extends MongoIntegra
         _ <- ledger.insertOne(
           new Document("_id", legacyMigration).append("version", Long.box(1L)).append("state", "Complete")
         )
-        outcome <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop).attempt
+        outcome <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO]).attempt
         after <- users.find(Filters.eq("_id", row.getString("_id"))).first
       } yield {
         assert(outcome.isLeft)
@@ -222,7 +222,7 @@ final class MongoCandidateResidenceIntegrityIntegrationSpec extends MongoIntegra
         _ <- fixture.database.runCommand(
           new Document("collMod", MongoCollections.Users).append("validator", new Document())
         )
-        failed <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop).attempt
+        failed <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO]).attempt
         stillDrifted <- MongoHiringValidators.userValidatorMatches(database)
         proof <- database.getCollection(MongoCollections.HiringMigrationLedger).find(migration).first
       } yield {
@@ -255,12 +255,12 @@ final class MongoCandidateResidenceIntegrityIntegrationSpec extends MongoIntegra
           ledger = database.getCollection(MongoCollections.HiringMigrationLedger)
           _ <- users.insertMany(rows)
           failed <- MongoHiringMigrations
-            .initialize(database, resetOnStart = false, diagnostics = Diagnostics.noop)
+            .initialize(database, resetOnStart = false, diagnostics = Diagnostics.noop[IO])
             .attempt
           running <- ledger.find(legacyMarker).first
           beforeRepair <- users.find.sort(com.mongodb.client.model.Sorts.ascending("_id")).all
           _ <- users.replaceOne(Filters.eq("_id", rows.last.getString("_id")), candidate(500))
-          _ <- MongoHiringMigrations.initialize(database, resetOnStart = false, diagnostics = Diagnostics.noop)
+          _ <- MongoHiringMigrations.initialize(database, resetOnStart = false, diagnostics = Diagnostics.noop[IO])
           proof <- ledger.find(legacyMarker).first
           stored <- users.find.sort(com.mongodb.client.model.Sorts.ascending("_id")).all
           legacy <- users.find(Filters.eq("_id", rows.head.getString("_id"))).first

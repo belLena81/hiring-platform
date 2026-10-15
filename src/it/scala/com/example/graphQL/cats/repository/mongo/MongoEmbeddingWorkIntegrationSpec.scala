@@ -24,14 +24,14 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
       fixture.database -> MongoTransactionRunner.sessions(
         fixture.client,
         RepositoryError.Conflict,
-        diagnostics = Diagnostics.noop
+        diagnostics = Diagnostics.noop[IO]
       )
     }
 
-  private def successful[A](result: RepositoryIO[A]): IO[A] =
+  private def successful[A](result: RepositoryF[IO, A]): IO[A] =
     result.value.flatMap(_.fold(error => IO.raiseError(new AssertionError(s"Repository failure: $error")), IO.pure))
 
-  private def claimed(repository: EmbeddingWorkRepository, at: Instant): IO[ClaimedEmbeddingWork] =
+  private def claimed(repository: EmbeddingWorkRepository[IO], at: Instant): IO[ClaimedEmbeddingWork] =
     successful(repository.claim("worker", at, at.plusSeconds(30)))
       .flatMap(IO.fromOption(_)(new AssertionError("Expected durable claim")))
 
@@ -42,7 +42,7 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
 
   test("deletion removes candidate embeddings and rejects stale and fresh deleted-account writes") {
     database.use { case (db, transactions) =>
-      val users = new MongoUserRepository(db, transactions, MongoEmbeddingWorkEnqueuer.disabled, Diagnostics.noop)
+      val users = new MongoUserRepository(db, transactions, MongoEmbeddingWorkEnqueuer.disabled, Diagnostics.noop[IO])
       val id = UserId(UUID.randomUUID())
       val embedding = EntityEmbedding(List(0.1f), EmbeddingMeta("voyage-4-lite", "candidate-source", now))
       val user = User(
@@ -76,9 +76,9 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
 
   test("deletion during an in-flight provider call leaves a raw embedding-free tombstone") {
     database.use { case (db, transactions) =>
-      val users = new MongoUserRepository(db, transactions, MongoEmbeddingWorkEnqueuer.disabled, Diagnostics.noop)
-      val jobs = new MongoJobRepository(db, transactions, MongoEmbeddingWorkEnqueuer.disabled, Diagnostics.noop)
-      val work = new MongoEmbeddingWorkRepository(db, Diagnostics.noop)
+      val users = new MongoUserRepository(db, transactions, MongoEmbeddingWorkEnqueuer.disabled, Diagnostics.noop[IO])
+      val jobs = new MongoJobRepository(db, transactions, MongoEmbeddingWorkEnqueuer.disabled, Diagnostics.noop[IO])
+      val work = new MongoEmbeddingWorkRepository(db, Diagnostics.noop[IO])
       val id = UserId(UUID.randomUUID())
       val user = User(
         id,
@@ -94,12 +94,12 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
         _ <- successful(work.enqueue(key, now))
         started <- Deferred[IO, Unit]
         release <- Deferred[IO, Unit]
-        provider = new EmbeddingService {
+        provider = new EmbeddingService[IO] {
           def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] =
             (started.complete(()).void *> release.get).as(Right(EmbeddingVector(List(0.1f), "voyage-4-lite", 1)))
         }
         _ <- com.example.graphQL.cats.service.search.EmbeddingPipeline
-          .resource(
+          .resource[IO](
             work,
             users,
             jobs,
@@ -110,7 +110,7 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
             1,
             10.millis,
             30.seconds,
-            diagnostics = Diagnostics.noop
+            diagnostics = Diagnostics.noop[IO]
           )
           .use { publisher =>
             publisher.wake *> started.get *>
@@ -153,26 +153,27 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
           fixture.database,
           fixture.client,
           MongoEmbeddingWorkEnqueuer.disabled,
-          Diagnostics.noop
+          Diagnostics.noop[IO]
         )
         val jobs = MongoJobRepository.transactional(
           fixture.database,
           fixture.client,
           MongoEmbeddingWorkEnqueuer.disabled,
-          Diagnostics.noop
+          Diagnostics.noop[IO]
         )
-        val applications = MongoApplicationRepository.transactional(fixture.database, fixture.client, Diagnostics.noop)
-        val workflows = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
-        val scheduling = new com.example.graphQL.cats.service.application.InterviewSchedulingService(
+        val applications =
+          MongoApplicationRepository.transactional(fixture.database, fixture.client, Diagnostics.noop[IO])
+        val workflows = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop[IO])
+        val scheduling = new com.example.graphQL.cats.service.application.InterviewSchedulingService[IO](
           users,
           jobs,
           applications,
           workflows,
           5.minutes
         )
-        val work = new MongoEmbeddingWorkRepository(fixture.database, Diagnostics.noop)
+        val work = new MongoEmbeddingWorkRepository(fixture.database, Diagnostics.noop[IO])
         for {
-          _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+          _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
           _ <- InterviewSchedulingFixtures.seed(fixture.database, List(workflow), at)
           application <- successful(applications.find(workflow.applicationId))
             .flatMap(IO.fromOption(_)(new AssertionError("Missing application")))
@@ -183,7 +184,7 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
           started <- Deferred[IO, Unit]
           release <- Deferred[IO, Unit]
           calls <- Ref.of[IO, Int](0)
-          provider = new EmbeddingService {
+          provider = new EmbeddingService[IO] {
             def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] =
               calls
                 .updateAndGet(_ + 1)
@@ -199,7 +200,7 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
           key = com.example.graphQL.cats.service.search.EmbeddingWorkKeys.keyFor(changed)
           _ <- successful(work.enqueue(key, at))
           _ <- com.example.graphQL.cats.service.search.EmbeddingPipeline
-            .resource(
+            .resource[IO](
               work,
               users,
               jobs,
@@ -210,7 +211,7 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
               1,
               10.millis,
               30.seconds,
-              diagnostics = Diagnostics.noop,
+              diagnostics = Diagnostics.noop[IO],
               durableRetry = new com.example.graphQL.cats.service.search.DurableRetrySettings(8, 10.millis, 20.millis)
             )
             .use { publisher =>
@@ -262,8 +263,8 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
 
   test("singleton Admin can inspect and CAS-repair failed work; other actors and stale generations cannot") {
     database.use { case (db, transactions) =>
-      val users = new MongoUserRepository(db, transactions, MongoEmbeddingWorkEnqueuer.disabled, Diagnostics.noop)
-      val work = new MongoEmbeddingWorkRepository(db, Diagnostics.noop)
+      val users = new MongoUserRepository(db, transactions, MongoEmbeddingWorkEnqueuer.disabled, Diagnostics.noop[IO])
+      val work = new MongoEmbeddingWorkRepository(db, Diagnostics.noop[IO])
       val admin = User(UserId(UUID.randomUUID()), None, "Admin", UserRole.Admin, None, now, adminSingleton = true)
       val candidate = User(
         UserId(UUID.randomUUID()),
@@ -299,7 +300,7 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
 
   test("renewal requires a live matching generation and token") {
     database.use { case (db, _) =>
-      val work = new MongoEmbeddingWorkRepository(db, Diagnostics.noop)
+      val work = new MongoEmbeddingWorkRepository(db, Diagnostics.noop[IO])
       val key = EmbeddingWorkKey(EmbeddingWorkKind.Job, UUID.randomUUID().toString)
       for {
         _ <- successful(work.enqueue(key, now))
@@ -320,7 +321,7 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
 
   test("a lease is reclaimable at exactly its expiry instant and held one millisecond earlier") {
     database.use { case (db, _) =>
-      val work = new MongoEmbeddingWorkRepository(db, Diagnostics.noop)
+      val work = new MongoEmbeddingWorkRepository(db, Diagnostics.noop[IO])
       val key = EmbeddingWorkKey(EmbeddingWorkKind.Job, UUID.randomUUID().toString)
       val leaseUntil = now.plusSeconds(30)
       for {
@@ -342,7 +343,7 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
 
   test("active embedding work can be enqueued transactionally without replacing its lease") {
     database.use { case (db, transactions) =>
-      val repository = new MongoEmbeddingWorkRepository(db, Diagnostics.noop)
+      val repository = new MongoEmbeddingWorkRepository(db, Diagnostics.noop[IO])
       val key = EmbeddingWorkKey(EmbeddingWorkKind.Job, UUID.randomUUID().toString)
       for {
         _ <- successful(repository.enqueue(key, now))
@@ -361,7 +362,7 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
 
   test("generation and reclaimed lease token fence old completion retry and failure") {
     database.use { case (db, _) =>
-      val repository = new MongoEmbeddingWorkRepository(db, Diagnostics.noop)
+      val repository = new MongoEmbeddingWorkRepository(db, Diagnostics.noop[IO])
       val key = EmbeddingWorkKey(EmbeddingWorkKind.CandidateProfile, UUID.randomUUID().toString)
       for {
         _ <- successful(repository.enqueue(key, now))
@@ -394,7 +395,7 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
 
   test("failed and delayed work reset to ready and clear terminal metadata") {
     database.use { case (db, transactions) =>
-      val repository = new MongoEmbeddingWorkRepository(db, Diagnostics.noop)
+      val repository = new MongoEmbeddingWorkRepository(db, Diagnostics.noop[IO])
       val key = EmbeddingWorkKey(EmbeddingWorkKind.Job, UUID.randomUUID().toString)
       for {
         _ <- successful(transactions.run(session => repository.enqueue(session, key, now)))
@@ -421,9 +422,9 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
 
   test("job and candidate mutations commit newer source and work while provider claims remain active") {
     database.use { case (db, transactions) =>
-      val work = new MongoEmbeddingWorkRepository(db, Diagnostics.noop)
-      val jobs = new MongoJobRepository(db, transactions, work, Diagnostics.noop)
-      val users = new MongoUserRepository(db, transactions, work, Diagnostics.noop)
+      val work = new MongoEmbeddingWorkRepository(db, Diagnostics.noop[IO])
+      val jobs = new MongoJobRepository(db, transactions, work, Diagnostics.noop[IO])
+      val users = new MongoUserRepository(db, transactions, work, Diagnostics.noop[IO])
       val jobId = JobId(UUID.randomUUID())
       val candidateId = UserId(UUID.randomUUID())
       val job = Job(

@@ -4,6 +4,16 @@ import cats.effect.{Clock, IO, Resource}
 import cats.effect.std.UUIDGen
 import cats.syntax.all.*
 import com.example.graphQL.cats.config.KafkaConfig
+import com.example.graphQL.cats.domain.policy.CircuitBreakerPolicy
+import org.apache.kafka.common.errors.{
+  AuthorizationException,
+  BrokerNotAvailableException,
+  InvalidTopicException,
+  RecordTooLargeException,
+  RetriableException,
+  SerializationException
+}
+import com.example.graphQL.cats.service.resilience.CircuitBreaker
 import com.example.graphQL.cats.service.port.{
   ClaimedOperationalEvent,
   ConsumerReceiptRepository,
@@ -11,7 +21,7 @@ import com.example.graphQL.cats.service.port.{
   EventQuarantineRepository,
   OperationalEventFailureCategory,
   OperationalEventOutboxRepository,
-  RepositoryIO
+  RepositoryF
 }
 import com.example.graphQL.cats.service.{BackgroundWorker, Diagnostics, LogEvent, LogFields}
 import com.example.graphQL.cats.service.Diagnostics.*
@@ -32,16 +42,17 @@ object OperationalEventKafkaRuntime {
 
   def resource(
       config: KafkaConfig,
-      outbox: OperationalEventOutboxRepository,
-      receipts: ConsumerReceiptRepository,
-      quarantine: EventQuarantineRepository,
-      diagnostics: Diagnostics,
+      outbox: OperationalEventOutboxRepository[IO],
+      receipts: ConsumerReceiptRepository[IO],
+      quarantine: EventQuarantineRepository[IO],
+      diagnostics: Diagnostics[IO],
       clock: Clock[IO] = Clock[IO],
-      uuidGen: UUIDGen[IO] = UUIDGen[IO]
+      uuidGen: UUIDGen[IO] = UUIDGen[IO],
+      breaker: CircuitBreaker[IO] = CircuitBreaker.disabled[IO]
   ): Resource[IO, Unit] =
     if (!config.enabled) Resource.unit
     else {
-      val publisher = publisherResource(config, outbox, diagnostics, clock, uuidGen)
+      val publisher = publisherResource(config, outbox, diagnostics, clock, uuidGen, breaker)
       val consumer =
         if (config.consumer.enabled) consumerResource(config, receipts, quarantine, diagnostics, clock)
         else Resource.unit
@@ -50,10 +61,11 @@ object OperationalEventKafkaRuntime {
 
   private def publisherResource(
       config: KafkaConfig,
-      outbox: OperationalEventOutboxRepository,
-      diagnostics: Diagnostics,
+      outbox: OperationalEventOutboxRepository[IO],
+      diagnostics: Diagnostics[IO],
       clock: Clock[IO],
-      uuidGen: UUIDGen[IO]
+      uuidGen: UUIDGen[IO],
+      breaker: CircuitBreaker[IO]
   ): Resource[IO, Unit] = {
     val settings = KafkaClientSettings.producer(
       config.bootstrapServers,
@@ -78,7 +90,7 @@ object OperationalEventKafkaRuntime {
               diagnostics,
               Stream
                 .awakeEvery[IO](config.publisher.pollIntervalMillis.millis)
-                .evalMap(_ => publishBatch(config, outbox, diagnostics, transactionalId, producer, clock)),
+                .evalMap(_ => publishBatch(config, outbox, diagnostics, transactionalId, producer, clock, breaker)),
               config.publisher.retryDelaySeconds.seconds,
               stopRetrying = KafkaRuntimeSupport.isProducerFenced,
               maxDelay = config.restartMaxDelaySeconds.seconds
@@ -97,30 +109,72 @@ object OperationalEventKafkaRuntime {
 
   private def publishBatch(
       config: KafkaConfig,
-      outbox: OperationalEventOutboxRepository,
-      diagnostics: Diagnostics,
+      outbox: OperationalEventOutboxRepository[IO],
+      diagnostics: Diagnostics[IO],
       transactionalId: String,
       producer: TransactionalKafkaProducer.WithoutOffsets[IO, String, Array[Byte]],
-      clock: Clock[IO]
+      clock: Clock[IO],
+      breaker: CircuitBreaker[IO]
   ): IO[Unit] =
     publishWaves(config.publisher.batchSize) { limit =>
-      clock.realTimeInstant.flatMap { now =>
-        requireOutboxSuccess(
-          outbox.claim(
-            config.publisher.workerId,
-            transactionalId,
-            now,
-            now.plusSeconds(config.publisher.leaseSeconds.toLong),
-            limit
+      claimWithin(breaker, limit) { allowed =>
+        clock.realTimeInstant.flatMap { now =>
+          requireOutboxSuccess(
+            outbox.claim(
+              config.publisher.workerId,
+              transactionalId,
+              now,
+              now.plusSeconds(config.publisher.leaseSeconds.toLong),
+              allowed
+            )
           )
-        )
+        }
       }
     } { claim =>
       val record = ProducerRecord(config.topic, claim.partitionKey, claim.envelopeBytes)
       publishClaim(config, outbox, diagnostics, claim, clock)(
-        producer.produceWithoutOffsets(ProducerRecords.one(record)).void
+        guardedSend(breaker, producer.produceWithoutOffsets(ProducerRecords.one(record)).void)
       )
     }
+
+  /** While the breaker is open nothing is claimed, so outbox rows stay untouched until a probe is allowed; probing
+    * claims a single event.
+    */
+  private[kafka] def claimWithin(breaker: CircuitBreaker[IO], limit: Int)(
+      claim: Int => IO[List[ClaimedOperationalEvent]]
+  ): IO[List[ClaimedOperationalEvent]] =
+    breaker.admittedState.flatMap {
+      case None                                       => IO.pure(Nil)
+      case Some(CircuitBreakerPolicy.State.Closed(_)) => claim(limit)
+      case Some(_)                                    => claim(1)
+    }
+
+  /** Transport and broker-availability failures only: timeouts, network and disconnect errors, leader changes and other
+    * retriable broker errors. Per-record (too large, serialization, invalid topic), authorization and fencing errors
+    * say nothing about the broker, and one poison event must not open the breaker for all publication.
+    */
+  private[kafka] def isBrokerUnavailable(error: Throwable): Boolean = {
+    val chain = CauseChain(error).toList
+    val perRecordOrAuthorization = chain.exists {
+      case _: RecordTooLargeException | _: SerializationException | _: InvalidTopicException |
+          _: AuthorizationException =>
+        true
+      case _ => false
+    }
+    val transport = chain.exists {
+      case _: RetriableException | _: BrokerNotAvailableException | _: java.util.concurrent.TimeoutException |
+          _: java.io.IOException =>
+        true
+      case _ => false
+    }
+    !KafkaRuntimeSupport.isProducerFenced(error) && !perRecordOrAuthorization && transport
+  }
+
+  /** Send failures count only when they show the broker is unavailable. */
+  private[kafka] def guardedSend(breaker: CircuitBreaker[IO], send: IO[Unit]): IO[Unit] =
+    breaker
+      .protect(send)(CircuitBreaker.classifier[IO, Unit](isBrokerUnavailable))
+      .flatMap(_.fold(_ => IO.raiseError(PublisherBreakerOpen), IO.pure))
 
   /** Claim only work that can start its lease heartbeat immediately. Kafka owns transaction serialization. */
   private[kafka] def publishWaves(batchSize: Int)(
@@ -142,8 +196,8 @@ object OperationalEventKafkaRuntime {
 
   private[kafka] def publishClaim(
       config: KafkaConfig,
-      outbox: OperationalEventOutboxRepository,
-      diagnostics: Diagnostics,
+      outbox: OperationalEventOutboxRepository[IO],
+      diagnostics: Diagnostics[IO],
       claim: ClaimedOperationalEvent,
       clock: Clock[IO] = Clock[IO]
   )(send: IO[Unit]): IO[Unit] = {
@@ -177,6 +231,18 @@ object OperationalEventKafkaRuntime {
           )
         case Left(error) if KafkaRuntimeSupport.isProducerFenced(error) =>
           IO.raiseError(ProducerGenerationFenced(error))
+        case Left(PublisherBreakerOpen) =>
+          // Never sent: not a delivery attempt that can exhaust the event, so it is only released.
+          clock.realTimeInstant.flatMap(releasedAt =>
+            requireOutboxSuccess(
+              outbox.releaseForRetry(
+                claim.event.eventId,
+                claim.leaseToken,
+                releasedAt,
+                releasedAt.plusSeconds(config.publisher.retryDelaySeconds.toLong)
+              )
+            )
+          )
         case Left(error) =>
           diagnostics.emit(LogEvent.RuntimeFailed, fields = LogFields.failure(error)) *> clock.realTimeInstant
             .flatMap { failedAt =>
@@ -197,7 +263,7 @@ object OperationalEventKafkaRuntime {
       }
   }
 
-  private def requireOutboxSuccess[A](result: RepositoryIO[A]): IO[A] =
+  private def requireOutboxSuccess[A](result: RepositoryF[IO, A]): IO[A] =
     result.leftMap(error => OutboxOperationFailed(error.toString)).rethrowT
 
   /** Operational facts may arrive out of order; Kafka preserves append order within each partition. */
@@ -208,9 +274,9 @@ object OperationalEventKafkaRuntime {
 
   private[kafka] def consumerResource(
       config: KafkaConfig,
-      receipts: ConsumerReceiptRepository,
-      quarantine: EventQuarantineRepository,
-      diagnostics: Diagnostics,
+      receipts: ConsumerReceiptRepository[IO],
+      quarantine: EventQuarantineRepository[IO],
+      diagnostics: Diagnostics[IO],
       clock: Clock[IO] = Clock[IO]
   ): Resource[IO, Unit] = {
     val settings = KafkaClientSettings.committedConsumer(
@@ -254,15 +320,15 @@ object OperationalEventKafkaRuntime {
   /** Makes the record durable (receipt, or quarantine when malformed); a repository failure stays typed. */
   private[kafka] def recordDurably(
       config: KafkaConfig,
-      receipts: ConsumerReceiptRepository,
-      quarantine: EventQuarantineRepository,
+      receipts: ConsumerReceiptRepository[IO],
+      quarantine: EventQuarantineRepository[IO],
       topic: String,
       partition: Int,
       offset: Long,
       bytes: Option[Array[Byte]],
       clock: Clock[IO] = Clock[IO]
-  ): RepositoryIO[Unit] =
-    RepositoryIO.lift(clock.realTimeInstant).flatMap { now =>
+  ): RepositoryF[IO, Unit] =
+    RepositoryF.lift(clock.realTimeInstant).flatMap { now =>
       bytes.toRight("MalformedEnvelope").flatMap(OperationalEventJson.decode) match {
         case Left(_) =>
           quarantine.save(
@@ -299,6 +365,10 @@ object OperationalEventKafkaRuntime {
 
   private final case class OutboxOperationFailed(reason: String)
       extends RuntimeException(s"outbox operation failed: $reason")
+      with NoStackTrace
+
+  private case object PublisherBreakerOpen
+      extends RuntimeException("publisher circuit breaker is open")
       with NoStackTrace
 
   private final case class ProducerGenerationFenced(cause: Throwable)

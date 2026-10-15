@@ -25,7 +25,7 @@ import com.example.graphQL.cats.service.port.{
   EmbeddingInput,
   EmbeddingService,
   EmbeddingVector,
-  RepositoryIO,
+  RepositoryF,
   SemanticSearchRepository
 }
 import com.example.graphQL.cats.service.ServiceFixtures.{InMemoryApplications, InMemoryJobs, InMemoryUsers}
@@ -35,7 +35,7 @@ import com.example.graphQL.cats.service.protocol.{
   IdempotencyRequest,
   LoginInput,
   SignUpInput,
-  UseCaseIO
+  UseCaseF
 }
 import com.example.graphQL.cats.service.search.SemanticSearchService
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
@@ -150,11 +150,11 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
   }
 
   test("HAL-03.4 analytics report failures use a sanitized analytics error") {
-    val reporting = new AnalyticsReportingUseCases {
+    val reporting = new AnalyticsReportingUseCases[IO] {
       override def report(
           actor: ActorContext,
           period: com.example.graphQL.cats.service.AnalyticsPeriod
-      ): UseCaseIO[com.example.graphQL.cats.service.AnalyticsReportSnapshot] =
+      ): UseCaseF[IO, com.example.graphQL.cats.service.AnalyticsReportSnapshot] =
         EitherT.leftT(UseCaseError.Analytics(AnalyticsError.ReportsUnavailable))
     }
     val query =
@@ -173,11 +173,11 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
   test("HAL-03.5 an active Admin can read a published report with its asOf timestamp") {
     val asOf = Instant.parse("2026-09-17T08:00:00Z")
     val snapshot = AnalyticsReportSnapshot(asOf, Nil, None, Nil)
-    val reporting = new AnalyticsReportingUseCases {
+    val reporting = new AnalyticsReportingUseCases[IO] {
       override def report(
           actor: ActorContext,
           period: com.example.graphQL.cats.service.AnalyticsPeriod
-      ): UseCaseIO[AnalyticsReportSnapshot] = EitherT.rightT(snapshot)
+      ): UseCaseF[IO, AnalyticsReportSnapshot] = EitherT.rightT(snapshot)
     }
     val query =
       """query { analyticsReport(from: "2026-09-16T00:00:00Z", to: "2026-09-17T00:00:00Z") { asOf } }"""
@@ -202,8 +202,8 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       |} }""".stripMargin
 
   private def coverageService(
-      users: com.example.graphQL.cats.service.port.UserRepository
-  ): EmbeddingCoverageUseCases = {
+      users: com.example.graphQL.cats.service.port.UserRepository[IO]
+  ): EmbeddingCoverageUseCases[IO] = {
     import com.example.graphQL.cats.service.search.*
     val tally = EmbeddingCoverageTally.empty.add(
       EmbeddingCoverageEntity(
@@ -216,19 +216,25 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       Some("model-a"),
       now
     )
-    val repository = new com.example.graphQL.cats.service.port.EmbeddingCoverageRepository {
-      override def observe(request: EmbeddingCoverageScanRequest): RepositoryIO[EmbeddingCoverageObservation] =
-        RepositoryIO.fromEither(
-          Right(
-            EmbeddingCoverageObservation(
-              tally,
-              List(
-                EmbeddingCoverageKindObservation(com.example.graphQL.cats.service.port.EmbeddingWorkKind.Job, 1L, false)
-              ),
-              EmbeddingQueueObservation(false, 0L, None)
+    val repository = new com.example.graphQL.cats.service.port.EmbeddingCoverageRepository[IO] {
+      override def observe(request: EmbeddingCoverageScanRequest): RepositoryF[IO, EmbeddingCoverageObservation] =
+        RepositoryF
+          .at[IO]
+          .fromEither(
+            Right(
+              EmbeddingCoverageObservation(
+                tally,
+                List(
+                  EmbeddingCoverageKindObservation(
+                    com.example.graphQL.cats.service.port.EmbeddingWorkKind.Job,
+                    1L,
+                    false
+                  )
+                ),
+                EmbeddingQueueObservation(false, 0L, None)
+              )
             )
           )
-        )
     }
     EmbeddingCoverageService.live(
       users,
@@ -301,11 +307,11 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     val adminActor = Some(ActorContext(adminId, UserRole.Admin))
     for {
       calls <- Ref.of[IO, Int](0)
-      repository = new com.example.graphQL.cats.service.port.EmbeddingCoverageRepository {
+      repository = new com.example.graphQL.cats.service.port.EmbeddingCoverageRepository[IO] {
         override def observe(
             request: com.example.graphQL.cats.service.search.EmbeddingCoverageScanRequest
-        ): RepositoryIO[com.example.graphQL.cats.service.search.EmbeddingCoverageObservation] =
-          RepositoryIO.lift(
+        ): RepositoryF[IO, com.example.graphQL.cats.service.search.EmbeddingCoverageObservation] =
+          RepositoryF.lift(
             calls
               .update(_ + 1)
               .as(
@@ -317,7 +323,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
               )
           )
       }
-      service = (users: com.example.graphQL.cats.service.port.UserRepository) =>
+      service = (users: com.example.graphQL.cats.service.port.UserRepository[IO]) =>
         EmbeddingCoverageService.live(
           users,
           repository,
@@ -1347,12 +1353,12 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       query: String,
       actor: Option[ActorContext],
       users: List[User],
-      accountService: AccountUseCases = TestGraphQLSupport.accountService,
+      accountService: AccountUseCases[IO] = TestGraphQLSupport.accountService,
       variables: Json = Json.obj(),
       hiringReady: IO[ProbeResult] = IO.pure(ProbeResult.Ready),
-      analyticsReporting: AnalyticsReportingUseCases = AnalyticsReportingUseCases.unavailable,
-      embeddingCoverage: com.example.graphQL.cats.service.port.UserRepository => EmbeddingCoverageUseCases = _ =>
-        EmbeddingCoverageUseCases.denyAll
+      analyticsReporting: AnalyticsReportingUseCases[IO] = AnalyticsReportingUseCases.unavailable,
+      embeddingCoverage: com.example.graphQL.cats.service.port.UserRepository[IO] => EmbeddingCoverageUseCases[IO] =
+        _ => EmbeddingCoverageUseCases.denyAll[IO]
   ): IO[Json] =
     executeEitherWithUsers(
       query,
@@ -1370,11 +1376,11 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       query: String,
       actor: Option[ActorContext],
       users: List[User],
-      accountService: AccountUseCases = TestGraphQLSupport.accountService,
+      accountService: AccountUseCases[IO] = TestGraphQLSupport.accountService,
       variables: Json = Json.obj(),
       hiringReady: IO[ProbeResult] = IO.pure(ProbeResult.Ready),
-      analyticsReporting: AnalyticsReportingUseCases = AnalyticsReportingUseCases.unavailable,
-      embeddingCoverage: com.example.graphQL.cats.service.port.UserRepository => EmbeddingCoverageUseCases
+      analyticsReporting: AnalyticsReportingUseCases[IO] = AnalyticsReportingUseCases.unavailable,
+      embeddingCoverage: com.example.graphQL.cats.service.port.UserRepository[IO] => EmbeddingCoverageUseCases[IO]
   ): IO[Either[HiringGraphQLSchema.Failure, Json]] = {
     for {
       usersRef <- Ref.of[IO, Map[UserId, User]](users.map(user => user.id -> user).toMap)
@@ -1428,19 +1434,19 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
         scope: com.example.graphQL.cats.service.read.HiringReadScope,
         keys: List[com.example.graphQL.cats.service.read.UserRelationKey]
     ) =
-      com.example.graphQL.cats.service.port.RepositoryIO.lift(
+      com.example.graphQL.cats.service.port.RepositoryF.lift(
         com.example.graphQL.cats.service.ServiceFixtures
           .userRelations(ref, jobs, applications)(scope, keys)
           .flatTap(values => batches.update(_ :+ values.map(_.value.id)))
       )
 
-    override def find(id: UserId): RepositoryIO[Option[User]] =
-      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(ref.get.map(_.get(id)).map(Right(_)))
+    override def find(id: UserId): RepositoryF[IO, Option[User]] =
+      com.example.graphQL.cats.service.port.RepositoryF.fromFEither(ref.get.map(_.get(id)).map(Right(_)))
 
     override def updateEmbedding(
         id: UserId,
         embedding: com.example.graphQL.cats.domain.model.EntityEmbedding
-    ): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(ref.modify { users =>
+    ): RepositoryF[IO, Unit] = com.example.graphQL.cats.service.port.RepositoryF.fromFEither(ref.modify { users =>
       users.get(id) match {
         case Some(user) => (users + (id -> user.copy(embedding = Some(embedding))), Right(()))
         case None       => (users, Left(RepositoryError.Conflict))
@@ -1449,63 +1455,66 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
   }
 
   private final case class FakeEmbeddingService(result: Either[EmbeddingError, EmbeddingVector])
-      extends EmbeddingService {
+      extends EmbeddingService[IO] {
     override def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] =
       IO.pure(result)
   }
 
-  private final case class FakeSemanticSearchRepository(jobs: List[RankedJob]) extends SemanticSearchRepository {
+  private final case class FakeSemanticSearchRepository(jobs: List[RankedJob]) extends SemanticSearchRepository[IO] {
     override def authorizedJobEligibility(
         scope: com.example.graphQL.cats.service.read.HiringReadScope,
         ids: List[com.example.graphQL.cats.domain.model.Identifiers.JobId],
         expected: Option[com.example.graphQL.cats.service.search.CandidateSearchEligibility]
     ) =
       if (scope.role == UserRole.Candidate) jobEligibility(ids)
-      else com.example.graphQL.cats.service.port.RepositoryIO.pure(Nil)
+      else com.example.graphQL.cats.service.port.RepositoryF.at[IO].pure(Nil)
     override def authorizedCandidateEligibility(
         scope: com.example.graphQL.cats.service.read.HiringReadScope,
         expected: com.example.graphQL.cats.service.search.JobSearchEligibility,
         ids: List[com.example.graphQL.cats.domain.model.Identifiers.UserId]
     ) =
-      com.example.graphQL.cats.service.port.RepositoryIO
+      com.example.graphQL.cats.service.port.RepositoryF
+        .at[IO]
         .fromEither(Right(List.empty[com.example.graphQL.cats.service.search.CandidateSearchEligibility]))
 
     private def jobEligibility(ids: List[com.example.graphQL.cats.domain.model.Identifiers.JobId]) =
-      com.example.graphQL.cats.service.port.RepositoryIO.fromEither(
-        Right(
-          jobs
-            .filter(hit => ids.contains(hit.job.id))
-            .map(hit => com.example.graphQL.cats.service.search.JobSearchEligibility.fromJob(hit.job))
+      com.example.graphQL.cats.service.port.RepositoryF
+        .at[IO]
+        .fromEither(
+          Right(
+            jobs
+              .filter(hit => ids.contains(hit.job.id))
+              .map(hit => com.example.graphQL.cats.service.search.JobSearchEligibility.fromJob(hit.job))
+          )
         )
-      )
-    override def searchJobs(query: VectorSearchQuery): RepositoryIO[List[JobRetrievalHit]] =
-      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Right(jobs.map(_.retrieval))))
+    override def searchJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
+      com.example.graphQL.cats.service.port.RepositoryF.fromFEither(IO.pure(Right(jobs.map(_.retrieval))))
 
-    override def recommendedJobs(query: VectorSearchQuery): RepositoryIO[List[JobRetrievalHit]] =
-      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Right(jobs.map(_.retrieval))))
+    override def recommendedJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
+      com.example.graphQL.cats.service.port.RepositoryF.fromFEither(IO.pure(Right(jobs.map(_.retrieval))))
 
-    override def candidateMatches(query: VectorSearchQuery): RepositoryIO[List[CandidateRetrievalHit]] =
-      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Right(Nil)))
+    override def candidateMatches(query: VectorSearchQuery): RepositoryF[IO, List[CandidateRetrievalHit]] =
+      com.example.graphQL.cats.service.port.RepositoryF.fromFEither(IO.pure(Right(Nil)))
   }
 
-  private final class RecordingAccountService(updateCalls: Ref[IO, Int]) extends AccountUseCases {
+  private final class RecordingAccountService(updateCalls: Ref[IO, Int]) extends AccountUseCases[IO] {
     private val unsupported: UseCaseError =
       UseCaseError.Account(com.example.graphQL.cats.service.AccountError.ProfileUnsupportedForRole)
 
-    override def signUp(request: IdempotencyRequest, input: SignUpInput): UseCaseIO[(User, AccountToken)] =
+    override def signUp(request: IdempotencyRequest, input: SignUpInput): UseCaseF[IO, (User, AccountToken)] =
       EitherT.leftT(unsupported)
 
-    override def login(request: IdempotencyRequest, input: LoginInput): UseCaseIO[(User, AccountToken)] =
+    override def login(request: IdempotencyRequest, input: LoginInput): UseCaseF[IO, (User, AccountToken)] =
       EitherT.leftT(unsupported)
 
-    override def me(actor: ActorContext): UseCaseIO[User] =
+    override def me(actor: ActorContext): UseCaseF[IO, User] =
       EitherT.leftT(unsupported)
 
     override def updateMyProfile(
         request: IdempotencyRequest,
         actor: ActorContext,
         input: AccountProfileInput
-    ): UseCaseIO[User] =
+    ): UseCaseF[IO, User] =
       EitherT(
         updateCalls.update(_ + 1) *> IO.pure(
           UserProfile
@@ -1516,83 +1525,83 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
         )
       )
 
-    override def deleteMyAccount(request: IdempotencyRequest, actor: ActorContext): UseCaseIO[String] =
+    override def deleteMyAccount(request: IdempotencyRequest, actor: ActorContext): UseCaseF[IO, String] =
       EitherT.leftT(unsupported)
 
-    override def accountDeletionStatus(actor: ActorContext, receiptId: String): UseCaseIO[AccountDeletionStatus] =
+    override def accountDeletionStatus(actor: ActorContext, receiptId: String): UseCaseF[IO, AccountDeletionStatus] =
       EitherT.rightT(AccountDeletionStatus.NotFound)
 
-    override def listUsers(actor: ActorContext, page: UserPageRequest): UseCaseIO[List[User]] =
+    override def listUsers(actor: ActorContext, page: UserPageRequest): UseCaseF[IO, List[User]] =
       EitherT.leftT(unsupported)
   }
 
-  private object SignUpReturningCandidateService extends AccountUseCases {
-    private def unsupported[A]: UseCaseIO[A] =
+  private object SignUpReturningCandidateService extends AccountUseCases[IO] {
+    private def unsupported[A]: UseCaseF[IO, A] =
       EitherT.leftT(UseCaseError.Account(com.example.graphQL.cats.service.AccountError.ProfileUnsupportedForRole))
-    override def signUp(request: IdempotencyRequest, input: SignUpInput): UseCaseIO[(User, AccountToken)] =
+    override def signUp(request: IdempotencyRequest, input: SignUpInput): UseCaseF[IO, (User, AccountToken)] =
       EitherT.rightT(candidate -> AccountToken("token", now.plusSeconds(60)))
-    override def login(request: IdempotencyRequest, input: LoginInput): UseCaseIO[(User, AccountToken)] = unsupported
-    override def me(actor: ActorContext): UseCaseIO[User] = unsupported
+    override def login(request: IdempotencyRequest, input: LoginInput): UseCaseF[IO, (User, AccountToken)] = unsupported
+    override def me(actor: ActorContext): UseCaseF[IO, User] = unsupported
     override def updateMyProfile(
         request: IdempotencyRequest,
         actor: ActorContext,
         input: AccountProfileInput
-    ): UseCaseIO[User] = unsupported
-    override def deleteMyAccount(request: IdempotencyRequest, actor: ActorContext): UseCaseIO[String] = unsupported
-    override def accountDeletionStatus(actor: ActorContext, receiptId: String): UseCaseIO[AccountDeletionStatus] =
+    ): UseCaseF[IO, User] = unsupported
+    override def deleteMyAccount(request: IdempotencyRequest, actor: ActorContext): UseCaseF[IO, String] = unsupported
+    override def accountDeletionStatus(actor: ActorContext, receiptId: String): UseCaseF[IO, AccountDeletionStatus] =
       EitherT.rightT(AccountDeletionStatus.NotFound)
-    override def listUsers(actor: ActorContext, page: UserPageRequest): UseCaseIO[List[User]] = unsupported
+    override def listUsers(actor: ActorContext, page: UserPageRequest): UseCaseF[IO, List[User]] = unsupported
   }
 
-  private final class PublicAccountService(calls: Ref[IO, Int]) extends AccountUseCases {
-    private def unavailable[A]: UseCaseIO[A] =
+  private final class PublicAccountService(calls: Ref[IO, Int]) extends AccountUseCases[IO] {
+    private def unavailable[A]: UseCaseF[IO, A] =
       EitherT.leftT(UseCaseError.Availability(com.example.graphQL.cats.service.AvailabilityError.ServiceNotReady))
 
-    override def signUp(request: IdempotencyRequest, input: SignUpInput): UseCaseIO[(User, AccountToken)] =
+    override def signUp(request: IdempotencyRequest, input: SignUpInput): UseCaseF[IO, (User, AccountToken)] =
       EitherT.liftF(calls.update(_ + 1)) *> unavailable
 
-    override def login(request: IdempotencyRequest, input: LoginInput): UseCaseIO[(User, AccountToken)] =
+    override def login(request: IdempotencyRequest, input: LoginInput): UseCaseF[IO, (User, AccountToken)] =
       EitherT.liftF(calls.update(_ + 1)) *> unavailable
 
-    override def me(actor: ActorContext): UseCaseIO[User] = unavailable
+    override def me(actor: ActorContext): UseCaseF[IO, User] = unavailable
     override def updateMyProfile(
         request: IdempotencyRequest,
         actor: ActorContext,
         input: AccountProfileInput
-    ): UseCaseIO[User] = unavailable
-    override def deleteMyAccount(request: IdempotencyRequest, actor: ActorContext): UseCaseIO[String] = unavailable
-    override def accountDeletionStatus(actor: ActorContext, receiptId: String): UseCaseIO[AccountDeletionStatus] =
+    ): UseCaseF[IO, User] = unavailable
+    override def deleteMyAccount(request: IdempotencyRequest, actor: ActorContext): UseCaseF[IO, String] = unavailable
+    override def accountDeletionStatus(actor: ActorContext, receiptId: String): UseCaseF[IO, AccountDeletionStatus] =
       EitherT.rightT(AccountDeletionStatus.NotFound)
-    override def listUsers(actor: ActorContext, page: UserPageRequest): UseCaseIO[List[User]] = unavailable
+    override def listUsers(actor: ActorContext, page: UserPageRequest): UseCaseF[IO, List[User]] = unavailable
   }
 
-  private object NameTakenAccountService extends AccountUseCases {
+  private object NameTakenAccountService extends AccountUseCases[IO] {
     private val unsupported: UseCaseError =
       UseCaseError.Account(com.example.graphQL.cats.service.AccountError.ProfileUnsupportedForRole)
 
-    override def signUp(request: IdempotencyRequest, input: SignUpInput): UseCaseIO[(User, AccountToken)] =
+    override def signUp(request: IdempotencyRequest, input: SignUpInput): UseCaseF[IO, (User, AccountToken)] =
       EitherT.leftT(UseCaseError.Account(com.example.graphQL.cats.service.AccountError.NameTaken))
 
-    override def login(request: IdempotencyRequest, input: LoginInput): UseCaseIO[(User, AccountToken)] =
+    override def login(request: IdempotencyRequest, input: LoginInput): UseCaseF[IO, (User, AccountToken)] =
       EitherT.leftT(unsupported)
 
-    override def me(actor: ActorContext): UseCaseIO[User] =
+    override def me(actor: ActorContext): UseCaseF[IO, User] =
       EitherT.leftT(unsupported)
 
     override def updateMyProfile(
         request: IdempotencyRequest,
         actor: ActorContext,
         input: AccountProfileInput
-    ): UseCaseIO[User] =
+    ): UseCaseF[IO, User] =
       EitherT.leftT(unsupported)
 
-    override def deleteMyAccount(request: IdempotencyRequest, actor: ActorContext): UseCaseIO[String] =
+    override def deleteMyAccount(request: IdempotencyRequest, actor: ActorContext): UseCaseF[IO, String] =
       EitherT.leftT(unsupported)
 
-    override def accountDeletionStatus(actor: ActorContext, receiptId: String): UseCaseIO[AccountDeletionStatus] =
+    override def accountDeletionStatus(actor: ActorContext, receiptId: String): UseCaseF[IO, AccountDeletionStatus] =
       EitherT.rightT(AccountDeletionStatus.NotFound)
 
-    override def listUsers(actor: ActorContext, page: UserPageRequest): UseCaseIO[List[User]] =
+    override def listUsers(actor: ActorContext, page: UserPageRequest): UseCaseF[IO, List[User]] =
       EitherT.leftT(unsupported)
   }
 

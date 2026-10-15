@@ -6,32 +6,32 @@ import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import java.time.Instant
 import java.util.UUID
 
-private[cats] object TestSearchSessionWorkRepository extends SearchSessionWorkRepository {
-  override def enqueue(work: PendingSearchSessionWork, now: Instant): RepositoryIO[Unit] =
-    com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Right(())))
+private[cats] object TestSearchSessionWorkRepository extends SearchSessionWorkRepository[IO] {
+  override def enqueue(work: PendingSearchSessionWork, now: Instant): RepositoryF[IO, Unit] =
+    com.example.graphQL.cats.service.port.RepositoryF.fromFEither(IO.pure(Right(())))
 
   override def findForActor(
       actorId: UserId,
       searchId: UUID
-  ): RepositoryIO[Option[SearchSessionLookup]] =
-    com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Right(None)))
+  ): RepositoryF[IO, Option[SearchSessionLookup]] =
+    com.example.graphQL.cats.service.port.RepositoryF.fromFEither(IO.pure(Right(None)))
 
   override def claim(
       workerId: String,
       now: Instant,
       leaseUntil: Instant
-  ): RepositoryIO[Option[ClaimedSearchSessionWork]] =
-    com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Right(None)))
+  ): RepositoryF[IO, Option[ClaimedSearchSessionWork]] =
+    com.example.graphQL.cats.service.port.RepositoryF.fromFEither(IO.pure(Right(None)))
 
-  override def complete(claim: ClaimedSearchSessionWork, now: Instant): RepositoryIO[Unit] =
-    com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Right(())))
+  override def complete(claim: ClaimedSearchSessionWork, now: Instant): RepositoryF[IO, Unit] =
+    com.example.graphQL.cats.service.port.RepositoryF.fromFEither(IO.pure(Right(())))
 
-  override def retry(claim: ClaimedSearchSessionWork, availableAt: Instant): RepositoryIO[Unit] =
-    com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Right(())))
+  override def retry(claim: ClaimedSearchSessionWork, availableAt: Instant): RepositoryF[IO, Unit] =
+    com.example.graphQL.cats.service.port.RepositoryF.fromFEither(IO.pure(Right(())))
 
   override def fail(
       claim: ClaimedSearchSessionWork,
       failure: SearchSessionWorkFailure,
       now: Instant
-  ): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Right(())))
+  ): RepositoryF[IO, Unit] = com.example.graphQL.cats.service.port.RepositoryF.fromFEither(IO.pure(Right(())))
 }

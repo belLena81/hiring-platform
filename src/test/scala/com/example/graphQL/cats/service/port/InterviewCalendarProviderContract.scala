@@ -13,7 +13,7 @@ import munit.CatsEffectSuite
   * steps as no-ops.
   */
 trait InterviewCalendarContractSubject {
-  def provider: InterviewCalendarProvider
+  def provider: InterviewCalendarProvider[IO]
 
   /** A workflow whose original hold may be reserved now. */
   def newWorkflow(candidate: UserId, recruiter: UserId, interval: InterviewInterval): IO[InterviewWorkflow]
@@ -39,7 +39,7 @@ trait InterviewCalendarProviderContract { self: CatsEffectSuite =>
     InterviewInterval(base.plus(startHour, ChronoUnit.HOURS), base.plus(startHour + hours, ChronoUnit.HOURS))
   private def user() = UserId(UUID.randomUUID())
 
-  private def success[A](value: InterviewProviderIO[A]): IO[A] =
+  private def success[A](value: InterviewProviderF[IO, A]): IO[A] =
     value.value.flatMap(_.fold(error => IO.raiseError(new AssertionError(s"Provider failure: $error")), IO.pure))
 
   private def reserve(subject: InterviewCalendarContractSubject, workflow: InterviewWorkflow, generation: Int) =

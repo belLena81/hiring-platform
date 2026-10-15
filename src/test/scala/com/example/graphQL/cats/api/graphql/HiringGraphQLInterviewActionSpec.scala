@@ -159,7 +159,7 @@ final class HiringGraphQLInterviewActionSpec extends CatsEffectSuite {
         errors,
         jobLookup = id => jobsRef.get.map(_.get(id))
       )
-      service = new InterviewSchedulingService(users, jobs, applications, repository, 5.minutes, IO.pure(clock))
+      service = new InterviewSchedulingService[IO](users, jobs, applications, repository, 5.minutes, IO.pure(clock))
     } yield Arrangement(
       HiringGraphQLServices(
         HiringReadService(users, jobs, applications),

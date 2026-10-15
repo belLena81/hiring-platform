@@ -10,7 +10,7 @@ import com.example.graphQL.cats.service.port.{
   EmbeddingWorkFailure,
   EmbeddingWorkKind,
   EmbeddingWorkState,
-  RepositoryIO
+  RepositoryF
 }
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.search.*
@@ -36,8 +36,8 @@ import scala.jdk.CollectionConverters.*
   *   2. The worker writes the embedding before `complete` deletes the row (`EmbeddingPipeline` `updateEmbedding`
   *      ~247/264, then `work.complete` ~150-151), so a snapshot never shows a deleted row with a still stale embedding.
   */
-final class MongoEmbeddingCoverageRepository(database: MongoDatabase[IO], diagnostics: Diagnostics)
-    extends EmbeddingCoverageRepository {
+final class MongoEmbeddingCoverageRepository(database: MongoDatabase[IO], diagnostics: Diagnostics[IO])
+    extends EmbeddingCoverageRepository[IO] {
   import MongoEmbeddingCoverageRepository.*
 
   private val primary = database.withReadPreference(ReadPreference.primary())
@@ -47,8 +47,8 @@ final class MongoEmbeddingCoverageRepository(database: MongoDatabase[IO], diagno
       pipeline: List[Document],
       limits: EmbeddingCoverageLimits,
       snapshot: Boolean = false
-  ): RepositoryIO[List[Document]] =
-    RepositoryIO.lift(
+  ): RepositoryF[IO, List[Document]] =
+    RepositoryF.lift(
       Mongo4catsCollections
         .documents(primary, collection)
         .map(source => if (snapshot) source.withReadConcern(ReadConcern.SNAPSHOT) else source)
@@ -57,7 +57,7 @@ final class MongoEmbeddingCoverageRepository(database: MongoDatabase[IO], diagno
         )
     )
 
-  override def observe(request: EmbeddingCoverageScanRequest): RepositoryIO[EmbeddingCoverageObservation] =
+  override def observe(request: EmbeddingCoverageScanRequest): RepositoryF[IO, EmbeddingCoverageObservation] =
     MongoRepositorySupport.repositoryGuard(diagnostics, "embeddingCoverage.observe") {
       for {
         jobs <- scanKind(JobScan, request, EmbeddingCoverageTally.empty)
@@ -82,9 +82,9 @@ final class MongoEmbeddingCoverageRepository(database: MongoDatabase[IO], diagno
       scan: CoverageKind,
       request: EmbeddingCoverageScanRequest,
       initial: EmbeddingCoverageTally
-  ): RepositoryIO[(EmbeddingCoverageTally, EmbeddingCoverageKindObservation)] = {
+  ): RepositoryF[IO, (EmbeddingCoverageTally, EmbeddingCoverageKindObservation)] = {
     val limits = request.limits
-    def page(state: Page): RepositoryIO[Either[Page, Scanned]] = {
+    def page(state: Page): RepositoryF[IO, Either[Page, Scanned]] = {
       val remaining = limits.maxEntitiesPerKind - state.scanned
       val limit = math.min(limits.pageSize, remaining + 1)
       aggregate(
@@ -94,9 +94,11 @@ final class MongoEmbeddingCoverageRepository(database: MongoDatabase[IO], diagno
         snapshot = true
       )
         .flatMap(documents =>
-          RepositoryIO.fromEither(
-            documents.traverse(scan.decode).map(documents.lastOption.map(_.getString(MongoFields.Id)) -> _)
-          )
+          RepositoryF
+            .at[IO]
+            .fromEither(
+              documents.traverse(scan.decode).map(documents.lastOption.map(_.getString(MongoFields.Id)) -> _)
+            )
         )
         .map { case (lastId, decoded) =>
           val (within, over) = decoded.flatten.splitAt(remaining)
@@ -111,33 +113,37 @@ final class MongoEmbeddingCoverageRepository(database: MongoDatabase[IO], diagno
     }
     for {
       searchable <- countEligible(scan, limits)
-      scanned <- Monad[RepositoryIO].tailRecM(Page(None, 0, initial))(page)
+      scanned <- Monad[[A] =>> RepositoryF[IO, A]].tailRecM(Page(None, 0, initial))(page)
     } yield scanned.tally -> EmbeddingCoverageKindObservation(scan.kind, searchable, scanned.truncated)
   }
 
-  private def countEligible(scan: CoverageKind, limits: EmbeddingCoverageLimits): RepositoryIO[Long] =
+  private def countEligible(scan: CoverageKind, limits: EmbeddingCoverageLimits): RepositoryF[IO, Long] =
     aggregate(scan.collection, countPipeline(scan), limits).flatMap(rows =>
-      RepositoryIO.fromEither(
-        rows.headOption.fold[Either[RepositoryError, Long]](Right(0L))(row =>
-          MongoDocumentFields.toRepository(MongoDocumentFields.requiredNumberAsLong(row, "n"))
+      RepositoryF
+        .at[IO]
+        .fromEither(
+          rows.headOption.fold[Either[RepositoryError, Long]](Right(0L))(row =>
+            MongoDocumentFields.toRepository(MongoDocumentFields.requiredNumberAsLong(row, "n"))
+          )
         )
-      )
     )
 
   private def observeQueue(
       scan: CoverageKind,
       request: EmbeddingCoverageScanRequest
-  ): RepositoryIO[EmbeddingQueueObservation] =
+  ): RepositoryF[IO, EmbeddingQueueObservation] =
     aggregate(MongoCollections.EmbeddingWork, queuePipeline(scan, request), request.limits).flatMap(rows =>
-      RepositoryIO.fromEither(rows.headOption match {
-        case None      => Right(EmbeddingQueueObservation(truncated = false, 0L, None))
-        case Some(row) =>
-          MongoDocumentFields.toRepository(for {
-            total <- MongoDocumentFields.requiredNumberAsLong(row, "total")
-            stuck <- MongoDocumentFields.requiredNumberAsLong(row, "stuck")
-            oldest <- MongoDocumentFields.optionalInstant(row, "oldest")
-          } yield EmbeddingQueueObservation(total > request.limits.maxEntitiesPerKind.toLong, stuck, oldest))
-      })
+      RepositoryF
+        .at[IO]
+        .fromEither(rows.headOption match {
+          case None      => Right(EmbeddingQueueObservation(truncated = false, 0L, None))
+          case Some(row) =>
+            MongoDocumentFields.toRepository(for {
+              total <- MongoDocumentFields.requiredNumberAsLong(row, "total")
+              stuck <- MongoDocumentFields.requiredNumberAsLong(row, "stuck")
+              oldest <- MongoDocumentFields.optionalInstant(row, "oldest")
+            } yield EmbeddingQueueObservation(total > request.limits.maxEntitiesPerKind.toLong, stuck, oldest))
+        })
     )
 }
 

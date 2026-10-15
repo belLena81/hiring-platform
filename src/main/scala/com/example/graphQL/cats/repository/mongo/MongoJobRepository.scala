@@ -1,5 +1,7 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.service.resilience.CircuitBreaker
+
 import cats.effect.IO
 import cats.data.EitherT
 import cats.syntax.all.*
@@ -24,33 +26,33 @@ final class MongoJobRepository(
     database: MongoDatabase[IO],
     transactionRunner: MongoTransactionRunner,
     embeddingWork: MongoEmbeddingWorkEnqueuer,
-    diagnostics: Diagnostics,
+    diagnostics: Diagnostics[IO],
     discoveryPolicy: Option[DiscoveryQueryPolicy] = None
-) extends JobRepository {
+) extends JobRepository[IO] {
   private def collection = Mongo4catsCollections.documents(database, MongoCollections.Jobs)
   private def outbox = Mongo4catsCollections.documents(database, MongoCollections.EventOutbox)
 
-  override def find(id: JobId): RepositoryIO[Option[Job]] =
+  override def find(id: JobId): RepositoryF[IO, Option[Job]] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "MongoJobRepository.find")(
-        RepositoryIO
+        RepositoryF
           .lift(MongoSessionOperations.findById(collection, None, id.value.toString))
           .subflatMap(document => MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readJob)))
       )
 
-  override def findVersioned(id: JobId): RepositoryIO[Option[Versioned[Job]]] =
+  override def findVersioned(id: JobId): RepositoryF[IO, Option[Versioned[Job]]] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "MongoJobRepository.findVersioned")(
-        RepositoryIO
+        RepositoryF
           .lift(MongoSessionOperations.findById(collection, None, id.value.toString))
           .subflatMap(document =>
             MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readVersionedJob))
           )
       )
 
-  override def findSubmissionSnapshot(id: JobId): RepositoryIO[Option[JobSubmissionSnapshot]] =
+  override def findSubmissionSnapshot(id: JobId): RepositoryF[IO, Option[JobSubmissionSnapshot]] =
     MongoRepositorySupport.repositoryGuard(diagnostics, "MongoJobRepository.findSubmissionSnapshot")(
-      RepositoryIO
+      RepositoryF
         .lift(
           MongoSessionOperations
             .findById(collection, None, id.value.toString, Some(MongoJobSubmissionSnapshotCodec.projection))
@@ -60,10 +62,10 @@ final class MongoJobRepository(
         )
     )
 
-  override def relatedJobs(scope: HiringReadScope, keys: List[JobRelationKey]): RepositoryIO[List[RelatedJob]] = {
+  override def relatedJobs(scope: HiringReadScope, keys: List[JobRelationKey]): RepositoryF[IO, List[RelatedJob]] = {
     import MongoAuthorizedReadQueries.*
     val requested = keys.distinct
-    if (requested.isEmpty) RepositoryIO.pure(Nil)
+    if (requested.isEmpty) RepositoryF.at[IO].pure(Nil)
     else {
       val pipeline = List(
         matching(
@@ -102,7 +104,7 @@ final class MongoJobRepository(
   override def findOpen(
       filter: JobSearchFilter,
       page: JobPageRequest
-  ): RepositoryIO[List[Job]] =
+  ): RepositoryF[IO, List[Job]] =
     findMany(baseSearchFilter(filter, page), page)
 
   override def nearbyJobs(
@@ -193,16 +195,16 @@ final class MongoJobRepository(
       scope: HiringReadScope,
       jobsPipeline: List[Document],
       maxTime: Option[scala.concurrent.duration.FiniteDuration]
-  ): RepositoryIO[List[Document]] =
+  ): RepositoryF[IO, List[Document]] =
     discoveryPolicy match {
-      case None         => RepositoryIO.raise(RepositoryError.Unavailable)
+      case None         => RepositoryF.at[IO].raise(RepositoryError.Unavailable)
       case Some(policy) =>
         import scala.jdk.CollectionConverters.*
         val allowed = scope.role == UserRole.Candidate || scope.role == UserRole.Admin
-        if (!allowed) RepositoryIO.raise(RepositoryError.AuthorityRevoked)
+        if (!allowed) RepositoryF.at[IO].raise(RepositoryError.AuthorityRevoked)
         else {
           val pipeline = MongoJobRepository.authorizedDiscoveryPipeline(scope, jobsPipeline)
-          RepositoryIO
+          RepositoryF
             .lift(
               policy.run(
                 Mongo4catsCollections
@@ -231,7 +233,7 @@ final class MongoJobRepository(
         }
     }
 
-  override def findAll(page: JobPageRequest): RepositoryIO[List[Job]] =
+  override def findAll(page: JobPageRequest): RepositoryF[IO, List[Job]] =
     findMany(
       baseJobFilter(List(page.status.map(status => MongoFilter.eq(MongoFields.Status, status.toString))), page),
       page
@@ -240,7 +242,7 @@ final class MongoJobRepository(
   override def findByRecruiter(
       recruiterId: UserId,
       page: JobPageRequest
-  ): RepositoryIO[List[Job]] =
+  ): RepositoryF[IO, List[Job]] =
     findMany(
       baseJobFilter(
         List(
@@ -257,7 +259,7 @@ final class MongoJobRepository(
       now: Instant,
       events: List[OperationalEventEnvelope],
       context: MutationWriteContext
-  ): RepositoryIO[Unit] =
+  ): RepositoryF[IO, Unit] =
     MongoMutationWriteContext
       .run(
         context,
@@ -274,9 +276,9 @@ final class MongoJobRepository(
       now: Instant,
       events: List[OperationalEventEnvelope],
       session: Option[ClientSession[IO]]
-  ): RepositoryIO[Unit] =
+  ): RepositoryF[IO, Unit] =
     for {
-      _ <- RepositoryIO.lift(MongoSessionOperations.insertOne(collection, session, MongoHiringCodecs.job(job)))
+      _ <- RepositoryF.lift(MongoSessionOperations.insertOne(collection, session, MongoHiringCodecs.job(job)))
       _ <- embeddingWork.enqueue(session, EmbeddingWorkKey(EmbeddingWorkKind.Job, job.id.value.toString), now)
       _ <- MongoOperationalEventInsertion.insert(outbox, session, events, now, diagnostics)
     } yield ()
@@ -287,7 +289,7 @@ final class MongoJobRepository(
       now: Instant,
       events: List[OperationalEventEnvelope],
       context: MutationWriteContext
-  ): RepositoryIO[Versioned[Job]] =
+  ): RepositoryF[IO, Versioned[Job]] =
     MongoMutationWriteContext
       .run(
         context,
@@ -305,10 +307,12 @@ final class MongoJobRepository(
       now: Instant,
       events: List[OperationalEventEnvelope],
       session: Option[ClientSession[IO]]
-  ): RepositoryIO[Versioned[Job]] =
+  ): RepositoryF[IO, Versioned[Job]] =
     for {
-      nextVersion <- RepositoryIO.fromEither(Versioned.nextVersion(expected.version).toRight(RepositoryError.Conflict))
-      result <- RepositoryIO.lift(
+      nextVersion <- RepositoryF
+        .at[IO]
+        .fromEither(Versioned.nextVersion(expected.version).toRight(RepositoryError.Conflict))
+      result <- RepositoryF.lift(
         MongoSessionOperations.replaceOne(
           collection,
           session,
@@ -319,12 +323,12 @@ final class MongoJobRepository(
           MongoHiringCodecs.job(replacement, nextVersion)
         )
       )
-      _ <- RepositoryIO.fromEither(MongoRepositorySupport.matchedOne(result))
+      _ <- RepositoryF.at[IO].fromEither(MongoRepositorySupport.matchedOne(result))
       _ <- embeddingWork.enqueue(session, EmbeddingWorkKey(EmbeddingWorkKind.Job, replacement.id.value.toString), now)
       _ <- MongoOperationalEventInsertion.insert(outbox, session, events, now, diagnostics)
     } yield Versioned(replacement, nextVersion)
 
-  override def updateEmbedding(id: JobId, embedding: EntityEmbedding): RepositoryIO[Unit] =
+  override def updateEmbedding(id: JobId, embedding: EntityEmbedding): RepositoryF[IO, Unit] =
     findVersioned(id).flatMap {
       case Some(job) => updateEmbedding(job, embedding)
       case None      => EitherT.leftT[IO, Unit](RepositoryError.Conflict)
@@ -333,9 +337,9 @@ final class MongoJobRepository(
   override def updateEmbedding(
       observed: Versioned[Job],
       embedding: EntityEmbedding
-  ): RepositoryIO[Unit] = {
+  ): RepositoryF[IO, Unit] = {
     val encoded = MongoHiringCodecs.embeddingDocument(embedding)
-    RepositoryIO
+    RepositoryF
       .lift(
         MongoSessionOperations
           .updateOne(
@@ -360,7 +364,7 @@ final class MongoJobRepository(
       )
   }
 
-  private def findMany(filter: MongoFilter, page: JobPageRequest): RepositoryIO[List[Job]] =
+  private def findMany(filter: MongoFilter, page: JobPageRequest): RepositoryF[IO, List[Job]] =
     MongoKeysetPaging.page(collection, filter, MongoFields.CreatedAt, page.pageSize)(MongoHiringCodecs.readJob)(
       diagnostics
     )
@@ -516,12 +520,13 @@ object MongoJobRepository {
       database: MongoDatabase[IO],
       client: MongoClient[IO],
       embeddingWork: MongoEmbeddingWorkEnqueuer,
-      diagnostics: Diagnostics,
-      discoveryPolicy: Option[DiscoveryQueryPolicy] = None
+      diagnostics: Diagnostics[IO],
+      discoveryPolicy: Option[DiscoveryQueryPolicy] = None,
+      breaker: CircuitBreaker[IO] = CircuitBreaker.disabled[IO]
   ): MongoJobRepository =
     new MongoJobRepository(
       database,
-      MongoTransactionRunner.sessions(client, RepositoryError.Conflict, diagnostics = diagnostics),
+      MongoTransactionRunner.sessions(client, RepositoryError.Conflict, diagnostics = diagnostics, breaker = breaker),
       embeddingWork,
       diagnostics,
       discoveryPolicy

@@ -6,26 +6,26 @@ import com.example.graphQL.cats.domain.pagination.{ApplicationEventPageRequest, 
 import com.example.graphQL.cats.service.events.OperationalEventEnvelope
 import com.example.graphQL.cats.service.read.HiringReadScope
 
-trait ApplicationRepository {
-  def find(id: ApplicationId): RepositoryIO[Option[Application]]
-  def findByCandidate(scope: HiringReadScope, page: ApplicationPageRequest): RepositoryIO[List[Application]]
-  def findByJob(scope: HiringReadScope, jobId: JobId, page: ApplicationPageRequest): RepositoryIO[List[Application]]
+trait ApplicationRepository[F[_]] {
+  def find(id: ApplicationId): RepositoryF[F, Option[Application]]
+  def findByCandidate(scope: HiringReadScope, page: ApplicationPageRequest): RepositoryF[F, List[Application]]
+  def findByJob(scope: HiringReadScope, jobId: JobId, page: ApplicationPageRequest): RepositoryF[F, List[Application]]
   def history(
       scope: HiringReadScope,
       applicationId: ApplicationId,
       page: ApplicationEventPageRequest
-  ): RepositoryIO[List[ApplicationEvent]]
+  ): RepositoryF[F, List[ApplicationEvent]]
   def createForOpenJobWithEvents(
       observedJob: JobSubmissionSnapshot,
       application: Application,
       initialEvent: ApplicationEvent,
       events: List[OperationalEventEnvelope],
       context: MutationWriteContext
-  ): RepositoryIO[Unit]
+  ): RepositoryF[F, Unit]
   def updateStatusWithEvents(
       application: Application,
       event: ApplicationEvent,
       events: List[OperationalEventEnvelope],
       context: MutationWriteContext
-  ): RepositoryIO[Unit]
+  ): RepositoryF[F, Unit]
 }

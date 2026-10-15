@@ -16,7 +16,7 @@ import java.time.temporal.ChronoUnit
 import scala.jdk.CollectionConverters.*
 
 /** Durable calendar reservations: holds, cancellations and releases fenced against the workflow. */
-final class MongoInterviewCalendarLedger(store: MongoInterviewWorkflowStore) extends InterviewCalendarLedger {
+final class MongoInterviewCalendarLedger(store: MongoInterviewWorkflowStore) extends InterviewCalendarLedger[IO] {
   import MongoInterviewFields.*
   import MongoInterviewWorkflowCodec.*
   import store.*
@@ -24,33 +24,38 @@ final class MongoInterviewCalendarLedger(store: MongoInterviewWorkflowStore) ext
   override def reserveIfAvailable(
       reservation: InterviewCalendarReservation,
       execution: Option[ClaimedInterviewWorkflowCommand] = None
-  ): InterviewProviderIO[InterviewCalendarReservation] = {
+  ): InterviewProviderF[IO, InterviewCalendarReservation] = {
     val participants = List(reservation.candidateId, reservation.recruiterId).distinct.sortBy(_.value.toString)
     val generation = InterviewCalendarKeys.reservationGeneration(reservation.workflowId, reservation.idempotencyKey)
-    val write = RepositoryIO.fromEither(generation.toRight(RepositoryError.Conflict)).flatMap { generation =>
+    val write = RepositoryF.at[IO].fromEither(generation.toRight(RepositoryError.Conflict)).flatMap { generation =>
       transactionRunner.run { session =>
         for {
           _ <- fenceSubjects(session, participants)
           _ <- fenceExecution(session, reservation.workflowId, execution)
           workflow <- loadWorkflow(reservation.workflowId, session).orConflict
-          actualNow <- RepositoryIO.lift(clock.realTimeInstant)
+          actualNow <- RepositoryF.lift(clock.realTimeInstant)
           // Only the original scheduling hold is bounded by the pre-commit window; a replacement hold follows consent.
-          _ <- RepositoryIO.fromEither(
-            Either.cond(generation > 0 || actualNow.isBefore(workflow.preCommitDeadline), (), RepositoryError.Conflict)
-          )
-          _ <- RepositoryIO.fromEither(
-            Either.cond(
-              workflow.candidateId == reservation.candidateId &&
-                workflow.recruiterId == reservation.recruiterId &&
-                InterviewCalendarFence.holdableGeneration(workflow).contains(generation) &&
-                InterviewCalendarFence.holdInterval(workflow, generation).contains(reservation.interval),
-              (),
-              RepositoryError.Conflict
+          _ <- RepositoryF
+            .at[IO]
+            .fromEither(
+              Either
+                .cond(generation > 0 || actualNow.isBefore(workflow.preCommitDeadline), (), RepositoryError.Conflict)
             )
-          )
+          _ <- RepositoryF
+            .at[IO]
+            .fromEither(
+              Either.cond(
+                workflow.candidateId == reservation.candidateId &&
+                  workflow.recruiterId == reservation.recruiterId &&
+                  InterviewCalendarFence.holdableGeneration(workflow).contains(generation) &&
+                  InterviewCalendarFence.holdInterval(workflow, generation).contains(reservation.interval),
+                (),
+                RepositoryError.Conflict
+              )
+            )
           _ <- bumpProviderFence(session, workflow.id, workflow.phase)
           _ <- participants.traverse_(id => touchParticipantLock(session, id))
-          existing <- RepositoryIO.lift(
+          existing <- RepositoryF.lift(
             MongoSessionOperations.findOne(
               reservations,
               session,
@@ -59,13 +64,15 @@ final class MongoInterviewCalendarLedger(store: MongoInterviewWorkflowStore) ext
           )
           saved <- existing match {
             case Some(document) =>
-              RepositoryIO.fromEither(decodeReservation(document).flatMap { value =>
-                Either.cond(
-                  sameReservation(value, reservation) && value.releasedAt.isEmpty,
-                  value,
-                  RepositoryError.Conflict
-                )
-              })
+              RepositoryF
+                .at[IO]
+                .fromEither(decodeReservation(document).flatMap { value =>
+                  Either.cond(
+                    sameReservation(value, reservation) && value.releasedAt.isEmpty,
+                    value,
+                    RepositoryError.Conflict
+                  )
+                })
             case None =>
               // Other workflows' holds conflict; a workflow's own holds (old and replacement) never do.
               val overlap = MongoFilter.and(
@@ -75,8 +82,8 @@ final class MongoInterviewCalendarLedger(store: MongoInterviewWorkflowStore) ext
                 MongoFilter.gt(EndField, reservation.interval.startsAt.toDate),
                 MongoFilter.exists(ReleasedAtField, false)
               )
-              RepositoryIO.lift(MongoSessionOperations.findOne(reservations, session, overlap)).flatMap {
-                case Some(_) => RepositoryIO.raise(RepositoryError.Conflict)
+              RepositoryF.lift(MongoSessionOperations.findOne(reservations, session, overlap)).flatMap {
+                case Some(_) => RepositoryF.at[IO].raise(RepositoryError.Conflict)
                 case None    =>
                   // Stored with millisecond precision, so the first answer equals every replayed answer.
                   val stored = reservation.copy(reservedAt = reservation.reservedAt.truncatedTo(ChronoUnit.MILLIS))
@@ -92,17 +99,17 @@ final class MongoInterviewCalendarLedger(store: MongoInterviewWorkflowStore) ext
   override def find(
       workflowId: InterviewWorkflowId,
       idempotencyKey: String
-  ): InterviewProviderIO[Option[InterviewCalendarReservation]] =
+  ): InterviewProviderF[IO, Option[InterviewCalendarReservation]] =
     InterviewCalendarKeys.reservationKeyFor(workflowId, idempotencyKey) match {
       case None      => EitherT.rightT[IO, InterviewProviderError](Option.empty[InterviewCalendarReservation])
       case Some(key) =>
         MongoRepositorySupport
           .repositoryGuard(diagnostics, "interviewCalendar.find") {
-            RepositoryIO
+            RepositoryF
               .lift(
                 MongoSessionOperations.findOne(reservations, None, reservationIdentity(workflowId, key))
               )
-              .flatMap(_.traverse(document => RepositoryIO.fromEither(decodeReservation(document))))
+              .flatMap(_.traverse(document => RepositoryF.at[IO].fromEither(decodeReservation(document))))
           }
           .leftMap(_ => InterviewProviderError.Unavailable)
     }
@@ -111,22 +118,22 @@ final class MongoInterviewCalendarLedger(store: MongoInterviewWorkflowStore) ext
       idempotencyKey: String,
       at: Instant,
       execution: Option[ClaimedInterviewWorkflowCommand] = None
-  ): InterviewProviderIO[Unit] = {
+  ): InterviewProviderF[IO, Unit] = {
     val result = MongoRepositorySupport.repositoryGuard(diagnostics, "interviewCalendar.release") {
       transactionRunner.run { session =>
-        RepositoryIO
+        RepositoryF
           .lift(MongoSessionOperations.findOne(reservations, session, MongoFilter.eq("releaseKey", idempotencyKey)))
           .flatMap {
-            case None                                                    => ().pure[RepositoryIO]
-            case Some(document) if document.containsKey(ReleasedAtField) => ().pure[RepositoryIO]
+            case None                                                    => ().pure[[A] =>> RepositoryF[IO, A]]
+            case Some(document) if document.containsKey(ReleasedAtField) => ().pure[[A] =>> RepositoryF[IO, A]]
             case Some(document)                                          =>
               for {
-                reservation <- RepositoryIO.fromEither(decodeReservation(document))
+                reservation <- RepositoryF.at[IO].fromEither(decodeReservation(document))
                 _ <- fenceExecution(session, reservation.workflowId, execution)
-                receipt <- RepositoryIO.lift(
+                receipt <- RepositoryF.lift(
                   MongoSessionOperations.findById(inbox, session, s"${reservation.workflowId.value}:hiring")
                 )
-                _ <- RepositoryIO.fromEither(Either.cond(receipt.isEmpty, (), RepositoryError.Conflict))
+                _ <- RepositoryF.at[IO].fromEither(Either.cond(receipt.isEmpty, (), RepositoryError.Conflict))
                 _ <- bumpProviderFence(session, reservation.workflowId, InterviewWorkflowPhase.CompensationPending)
                 _ <- markReleased(session, reservation, at)
               } yield ()
@@ -141,7 +148,7 @@ final class MongoInterviewCalendarLedger(store: MongoInterviewWorkflowStore) ext
       idempotencyKey: String,
       at: Instant,
       execution: Option[ClaimedInterviewWorkflowCommand] = None
-  ): InterviewProviderIO[InterviewCalendarCancellation] =
+  ): InterviewProviderF[IO, InterviewCalendarCancellation] =
     InterviewCalendarKeys.cancellationGeneration(workflowId, idempotencyKey) match {
       case None =>
         EitherT.rightT[IO, InterviewProviderError](InterviewCalendarCancellation.UnknownReservation)
@@ -150,29 +157,32 @@ final class MongoInterviewCalendarLedger(store: MongoInterviewWorkflowStore) ext
         val reserveKey = InterviewWorkflow.reservationKey(workflowId, generation)
         val result = MongoRepositorySupport.repositoryGuard(diagnostics, "interviewCalendar.cancel") {
           transactionRunner.run { session =>
-            RepositoryIO
+            RepositoryF
               .lift(MongoSessionOperations.findOne(reservations, session, reservationIdentity(workflowId, reserveKey)))
               .flatMap {
                 case None =>
-                  (InterviewCalendarCancellation.UnknownReservation: InterviewCalendarCancellation).pure[RepositoryIO]
+                  (InterviewCalendarCancellation.UnknownReservation: InterviewCalendarCancellation)
+                    .pure[[A] =>> RepositoryF[IO, A]]
                 case Some(document) =>
-                  RepositoryIO.fromEither(decodeReservation(document)).flatMap { reservation =>
+                  RepositoryF.at[IO].fromEither(decodeReservation(document)).flatMap { reservation =>
                     reservation.releasedAt match {
                       case Some(released) =>
                         (InterviewCalendarCancellation.AlreadyCancelled(released): InterviewCalendarCancellation)
-                          .pure[RepositoryIO]
+                          .pure[[A] =>> RepositoryF[IO, A]]
                       case None =>
                         for {
                           _ <- fenceExecution(session, workflowId, execution)
                           workflow <- loadWorkflow(workflowId, session).orConflict
                           // The provider only cancels what the workflow currently requires cancelled.
-                          _ <- RepositoryIO.fromEither(
-                            Either.cond(
-                              InterviewCalendarFence.cancellableGeneration(workflow).contains(generation),
-                              (),
-                              RepositoryError.Conflict
+                          _ <- RepositoryF
+                            .at[IO]
+                            .fromEither(
+                              Either.cond(
+                                InterviewCalendarFence.cancellableGeneration(workflow).contains(generation),
+                                (),
+                                RepositoryError.Conflict
+                              )
                             )
-                          )
                           _ <- bumpProviderFence(session, workflow.id, workflow.phase)
                           _ <- markReleased(session, reservation, released)
                         } yield InterviewCalendarCancellation.Cancelled(released)
@@ -189,7 +199,7 @@ final class MongoInterviewCalendarLedger(store: MongoInterviewWorkflowStore) ext
       session: Option[ClientSession[IO]],
       reservation: InterviewCalendarReservation,
       at: Instant
-  ): RepositoryIO[Unit] =
+  ): RepositoryF[IO, Unit] =
     fenceSubjects(session, List(reservation.candidateId, reservation.recruiterId)) *>
       List(reservation.candidateId, reservation.recruiterId).distinct.traverse_(touchParticipantLock(session, _)) *>
       guardWrite(
@@ -202,9 +212,9 @@ final class MongoInterviewCalendarLedger(store: MongoInterviewWorkflowStore) ext
         MongoUpdate.set(ReleasedAtField, at.toDate)
       )
 
-  private def touchParticipantLock(session: Option[ClientSession[IO]], participant: UserId): RepositoryIO[Unit] = {
+  private def touchParticipantLock(session: Option[ClientSession[IO]], participant: UserId): RepositoryF[IO, Unit] = {
     val update = MongoUpdate.inc("fence", java.lang.Long.valueOf(1L))
-    RepositoryIO
+    RepositoryF
       .lift(
         MongoSessionOperations
           .updateOne(

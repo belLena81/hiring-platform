@@ -36,19 +36,19 @@ enum SearchSessionLookup {
   case Failed
 }
 
-trait SearchSessionWorkRepository {
-  def enqueue(work: PendingSearchSessionWork, now: Instant): RepositoryIO[Unit]
-  def findForActor(actorId: UserId, searchId: UUID): RepositoryIO[Option[SearchSessionLookup]]
+trait SearchSessionWorkRepository[F[_]] {
+  def enqueue(work: PendingSearchSessionWork, now: Instant): RepositoryF[F, Unit]
+  def findForActor(actorId: UserId, searchId: UUID): RepositoryF[F, Option[SearchSessionLookup]]
   def claim(
       workerId: String,
       now: Instant,
       leaseUntil: Instant
-  ): RepositoryIO[Option[ClaimedSearchSessionWork]]
-  def complete(claim: ClaimedSearchSessionWork, now: Instant): RepositoryIO[Unit]
-  def retry(claim: ClaimedSearchSessionWork, availableAt: Instant): RepositoryIO[Unit]
+  ): RepositoryF[F, Option[ClaimedSearchSessionWork]]
+  def complete(claim: ClaimedSearchSessionWork, now: Instant): RepositoryF[F, Unit]
+  def retry(claim: ClaimedSearchSessionWork, availableAt: Instant): RepositoryF[F, Unit]
   def fail(
       claim: ClaimedSearchSessionWork,
       failure: SearchSessionWorkFailure,
       now: Instant
-  ): RepositoryIO[Unit]
+  ): RepositoryF[F, Unit]
 }

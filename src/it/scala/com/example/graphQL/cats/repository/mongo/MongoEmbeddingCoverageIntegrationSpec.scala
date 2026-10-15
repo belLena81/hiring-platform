@@ -30,10 +30,10 @@ final class MongoEmbeddingCoverageIntegrationSpec extends MongoIntegrationSuite 
 
   private def database: Resource[IO, MongoDatabase[IO]] =
     mongoResource.evalMap(fixture =>
-      MongoHiringSetup.initialize(fixture.database, Diagnostics.noop).as(fixture.database)
+      MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO]).as(fixture.database)
     )
 
-  private def successful[A](result: RepositoryIO[A]): IO[A] =
+  private def successful[A](result: RepositoryF[IO, A]): IO[A] =
     result.value.flatMap(_.fold(error => IO.raiseError(new AssertionError(s"Repository failure: $error")), IO.pure))
 
   private def insert(db: MongoDatabase[IO], collection: String, documents: List[Document]): IO[Unit] =
@@ -109,7 +109,7 @@ final class MongoEmbeddingCoverageIntegrationSpec extends MongoIntegrationSuite 
 
   test("ECR-02 ECR-03 the cross-tab counts every searchable entity once on a seeded database") {
     database.use { db =>
-      val work = new MongoEmbeddingWorkRepository(db, Diagnostics.noop)
+      val work = new MongoEmbeddingWorkRepository(db, Diagnostics.noop[IO])
       val enqueuedAt = now.minusSeconds(600)
       val current = jobWith(1, embedding = Some("model-a" -> true))
       val currentWaiting = jobWith(2, embedding = Some("model-a" -> true))
@@ -166,7 +166,7 @@ final class MongoEmbeddingCoverageIntegrationSpec extends MongoIntegrationSuite 
         // stuckBefore is now - 15 min and the comparison is strict: exactly at the bound is not stuck, 1 ms older is.
         _ <- successful(work.enqueue(jobKey(atBoundary), now.minusSeconds(15 * 60)))
         _ <- successful(work.enqueue(jobKey(pastBoundary), now.minusSeconds(15 * 60).minusMillis(1)))
-        repository = new MongoEmbeddingCoverageRepository(db, Diagnostics.noop)
+        repository = new MongoEmbeddingCoverageRepository(db, Diagnostics.noop[IO])
         unfiltered <- successful(repository.observe(request(None)))
         filtered <- successful(repository.observe(request(Some("model-a"))))
       } yield {
@@ -219,7 +219,7 @@ final class MongoEmbeddingCoverageIntegrationSpec extends MongoIntegrationSuite 
       val jobs = (1 to 7).toList.map(n => jobWith(n))
       for {
         _ <- insert(db, MongoCollections.Jobs, jobs.map(MongoHiringCodecs.job(_)))
-        observation <- successful(new MongoEmbeddingCoverageRepository(db, Diagnostics.noop).observe(request(None)))
+        observation <- successful(new MongoEmbeddingCoverageRepository(db, Diagnostics.noop[IO]).observe(request(None)))
       } yield {
         assertEquals(observation.tally.scanned(EmbeddingWorkKind.Job), 7L)
         assertEquals(observation.tally.orphanedGaps, 7L)
@@ -230,17 +230,17 @@ final class MongoEmbeddingCoverageIntegrationSpec extends MongoIntegrationSuite 
 
   test("ECR-06 a capped scan sets truncated and the checks are inconclusive") {
     database.use { db =>
-      val work = new MongoEmbeddingWorkRepository(db, Diagnostics.noop)
+      val work = new MongoEmbeddingWorkRepository(db, Diagnostics.noop[IO])
       val jobs = (1 to 5).toList.map(n => jobWith(n, embedding = Some("model-a" -> true)))
       val capped = limits.copy(maxEntitiesPerKind = 3)
       for {
         _ <- insert(db, MongoCollections.Jobs, jobs.map(MongoHiringCodecs.job(_)))
         _ <- jobs.traverse_(job => successful(work.enqueue(jobKey(job), now.minusSeconds(30))))
         observation <- successful(
-          new MongoEmbeddingCoverageRepository(db, Diagnostics.noop).observe(request(None, capped))
+          new MongoEmbeddingCoverageRepository(db, Diagnostics.noop[IO]).observe(request(None, capped))
         )
         exact <- successful(
-          new MongoEmbeddingCoverageRepository(db, Diagnostics.noop)
+          new MongoEmbeddingCoverageRepository(db, Diagnostics.noop[IO])
             .observe(request(None, capped.copy(maxEntitiesPerKind = 5)))
         )
       } yield {
@@ -282,8 +282,9 @@ final class MongoEmbeddingCoverageIntegrationSpec extends MongoIntegrationSuite 
   test("a driver or server failure inside the scan yields a typed unavailable error, not a report") {
     database.use { db =>
       val invalid = limits.copy(pageSize = -1)
-      new MongoEmbeddingCoverageRepository(db, Diagnostics.noop).observe(request(None, invalid)).value.map { result =>
-        assertEquals(result, Left(RepositoryError.Unavailable))
+      new MongoEmbeddingCoverageRepository(db, Diagnostics.noop[IO]).observe(request(None, invalid)).value.map {
+        result =>
+          assertEquals(result, Left(RepositoryError.Unavailable))
       }
     }
   }
@@ -294,7 +295,7 @@ final class MongoEmbeddingCoverageIntegrationSpec extends MongoIntegrationSuite 
       for {
         _ <- insert(db, MongoCollections.Jobs, jobs.map(MongoHiringCodecs.job(_)))
         _ <- MongoAccessEvaluationSupport.command(db, new Document("profile", 2))
-        _ <- successful(new MongoEmbeddingCoverageRepository(db, Diagnostics.noop).observe(request(None)))
+        _ <- successful(new MongoEmbeddingCoverageRepository(db, Diagnostics.noop[IO]).observe(request(None)))
         _ <- MongoAccessEvaluationSupport.command(db, new Document("profile", 0))
         entries <- MongoRepositoryTestSupport
           .collection(db, "system.profile")
@@ -353,7 +354,7 @@ final class MongoEmbeddingCoverageIntegrationSpec extends MongoIntegrationSuite 
         _ <- insert(db, MongoCollections.Jobs, jobs.map(MongoHiringCodecs.job(_)))
         _ <- insert(db, MongoCollections.Users, users.map(MongoHiringCodecs.user(_)))
         _ <- insert(db, MongoCollections.EmbeddingWork, workRows)
-        repository = new MongoEmbeddingCoverageRepository(db, Diagnostics.noop)
+        repository = new MongoEmbeddingCoverageRepository(db, Diagnostics.noop[IO])
         timed <- repository.observe(request(Some("model-a"), bounds)).value.timed
         observation <- IO.fromEither(timed._2.left.map(error => new AssertionError(error.toString)))
         midJob = jobs.map(_.id.value.toString).sorted.drop(perKind / 2).head

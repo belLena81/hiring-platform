@@ -213,7 +213,7 @@ class JobServiceSpec extends CatsEffectSuite {
       users <- Ref.of[IO, Map[UserId, User]](Map(recruiterId -> recruiter))
       jobs <- Ref.of[IO, Map[JobId, Job]](Map.empty)
       wakes <- Ref.of[IO, Int](0)
-      publisher = new EmbeddingWorkPublisher {
+      publisher = new EmbeddingWorkPublisher[IO] {
         override def wake: IO[Unit] = wakes.update(_ + 1)
       }
       service <- deterministicService(InMemoryUsers(users), InMemoryJobs(jobs), List(now), List(jobId.value), publisher)
@@ -243,14 +243,14 @@ class JobServiceSpec extends CatsEffectSuite {
       users <- Ref.of[IO, Map[UserId, User]](Map(recruiterId -> recruiter))
       jobs <- Ref.of[IO, Map[JobId, Job]](Map.empty)
       captured <- Ref.of[IO, List[(LogEvent, Map[LogField, String])]](Nil)
-      diagnostics = new Diagnostics {
+      diagnostics = new Diagnostics[IO] {
         override def event(
             event: LogEvent,
             requestId: Option[String],
             fields: => Map[LogField, String]
         ): IO[Unit] = captured.update((event, fields) :: _)
       }
-      publisher = new EmbeddingWorkPublisher {
+      publisher = new EmbeddingWorkPublisher[IO] {
         override def wake: IO[Unit] = IO.raiseError(new IllegalStateException("sensitive wake detail"))
       }
       service <- deterministicService(
@@ -424,9 +424,10 @@ class JobServiceSpec extends CatsEffectSuite {
       jobs: InMemoryJobs,
       times: List[java.time.Instant],
       ids: List[UUID],
-      embeddingWork: EmbeddingWorkPublisher = com.example.graphQL.cats.service.search.TestEmbeddingWorkPublisher.noop,
-      diagnostics: Diagnostics = Diagnostics.noop
-  ): IO[JobService] =
+      embeddingWork: EmbeddingWorkPublisher[IO] =
+        com.example.graphQL.cats.service.search.TestEmbeddingWorkPublisher.noop,
+      diagnostics: Diagnostics[IO] = Diagnostics.noop
+  ): IO[JobService[IO]] =
     for {
       timeValues <- Ref.of[IO, List[java.time.Instant]](times)
       idValues <- Ref.of[IO, List[UUID]](ids)

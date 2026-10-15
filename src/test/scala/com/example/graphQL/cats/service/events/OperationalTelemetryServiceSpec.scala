@@ -13,7 +13,7 @@ import com.example.graphQL.cats.service.port.{
   MutationReceiptRepository,
   MutationWriteOutcome,
   MutationWriteContext,
-  RepositoryIO,
+  RepositoryF,
   SearchSessionRepository
 }
 import com.example.graphQL.cats.service.RepositoryError
@@ -128,7 +128,7 @@ class OperationalTelemetryServiceSpec extends CatsEffectSuite {
         com.example.graphQL.cats.domain.model.Identifiers.UserId,
         com.example.graphQL.cats.domain.model.User
       ] = Map(candidateId -> candidate, recruiterId -> recruiter),
-      idempotent: Idempotent = com.example.graphQL.cats.service.mutation.TestIdempotency.noop
+      idempotent: Idempotent[IO] = com.example.graphQL.cats.service.mutation.TestIdempotency.noop
   ) =
     for {
       usersRef <- Ref.of[IO, Map[
@@ -176,39 +176,41 @@ class OperationalTelemetryServiceSpec extends CatsEffectSuite {
       now.plusSeconds(7.days.toSeconds)
     )
 
-  private final case class ReplayReceipts(reference: MutationEntityReference) extends MutationReceiptRepository {
+  private final case class ReplayReceipts(reference: MutationEntityReference) extends MutationReceiptRepository[IO] {
     override def execute[A, E](
         key: MutationReceiptKey,
         fingerprint: MutationReceiptFingerprint,
         now: java.time.Instant,
         expiresAt: java.time.Instant
     )(
-        write: MutationWriteContext => RepositoryIO[MutationWriteOutcome[A, E]]
-    ): RepositoryIO[MutationReceiptExecution[A, E]] = com.example.graphQL.cats.service.port.RepositoryIO.fromEither(
-      Right(MutationReceiptExecution.Replay(reference))
-    )
+        write: MutationWriteContext => RepositoryF[IO, MutationWriteOutcome[A, E]]
+    ): RepositoryF[IO, MutationReceiptExecution[A, E]] = com.example.graphQL.cats.service.port.RepositoryF
+      .at[IO]
+      .fromEither(
+        Right(MutationReceiptExecution.Replay(reference))
+      )
   }
 
   private final class InMemorySearchSessions(
       sessions: Ref[IO, Map[UUID, SearchSession]],
       storedEvents: Ref[IO, Vector[OperationalEventEnvelope]]
-  ) extends SearchSessionRepository {
-    override def save(session: SearchSession, event: OperationalEventEnvelope): RepositoryIO[Unit] =
-      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+  ) extends SearchSessionRepository[IO] {
+    override def save(session: SearchSession, event: OperationalEventEnvelope): RepositoryF[IO, Unit] =
+      com.example.graphQL.cats.service.port.RepositoryF.fromFEither(
         IO.defer {
           val _ = event
           sessions.update(_ + (session.id -> session)).as(Right(()))
         }
       )
 
-    override def find(id: UUID): RepositoryIO[Option[SearchSession]] =
-      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(sessions.get.map(values => Right(values.get(id))))
+    override def find(id: UUID): RepositoryF[IO, Option[SearchSession]] =
+      com.example.graphQL.cats.service.port.RepositoryF.fromFEither(sessions.get.map(values => Right(values.get(id))))
 
     override def recordInteraction(
         event: OperationalEventEnvelope,
         context: MutationWriteContext
-    ): RepositoryIO[Boolean] =
-      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(storedEvents.modify { events =>
+    ): RepositoryF[IO, Boolean] =
+      com.example.graphQL.cats.service.port.RepositoryF.fromFEither(storedEvents.modify { events =>
         events.find(_.eventId == event.eventId) match {
           case Some(existing) if sameLogicalEvent(existing, event) => events -> Right(false)
           case Some(_)                                             => events -> Left(RepositoryError.Conflict)

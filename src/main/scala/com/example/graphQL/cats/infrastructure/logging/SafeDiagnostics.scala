@@ -18,7 +18,7 @@ object SafeDiagnostics {
   private val loggerName = "hiring.foundation"
   private val DefaultLogDirectory = Paths.get("_logs")
 
-  def configure(maskSensitive: Boolean, allowed: PublicLogValues): IO[Diagnostics] =
+  def configure(maskSensitive: Boolean, allowed: PublicLogValues): IO[Diagnostics[IO]] =
     IO.blocking {
       Files.createDirectories(DefaultLogDirectory)
       val diagnostics = apply(maskSensitive, allowed)
@@ -32,7 +32,7 @@ object SafeDiagnostics {
         if (maskSensitive) IO.unit else diagnostics.emit(LogEvent.LocalUnmasked)
       }
 
-  def apply(maskSensitive: Boolean, allowed: PublicLogValues): Diagnostics = {
+  def apply(maskSensitive: Boolean, allowed: PublicLogValues): Diagnostics[IO] = {
     val structuredLogger = Slf4jLogger.getLoggerFromName[IO](loggerName)
     withEventSink(
       maskSensitive,
@@ -55,7 +55,7 @@ object SafeDiagnostics {
       sink: String => IO[Unit],
       maskSensitive: Boolean = true,
       allowed: PublicLogValues = PublicLogValues.none
-  ): Diagnostics =
+  ): Diagnostics[IO] =
     withEventSink(maskSensitive, allowed, _ => IO.pure(true), (_, message) => sink(message))
 
   private def levelEnabled(logger: org.typelevel.log4cats.SelfAwareStructuredLogger[IO], level: LogLevel): IO[Boolean] =
@@ -151,7 +151,7 @@ object SafeDiagnostics {
       allowed: PublicLogValues,
       isEnabled: LogLevel => IO[Boolean],
       sink: (LogEvent, String) => IO[Unit]
-  ): Diagnostics = new Diagnostics {
+  ): Diagnostics[IO] = new Diagnostics[IO] {
     def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]): IO[Unit] = IO
       .defer {
         isEnabled(event.level).flatMap { enabled =>

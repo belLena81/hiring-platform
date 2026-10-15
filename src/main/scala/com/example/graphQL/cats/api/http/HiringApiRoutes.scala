@@ -13,8 +13,8 @@ import org.typelevel.otel4s.trace.Tracer
 import scala.concurrent.duration.*
 
 final class HiringApiRoutes(
-    service: HealthService,
-    diagnostics: Diagnostics,
+    service: HealthService[IO],
+    diagnostics: Diagnostics[IO],
     dependencies: HiringApiRoutes.Dependencies,
     tracer: Tracer[IO] = Tracer.noop[IO]
 ) {

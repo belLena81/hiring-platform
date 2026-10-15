@@ -16,48 +16,48 @@ enum OperationalEventFailureCategory {
   case MalformedEnvelope, UnsupportedVersion, InvalidOrdering, ConsumerFailure
 }
 
-trait OperationalEventOutboxRepository {
+trait OperationalEventOutboxRepository[F[_]] {
   def claim(
       workerId: String,
       transactionalId: String,
       now: Instant,
       leaseUntil: Instant,
       limit: Int
-  ): RepositoryIO[List[ClaimedOperationalEvent]]
+  ): RepositoryF[F, List[ClaimedOperationalEvent]]
   def renewLease(
       eventId: java.util.UUID,
       leaseToken: String,
       subjectIds: List[String],
       leaseUntil: Instant
-  ): RepositoryIO[Unit]
+  ): RepositoryF[F, Unit]
   def markPublished(
       eventId: java.util.UUID,
       leaseToken: String,
       now: Instant,
       retentionExpiresAt: Instant
-  ): RepositoryIO[Unit]
+  ): RepositoryF[F, Unit]
   def releaseForRetry(
       eventId: java.util.UUID,
       leaseToken: String,
       now: Instant,
       availableAt: Instant
-  ): RepositoryIO[Unit]
+  ): RepositoryF[F, Unit]
   def markFailed(
       eventId: java.util.UUID,
       leaseToken: String,
       now: Instant,
       reason: String
-  ): RepositoryIO[Unit]
+  ): RepositoryF[F, Unit]
 }
 
-trait ConsumerReceiptRepository {
-  def exists(consumerGroup: String, eventId: java.util.UUID): RepositoryIO[Boolean]
+trait ConsumerReceiptRepository[F[_]] {
+  def exists(consumerGroup: String, eventId: java.util.UUID): RepositoryF[F, Boolean]
   def record(
       consumerGroup: String,
       event: OperationalEventEnvelope,
       now: Instant,
       expiresAt: Instant
-  ): RepositoryIO[Boolean]
+  ): RepositoryF[F, Boolean]
 }
 
 final case class EventQuarantineRecord(
@@ -71,6 +71,6 @@ final case class EventQuarantineRecord(
     expiresAt: Instant
 )
 
-trait EventQuarantineRepository {
-  def save(record: EventQuarantineRecord): RepositoryIO[Unit]
+trait EventQuarantineRepository[F[_]] {
+  def save(record: EventQuarantineRecord): RepositoryF[F, Unit]
 }

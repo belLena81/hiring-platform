@@ -8,8 +8,8 @@ import com.example.graphQL.cats.runtime.HiringLogValues
 import munit.CatsEffectSuite
 
 class ConfigInvalidStartupLoggingSpec extends CatsEffectSuite {
-  private def recording(sink: Ref[IO, Vector[(LogEvent, Map[LogField, String])]]): Diagnostics =
-    new Diagnostics {
+  private def recording(sink: Ref[IO, Vector[(LogEvent, Map[LogField, String])]]): Diagnostics[IO] =
+    new Diagnostics[IO] {
       def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]): IO[Unit] =
         sink.update(_ :+ (event, fields))
     }

@@ -175,15 +175,15 @@ private[mongo] final case class InterviewLifecycleScenario(
       case other => IO.raiseError(new AssertionError(s"expected an applied transition, got $other"))
     }
 
-  val calendarLedger: InterviewCalendarProvider = LedgerInterviewCalendarProvider.durable(repository)
-  val notificationLedger: InterviewNotificationProvider = LedgerInterviewNotificationProvider.durable(repository)
+  val calendarLedger: InterviewCalendarProvider[IO] = LedgerInterviewCalendarProvider.durable(repository)
+  val notificationLedger: InterviewNotificationProvider[IO] = LedgerInterviewNotificationProvider.durable(repository)
 
   private def snapshotHolds: IO[Unit] =
     List(0, 1, 2, 3).traverse(isHeld).flatMap(held => faults.liveHolds.update(_ :+ held.count(identity)))
 
   /** The ledger calendar, wrapped with the scenario's faults and counters. */
-  val calendar: InterviewCalendarProvider = new InterviewCalendarProvider {
-    private def unavailable(counter: Ref[IO, Int]): InterviewProviderIO[Unit] =
+  val calendar: InterviewCalendarProvider[IO] = new InterviewCalendarProvider[IO] {
+    private def unavailable(counter: Ref[IO, Int]): InterviewProviderF[IO, Unit] =
       EitherT(counter.modify(left => if (left > 0) (left - 1, true) else (0, false)).map { fail =>
         if (fail) Left(InterviewProviderError.Unavailable) else Right(())
       })
@@ -196,7 +196,7 @@ private[mongo] final case class InterviewLifecycleScenario(
         interval: InterviewInterval,
         now: Instant,
         execution: Option[ClaimedInterviewWorkflowCommand]
-    ): InterviewProviderIO[InterviewCalendarReservation] =
+    ): InterviewProviderF[IO, InterviewCalendarReservation] =
       EitherT.liftF[IO, InterviewProviderError, Unit](faults.holdCalls.update(_ :+ idempotencyKey)) *>
         unavailable(faults.holdUnavailable) *>
         calendarLedger.reserve(workflowId, idempotencyKey, candidateId, recruiterId, interval, now, execution)
@@ -204,14 +204,14 @@ private[mongo] final case class InterviewLifecycleScenario(
     override def lookup(
         workflowId: InterviewWorkflowId,
         idempotencyKey: String
-    ): InterviewProviderIO[Option[InterviewCalendarReservation]] = calendarLedger.lookup(workflowId, idempotencyKey)
+    ): InterviewProviderF[IO, Option[InterviewCalendarReservation]] = calendarLedger.lookup(workflowId, idempotencyKey)
 
     override def cancel(
         workflowId: InterviewWorkflowId,
         idempotencyKey: String,
         now: Instant,
         execution: Option[ClaimedInterviewWorkflowCommand]
-    ): InterviewProviderIO[InterviewCalendarCancellation] =
+    ): InterviewProviderF[IO, InterviewCalendarCancellation] =
       for {
         _ <- EitherT.liftF[IO, InterviewProviderError, Unit](faults.cancelCalls.update(_ :+ idempotencyKey))
         _ <- unavailable(faults.cancelUnavailable)
@@ -237,11 +237,11 @@ private[mongo] final case class InterviewLifecycleScenario(
         idempotencyKey: String,
         now: Instant,
         execution: Option[ClaimedInterviewWorkflowCommand]
-    ): InterviewProviderIO[Unit] = calendarLedger.release(idempotencyKey, now, execution)
+    ): InterviewProviderF[IO, Unit] = calendarLedger.release(idempotencyKey, now, execution)
   }
 
   /** The ledger receipt store, wrapped with the scenario's faults and counters. */
-  val notifications: InterviewNotificationProvider = new InterviewNotificationProvider {
+  val notifications: InterviewNotificationProvider[IO] = new InterviewNotificationProvider[IO] {
     override def notify(
         workflowId: InterviewWorkflowId,
         recipientId: UserId,
@@ -250,7 +250,7 @@ private[mongo] final case class InterviewLifecycleScenario(
         idempotencyKey: String,
         now: Instant,
         execution: Option[ClaimedInterviewWorkflowCommand]
-    ): InterviewProviderIO[InterviewNotificationReceipt] =
+    ): InterviewProviderF[IO, InterviewNotificationReceipt] =
       for {
         _ <- EitherT.liftF[IO, InterviewProviderError, Unit](faults.deliveries.update(_ :+ idempotencyKey))
         failing <- EitherT.liftF[IO, InterviewProviderError, Boolean](
@@ -274,7 +274,7 @@ private[mongo] final case class InterviewLifecycleScenario(
         )
       } yield receipt
 
-    override def lookup(idempotencyKey: String): InterviewProviderIO[Option[InterviewNotificationReceipt]] =
+    override def lookup(idempotencyKey: String): InterviewProviderF[IO, Option[InterviewNotificationReceipt]] =
       notificationLedger.lookup(idempotencyKey)
   }
 
@@ -290,20 +290,20 @@ private[mongo] final case class InterviewLifecycleScenario(
       claimLease: FiniteDuration = 60.seconds,
       maxAttempts: Int = 5,
       clock: IO[Instant] = IO.realTimeInstant
-  ): InterviewWorkflowWorker =
-    new InterviewWorkflowWorker(
+  ): InterviewWorkflowWorker[IO] =
+    new InterviewWorkflowWorker[IO](
       repository,
       calendar,
       notifications,
       settings(workerId, claimLease, maxAttempts),
-      Diagnostics.noop,
+      Diagnostics.noop[IO],
       clock
     )
 
   private val commandGeneration = InterviewPublisherGeneration(InterviewPublisherRole.Orchestrator, UUID.randomUUID())
   private val resultGeneration = InterviewPublisherGeneration(InterviewPublisherRole.Worker, UUID.randomUUID())
 
-  private def transport: InterviewTransport = new InterviewTransport {
+  private def transport: InterviewTransport[IO] = new InterviewTransport[IO] {
     override def generationFor(message: InterviewMessage): InterviewPublisherGeneration =
       if (message.result.nonEmpty) resultGeneration else commandGeneration
     override def publish(message: InterviewMessage): IO[Unit] = inFlight.update(_ :+ message)
@@ -312,7 +312,7 @@ private[mongo] final case class InterviewLifecycleScenario(
   /** One broker round: publish what is due, then deliver every pending message. A message whose handler crashes or
     * reports it is not durable stays pending, like an uncommitted offset. Returns the crashes observed.
     */
-  def round(worker: InterviewWorkflowWorker): IO[List[Throwable]] =
+  def round(worker: InterviewWorkflowWorker[IO]): IO[List[Throwable]] =
     for {
       _ <- worker.publishDue(transport)
       pending <- inFlight.getAndSet(Vector.empty)
@@ -332,7 +332,7 @@ private[mongo] final case class InterviewLifecycleScenario(
 
   /** Pumps rounds until the workflow satisfies `done`. The crashes of earlier rounds are returned for assertions. */
   def drive(
-      workers: List[InterviewWorkflowWorker],
+      workers: List[InterviewWorkflowWorker[IO]],
       done: InterviewWorkflow => Boolean,
       rounds: Int = 400,
       pause: FiniteDuration = 25.millis
@@ -364,7 +364,7 @@ private[mongo] final case class InterviewLifecycleScenario(
 
   /** Pumps rounds until `condition` holds; unlike `drive` it does not look at the workflow phase. */
   def pumpUntil(
-      workers: List[InterviewWorkflowWorker],
+      workers: List[InterviewWorkflowWorker[IO]],
       condition: IO[Boolean],
       rounds: Int = 400,
       pause: FiniteDuration = 25.millis
@@ -381,7 +381,7 @@ private[mongo] final case class InterviewLifecycleScenario(
   /** Lets whatever the workflow's current phase still has to do finish, then a few more rounds so informational
     * notifications are delivered. Returns the settled workflow.
     */
-  def settle(workers: List[InterviewWorkflowWorker]): IO[InterviewWorkflow] =
+  def settle(workers: List[InterviewWorkflowWorker[IO]]): IO[InterviewWorkflow] =
     current.flatMap { observed =>
       val finished: InterviewWorkflow => Boolean = observed.phase match {
         case InterviewWorkflowPhase.CancelPending | InterviewWorkflowPhase.CancelNotificationsPending =>
@@ -406,7 +406,7 @@ private[mongo] object InterviewLifecycleScenario {
   val interval: InterviewInterval = InterviewInterval(now.plusSeconds(172800), now.plusSeconds(176400))
   val replacement: InterviewInterval = InterviewInterval(now.plusSeconds(259200), now.plusSeconds(262800))
 
-  private def success[A](operation: RepositoryIO[A]): IO[A] =
+  private def success[A](operation: RepositoryF[IO, A]): IO[A] =
     operation.value.flatMap(_.fold(error => IO.raiseError(new AssertionError(s"$error")), IO.pure))
 
   /** Seeds a booked interview (`Completed`, application `Interview`, scheduling hold live) and runs `use` against it.
@@ -416,7 +416,7 @@ private[mongo] object InterviewLifecycleScenario {
       held: InterviewInterval = interval
   )(use: InterviewLifecycleScenario => IO[A]): IO[A] =
     mongo.use { fixture =>
-      val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
+      val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop[IO])
       for {
         at <- IO.realTimeInstant.map(_.truncatedTo(java.time.temporal.ChronoUnit.MILLIS))
         base <- IO.fromEither(
@@ -433,7 +433,7 @@ private[mongo] object InterviewLifecycleScenario {
             )
             .leftMap(error => new AssertionError(s"invalid workflow $error"))
         )
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- InterviewSchedulingFixtures.seed(fixture.database, List(base), at)
         _ <- success(
           repository.create(

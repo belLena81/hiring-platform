@@ -35,10 +35,10 @@ private[mongo] abstract class MongoJobDiscoveryFixture extends MongoIntegrationS
       fixture.database,
       fixture.client,
       MongoEmbeddingWorkEnqueuer.disabled,
-      Diagnostics.noop
+      Diagnostics.noop[IO]
     )
     for {
-      _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+      _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
       _ <- MongoRepositoryTestSupport.insertOne(fixture.database, MongoCollections.Users, MongoHiringCodecs.user(actor))
       policy <- DiscoveryQueryPolicy.create(2.seconds, 4)
       scope <- IO.fromEither(
@@ -52,7 +52,7 @@ private[mongo] abstract class MongoJobDiscoveryFixture extends MongoIntegrationS
       )
     } yield (fixture, policy, scope)
   }
-  protected def success[A](effect: RepositoryIO[A]): IO[A] =
+  protected def success[A](effect: RepositoryF[IO, A]): IO[A] =
     effect.value.flatMap(_.fold(error => IO.raiseError(new AssertionError(s"Repository failed: $error")), IO.pure))
 
 }

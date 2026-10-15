@@ -52,7 +52,7 @@ final class MongoAccountRegistrationIntegrationSpec extends MongoIntegrationSuit
         seed = com.example.graphQL.cats.config
           .AdminSeedConfig(true, Some("Synthetic admin"), Some("synthetic-admin-password"))
         config = base.copy(adminSeed = seed)
-        _ <- MongoHiringRuntime.resource(config, Diagnostics.noop).use { runtime =>
+        _ <- MongoHiringRuntime.resource(config, Diagnostics.noop[IO]).use { runtime =>
           for {
             candidate <- runtime.services.accountService
               .signUp(
@@ -80,7 +80,10 @@ final class MongoAccountRegistrationIntegrationSpec extends MongoIntegrationSuit
           } yield ()
         }
         _ <- MongoHiringRuntime
-          .resource(config.copy(adminSeed = seed.copy(password = Some("changed-password-unused"))), Diagnostics.noop)
+          .resource(
+            config.copy(adminSeed = seed.copy(password = Some("changed-password-unused"))),
+            Diagnostics.noop[IO]
+          )
           .use { runtime =>
             for {
               old <- runtime.services.accountService
@@ -104,7 +107,7 @@ final class MongoAccountRegistrationIntegrationSpec extends MongoIntegrationSuit
         // A drifted seed name is a no-op once the registry is initialized (README Admin seed): startup
         // succeeds and the existing Admin and its password are preserved; no second Admin is provisioned.
         drifted <- MongoHiringRuntime
-          .resource(config.copy(adminSeed = seed.copy(name = Some("Another admin"))), Diagnostics.noop)
+          .resource(config.copy(adminSeed = seed.copy(name = Some("Another admin"))), Diagnostics.noop[IO])
           .use { runtime =>
             for {
               original <- runtime.services.accountService
@@ -137,7 +140,12 @@ final class MongoAccountRegistrationIntegrationSpec extends MongoIntegrationSuit
         _ <- MongoDatabaseProbe.clientResource(config.mongoUri).use { client =>
           client.getDatabase(config.mongoDatabase).flatMap { database =>
             val users =
-              MongoUserRepository.transactional(database, client, MongoEmbeddingWorkEnqueuer.disabled, Diagnostics.noop)
+              MongoUserRepository.transactional(
+                database,
+                client,
+                MongoEmbeddingWorkEnqueuer.disabled,
+                Diagnostics.noop[IO]
+              )
             val filter = Filters.eq(MongoFields.Id, "user-account-registry")
             for {
               absent <- users.initialized.value

@@ -34,17 +34,17 @@ final class InterviewSchedulingServiceSpec extends CatsEffectSuite {
   )
 
   private def service(
-      workflows: InterviewWorkflowRepository,
+      workflows: InterviewWorkflowRepository[IO],
       clock: IO[Instant],
       ids: IO[InterviewWorkflowId]
-  ): IO[InterviewSchedulingService] =
+  ): IO[InterviewSchedulingService[IO]] =
     for {
       users <- Ref.of[IO, Map[UserId, User]](Map(candidateId -> candidate, recruiterId -> recruiter, adminId -> admin))
       jobs <- Ref.of[IO, Map[JobId, Job]](Map(jobId -> openJob))
       applications <- Ref.of[IO, Map[ApplicationId, Application]](Map(applicationId -> accepted))
       events <- Ref.of[IO, Vector[ApplicationEvent]](Vector.empty)
       errors <- Ref.of[IO, Option[RepositoryError]](None)
-    } yield new InterviewSchedulingService(
+    } yield new InterviewSchedulingService[IO](
       new InMemoryUsers(users),
       new InMemoryJobs(jobs),
       new InMemoryApplications(applications, events, errors),
@@ -61,7 +61,7 @@ final class InterviewSchedulingServiceSpec extends CatsEffectSuite {
       writes <- Ref.of[IO, Vector[(InterviewWorkflow, Instant)]](Vector.empty)
       repository = new TestInterviewWorkflowRepository {
         override def findRequest(actor: UserId, key: UUID, fingerprint: MutationReceiptFingerprint) =
-          RepositoryIO.pure(Option.empty[InterviewWorkflow])
+          RepositoryF.at[IO].pure(Option.empty[InterviewWorkflow])
         override def create(
             workflow: InterviewWorkflow,
             initialCommand: InterviewWorkflowCommand,
@@ -69,7 +69,7 @@ final class InterviewSchedulingServiceSpec extends CatsEffectSuite {
             fingerprint: MutationReceiptFingerprint,
             at: Instant
         ) =
-          RepositoryIO.lift(writes.update(_ :+ (workflow, at))).as(InterviewWorkflowAdvanceResult.Applied)
+          RepositoryF.lift(writes.update(_ :+ (workflow, at))).as(InterviewWorkflowAdvanceResult.Applied)
       }
       scheduling <- service(
         repository,
@@ -118,7 +118,7 @@ final class InterviewSchedulingServiceSpec extends CatsEffectSuite {
         assertEquals(actor, recruiterId)
         assertEquals(key, requestKey)
         assertEquals(fingerprint, expectedFingerprint)
-        RepositoryIO.pure(Some(past))
+        RepositoryF.at[IO].pure(Some(past))
       }
     }
     for {
@@ -142,7 +142,7 @@ final class InterviewSchedulingServiceSpec extends CatsEffectSuite {
   test("invalid interval observes supplied time but does not generate identity or persist intent") {
     val repository = new TestInterviewWorkflowRepository {
       override def findRequest(actor: UserId, key: UUID, fingerprint: MutationReceiptFingerprint) =
-        RepositoryIO.pure(Option.empty[InterviewWorkflow])
+        RepositoryF.at[IO].pure(Option.empty[InterviewWorkflow])
     }
     for {
       reads <- Ref.of[IO, Int](0)
@@ -165,9 +165,9 @@ final class InterviewSchedulingServiceSpec extends CatsEffectSuite {
     for {
       repairs <- Ref.of[IO, Vector[(Instant, UserId)]](Vector.empty)
       repository = new TestInterviewWorkflowRepository {
-        override def findForAdmin(id: InterviewWorkflowId) = RepositoryIO.pure(Some(existing))
+        override def findForAdmin(id: InterviewWorkflowId) = RepositoryF.at[IO].pure(Some(existing))
         override def repair(workflow: InterviewWorkflow, revision: Long, key: UUID, at: Instant, actor: UserId) =
-          RepositoryIO.lift(repairs.update(_ :+ (at, actor))).as(workflow)
+          RepositoryF.lift(repairs.update(_ :+ (at, actor))).as(workflow)
       }
       scheduling <- service(
         repository,

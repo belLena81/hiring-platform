@@ -35,12 +35,12 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
   private val noCalls = Calls(Vector.empty, Vector.empty, Vector.empty, Vector.empty, Vector.empty, 0)
 
   private final case class Providers(
-      cancel: InterviewProviderIO[InterviewCalendarCancellation] =
+      cancel: InterviewProviderF[IO, InterviewCalendarCancellation] =
         EitherT.rightT(InterviewCalendarCancellation.Cancelled(at)),
-      reserve: InterviewProviderIO[InterviewCalendarReservation] = EitherT.leftT(InterviewProviderError.Unavailable),
-      lookup: InterviewProviderIO[Option[InterviewCalendarReservation]] = EitherT.rightT(None),
+      reserve: InterviewProviderF[IO, InterviewCalendarReservation] = EitherT.leftT(InterviewProviderError.Unavailable),
+      lookup: InterviewProviderF[IO, Option[InterviewCalendarReservation]] = EitherT.rightT(None),
       delivers: Boolean = true,
-      notificationLookup: InterviewProviderIO[Option[InterviewNotificationReceipt]] = EitherT.rightT(None),
+      notificationLookup: InterviewProviderF[IO, Option[InterviewNotificationReceipt]] = EitherT.rightT(None),
       approval: Either[RepositoryError, Unit] = Right(()),
       hasApproval: Either[RepositoryError, Boolean] = Right(false)
   )
@@ -101,31 +101,31 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
       stored = record(workflow, command, None)
       claim = ClaimedInterviewWorkflowCommand(stored, "executor", new UUID(0L, 90L), clock.plusSeconds(60))
       repository = new TestInterviewWorkflowRepository {
-        override def findForAdmin(id: InterviewWorkflowId) = RepositoryIO.pure(Some(workflow))
-        override def findCommand(id: InterviewWorkflowId, step: String) = RepositoryIO.pure(Some(stored))
+        override def findForAdmin(id: InterviewWorkflowId) = RepositoryF.at[IO].pure(Some(workflow))
+        override def findCommand(id: InterviewWorkflowId, step: String) = RepositoryF.at[IO].pure(Some(stored))
         override def claimExecution(
             value: InterviewWorkflowCommandRecord,
             workerId: String,
             now: Instant,
             leaseUntil: Instant,
             maxAttempts: Int
-        ) = RepositoryIO.pure(InterviewExecutionClaimOutcome.Acquired(claim))
+        ) = RepositoryF.at[IO].pure(InterviewExecutionClaimOutcome.Acquired(claim))
         override def recordResult(
             value: ClaimedInterviewWorkflowCommand,
             result: InterviewResult,
             now: Instant
         ) =
-          RepositoryIO.lift(recorded.set(Some(result)))
+          RepositoryF.lift(recorded.set(Some(result)))
         override def approveRescheduledInterval(
             value: InterviewWorkflow,
             now: Instant,
             execution: ClaimedInterviewWorkflowCommand
-        ) = RepositoryIO.lift(calls.update(c => c.copy(approvals = c.approvals + 1))) *>
-          RepositoryIO.fromEither(providers.approval)
+        ) = RepositoryF.lift(calls.update(c => c.copy(approvals = c.approvals + 1))) *>
+          RepositoryF.at[IO].fromEither(providers.approval)
         override def hasRescheduleApproval(id: InterviewWorkflowId, generation: Int) =
-          RepositoryIO.fromEither(providers.hasApproval)
+          RepositoryF.at[IO].fromEither(providers.hasApproval)
       }
-      calendar = new InterviewCalendarProvider {
+      calendar = new InterviewCalendarProvider[IO] {
         override def reserve(
             id: InterviewWorkflowId,
             k: String,
@@ -149,7 +149,7 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
         override def release(k: String, now: Instant, execution: Option[ClaimedInterviewWorkflowCommand]) =
           EitherT.leftT[IO, Unit](InterviewProviderError.Unavailable)
       }
-      notifications = new InterviewNotificationProvider {
+      notifications = new InterviewNotificationProvider[IO] {
         override def notify(
             id: InterviewWorkflowId,
             recipient: UserId,
@@ -168,7 +168,7 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
             calls.update(c => c.copy(notificationLookups = c.notificationLookups :+ k))
           ) *> providers.notificationLookup
       }
-      worker = new InterviewWorkflowWorker(
+      worker = new InterviewWorkflowWorker[IO](
         repository,
         calendar,
         notifications,
@@ -421,10 +421,10 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
       applied <- Ref.of[IO, Applied](Applied(Vector.empty, Vector.empty, Vector.empty))
       stored = record(workflow, command, Some(InterviewResult.valueOf(result.toString)))
       repository = new TestInterviewWorkflowRepository {
-        override def findForAdmin(id: InterviewWorkflowId) = RepositoryIO.pure(Some(workflow))
-        override def findCommand(id: InterviewWorkflowId, step: String) = RepositoryIO.pure(Some(stored))
+        override def findForAdmin(id: InterviewWorkflowId) = RepositoryF.at[IO].pure(Some(workflow))
+        override def findCommand(id: InterviewWorkflowId, step: String) = RepositoryF.at[IO].pure(Some(stored))
         override def attemptCount(id: InterviewWorkflowId, requested: InterviewCommand) =
-          RepositoryIO.pure(attempts)
+          RepositoryF.at[IO].pure(attempts)
         override def applyLifecycle(
             id: InterviewWorkflowId,
             expectedRevision: Long,
@@ -432,7 +432,7 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
             origin: InterviewLifecycleOrigin,
             now: Instant,
             availableAt: Option[Instant]
-        ) = RepositoryIO
+        ) = RepositoryF
           .lift(
             applied.update(a => a.copy(lifecycle = a.lifecycle :+ ((expectedRevision, event, origin, availableAt))))
           )
@@ -441,13 +441,13 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
             value: InterviewWorkflowCommandRecord,
             settlement: InterviewNotificationSettlement,
             now: Instant
-        ) = RepositoryIO.lift(applied.update(a => a.copy(settlements = a.settlements :+ settlement))).as(true)
+        ) = RepositoryF.lift(applied.update(a => a.copy(settlements = a.settlements :+ settlement))).as(true)
         override def quarantine(identity: String, now: Instant) =
-          RepositoryIO.lift(applied.update(a => a.copy(quarantined = a.quarantined :+ identity)))
+          RepositoryF.lift(applied.update(a => a.copy(quarantined = a.quarantined :+ identity)))
       }
-      worker = new InterviewWorkflowWorker(
+      worker = new InterviewWorkflowWorker[IO](
         repository,
-        new InterviewCalendarProvider {
+        new InterviewCalendarProvider[IO] {
           def reserve(
               id: InterviewWorkflowId,
               k: String,
@@ -463,7 +463,7 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
           def release(k: String, n: Instant, e: Option[ClaimedInterviewWorkflowCommand]) =
             EitherT.leftT(InterviewProviderError.Unavailable)
         },
-        new InterviewNotificationProvider {
+        new InterviewNotificationProvider[IO] {
           def notify(
               id: InterviewWorkflowId,
               r: UserId,
@@ -602,9 +602,9 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
       )
       current <- Ref.of[IO, (InterviewWorkflow, InterviewWorkflowCommandRecord)](cancelling -> stored)
       repository = new TestInterviewWorkflowRepository {
-        override def findForAdmin(id: InterviewWorkflowId) = RepositoryIO.lift(current.get.map(value => Some(value._1)))
+        override def findForAdmin(id: InterviewWorkflowId) = RepositoryF.lift(current.get.map(value => Some(value._1)))
         override def findCommand(id: InterviewWorkflowId, step: String) =
-          RepositoryIO.lift(current.get.map(value => Some(value._2)))
+          RepositoryF.lift(current.get.map(value => Some(value._2)))
         override def applyLifecycle(
             id: InterviewWorkflowId,
             expectedRevision: Long,
@@ -613,14 +613,14 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
             now: Instant,
             availableAt: Option[Instant]
         ) =
-          RepositoryIO.lift(applied.update(_ :+ (event -> origin))).as(InterviewLifecycleOutcome.Duplicate(cancelling))
+          RepositoryF.lift(applied.update(_ :+ (event -> origin))).as(InterviewLifecycleOutcome.Duplicate(cancelling))
         override def settleNotificationResult(
             value: InterviewWorkflowCommandRecord,
             settlement: InterviewNotificationSettlement,
             now: Instant
-        ) = RepositoryIO.lift(settled.update(_ :+ settlement)).as(true)
+        ) = RepositoryF.lift(settled.update(_ :+ settlement)).as(true)
       }
-      unavailableCalendar = new InterviewCalendarProvider {
+      unavailableCalendar = new InterviewCalendarProvider[IO] {
         def reserve(
             id: InterviewWorkflowId,
             k: String,
@@ -637,7 +637,7 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
         def release(k: String, n: Instant, e: Option[ClaimedInterviewWorkflowCommand]) =
           EitherT.liftF(IO.raiseError(new AssertionError("a late message must not reach the provider")))
       }
-      silentNotifications = new InterviewNotificationProvider {
+      silentNotifications = new InterviewNotificationProvider[IO] {
         def notify(
             id: InterviewWorkflowId,
             r: UserId,
@@ -650,7 +650,7 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
         def lookup(k: String) =
           EitherT.liftF(IO.raiseError(new AssertionError("a late message must not reach the provider")))
       }
-      worker = new InterviewWorkflowWorker(
+      worker = new InterviewWorkflowWorker[IO](
         repository,
         unavailableCalendar,
         silentNotifications,
@@ -690,12 +690,12 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
       quarantined <- Ref.of[IO, Vector[String]](Vector.empty)
       reads <- Ref.of[IO, Int](0)
       repository = new TestInterviewWorkflowRepository {
-        override def findForAdmin(id: InterviewWorkflowId) = RepositoryIO.pure(Some(open))
+        override def findForAdmin(id: InterviewWorkflowId) = RepositoryF.at[IO].pure(Some(open))
         // The first read is the message's own lookup; a later read is the re-read after a failed requeue.
         override def findCommand(id: InterviewWorkflowId, step: String) =
-          RepositoryIO.lift(reads.getAndUpdate(_ + 1).map(n => if (n == 0) Some(stored) else current(Some(stored))))
+          RepositoryF.lift(reads.getAndUpdate(_ + 1).map(n => if (n == 0) Some(stored) else current(Some(stored))))
         override def deferExpiry(value: InterviewWorkflowCommandRecord, availableAt: Instant) =
-          RepositoryIO.lift(deferred.update(_ :+ availableAt)) *> RepositoryIO.fromEither(requeue)
+          RepositoryF.lift(deferred.update(_ :+ availableAt)) *> RepositoryF.at[IO].fromEither(requeue)
         override def applyLifecycle(
             id: InterviewWorkflowId,
             expectedRevision: Long,
@@ -703,12 +703,12 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
             origin: InterviewLifecycleOrigin,
             at: Instant,
             availableAt: Option[Instant]
-        ) = RepositoryIO.lift(applied.update(_ :+ event)).as(InterviewLifecycleOutcome.Duplicate(open))
+        ) = RepositoryF.lift(applied.update(_ :+ event)).as(InterviewLifecycleOutcome.Duplicate(open))
         override def quarantine(identity: String, at: Instant) =
-          RepositoryIO.lift(quarantined.update(_ :+ identity))
+          RepositoryF.lift(quarantined.update(_ :+ identity))
       }
-      never = new InterviewCalendarProvider {
-        private def refuse[A]: InterviewProviderIO[A] =
+      never = new InterviewCalendarProvider[IO] {
+        private def refuse[A]: InterviewProviderF[IO, A] =
           EitherT.liftF(IO.raiseError(new AssertionError("an early expiry must not reach the provider")))
         def reserve(
             id: InterviewWorkflowId,
@@ -723,7 +723,7 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
         def cancel(id: InterviewWorkflowId, k: String, n: Instant, e: Option[ClaimedInterviewWorkflowCommand]) = refuse
         def release(k: String, n: Instant, e: Option[ClaimedInterviewWorkflowCommand]) = refuse
       }
-      silent = new InterviewNotificationProvider {
+      silent = new InterviewNotificationProvider[IO] {
         def notify(
             id: InterviewWorkflowId,
             r: UserId,
@@ -735,7 +735,7 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
         ) = EitherT.liftF(IO.raiseError(new AssertionError("no notification")))
         def lookup(k: String) = EitherT.liftF(IO.raiseError(new AssertionError("no notification")))
       }
-      worker = new InterviewWorkflowWorker(repository, never, silent, settings, Diagnostics.noop, IO.pure(now))
+      worker = new InterviewWorkflowWorker[IO](repository, never, silent, settings, Diagnostics.noop, IO.pure(now))
       durable <- worker.receiveCommand(messageFor(open, stored, None)).committed
       requeued <- deferred.get
       events <- applied.get

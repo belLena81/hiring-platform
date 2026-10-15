@@ -74,7 +74,7 @@ final class TracePropagationSpec extends CatsEffectSuite {
             TestGraphQLSupport.interactions,
             TestGraphQLSupport.searchSessions
           )
-          probe = new DatabaseProbe {
+          probe = new DatabaseProbe[IO] {
             def check(requestId: Option[String]): IO[ProbeResult] = IO.pure(ProbeResult.Ready)
           }
           captured <- TestGraphQLSupport
@@ -114,7 +114,7 @@ final class TracePropagationSpec extends CatsEffectSuite {
     }
   }
 
-  private def capture(records: Ref[IO, Vector[DiagnosticRecord]]): Diagnostics = new Diagnostics {
+  private def capture(records: Ref[IO, Vector[DiagnosticRecord]]): Diagnostics[IO] = new Diagnostics[IO] {
     def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]): IO[Unit] =
       records.update(_ :+ ((event, requestId, fields)))
   }

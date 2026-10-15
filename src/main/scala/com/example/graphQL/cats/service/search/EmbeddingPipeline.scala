@@ -3,7 +3,9 @@ package com.example.graphQL.cats.service.search
 import com.example.graphQL.cats.domain.policy.RetryBackoff
 
 import cats.effect.std.{Queue, UUIDGen}
-import cats.effect.{Clock, IO, Resource}
+import cats.{Applicative, Functor, MonadThrow}
+import cats.effect.{Clock, Resource, Temporal}
+import cats.effect.implicits.*
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId, parse as parseIdentifier}
 import com.example.graphQL.cats.domain.model.{EmbeddingMeta, EntityEmbedding, SearchableText}
@@ -17,18 +19,19 @@ import retry.*
 import retry.RetryPolicies.*
 import scala.concurrent.duration.*
 
-trait EmbeddingWorkPublisher {
+trait EmbeddingWorkPublisher[F[_]] {
 
   /** Signals work that was atomically persisted by the mutation transaction. */
-  def wake: IO[Unit]
+  def wake: F[Unit]
 
   /** A failed wake never fails the committed mutation; the durable work is picked up by the next poll. */
-  final def wakeAfterCommit(diagnostics: Diagnostics): IO[Unit] =
+  final def wakeAfterCommit(diagnostics: Diagnostics[F])(using F: MonadThrow[F]): F[Unit] =
     wake.handleErrorWith(error => diagnostics.emit(LogEvent.EmbeddingWakeFailed, fields = LogFields.failure(error)))
 }
 
-final class DurableEmbeddingWorkPublisher private[search] (wakeups: Queue[IO, Unit]) extends EmbeddingWorkPublisher {
-  override def wake: IO[Unit] = wakeups.tryOffer(()).void
+final class DurableEmbeddingWorkPublisher[F[_]: Functor] private[search] (wakeups: Queue[F, Unit])
+    extends EmbeddingWorkPublisher[F] {
+  override def wake: F[Unit] = wakeups.tryOffer(()).void
 }
 
 /** Bounded durable retries of failed embedding work: attempts before failure, then capped exponential backoff. */
@@ -38,111 +41,126 @@ final case class DurableRetrySettings(
     cap: FiniteDuration = 5.minutes
 )
 
-final class EmbeddingPipeline(
-    wakeups: Queue[IO, Unit],
-    work: EmbeddingWorkRepository,
-    users: UserRepository,
-    jobs: JobRepository,
-    embeddings: EmbeddingService,
+final class EmbeddingPipeline[F[_]](using F: Temporal[F])(
+    wakeups: Queue[F, Unit],
+    work: EmbeddingWorkRepository[F],
+    users: UserRepository[F],
+    jobs: JobRepository[F],
+    embeddings: EmbeddingService[F],
     model: String,
     parallelism: Int,
     retryAttempts: Int,
     retryDelay: FiniteDuration,
     leaseDuration: FiniteDuration,
-    clock: Clock[IO],
+    clock: Clock[F],
     workerId: String,
-    diagnostics: Diagnostics,
+    diagnostics: Diagnostics[F],
     durableRetry: DurableRetrySettings = new DurableRetrySettings(),
-    workerHealth: Boolean => IO[Unit] = _ => IO.unit
+    workerHealth: Boolean => F[Unit] = _ => F.unit
 ) {
-  private val now: IO[Instant] = clock.realTimeInstant
+  private val now: F[Instant] = clock.realTimeInstant
 
-  def stream: Stream[IO, Unit] =
+  def stream: Stream[F, Unit] =
     Stream
       .fromQueueUnterminated(wakeups)
-      .merge(Stream.awakeEvery[IO](retryDelay).as(()))
+      .merge(Stream.awakeEvery[F](retryDelay).as(()))
       .parEvalMap(parallelism)(_ => drain)
 
-  private def drain: IO[Unit] =
-    claimNext.flatMap(_.fold(IO.unit)(claim => processClaim(claim) *> drain))
+  private def drain: F[Unit] =
+    claimNext.flatMap(_.fold(Applicative[F].unit)(claim => processClaim(claim) *> drain))
 
-  private def claimNext: IO[Option[ClaimedEmbeddingWork]] =
+  private def claimNext: F[Option[ClaimedEmbeddingWork]] =
     now.flatMap(instant => work.claim(workerId, instant, instant.plusMillis(leaseDuration.toMillis)).value).flatMap {
       case Right(claim) => workerHealth(true).as(claim)
       case Left(_)      => workerHealth(false) *> reportRepositoryFailure.as(None)
     }
 
-  private def reportRepositoryFailure: IO[Unit] =
+  private def reportRepositoryFailure: F[Unit] =
     diagnostics.emit(LogEvent.EmbeddingProcessingFailed)
 
   /** Runs a repository step, reporting (not raising) its typed failure. */
-  private def orReport[A](step: RepositoryIO[A]): IO[Unit] =
+  private def orReport[A](step: RepositoryF[F, A]): F[Unit] =
     step.leftSemiflatMap(_ => reportRepositoryFailure).value.void
 
   private enum ProcessingOutcome {
     case Completed, Retry, Conflict, Abandoned
+
+    /** The provider breaker is open: retry later without consuming the in-memory or durable attempt budget. */
+    case Deferred
     case Terminal(failure: EmbeddingWorkFailure)
   }
 
-  private val retryPolicy: RetryPolicy[IO, ProcessingOutcome] =
-    limitRetries[IO](math.max(retryAttempts - 1, 0)) join constantDelay[IO](retryDelay)
+  private val retryPolicy: RetryPolicy[F, ProcessingOutcome] =
+    limitRetries[F](math.max(retryAttempts - 1, 0)) join constantDelay[F](retryDelay)
 
-  private def processClaim(claim: ClaimedEmbeddingWork): IO[Unit] =
-    retryingOnFailures(
-      process(claim).handleErrorWith(error =>
-        diagnostics
-          .emit(LogEvent.EmbeddingProcessingFailed, fields = LogFields.failure(error))
-          .as(ProcessingOutcome.Retry)
-      )
-    )(
-      policy = retryPolicy,
-      valueHandler = (outcome, _) =>
-        IO.pure(outcome match {
-          case ProcessingOutcome.Retry => HandlerDecision.Continue
-          case _                       => HandlerDecision.Stop
-        })
-    ).race(leaseHeartbeat(claim)).flatMap { result =>
-      result.fold(_.fold(identity, identity), _ => ProcessingOutcome.Abandoned) match {
-        case ProcessingOutcome.Abandoned => IO.unit
-        case ProcessingOutcome.Conflict  =>
-          orReport(
-            RepositoryIO.lift(conflictOutcome(claim)).flatMap {
-              case ProcessingOutcome.Completed         => work.complete(claim)
-              case ProcessingOutcome.Terminal(failure) => RepositoryIO.lift(now).flatMap(work.fail(claim, failure, _))
-              // Revision fencing does not consume the provider failure budget.
-              case _ =>
-                RepositoryIO
-                  .lift(now)
-                  .flatMap(at => work.retry(claim, at.plusMillis(durableRetry.base.toMillis), chargeAttempt = false))
-            }
+  private def processClaim(claim: ClaimedEmbeddingWork): F[Unit] =
+    Temporal[F]
+      .race(
+        retryingOnFailures(
+          process(claim).handleErrorWith(error =>
+            diagnostics
+              .emit(LogEvent.EmbeddingProcessingFailed, fields = LogFields.failure(error))
+              .as(ProcessingOutcome.Retry)
           )
-        case ProcessingOutcome.Retry =>
-          orReport(
-            RepositoryIO.lift(now).flatMap { at =>
-              if (claim.attempts + 1 < durableRetry.attempts)
-                work.retry(
-                  claim,
-                  at.plusMillis(
-                    RetryBackoff.exponentialMillis(
-                      claim.attempts.toLong + 1L,
-                      durableRetry.base.toMillis,
-                      durableRetry.cap.toMillis
+        )(
+          policy = retryPolicy,
+          valueHandler = (outcome, _) =>
+            Applicative[F].pure(outcome match {
+              case ProcessingOutcome.Retry => HandlerDecision.Continue
+              case _                       => HandlerDecision.Stop
+            })
+        ),
+        leaseHeartbeat(claim)
+      )
+      .flatMap { result =>
+        result.fold(_.fold(identity, identity), _ => ProcessingOutcome.Abandoned) match {
+          case ProcessingOutcome.Abandoned => Applicative[F].unit
+          case ProcessingOutcome.Conflict  =>
+            orReport(
+              RepositoryF.lift(conflictOutcome(claim)).flatMap {
+                case ProcessingOutcome.Completed         => work.complete(claim)
+                case ProcessingOutcome.Terminal(failure) => RepositoryF.lift(now).flatMap(work.fail(claim, failure, _))
+                // Revision fencing does not consume the provider failure budget.
+                case _ =>
+                  RepositoryF
+                    .lift(now)
+                    .flatMap(at => work.retry(claim, at.plusMillis(durableRetry.base.toMillis), chargeAttempt = false))
+              }
+            )
+          case ProcessingOutcome.Deferred =>
+            // An open provider breaker never reached the provider, so no attempt is charged.
+            orReport(
+              RepositoryF
+                .lift(now)
+                .flatMap(at => work.retry(claim, at.plusMillis(durableRetry.base.toMillis), chargeAttempt = false))
+            )
+          case ProcessingOutcome.Retry =>
+            orReport(
+              RepositoryF.lift(now).flatMap { at =>
+                if (claim.attempts + 1 < durableRetry.attempts)
+                  work.retry(
+                    claim,
+                    at.plusMillis(
+                      RetryBackoff.exponentialMillis(
+                        claim.attempts.toLong + 1L,
+                        durableRetry.base.toMillis,
+                        durableRetry.cap.toMillis
+                      )
                     )
                   )
-                )
-              else work.fail(claim, EmbeddingWorkFailure.RetryExhausted, at)
-            }
-          )
-        case ProcessingOutcome.Completed         => orReport(work.complete(claim))
-        case ProcessingOutcome.Terminal(failure) =>
-          orReport(RepositoryIO.lift(now).flatMap(work.fail(claim, failure, _)))
+                else work.fail(claim, EmbeddingWorkFailure.RetryExhausted, at)
+              }
+            )
+          case ProcessingOutcome.Completed         => orReport(work.complete(claim))
+          case ProcessingOutcome.Terminal(failure) =>
+            orReport(RepositoryF.lift(now).flatMap(work.fail(claim, failure, _)))
+        }
       }
-    }
 
-  private def invalidWorkKey: IO[ProcessingOutcome] =
-    IO.pure(ProcessingOutcome.Terminal(EmbeddingWorkFailure.InvalidWorkKey))
+  private def invalidWorkKey: F[ProcessingOutcome] =
+    Applicative[F].pure(ProcessingOutcome.Terminal(EmbeddingWorkFailure.InvalidWorkKey))
 
-  private def conflictOutcome(claim: ClaimedEmbeddingWork): IO[ProcessingOutcome] = {
+  private def conflictOutcome(claim: ClaimedEmbeddingWork): F[ProcessingOutcome] = {
     def preparedOutcome(source: Option[String], metadata: Option[EmbeddingMeta]): ProcessingOutcome =
       EmbeddingPreparation.prepare(source, metadata, model, SearchableText.DocumentMaxChars) match {
         case EmbeddingPreparation.NoWork           => ProcessingOutcome.Completed
@@ -177,34 +195,34 @@ final class EmbeddingPipeline(
     )
   }
 
-  private def renewClaim(claim: ClaimedEmbeddingWork): IO[Boolean] =
+  private def renewClaim(claim: ClaimedEmbeddingWork): F[Boolean] =
     now.flatMap(at => work.renew(claim, at, at.plusMillis(leaseDuration.toMillis)).value).flatMap {
-      case Right(renewed) => IO.pure(renewed)
+      case Right(renewed) => Applicative[F].pure(renewed)
       case Left(_)        => reportRepositoryFailure.as(false)
     }
 
-  private def leaseHeartbeat(claim: ClaimedEmbeddingWork): IO[Unit] =
+  private def leaseHeartbeat(claim: ClaimedEmbeddingWork): F[Unit] =
     Stream
-      .awakeEvery[IO]((leaseDuration / 3).max(1.millis))
+      .awakeEvery[F]((leaseDuration / 3).max(1.millis))
       .evalMap(_ => renewClaim(claim))
       .takeWhile(identity)
       .compile
       .drain
 
-  private def process(claim: ClaimedEmbeddingWork): IO[ProcessingOutcome] =
+  private def process(claim: ClaimedEmbeddingWork): F[ProcessingOutcome] =
     onKey(claim)(processJob)(processCandidate)
 
   /** Runs the step for the claimed entity kind; a key that is not a valid identifier is terminal. */
-  private def onKey(claim: ClaimedEmbeddingWork)(job: JobId => IO[ProcessingOutcome])(
-      candidate: UserId => IO[ProcessingOutcome]
-  ): IO[ProcessingOutcome] =
+  private def onKey(claim: ClaimedEmbeddingWork)(job: JobId => F[ProcessingOutcome])(
+      candidate: UserId => F[ProcessingOutcome]
+  ): F[ProcessingOutcome] =
     claim.key.kind match {
       case EmbeddingWorkKind.Job => parseIdentifier(claim.key.entityId)(JobId.apply).fold(invalidWorkKey)(job)
       case EmbeddingWorkKind.CandidateProfile =>
         parseIdentifier(claim.key.entityId)(UserId.apply).fold(invalidWorkKey)(candidate)
     }
 
-  private def processJob(id: JobId): IO[ProcessingOutcome] =
+  private def processJob(id: JobId): F[ProcessingOutcome] =
     jobs.findVersioned(id).value.flatMap {
       case Right(Some(observed)) =>
         val job = observed.value
@@ -215,11 +233,11 @@ final class EmbeddingPipeline(
           SearchableText.DocumentMaxChars
         )
         embedPrepared(prepared)(embedding => jobs.updateEmbedding(observed, embedding)).value.map(attemptOutcome)
-      case Right(None) => IO.pure(ProcessingOutcome.Completed)
-      case Left(_)     => IO.pure(ProcessingOutcome.Retry)
+      case Right(None) => Applicative[F].pure(ProcessingOutcome.Completed)
+      case Left(_)     => Applicative[F].pure(ProcessingOutcome.Retry)
     }
 
-  private def processCandidate(id: UserId): IO[ProcessingOutcome] =
+  private def processCandidate(id: UserId): F[ProcessingOutcome] =
     users.findVersioned(id).value.flatMap {
       case Right(Some(observed))
           if observed.value.accountStatus == com.example.graphQL.cats.domain.model.AccountStatus.Active &&
@@ -232,9 +250,9 @@ final class EmbeddingPipeline(
           SearchableText.DocumentMaxChars
         )
         embedPrepared(prepared)(embedding => users.updateEmbedding(observed, embedding)).value.map(attemptOutcome)
-      case Right(Some(_)) => IO.pure(ProcessingOutcome.Completed)
-      case Right(None)    => IO.pure(ProcessingOutcome.Completed)
-      case Left(_)        => IO.pure(ProcessingOutcome.Retry)
+      case Right(Some(_)) => Applicative[F].pure(ProcessingOutcome.Completed)
+      case Right(None)    => Applicative[F].pure(ProcessingOutcome.Completed)
+      case Left(_)        => Applicative[F].pure(ProcessingOutcome.Retry)
     }
 
   private def attemptOutcome(result: Either[RepositoryError, ProcessingOutcome]): ProcessingOutcome = result match {
@@ -244,24 +262,26 @@ final class EmbeddingPipeline(
   }
 
   private def embedPrepared(prepared: EmbeddingPreparation)(
-      persist: EntityEmbedding => RepositoryIO[Unit]
-  ): RepositoryIO[ProcessingOutcome] = prepared match {
-    case EmbeddingPreparation.NoWork           => RepositoryIO.pure(ProcessingOutcome.Completed)
+      persist: EntityEmbedding => RepositoryF[F, Unit]
+  ): RepositoryF[F, ProcessingOutcome] = prepared match {
+    case EmbeddingPreparation.NoWork           => RepositoryF.pure[F, ProcessingOutcome](ProcessingOutcome.Completed)
     case EmbeddingPreparation.DocumentTooLarge =>
-      RepositoryIO.pure(ProcessingOutcome.Terminal(EmbeddingWorkFailure.DocumentTooLarge))
+      RepositoryF.pure[F, ProcessingOutcome](ProcessingOutcome.Terminal(EmbeddingWorkFailure.DocumentTooLarge))
     case EmbeddingPreparation.Prepared(text, hash) =>
-      RepositoryIO
+      RepositoryF
         .lift(
           embeddings
             .embed(EmbeddingInput(text, EmbeddingInputType.Document))
             .map(_.flatMap(EmbeddingVector.validateModel(_, model)))
         )
         .flatMap {
-          case Left(EmbeddingError.ProviderUnavailable) => RepositoryIO.pure(ProcessingOutcome.Retry)
-          case Left(EmbeddingError.InvalidResponse)     =>
-            RepositoryIO.pure(ProcessingOutcome.Terminal(EmbeddingWorkFailure.InvalidResponse))
+          case Left(EmbeddingError.ProviderUnavailable) =>
+            RepositoryF.pure[F, ProcessingOutcome](ProcessingOutcome.Retry)
+          case Left(EmbeddingError.CircuitOpen) => RepositoryF.pure[F, ProcessingOutcome](ProcessingOutcome.Deferred)
+          case Left(EmbeddingError.InvalidResponse) =>
+            RepositoryF.pure[F, ProcessingOutcome](ProcessingOutcome.Terminal(EmbeddingWorkFailure.InvalidResponse))
           case Right(vector) =>
-            RepositoryIO.lift(now).flatMap { instant =>
+            RepositoryF.lift(now).flatMap { instant =>
               persist(EntityEmbedding(vector.values, EmbeddingMeta(model, hash, instant)))
                 .as(ProcessingOutcome.Completed)
             }
@@ -272,27 +292,29 @@ final class EmbeddingPipeline(
 object EmbeddingPipeline {
   private val WorkerName = "embedding-pipeline"
 
-  def resource(
-      work: EmbeddingWorkRepository,
-      users: UserRepository,
-      jobs: JobRepository,
-      embeddings: EmbeddingService,
+  def resource[F[_]](using
+      F: Temporal[F],
+      uuids: UUIDGen[F]
+  )(
+      work: EmbeddingWorkRepository[F],
+      users: UserRepository[F],
+      jobs: JobRepository[F],
+      embeddings: EmbeddingService[F],
       model: String,
       queueSize: Int,
       parallelism: Int,
       retryAttempts: Int,
       retryDelay: FiniteDuration,
       leaseDuration: FiniteDuration,
-      diagnostics: Diagnostics,
+      diagnostics: Diagnostics[F],
       durableRetry: DurableRetrySettings = new DurableRetrySettings(attempts = 8),
       workerRestartDelay: FiniteDuration = 1.second,
-      workerHealth: Boolean => IO[Unit] = _ => IO.unit,
-      clock: Clock[IO] = Clock[IO],
-      uuidGen: UUIDGen[IO] = UUIDGen[IO]
-  ): Resource[IO, DurableEmbeddingWorkPublisher] =
-    Resource.eval(Queue.bounded[IO, Unit](queueSize)).flatMap { wakeups =>
+      workerHealth: Boolean => F[Unit] = _ => F.unit,
+      clock: Clock[F] = F
+  ): Resource[F, DurableEmbeddingWorkPublisher[F]] =
+    Resource.eval(Queue.bounded[F, Unit](queueSize)).flatMap { wakeups =>
       for {
-        workerId <- Resource.eval(uuidGen.randomUUID.map(_.toString))
+        workerId <- Resource.eval(uuids.randomUUID.map(_.toString))
         publisher = new DurableEmbeddingWorkPublisher(wakeups)
         pipeline = new EmbeddingPipeline(
           wakeups,
@@ -317,7 +339,7 @@ object EmbeddingPipeline {
             .handleErrorWith(error =>
               diagnostics.emit(LogEvent.EmbeddingProcessingFailed, fields = LogFields.failure(error))
             )
-            .flatMap(_ => IO.sleep(workerRestartDelay))
+            .flatMap(_ => Temporal[F].sleep(workerRestartDelay))
             .foreverM
         )
       } yield publisher

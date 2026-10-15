@@ -47,10 +47,10 @@ final class MongoSearchAuthorizationIntegrationSpec extends MongoIntegrationSuit
         db,
         MongoRepositoryTestSupport.noTransaction,
         MongoEmbeddingWorkEnqueuer.disabled,
-        Diagnostics.noop
+        Diagnostics.noop[IO]
       )
       val search =
-        new MongoSemanticSearchRepository(db, "jv", "cv", "jl", "cl", 100, 100, diagnostics = Diagnostics.noop)
+        new MongoSemanticSearchRepository(db, "jv", "cv", "jl", "cl", 100, 100, diagnostics = Diagnostics.noop[IO])
       val authorization = ActorAuthorization(users)
       def scope(user: User): HiringReadScope = HiringReadScope
         .validated(ActorContext(user.id, user.role), user, authorization)
@@ -63,7 +63,7 @@ final class MongoSearchAuthorizationIntegrationSpec extends MongoIntegrationSuit
         _ <- MongoRepositoryTestSupport.insertOne(db, MongoCollections.Users, MongoHiringCodecs.user(recruiter))
         _ <- MongoRepositoryTestSupport.insertOne(db, MongoCollections.Users, MongoHiringCodecs.user(candidateUser))
         _ <- MongoRepositoryTestSupport.insertOne(db, MongoCollections.Jobs, MongoHiringCodecs.job(queryJob))
-        _ <- MongoHiringSetup.initialize(db, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(db, Diagnostics.noop[IO])
         accepted <- search.authorizedCandidateEligibility(recruiterScope, currentJob, List(candidateUser.id)).value
         _ = assertEquals(accepted.map(_.map(_.id)), Right(List(candidateUser.id)))
         _ <- List("ownership", "actor", "closed", "source", "model").traverse_ { mutation =>

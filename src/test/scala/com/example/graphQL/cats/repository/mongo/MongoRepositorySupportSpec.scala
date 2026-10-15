@@ -4,7 +4,7 @@ import com.mongodb.client.result.{DeleteResult, UpdateResult}
 import cats.effect.IO
 import cats.effect.{Deferred, Outcome, Ref}
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
-import com.example.graphQL.cats.service.port.{RepositoryIO}
+import com.example.graphQL.cats.service.port.{RepositoryF}
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.events.{
   OperationalAggregateType,
@@ -41,7 +41,7 @@ final class MongoRepositorySupportSpec extends CatsEffectSuite {
   test("repository guard logs safe failure metadata before returning its typed error") {
     for {
       captured <- Ref.of[IO, List[(LogEvent, Map[LogField, String])]](Nil)
-      diagnostics = new Diagnostics {
+      diagnostics = new Diagnostics[IO] {
         override def event(
             event: LogEvent,
             requestId: Option[String],
@@ -50,7 +50,7 @@ final class MongoRepositorySupportSpec extends CatsEffectSuite {
       }
       result <- MongoRepositorySupport
         .repositoryGuard[Unit](diagnostics, "job.find")(
-          RepositoryIO.lift(IO.raiseError(new IllegalStateException("sensitive mongo detail")))
+          RepositoryF.lift(IO.raiseError(new IllegalStateException("sensitive mongo detail")))
         )(_ => Left(RepositoryError.Unavailable))
         .value
       entries <- captured.get
@@ -65,7 +65,7 @@ final class MongoRepositorySupportSpec extends CatsEffectSuite {
   }
 
   test("a diagnostics sink failure does not replace the repository error") {
-    val diagnostics = new Diagnostics {
+    val diagnostics = new Diagnostics[IO] {
       override def event(
           event: LogEvent,
           requestId: Option[String],
@@ -75,14 +75,14 @@ final class MongoRepositorySupportSpec extends CatsEffectSuite {
 
     MongoRepositorySupport
       .repositoryGuard[Unit](diagnostics, "job.find")(
-        RepositoryIO.lift(IO.raiseError(new IllegalArgumentException("driver failure")))
+        RepositoryF.lift(IO.raiseError(new IllegalArgumentException("driver failure")))
       )(_ => Left(RepositoryError.Conflict))
       .value
       .map(result => assertEquals(result, Left(RepositoryError.Conflict)))
   }
 
-  test("RepositoryIO wraps the expected repository failure channel") {
-    RepositoryIO.fromEither[Unit](Left(RepositoryError.InvalidStoredData)).value.map { result =>
+  test("RepositoryF wraps the expected repository failure channel") {
+    RepositoryF.at[IO].fromEither[Unit](Left(RepositoryError.InvalidStoredData)).value.map { result =>
       assertEquals(result, Left(RepositoryError.InvalidStoredData))
     }
   }
@@ -112,7 +112,7 @@ final class MongoRepositorySupportSpec extends CatsEffectSuite {
       written <- Ref.of[IO, Vector[String]](Vector.empty)
       result <- MongoOperationalEventInsertion
         .insertSequence(List(first, invalid, later), now)(document =>
-          RepositoryIO.lift(written.update(_ :+ document.getString(MongoFields.Id)))
+          RepositoryF.lift(written.update(_ :+ document.getString(MongoFields.Id)))
         )
         .value
       ids <- written.get
@@ -129,7 +129,7 @@ final class MongoRepositorySupportSpec extends CatsEffectSuite {
       written <- Ref.of[IO, Vector[String]](Vector.empty)
       result <- MongoOperationalEventInsertion
         .insertSequence(events, now)(document =>
-          RepositoryIO.lift(written.update(_ :+ document.getString(MongoFields.Id))).subflatMap { _ =>
+          RepositoryF.lift(written.update(_ :+ document.getString(MongoFields.Id))).subflatMap { _ =>
             if (document.getString(MongoFields.Id) == second.eventId.toString)
               Left(RepositoryError.Unavailable)
             else Right(())
@@ -149,12 +149,12 @@ final class MongoRepositorySupportSpec extends CatsEffectSuite {
       written <- Ref.of[IO, Vector[String]](Vector.empty)
       empty <- MongoOperationalEventInsertion
         .insertSequence(Nil, now)(_ =>
-          RepositoryIO.lift(IO.raiseError(new IllegalStateException("empty input must not write")))
+          RepositoryF.lift(IO.raiseError(new IllegalStateException("empty input must not write")))
         )
         .value
       result <- MongoOperationalEventInsertion
         .insertSequence(events, now)(document =>
-          RepositoryIO.lift(written.update(_ :+ document.getString(MongoFields.Id)))
+          RepositoryF.lift(written.update(_ :+ document.getString(MongoFields.Id)))
         )
         .value
       ids <- written.get
@@ -168,13 +168,13 @@ final class MongoRepositorySupportSpec extends CatsEffectSuite {
   test("repository guard preserves typed failures without reporting a driver failure") {
     for {
       reports <- Ref.of[IO, Int](0)
-      diagnostics = new Diagnostics {
+      diagnostics = new Diagnostics[IO] {
         override def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]): IO[Unit] =
           reports.update(_ + 1)
       }
       result <- MongoRepositorySupport
         .repositoryGuard(diagnostics, "typedFailure")(
-          RepositoryIO.fromEither[Unit](Left(RepositoryError.InvalidStoredData))
+          RepositoryF.at[IO].fromEither[Unit](Left(RepositoryError.InvalidStoredData))
         )(_ => Left(RepositoryError.Unavailable))
         .value
       count <- reports.get
@@ -189,13 +189,13 @@ final class MongoRepositorySupportSpec extends CatsEffectSuite {
       started <- Deferred[IO, Unit]
       released <- Ref.of[IO, Boolean](false)
       reports <- Ref.of[IO, Int](0)
-      diagnostics = new Diagnostics {
+      diagnostics = new Diagnostics[IO] {
         override def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]): IO[Unit] =
           reports.update(_ + 1)
       }
       fiber <- MongoRepositorySupport
         .repositoryGuard(diagnostics, "cancelledWrite")(
-          RepositoryIO.lift((started.complete(()) *> IO.never[Unit]).guarantee(released.set(true)))
+          RepositoryF.lift((started.complete(()) *> IO.never[Unit]).guarantee(released.set(true)))
         )(_ => Left(RepositoryError.Unavailable))
         .value
         .start

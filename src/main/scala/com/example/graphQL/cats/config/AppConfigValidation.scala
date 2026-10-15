@@ -31,8 +31,9 @@ private[config] object AppConfigValidation {
       loadSection[RawLoggingConfig](source, "logging"),
       loadSection[RawAuthConfig](source, "auth").andThen(AuthConfigValidation.read),
       loadSection[RawKafkaConfig](source, "kafka").andThen(KafkaConfigValidation.read),
-      loadSection[RawVectorSearchConfig](source, "vector-search").andThen(VectorSearchConfigValidation.read)
-    ).mapN { (transport, logging, authSettings, kafkaSettings, vectorSettings) =>
+      loadSection[RawVectorSearchConfig](source, "vector-search").andThen(VectorSearchConfigValidation.read),
+      resilienceSection(source)
+    ).mapN { (transport, logging, authSettings, kafkaSettings, vectorSettings, resilience) =>
       AppConfig(
         transport.host,
         transport.port,
@@ -50,9 +51,20 @@ private[config] object AppConfigValidation {
         transport.resetOnStart,
         transport.discovery,
         authSettings.adminSeed,
-        authSettings.interviewActionRateLimit
+        authSettings.interviewActionRateLimit,
+        resilience
       )
     }.toEither
+
+  /** An absent section keeps the conservative defaults; a present one must be complete and valid. */
+  private def resilienceSection(source: ConfigSource): ValidatedNel[ConfigError, ResilienceConfig] =
+    source
+      .at("resilience")
+      .cursor()
+      .fold(
+        _ => ResilienceConfig().validNel,
+        _ => loadSection[RawResilienceConfig](source, "resilience").andThen(ResilienceConfigValidation.read)
+      )
 
   private def loadSection[A: ConfigReader](source: ConfigSource, section: String): ValidatedNel[ConfigError, A] =
     source.at(section).load[A].leftMap(readError(_, section)).toValidated

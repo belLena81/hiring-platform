@@ -51,14 +51,14 @@ object MongoHiringSetup {
   val EventOutboxSubjectIdsIndex: String = MongoIndexNames.EventOutboxSubjectIds
   val InterviewWorkflowInboxIdentityIndex: String = MongoIndexNames.InterviewWorkflowInboxIdentity
 
-  def initialize(database: MongoDatabase[IO], diagnostics: Diagnostics): IO[Unit] =
+  def initialize(database: MongoDatabase[IO], diagnostics: Diagnostics[IO]): IO[Unit] =
     initialize(database, None, resetOnStart = false, diagnostics = diagnostics)
-  def initialize(database: MongoDatabase[IO], diagnostics: Diagnostics, topics: InterviewTopicPair): IO[Unit] =
+  def initialize(database: MongoDatabase[IO], diagnostics: Diagnostics[IO], topics: InterviewTopicPair): IO[Unit] =
     initialize(database, None, resetOnStart = false, diagnostics = diagnostics, topics = topics)
   def initialize(
       database: MongoDatabase[IO],
       atlas: Option[AtlasSearchIndexConfig],
-      diagnostics: Diagnostics
+      diagnostics: Diagnostics[IO]
   ): IO[Unit] =
     initialize(database, atlas, resetOnStart = false, diagnostics = diagnostics)
 
@@ -69,7 +69,7 @@ object MongoHiringSetup {
       database: MongoDatabase[IO],
       atlas: Option[AtlasSearchIndexConfig],
       resetOnStart: Boolean,
-      diagnostics: Diagnostics,
+      diagnostics: Diagnostics[IO],
       topics: InterviewTopicPair = InterviewTopicPair.Default
   ): IO[Unit] =
     setupDatabase(database).flatMap { setup =>

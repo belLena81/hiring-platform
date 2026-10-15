@@ -6,7 +6,7 @@ import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.Identifiers.parse as parseIdentifier
 import com.example.graphQL.cats.domain.search.SearchFusionStrategy
-import com.example.graphQL.cats.service.port.{RepositoryIO, SemanticSearchRepository}
+import com.example.graphQL.cats.service.port.{RepositoryF, SemanticSearchRepository}
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.search.*
 import com.example.graphQL.cats.service.read.HiringReadScope
@@ -31,14 +31,24 @@ final class MongoSemanticSearchRepository(
     fusionStrategy: SearchFusionStrategy = SearchFusionStrategy.ApplicationRrf,
     rerankEnabled: Boolean = false,
     rerankModel: String = "rerank-2.5-lite",
-    diagnostics: Diagnostics,
+    diagnostics: Diagnostics[IO],
     discoveryPolicy: Option[DiscoveryQueryPolicy] = None
-) extends SemanticSearchRepository {
+) extends SemanticSearchRepository[IO] {
 
-  private def admitted[A](query: RepositoryIO[A]): RepositoryIO[A] =
-    discoveryPolicy.fold(RepositoryIO.fromEither[A](Left(RepositoryError.Unavailable)))(policy =>
-      RepositoryIO.fromIOEither(policy.run(query.value))
+  private def admitted[A](query: RepositoryF[IO, A]): RepositoryF[IO, A] =
+    discoveryPolicy.fold(RepositoryF.at[IO].fromEither[A](Left(RepositoryError.Unavailable)))(policy =>
+      RepositoryF.fromFEither(
+        policy.run(query.value).recover {
+          case error if DiscoveryQueryPolicy.isUnavailable(error) => Left(RepositoryError.Unavailable)
+        }
+      )
     )
+
+  /** Eligibility is not a search root: with a policy it shares the search admission and breaker; without one it still
+    * runs, as before, with unavailability mapped in place.
+    */
+  private def eligibilityAdmitted[A](query: RepositoryF[IO, A]): RepositoryF[IO, A] =
+    discoveryPolicy.fold(MongoSemanticSearchRepository.unmetered(query))(_ => admitted(query))
 
   private val branchLimit = if (branchResultLimit > 0) branchResultLimit else numCandidates
 
@@ -60,7 +70,7 @@ final class MongoSemanticSearchRepository(
       scope: HiringReadScope,
       ids: List[JobId],
       queryCandidate: Option[CandidateSearchEligibility]
-  ): RepositoryIO[List[JobSearchEligibility]] = {
+  ): RepositoryF[IO, List[JobSearchEligibility]] = {
     val queryGate = queryCandidate.toList.flatMap { candidate =>
       (candidate.profile, candidate.metadata) match {
         case (Some(profile), Some(meta)) =>
@@ -97,7 +107,7 @@ final class MongoSemanticSearchRepository(
       scope: HiringReadScope,
       queryJob: JobSearchEligibility,
       ids: List[UserId]
-  ): RepositoryIO[List[CandidateSearchEligibility]] = {
+  ): RepositoryF[IO, List[CandidateSearchEligibility]] = {
     val source = queryJob.job
     val embeddingGate =
       queryJob.metadata.map(metadataFilter).getOrElse(Filters.expr(new Document("$eq", List(1, 0).asJava)))
@@ -126,12 +136,13 @@ final class MongoSemanticSearchRepository(
       parentGate: List[Document],
       selectedCollection: String,
       fields: List[String]
-  )(decode: Document => Either[RepositoryError, A]): RepositoryIO[List[A]] = {
+  )(decode: Document => Either[RepositoryError, A]): RepositoryF[IO, List[A]] = {
     val selected = ids.distinct
-    if (selected.size > branchLimit) RepositoryIO.raise(RepositoryError.Unavailable)
-    else if (selected.isEmpty) RepositoryIO.pure(Nil)
+    if (selected.size > branchLimit) RepositoryF.at[IO].raise(RepositoryError.Unavailable)
+    else if (selected.isEmpty) RepositoryF.at[IO].pure(Nil)
     else
-      MongoRepositorySupport.repositoryGuard(diagnostics, "semanticSearch.authorizedEligibility") {
+      // Eligibility queries run on the same search deployment, so they share its admission and breaker.
+      eligibilityAdmitted(MongoRepositorySupport.discoveryGuard(diagnostics, "semanticSearch.authorizedEligibility") {
         val child = List(
           MongoAuthorizedReadQueries.matching(Filters.in(MongoFields.Id, selected.asJava)),
           new Document("$limit", selected.size),
@@ -147,21 +158,21 @@ final class MongoSemanticSearchRepository(
           MongoAuthorizedReadQueries.unwind("eligibleHits"),
           MongoAuthorizedReadQueries.replace("eligibleHits")
         )
-        RepositoryIO
+        RepositoryF
           .lift(Mongo4catsCollections.documents(database, parentCollection).flatMap { collection =>
             collectWithin(aggregate(collection, pipeline), selected.size)
           })
           .subflatMap(_.traverse(decode))
-      }
+      })
   }
 
-  override def searchJobs(query: VectorSearchQuery): RepositoryIO[List[JobRetrievalHit]] =
+  override def searchJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
     admitted(rankedJobs(query, query.filter))
 
-  override def recommendedJobs(query: VectorSearchQuery): RepositoryIO[List[JobRetrievalHit]] =
+  override def recommendedJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
     admitted(rankedJobs(query, JobSearchFilter(None, Set.empty, None)))
 
-  override def candidateMatches(query: VectorSearchQuery): RepositoryIO[List[CandidateRetrievalHit]] = {
+  override def candidateMatches(query: VectorSearchQuery): RepositoryF[IO, List[CandidateRetrievalHit]] = {
     val filter = candidateFilter(query, includeEmbeddingModel = true)
     val vectorLimit = branchLimit
     val jobVector = candidateVectorSearch(query, query.vector, filter, vectorLimit)
@@ -182,34 +193,32 @@ final class MongoSemanticSearchRepository(
       vector: List[Float],
       filter: Bson,
       limit: Int
-  ): RepositoryIO[List[CandidateRetrievalHit]] = {
+  ): RepositoryF[IO, List[CandidateRetrievalHit]] = {
     val pipeline = candidateVectorPipeline(vector, filter, limit)
-    MongoRepositorySupport
-      .repositoryGuard(diagnostics, "semanticSearch.candidateVector") {
-        RepositoryIO
-          .lift(
-            Mongo4catsCollections.documents(database, MongoCollections.Users).flatMap { users =>
-              collectWithin(aggregate(users, pipeline.asScala.toSeq), limit)
-            }
-          )
-          .subflatMap(documents => MongoSemanticSearchResult.candidateHits(documents, query).map(_.flatten))
-      }
+    MongoRepositorySupport.discoveryGuard(diagnostics, "semanticSearch.candidateVector") {
+      RepositoryF
+        .lift(
+          Mongo4catsCollections.documents(database, MongoCollections.Users).flatMap { users =>
+            collectWithin(aggregate(users, pipeline.asScala.toSeq), limit)
+          }
+        )
+        .subflatMap(documents => MongoSemanticSearchResult.candidateHits(documents, query).map(_.flatten))
+    }
   }
 
   private def candidateLexicalSearch(
       query: VectorSearchQuery
-  ): RepositoryIO[List[CandidateRetrievalHit]] = {
+  ): RepositoryF[IO, List[CandidateRetrievalHit]] = {
     val pipeline = candidateLexicalPipeline(query, candidateLexicalFilter(query))
-    MongoRepositorySupport
-      .repositoryGuard(diagnostics, "semanticSearch.candidateLexical") {
-        RepositoryIO
-          .lift(
-            Mongo4catsCollections.documents(database, MongoCollections.Users).flatMap { users =>
-              collectWithin(aggregate(users, pipeline.asScala.toSeq), branchLimit)
-            }
-          )
-          .subflatMap(documents => MongoSemanticSearchResult.candidateHits(documents, query).map(_.flatten))
-      }
+    MongoRepositorySupport.discoveryGuard(diagnostics, "semanticSearch.candidateLexical") {
+      RepositoryF
+        .lift(
+          Mongo4catsCollections.documents(database, MongoCollections.Users).flatMap { users =>
+            collectWithin(aggregate(users, pipeline.asScala.toSeq), branchLimit)
+          }
+        )
+        .subflatMap(documents => MongoSemanticSearchResult.candidateHits(documents, query).map(_.flatten))
+    }
   }
 
   private[mongo] def candidateFilter(query: VectorSearchQuery, includeEmbeddingModel: Boolean): Bson =
@@ -226,7 +235,7 @@ final class MongoSemanticSearchRepository(
   private def rankedJobs(
       query: VectorSearchQuery,
       filter: JobSearchFilter
-  ): RepositoryIO[List[JobRetrievalHit]] = {
+  ): RepositoryF[IO, List[JobRetrievalHit]] = {
     val mongoFilter = jobFilter(query, filter)
     query.lexicalQuery.filter(_ => query.mode == SearchMode.HYBRID) match {
       case Some(text) if fusionStrategy != SearchFusionStrategy.ApplicationRrf =>
@@ -243,18 +252,17 @@ final class MongoSemanticSearchRepository(
       query: VectorSearchQuery,
       text: String,
       filter: Bson
-  ): RepositoryIO[List[JobRetrievalHit]] = {
+  ): RepositoryF[IO, List[JobRetrievalHit]] = {
     val stages = nativeJobFusionStages(query, text, filter)
-    MongoRepositorySupport
-      .repositoryGuard(diagnostics, "semanticSearch.nativeJobs") {
-        RepositoryIO
-          .lift(
-            Mongo4catsCollections.documents(database, MongoCollections.Jobs).flatMap { jobs =>
-              collectWithin(aggregate(jobs, stages), branchLimit)
-            }
-          )
-          .subflatMap(documents => MongoSemanticSearchResult.jobHits(documents, query).map(_.flatten))
-      }
+    MongoRepositorySupport.discoveryGuard(diagnostics, "semanticSearch.nativeJobs") {
+      RepositoryF
+        .lift(
+          Mongo4catsCollections.documents(database, MongoCollections.Jobs).flatMap { jobs =>
+            collectWithin(aggregate(jobs, stages), branchLimit)
+          }
+        )
+        .subflatMap(documents => MongoSemanticSearchResult.jobHits(documents, query).map(_.flatten))
+    }
   }
 
   private[mongo] def nativeJobFusionStages(
@@ -311,21 +319,20 @@ final class MongoSemanticSearchRepository(
       query: VectorSearchQuery,
       queryVector: List[Float],
       filter: Bson
-  ): RepositoryIO[List[CandidateRetrievalHit]] = {
+  ): RepositoryF[IO, List[CandidateRetrievalHit]] = {
     val pipeline = nativeCandidateFusionStages(query, queryVector, filter)
-    MongoRepositorySupport
-      .repositoryGuard(diagnostics, "semanticSearch.nativeCandidates") {
-        RepositoryIO
-          .lift(
-            Mongo4catsCollections.documents(database, MongoCollections.Users).flatMap { users =>
-              collectWithin(
-                aggregate(users, pipeline),
-                branchLimit
-              )
-            }
-          )
-          .subflatMap(documents => MongoSemanticSearchResult.candidateHits(documents, query).map(_.flatten))
-      }
+    MongoRepositorySupport.discoveryGuard(diagnostics, "semanticSearch.nativeCandidates") {
+      RepositoryF
+        .lift(
+          Mongo4catsCollections.documents(database, MongoCollections.Users).flatMap { users =>
+            collectWithin(
+              aggregate(users, pipeline),
+              branchLimit
+            )
+          }
+        )
+        .subflatMap(documents => MongoSemanticSearchResult.candidateHits(documents, query).map(_.flatten))
+    }
   }
 
   private[mongo] def nativeCandidateFusionStages(
@@ -383,18 +390,17 @@ final class MongoSemanticSearchRepository(
       query: VectorSearchQuery,
       filter: Bson,
       limit: Int
-  ): RepositoryIO[List[JobRetrievalHit]] = {
+  ): RepositoryF[IO, List[JobRetrievalHit]] = {
     val pipeline = jobVectorPipeline(query.vector, filter, limit)
-    MongoRepositorySupport
-      .repositoryGuard(diagnostics, "semanticSearch.vectorJobs") {
-        RepositoryIO
-          .lift(
-            Mongo4catsCollections.documents(database, MongoCollections.Jobs).flatMap { jobs =>
-              collectWithin(aggregate(jobs, pipeline.asScala.toSeq), limit)
-            }
-          )
-          .subflatMap(documents => MongoSemanticSearchResult.jobHits(documents, query).map(_.flatten))
-      }
+    MongoRepositorySupport.discoveryGuard(diagnostics, "semanticSearch.vectorJobs") {
+      RepositoryF
+        .lift(
+          Mongo4catsCollections.documents(database, MongoCollections.Jobs).flatMap { jobs =>
+            collectWithin(aggregate(jobs, pipeline.asScala.toSeq), limit)
+          }
+        )
+        .subflatMap(documents => MongoSemanticSearchResult.jobHits(documents, query).map(_.flatten))
+    }
   }
 
   private[mongo] def jobVectorPipeline(vector: List[Float], filter: Bson, limit: Int): java.util.List[Document] =
@@ -416,21 +422,20 @@ final class MongoSemanticSearchRepository(
   private def lexicalJobs(
       query: VectorSearchQuery,
       text: String
-  ): RepositoryIO[List[JobRetrievalHit]] = {
+  ): RepositoryF[IO, List[JobRetrievalHit]] = {
     val pipeline = (lexicalJobStages(text, jobLexicalFilter(query, query.filter)).asScala.toList ++ List(
       new Document("$set", new Document(MongoFields.Score, new Document("$meta", "searchScore"))),
       retrievalProjection
     )).asJava
-    MongoRepositorySupport
-      .repositoryGuard(diagnostics, "semanticSearch.lexicalJobs") {
-        RepositoryIO
-          .lift(
-            Mongo4catsCollections.documents(database, MongoCollections.Jobs).flatMap { jobs =>
-              collectWithin(aggregate(jobs, pipeline.asScala.toSeq), branchLimit)
-            }
-          )
-          .subflatMap(documents => MongoSemanticSearchResult.jobHits(documents, query).map(_.flatten))
-      }
+    MongoRepositorySupport.discoveryGuard(diagnostics, "semanticSearch.lexicalJobs") {
+      RepositoryF
+        .lift(
+          Mongo4catsCollections.documents(database, MongoCollections.Jobs).flatMap { jobs =>
+            collectWithin(aggregate(jobs, pipeline.asScala.toSeq), branchLimit)
+          }
+        )
+        .subflatMap(documents => MongoSemanticSearchResult.jobHits(documents, query).map(_.flatten))
+    }
   }
 
   private[mongo] def jobFilter(query: VectorSearchQuery, filter: JobSearchFilter): Bson =
@@ -556,10 +561,10 @@ private[mongo] object MongoSearchFusionPipeline {
 
 private[mongo] object MongoSemanticSearchResult {
   def fuseJobs(
-      vector: RepositoryIO[List[JobRetrievalHit]],
-      lexical: RepositoryIO[List[JobRetrievalHit]],
+      vector: RepositoryF[IO, List[JobRetrievalHit]],
+      lexical: RepositoryF[IO, List[JobRetrievalHit]],
       limit: Int
-  ): RepositoryIO[List[JobRetrievalHit]] =
+  ): RepositoryF[IO, List[JobRetrievalHit]] =
     (vector, lexical)
       .parMapN((vectorHits, lexicalHits) =>
         HybridRankFusion.retrieval(List(vectorHits, lexicalHits), limit)(_.value.toString)
@@ -567,11 +572,11 @@ private[mongo] object MongoSemanticSearchResult {
       .leftMap(_ => RepositoryError.Unavailable)
 
   def fuseCandidates(
-      jobVector: RepositoryIO[List[CandidateRetrievalHit]],
-      queryVector: RepositoryIO[List[CandidateRetrievalHit]],
-      lexical: RepositoryIO[List[CandidateRetrievalHit]],
+      jobVector: RepositoryF[IO, List[CandidateRetrievalHit]],
+      queryVector: RepositoryF[IO, List[CandidateRetrievalHit]],
+      lexical: RepositoryF[IO, List[CandidateRetrievalHit]],
       limit: Int
-  ): RepositoryIO[List[CandidateRetrievalHit]] =
+  ): RepositoryF[IO, List[CandidateRetrievalHit]] =
     (jobVector, queryVector, lexical)
       .parMapN((jobs, text, lexicalHits) =>
         HybridRankFusion.retrieval(List(jobs, text, lexicalHits), limit)(_.value.toString)
@@ -639,4 +644,15 @@ private[mongo] object MongoLexicalSearch {
           .append("filter", List(filter).asJava)
       )
     )
+}
+
+private[mongo] object MongoSemanticSearchRepository {
+
+  /** Runs a discovery-guarded query without admission control, mapping unreachable-deployment failures to
+    * `Unavailable`.
+    */
+  def unmetered[A](query: RepositoryF[IO, A]): RepositoryF[IO, A] =
+    RepositoryF.fromFEither(query.value.recover {
+      case error if DiscoveryQueryPolicy.isUnavailable(error) => Left(RepositoryError.Unavailable)
+    })
 }

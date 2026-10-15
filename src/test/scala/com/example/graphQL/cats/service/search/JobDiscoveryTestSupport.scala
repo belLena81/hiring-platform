@@ -6,7 +6,7 @@ import com.example.graphQL.cats.domain.model.{Job, User}
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.service.{RepositoryError, ServiceFixtures, TestHiringServices}
 import com.example.graphQL.cats.service.job.JobService
-import com.example.graphQL.cats.service.port.{JobRepository, LexicalJobMatcher, RepositoryIO, UserRepository}
+import com.example.graphQL.cats.service.port.{JobRepository, LexicalJobMatcher, RepositoryF, UserRepository}
 
 private[cats] object JobDiscoveryTestSupport {
   final case class Calls(
@@ -15,20 +15,27 @@ private[cats] object JobDiscoveryTestSupport {
       facetIds: List[Option[Set[JobId]]] = Nil,
       facetBudgets: List[Option[scala.concurrent.duration.FiniteDuration]] = Nil
   )
-  final case class Fixture(service: JobService, users: UserRepository, jobs: JobRepository, calls: Ref[IO, Calls])
+  final case class Fixture(
+      service: JobService[IO],
+      users: UserRepository[IO],
+      jobs: JobRepository[IO],
+      calls: Ref[IO, Calls]
+  )
 
   /** Deterministic lexical index double: returns the highest-scoring window of `limit + 1` hits like mongot would. */
   final class FakeLexicalMatcher(
       scores: Map[JobId, Double],
       outcome: Either[RepositoryError, Unit],
       val calls: Ref[IO, List[(String, JobSearchFilter, Int)]]
-  ) extends LexicalJobMatcher {
-    override def matches(text: String, filter: JobSearchFilter, limit: Int): RepositoryIO[LexicalJobMatches] =
-      RepositoryIO.lift(calls.update(_ :+ ((text, filter, limit)))) *>
-        RepositoryIO.fromEither(outcome.map { _ =>
-          val window = scores.toList.map(ScoredJobId.apply.tupled).sortBy(hit => (-hit.score, hit.id.value.toString))
-          LexicalJobMatches.fromWindow(window.take(limit + 1), limit)
-        })
+  ) extends LexicalJobMatcher[IO] {
+    override def matches(text: String, filter: JobSearchFilter, limit: Int): RepositoryF[IO, LexicalJobMatches] =
+      RepositoryF.lift(calls.update(_ :+ ((text, filter, limit)))) *>
+        RepositoryF
+          .at[IO]
+          .fromEither(outcome.map { _ =>
+            val window = scores.toList.map(ScoredJobId.apply.tupled).sortBy(hit => (-hit.score, hit.id.value.toString))
+            LexicalJobMatches.fromWindow(window.take(limit + 1), limit)
+          })
   }
 
   def matcher(
@@ -40,7 +47,7 @@ private[cats] object JobDiscoveryTestSupport {
   def fixture(
       users: List[User],
       values: List[Job] = Nil,
-      lexicalMatcher: Option[LexicalJobMatcher] = None,
+      lexicalMatcher: Option[LexicalJobMatcher[IO]] = None,
       lexicalLimit: Int = LexicalMatchLimit.Default.value,
       deadline: Option[scala.concurrent.duration.FiniteDuration] = None,
       clock: cats.effect.Clock[IO] = cats.effect.Clock[IO]
@@ -68,7 +75,7 @@ private[cats] object JobDiscoveryTestSupport {
       calls
     )
 
-  private final class RecordingJobs(delegate: JobRepository, calls: Ref[IO, Calls]) extends JobRepository {
+  private final class RecordingJobs(delegate: JobRepository[IO], calls: Ref[IO, Calls]) extends JobRepository[IO] {
     export delegate.{
       relatedJobs,
       find,
@@ -86,8 +93,8 @@ private[cats] object JobDiscoveryTestSupport {
         scope: com.example.graphQL.cats.service.read.HiringReadScope,
         query: NearbyJobsQuery,
         limit: Int
-    ): RepositoryIO[List[NearbyJob]] =
-      RepositoryIO.lift(calls.update(state => state.copy(nearby = state.nearby :+ query))) *>
+    ): RepositoryF[IO, List[NearbyJob]] =
+      RepositoryF.lift(calls.update(state => state.copy(nearby = state.nearby :+ query))) *>
         delegate.nearbyJobs(scope, query, limit)
 
     override def jobDiscoveryFacets(
@@ -95,8 +102,8 @@ private[cats] object JobDiscoveryTestSupport {
         query: JobFacetQuery,
         matchedIds: Option[Set[JobId]],
         maxTime: Option[scala.concurrent.duration.FiniteDuration]
-    ): RepositoryIO[JobDiscoveryFacets] =
-      RepositoryIO.lift(
+    ): RepositoryF[IO, JobDiscoveryFacets] =
+      RepositoryF.lift(
         calls.update(state =>
           state.copy(
             facets = state.facets :+ query,

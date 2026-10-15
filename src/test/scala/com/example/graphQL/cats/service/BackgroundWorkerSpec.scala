@@ -4,7 +4,7 @@ import cats.effect.{Deferred, IO, Ref}
 import munit.CatsEffectSuite
 
 final class BackgroundWorkerSpec extends CatsEffectSuite {
-  private final class Recording(events: Ref[IO, Vector[(LogEvent, Map[LogField, String])]]) extends Diagnostics {
+  private final class Recording(events: Ref[IO, Vector[(LogEvent, Map[LogField, String])]]) extends Diagnostics[IO] {
     override def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]): IO[Unit] =
       events.update(_ :+ (event -> fields))
   }

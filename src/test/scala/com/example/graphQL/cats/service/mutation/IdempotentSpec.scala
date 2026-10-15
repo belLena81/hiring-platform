@@ -61,15 +61,15 @@ final class IdempotentSpec extends CatsEffectSuite {
 
   test("passes the repository transaction context to the write") {
     val expected = new MutationWriteContext {}
-    val receipts = new MutationReceiptRepository {
+    val receipts = new MutationReceiptRepository[IO] {
       override def execute[A, E](
           key: MutationReceiptKey,
           fingerprint: MutationReceiptFingerprint,
           currentTime: Instant,
           expiresAt: Instant
       )(
-          write: MutationWriteContext => RepositoryIO[MutationWriteOutcome[A, E]]
-      ): RepositoryIO[MutationReceiptExecution[A, E]] = {
+          write: MutationWriteContext => RepositoryF[IO, MutationWriteOutcome[A, E]]
+      ): RepositoryF[IO, MutationReceiptExecution[A, E]] = {
         val _ = (key, fingerprint, currentTime, expiresAt)
         write(expected).map {
           case MutationWriteOutcome.Rejected(error) => MutationReceiptExecution.Rejected(error)
@@ -112,23 +112,24 @@ final class IdempotentSpec extends CatsEffectSuite {
   }
 
   test("keeps repository failures in the transaction-aborting outer channel") {
-    val receipts = new MutationReceiptRepository {
+    val receipts = new MutationReceiptRepository[IO] {
       override def execute[A, E](
           key: MutationReceiptKey,
           fingerprint: MutationReceiptFingerprint,
           currentTime: Instant,
           expiresAt: Instant
       )(
-          write: MutationWriteContext => RepositoryIO[MutationWriteOutcome[A, E]]
-      ): RepositoryIO[MutationReceiptExecution[A, E]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
-        IO.defer {
-          val _ = (key, fingerprint, currentTime, expiresAt)
-          write(MutationWriteContext.directWrite).value.flatMap {
-            case Left(error) => IO.pure(Left(error))
-            case other       => IO.raiseError(new AssertionError(s"expected outer repository failure, received $other"))
+          write: MutationWriteContext => RepositoryF[IO, MutationWriteOutcome[A, E]]
+      ): RepositoryF[IO, MutationReceiptExecution[A, E]] =
+        com.example.graphQL.cats.service.port.RepositoryF.fromFEither(
+          IO.defer {
+            val _ = (key, fingerprint, currentTime, expiresAt)
+            write(MutationWriteContext.directWrite).value.flatMap {
+              case Left(error) => IO.pure(Left(error))
+              case other => IO.raiseError(new AssertionError(s"expected outer repository failure, received $other"))
+            }
           }
-        }
-      )
+        )
     }
     Idempotent(receipts, FixedTestClock.at(now))
       .execute[String](
@@ -172,16 +173,16 @@ final class IdempotentSpec extends CatsEffectSuite {
 
     for {
       observed <- Ref.of[IO, Option[Observed]](None)
-      receipts = new MutationReceiptRepository {
+      receipts = new MutationReceiptRepository[IO] {
         override def execute[A, E](
             key: MutationReceiptKey,
             fingerprint: MutationReceiptFingerprint,
             currentTime: Instant,
             expiresAt: Instant
         )(
-            write: MutationWriteContext => RepositoryIO[MutationWriteOutcome[A, E]]
-        ): RepositoryIO[MutationReceiptExecution[A, E]] =
-          com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+            write: MutationWriteContext => RepositoryF[IO, MutationWriteOutcome[A, E]]
+        ): RepositoryF[IO, MutationReceiptExecution[A, E]] =
+          com.example.graphQL.cats.service.port.RepositoryF.fromFEither(
             write(MutationWriteContext.directWrite).value.flatMap {
               case Right(MutationWriteOutcome.Applied(value)) =>
                 observed.set(Some(Observed(key, fingerprint, currentTime, expiresAt, value.entity))) *>
@@ -219,15 +220,15 @@ final class IdempotentSpec extends CatsEffectSuite {
 
   private final class RecordingReceiptRepository(
       state: Ref[IO, Option[MutationEntityReference]]
-  ) extends MutationReceiptRepository {
+  ) extends MutationReceiptRepository[IO] {
     override def execute[A, E](
         key: MutationReceiptKey,
         fingerprint: MutationReceiptFingerprint,
         currentTime: Instant,
         expiresAt: Instant
     )(
-        write: MutationWriteContext => RepositoryIO[MutationWriteOutcome[A, E]]
-    ): RepositoryIO[MutationReceiptExecution[A, E]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+        write: MutationWriteContext => RepositoryF[IO, MutationWriteOutcome[A, E]]
+    ): RepositoryF[IO, MutationReceiptExecution[A, E]] = com.example.graphQL.cats.service.port.RepositoryF.fromFEither(
       IO.defer {
         val _ = (key, fingerprint, currentTime, expiresAt)
         state.get.flatMap {
@@ -247,16 +248,18 @@ final class IdempotentSpec extends CatsEffectSuite {
 
   private final class FixedReceiptRepository(
       execution: MutationReceiptExecution[Nothing, Nothing]
-  ) extends MutationReceiptRepository {
+  ) extends MutationReceiptRepository[IO] {
     override def execute[A, E](
         key: MutationReceiptKey,
         fingerprint: MutationReceiptFingerprint,
         currentTime: Instant,
         expiresAt: Instant
     )(
-        write: MutationWriteContext => RepositoryIO[MutationWriteOutcome[A, E]]
-    ): RepositoryIO[MutationReceiptExecution[A, E]] = com.example.graphQL.cats.service.port.RepositoryIO.fromEither(
-      Right(execution)
-    )
+        write: MutationWriteContext => RepositoryF[IO, MutationWriteOutcome[A, E]]
+    ): RepositoryF[IO, MutationReceiptExecution[A, E]] = com.example.graphQL.cats.service.port.RepositoryF
+      .at[IO]
+      .fromEither(
+        Right(execution)
+      )
   }
 }

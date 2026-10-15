@@ -4,7 +4,7 @@ import cats.effect.{IO, Ref}
 import com.example.graphQL.cats.FixedTestClock
 import com.example.graphQL.cats.domain.model.{AccountStatus, EntityEmbedding, User, UserRole}
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
-import com.example.graphQL.cats.service.port.{EmbeddingCoverageRepository, RepositoryIO}
+import com.example.graphQL.cats.service.port.{EmbeddingCoverageRepository, RepositoryF}
 import com.example.graphQL.cats.service.search.*
 import munit.CatsEffectSuite
 
@@ -30,9 +30,9 @@ final class EmbeddingCoverageServiceSpec extends CatsEffectSuite {
   )
 
   private final class Recording(requests: Ref[IO, List[EmbeddingCoverageScanRequest]])
-      extends EmbeddingCoverageRepository {
-    override def observe(request: EmbeddingCoverageScanRequest): RepositoryIO[EmbeddingCoverageObservation] =
-      RepositoryIO.lift(requests.update(request :: _).as(empty))
+      extends EmbeddingCoverageRepository[IO] {
+    override def observe(request: EmbeddingCoverageScanRequest): RepositoryF[IO, EmbeddingCoverageObservation] =
+      RepositoryF.lift(requests.update(request :: _).as(empty))
   }
 
   private def users(values: User*) = new TestUsers(values.map(user => user.id -> user).toMap)
@@ -105,7 +105,7 @@ final class EmbeddingCoverageServiceSpec extends CatsEffectSuite {
   }
 
   test("the default capability denies every caller as unauthorized") {
-    EmbeddingCoverageUseCases.denyAll.report(actor(admin), None).value.map { result =>
+    EmbeddingCoverageUseCases.denyAll[IO].report(actor(admin), None).value.map { result =>
       assertEquals(result, Left(UseCaseError.Authentication(AuthenticationError.Unauthorized)))
     }
   }
@@ -125,9 +125,9 @@ final class EmbeddingCoverageServiceSpec extends CatsEffectSuite {
   }
 
   test("repository failures stay typed") {
-    val failing = new EmbeddingCoverageRepository {
-      override def observe(request: EmbeddingCoverageScanRequest): RepositoryIO[EmbeddingCoverageObservation] =
-        RepositoryIO.raise(RepositoryError.Unavailable)
+    val failing = new EmbeddingCoverageRepository[IO] {
+      override def observe(request: EmbeddingCoverageScanRequest): RepositoryF[IO, EmbeddingCoverageObservation] =
+        RepositoryF.at[IO].raise(RepositoryError.Unavailable)
     }
     EmbeddingCoverageService
       .live(users(admin), failing, 5.minutes, clock = FixedTestClock.at(now))
@@ -139,8 +139,8 @@ final class EmbeddingCoverageServiceSpec extends CatsEffectSuite {
   }
 
   private final class TestUsers(values: Map[UserId, User]) extends ServiceFixtures.VersionedUserRepositoryTestAdapter {
-    override def find(id: UserId): RepositoryIO[Option[User]] = RepositoryIO.pure(values.get(id))
-    override def updateEmbedding(id: UserId, embedding: EntityEmbedding): RepositoryIO[Unit] =
-      RepositoryIO.pure(())
+    override def find(id: UserId): RepositoryF[IO, Option[User]] = RepositoryF.at[IO].pure(values.get(id))
+    override def updateEmbedding(id: UserId, embedding: EntityEmbedding): RepositoryF[IO, Unit] =
+      RepositoryF.at[IO].pure(())
   }
 }

@@ -7,15 +7,11 @@ import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLResolverSupport.*
 import com.example.graphQL.cats.domain.workflow.{InterviewWorkflow, InterviewWorkflowId}
 import com.example.graphQL.cats.service.{ActorContext, AvailabilityError, RepositoryError, UseCaseError}
-import com.example.graphQL.cats.service.application.{
-  InterviewActionError,
-  InterviewActionIO,
-  InterviewSchedulingService
-}
+import com.example.graphQL.cats.service.application.{InterviewActionError, InterviewActionF, InterviewSchedulingService}
 import sangria.schema.Context
 
 private[graphql] object HiringGraphQLInterviewResolvers {
-  private def available(hiring: HiringGraphQLServices): HiringGraphQLResult[InterviewSchedulingService] =
+  private def available(hiring: HiringGraphQLServices): HiringGraphQLResult[InterviewSchedulingService[IO]] =
     EitherT.fromEither[IO](
       hiring.interviewScheduling.toRight(
         HiringGraphQLFailure.UseCase(UseCaseError.Availability(AvailabilityError.ServiceNotReady))
@@ -131,7 +127,8 @@ private[graphql] object HiringGraphQLInterviewResolvers {
     InterviewWorkflowId(input.workflowId)
 
   private def interviewAction(context: Context[RequestContext, Unit])(
-      run: (InterviewSchedulingService, ActorContext, InterviewActionGraphQLInput) => InterviewActionIO[
+      run: (InterviewSchedulingService[IO], ActorContext, InterviewActionGraphQLInput) => InterviewActionF[
+        IO,
         InterviewWorkflow
       ]
   ): HiringGraphQLResult[MutationOutcome[InterviewWorkflow]] = {
@@ -144,7 +141,7 @@ private[graphql] object HiringGraphQLInterviewResolvers {
     * own unit. The actor handed to the service is the authenticated viewer, never anything from the input.
     */
   private def interviewActionOutcome(context: Context[RequestContext, Unit])(
-      run: (InterviewSchedulingService, ActorContext) => InterviewActionIO[InterviewWorkflow]
+      run: (InterviewSchedulingService[IO], ActorContext) => InterviewActionF[IO, InterviewWorkflow]
   ): HiringGraphQLResult[MutationOutcome[InterviewWorkflow]] =
     context.ctx.takeInterviewActionAllowance.flatMap {
       case Left(_) =>
@@ -159,7 +156,7 @@ private[graphql] object HiringGraphQLInterviewResolvers {
     }
 
   private def outcome(
-      value: InterviewActionIO[InterviewWorkflow]
+      value: InterviewActionF[IO, InterviewWorkflow]
   ): HiringGraphQLResult[MutationOutcome[InterviewWorkflow]] =
     EitherT(value.value.flatMap {
       case Right(workflow) => IO.pure(Right(workflow))

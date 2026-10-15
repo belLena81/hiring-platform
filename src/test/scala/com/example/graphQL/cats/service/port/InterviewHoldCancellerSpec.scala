@@ -17,7 +17,7 @@ final class InterviewHoldCancellerSpec extends CatsEffectSuite {
     InterviewLiveHold(id, InterviewWorkflow.reservationKey(id, 2), InterviewWorkflow.cancellationKey(id, 2))
 
   test("DHW-30 the platform ledger is its own provider, so the cleanup's local release is the confirmation") {
-    InterviewHoldCanceller.ledgerOwned.cancel(hold, at).value.map { answer =>
+    InterviewHoldCanceller.ledgerOwned[IO].cancel(hold, at).value.map { answer =>
       assertEquals(answer, Right(InterviewCalendarCancellation.Cancelled(at)))
     }
   }
@@ -27,7 +27,7 @@ final class InterviewHoldCancellerSpec extends CatsEffectSuite {
   ) {
     for {
       asked <- Ref.of[IO, Vector[(InterviewWorkflowId, String)]](Vector.empty)
-      calendar = new InterviewCalendarProvider {
+      calendar = new InterviewCalendarProvider[IO] {
         override def reserve(
             workflowId: InterviewWorkflowId,
             idempotencyKey: String,
@@ -36,25 +36,26 @@ final class InterviewHoldCancellerSpec extends CatsEffectSuite {
             interval: InterviewInterval,
             now: Instant,
             execution: Option[ClaimedInterviewWorkflowCommand]
-        ): InterviewProviderIO[InterviewCalendarReservation] =
+        ): InterviewProviderF[IO, InterviewCalendarReservation] =
           EitherT.leftT(InterviewProviderError.Unavailable)
         override def lookup(
             workflowId: InterviewWorkflowId,
             idempotencyKey: String
-        ): InterviewProviderIO[Option[InterviewCalendarReservation]] = EitherT.leftT(InterviewProviderError.Unavailable)
+        ): InterviewProviderF[IO, Option[InterviewCalendarReservation]] =
+          EitherT.leftT(InterviewProviderError.Unavailable)
         override def cancel(
             workflowId: InterviewWorkflowId,
             idempotencyKey: String,
             now: Instant,
             execution: Option[ClaimedInterviewWorkflowCommand]
-        ): InterviewProviderIO[InterviewCalendarCancellation] =
+        ): InterviewProviderF[IO, InterviewCalendarCancellation] =
           EitherT.liftF[IO, InterviewProviderError, Unit](asked.update(_ :+ (workflowId -> idempotencyKey))) *>
             EitherT.rightT[IO, InterviewProviderError](InterviewCalendarCancellation.AlreadyCancelled(now))
         override def release(
             idempotencyKey: String,
             now: Instant,
             execution: Option[ClaimedInterviewWorkflowCommand]
-        ): InterviewProviderIO[Unit] = EitherT.leftT(InterviewProviderError.Unavailable)
+        ): InterviewProviderF[IO, Unit] = EitherT.leftT(InterviewProviderError.Unavailable)
       }
       answer <- InterviewHoldCanceller.external(calendar).cancel(hold, at).value
       calls <- asked.get

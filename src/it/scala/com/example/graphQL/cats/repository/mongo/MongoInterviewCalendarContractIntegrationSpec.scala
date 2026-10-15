@@ -20,14 +20,14 @@ final class MongoInterviewCalendarContractIntegrationSpec
 
   override protected def withSubject[A](use: InterviewCalendarContractSubject => IO[A]): IO[A] =
     mongoResource.use { fixture =>
-      val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
+      val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop[IO])
       val workflows = Mongo4catsCollections.documents(fixture.database, MongoCollections.InterviewWorkflows)
       def update(workflow: InterviewWorkflow, changes: org.bson.conversions.Bson*): IO[Unit] =
         workflows.flatMap(
           _.updateOne(Filters.eq(MongoFields.Id, workflow.id.value.toString), Updates.combine(changes*)).void
         )
       val subject = new InterviewCalendarContractSubject {
-        override val provider: InterviewCalendarProvider = LedgerInterviewCalendarProvider.durable(repository)
+        override val provider: InterviewCalendarProvider[IO] = LedgerInterviewCalendarProvider.durable(repository)
 
         override def newWorkflow(candidate: UserId, recruiter: UserId, interval: InterviewInterval) = {
           val now = Instant.now()
@@ -92,6 +92,6 @@ final class MongoInterviewCalendarContractIntegrationSpec
               Updates.set("generation", Int.box(generation))
             ).as(workflow.copy(phase = InterviewWorkflowPhase.CancelPending, generation = generation))
       }
-      MongoHiringSetup.initialize(fixture.database, Diagnostics.noop) *> use(subject)
+      MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO]) *> use(subject)
     }
 }

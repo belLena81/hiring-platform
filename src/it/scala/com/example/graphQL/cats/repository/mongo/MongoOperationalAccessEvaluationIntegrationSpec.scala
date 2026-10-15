@@ -100,7 +100,7 @@ final class MongoOperationalAccessEvaluationIntegrationSpec extends MongoIntegra
   private final class ObservedRepositoryFailure(val error: RepositoryError)
       extends RuntimeException("Repository failure during synthetic baseline")
 
-  private def successful[A](value: RepositoryIO[A]): IO[A] = value.value.flatMap {
+  private def successful[A](value: RepositoryF[IO, A]): IO[A] = value.value.flatMap {
     case Right(result) => IO.pure(result)
     case Left(error)   => IO.raiseError(new ObservedRepositoryFailure(error))
   }
@@ -123,15 +123,16 @@ final class MongoOperationalAccessEvaluationIntegrationSpec extends MongoIntegra
         database,
         MongoRepositoryTestSupport.noTransaction,
         MongoEmbeddingWorkEnqueuer.disabled,
-        Diagnostics.noop
+        Diagnostics.noop[IO]
       )
       val jobRepository = MongoJobRepository.transactional(
         database,
         fixture.client,
         MongoEmbeddingWorkEnqueuer.disabled,
-        Diagnostics.noop
+        Diagnostics.noop[IO]
       )
-      val applicationRepository = MongoApplicationRepository.transactional(database, fixture.client, Diagnostics.noop)
+      val applicationRepository =
+        MongoApplicationRepository.transactional(database, fixture.client, Diagnostics.noop[IO])
       val authorization = ActorAuthorization(users)
       def scope(value: User): HiringReadScope =
         HiringReadScope
@@ -368,7 +369,7 @@ final class MongoOperationalAccessEvaluationIntegrationSpec extends MongoIntegra
         buildStarted <- IO.monotonic
         _ <- MongoHiringIndexSetup.create(database)
         buildEnded <- IO.monotonic
-        _ <- MongoHiringSetup.initialize(database, Diagnostics.noop)
+        _ <- MongoHiringSetup.initialize(database, Diagnostics.noop[IO])
         revision <- IO.blocking(scala.sys.process.Process(Seq("git", "rev-parse", "HEAD")).!!.trim)
         digest <- sourceDigest
         version <- support.command(database, new Document("buildInfo", 1)).map(_.getString("version"))
@@ -594,7 +595,7 @@ final class MongoOperationalAccessEvaluationIntegrationSpec extends MongoIntegra
         "job-lexical",
         "candidate-lexical",
         100,
-        diagnostics = Diagnostics.noop
+        diagnostics = Diagnostics.noop[IO]
       )
       val query = VectorSearchQuery(
         List(0.1f, 0.2f),
@@ -657,16 +658,17 @@ final class MongoOperationalAccessEvaluationIntegrationSpec extends MongoIntegra
   private def writeWorkloads(readFixture: support.Fixture): IO[Json] =
     support.isolatedFixture(readFixture).use { fixture =>
       (cats.effect.Ref.of[IO, Int](0), IO.realTimeInstant).tupled.flatMap { case (sequence, measuredAt) =>
-        val work = new MongoEmbeddingWorkRepository(fixture.database, Diagnostics.noop)
+        val work = new MongoEmbeddingWorkRepository(fixture.database, Diagnostics.noop[IO])
         val outbox =
-          MongoOperationalEventOutboxRepository.transactional(fixture.database, fixture.client, Diagnostics.noop)
+          MongoOperationalEventOutboxRepository.transactional(fixture.database, fixture.client, Diagnostics.noop[IO])
         val users = new MongoUserRepository(
           fixture.database,
           MongoRepositoryTestSupport.noTransaction,
           MongoEmbeddingWorkEnqueuer.disabled,
-          Diagnostics.noop
+          Diagnostics.noop[IO]
         )
-        val jobRepository = MongoJobRepository.transactional(fixture.database, fixture.client, work, Diagnostics.noop)
+        val jobRepository =
+          MongoJobRepository.transactional(fixture.database, fixture.client, work, Diagnostics.noop[IO])
         // Distinct and shared subjects exercise the same production claim contract.
         // claim maps expected lease conflicts to None, so an empty attempt is legitimate.
         // Actual progress and durable post-phase reconciliation are required independently.
@@ -805,7 +807,7 @@ final class MongoOperationalAccessEvaluationIntegrationSpec extends MongoIntegra
             MongoRepositoryTestSupport.insertOne(fixture.database, MongoCollections.Jobs, MongoHiringCodecs.job(value))
           )
           started <- IO.monotonic
-          _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+          _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
           ended <- IO.monotonic
           reports <- capabilities
             .traverse(capability => List(1, 8).traverse(observe(fixture, capability, _)))
