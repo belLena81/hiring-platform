@@ -65,7 +65,7 @@ class OperationalEventComposeIntegrationSpec extends KafkaIntegrationSuite {
     "Compose telemetry evidence job",
     List("Scala"),
     Set("Scala"),
-    Location("Cyprus", "Nicosia", remote = true),
+    Location("Cyprus", Some("Nicosia"), remote = true),
     JobStatus.Open,
     createdAt,
     createdAt

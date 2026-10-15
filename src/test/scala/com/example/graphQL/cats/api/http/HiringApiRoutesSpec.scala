@@ -42,10 +42,11 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
   private def app(
       effect: IO[ProbeResult],
       diagnostics: Diagnostics[IO] = Diagnostics.noop,
-      admissionPermits: Long = DefaultAdmissionPermits
+      admissionPermits: Long = DefaultAdmissionPermits,
+      hiringReady: IO[ProbeResult] = IO.pure(ProbeResult.Ready)
   ): IO[HttpApp[IO]] =
     val probe = new DatabaseProbe[IO] { def check(requestId: Option[String]): IO[ProbeResult] = effect }
-    buildRoutes(new HealthService(probe, diagnostics), diagnostics)
+    buildRoutes(new HealthService(probe, diagnostics), diagnostics, hiringReady = hiringReady)
       .flatMap(_.httpApp(HiringApiRoutes.HttpConfig(admissionPermits, 5.seconds)))
 
   private def buildRoutes(
@@ -95,7 +96,8 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       )
   }
 
-  private val health = request("{ health { status } }")
+  // A public GraphQL operation with no resolver, authentication or storage dependency.
+  private val ping = request("{ __typename }")
   private val jwtSecret = "01234567890123456789012345678901"
   private val jwtConfig = JwtAuthConfig(jwtSecret, "hiring-platform-local", "hiring-graphql-api")
 
@@ -114,7 +116,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         Diagnostics.noop,
         authenticate = _ => IO.pure(Left(com.example.graphQL.cats.api.auth.AuthFailure.Unavailable))
       ).flatMap(defaultApp)
-      response <- http(request("{ health { status } }"))
+      response <- http(ping)
       body <- response.as[Json]
     } yield {
       assertEquals(response.status, Status.ServiceUnavailable)
@@ -310,7 +312,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     }
   }
 
-  test("authenticated public GraphQL health and readiness bypass hiring setup readiness") {
+  test("AC-13.1 an authenticated __typename request bypasses hiring setup readiness") {
     for {
       usersRef <- Ref.of[IO, Map[
         com.example.graphQL.cats.domain.model.Identifiers.UserId,
@@ -363,21 +365,12 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         hiringReady = setupChecks.update(_ + 1).as(ProbeResult.Unavailable)
       ).flatMap(defaultApp)
       token = signedToken(ServiceFixtures.candidateId, UserRole.Candidate)
-      authenticatedHealth <- http(health.putHeaders(Header.Raw(CIString("Authorization"), s"Bearer $token")))
-      healthBody <- authenticatedHealth.as[Json]
-      authenticatedReadiness <- http(
-        request("{ readiness { status } }").putHeaders(Header.Raw(CIString("Authorization"), s"Bearer $token"))
-      )
-      readinessBody <- authenticatedReadiness.as[Json]
+      authenticatedPing <- http(ping.putHeaders(Header.Raw(CIString("Authorization"), s"Bearer $token")))
+      pingBody <- authenticatedPing.as[Json]
       setupCount <- setupChecks.get
     } yield {
-      assertEquals(authenticatedHealth.status, Status.Ok)
-      assertEquals(healthBody.hcursor.downField("data").downField("health").get[String]("status"), Right("UP"))
-      assertEquals(authenticatedReadiness.status, Status.Ok)
-      assertEquals(
-        readinessBody.hcursor.downField("data").downField("readiness").get[String]("status"),
-        Right("NOT_READY")
-      )
+      assertEquals(authenticatedPing.status, Status.Ok)
+      assertEquals(pingBody.hcursor.downField("data").get[String]("__typename"), Right("Query"))
       assertEquals(setupCount, 0)
     }
   }
@@ -415,7 +408,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         |}""".stripMargin
     val signup =
       """mutation {
-        |  signUp(input: { idempotencyKey: "00000000-0000-0000-0000-000000000005", name: "Candidate", role: CANDIDATE, password: "password-password", skills: ["Scala"] }) {
+        |  signUp(input: { idempotencyKey: "00000000-0000-0000-0000-000000000005", name: "Candidate", role: CANDIDATE, password: "password-password", profile: { candidate: { skills: ["Scala"] } } }) {
         | __typename
         |  }
         |}""".stripMargin
@@ -463,7 +456,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     }
   }
 
-  test("interview actions are limited per actor through the served routes, counting each aliased action") {
+  test("AC-11.1 interview actions are limited per actor through the served routes, counting each aliased action") {
     import com.example.graphQL.cats.domain.model.*
     import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
     import com.example.graphQL.cats.domain.workflow.*
@@ -490,7 +483,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       s"""$alias: requestInterviewReschedule(input: { workflowId: "${workflowId.value}", expectedRevision: 3, idempotencyKey: "${new java.util.UUID(
           9L,
           key
-        )}" }) { ... on InterviewWorkflow { revision } ... on DomainError { code } }"""
+        )}" }) { ... on InterviewWorkflow { revision } ... on DomainError { code retryAfterSeconds } }"""
     val mutation = s"mutation { ${action("first", 1)} ${action("second", 2)} }"
     for {
       usersRef <- Ref.of[IO, Map[UserId, User]](
@@ -555,6 +548,10 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       val data = body.hcursor.downField("data")
       assertEquals(data.downField("first").get[Long]("revision"), Right(4L), clue(body))
       assertEquals(data.downField("second").get[String]("code"), Right("RATE_LIMITED"), clue(body))
+      assert(
+        data.downField("second").get[Int]("retryAfterSeconds").exists(seconds => seconds >= 1 && seconds <= 60),
+        clue(body)
+      )
       assert(body.hcursor.downField("errors").focus.isEmpty, clue(body))
     }
   }
@@ -570,7 +567,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         authenticate = _ => IO.pure(Left(com.example.graphQL.cats.api.auth.AuthFailure.InvalidToken))
       )
         .flatMap(defaultApp)
-      response <- http(health)
+      response <- http(ping)
     } yield {
       assertEquals(response.status, Status.Unauthorized)
       assertEquals(response.headers.get[`WWW-Authenticate`].map(_.values.head), Some(Challenge("Bearer", "hiring")))
@@ -580,7 +577,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
   test("responses include the typed shared security headers") {
     for {
       http <- app(IO.pure(ProbeResult.Ready))
-      response <- http(health)
+      response <- http(ping)
     } yield {
       assertEquals(response.headers.get[`Cache-Control`].map(_.values.toList), Some(List(CacheDirective.`no-store`)))
       assertEquals(response.headers.get(CIString("X-Content-Type-Options")).map(_.head.value), Some("nosniff"))
@@ -600,7 +597,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     val mixedOperations =
       """mutation {
         |  login(input: { idempotencyKey: "00000000-0000-0000-0000-000000000008", name: "Candidate", password: "password-password" }) { __typename }
-        |  signUp(input: { idempotencyKey: "00000000-0000-0000-0000-000000000009", name: "Candidate", role: CANDIDATE, password: "password-password", skills: ["Scala"] }) { __typename }
+        |  signUp(input: { idempotencyKey: "00000000-0000-0000-0000-000000000009", name: "Candidate", role: CANDIDATE, password: "password-password", profile: { candidate: { skills: ["Scala"] } } }) { __typename }
         |}""".stripMargin
     for {
       probe = new DatabaseProbe[IO] {
@@ -685,7 +682,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     val inlineSignup =
       """mutation {
         |  ... on Mutation {
-        |    signUp(input: { idempotencyKey: "00000000-0000-0000-0000-000000000015", name: "Candidate", role: CANDIDATE, password: "password-password", skills: ["Scala"] }) {
+        |    signUp(input: { idempotencyKey: "00000000-0000-0000-0000-000000000015", name: "Candidate", role: CANDIDATE, password: "password-password", profile: { candidate: { skills: ["Scala"] } } }) {
         | __typename
         |    }
         |  }
@@ -758,7 +755,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         |}""".stripMargin
     val operationNamedLogin =
       """query login {
-        |  health { status }
+        |  __typename
         |}""".stripMargin
 
     for {
@@ -789,7 +786,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         |}""".stripMargin
     val signup =
       """mutation {
-        |  signUp(input: { idempotencyKey: "00000000-0000-0000-0000-000000000019", name: "Candidate", role: CANDIDATE, password: "password-password", skills: ["Scala"] }) { __typename }
+        |  signUp(input: { idempotencyKey: "00000000-0000-0000-0000-000000000019", name: "Candidate", role: CANDIDATE, password: "password-password", profile: { candidate: { skills: ["Scala"] } } }) { __typename }
         |}""".stripMargin
     val trustedProxy = TrustedProxyConfig(List(Cidr.fromString("10.0.0.0/8").get))
 
@@ -907,7 +904,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         Json
           .obj(
             "query" -> Json.fromString(
-              "query Selected($include: Boolean!) { readiness @include(if: $include) { status } } # synthetic-field-comment-secret"
+              "query Selected($include: Boolean!) { me @include(if: $include) { id } } # synthetic-field-comment-secret"
             ),
             "operationName" -> Json.fromString("Selected"),
             "variables" -> Json
@@ -918,7 +915,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       )
       execution <- TestGraphQLSupport
         .context(
-          IO.raiseError[ProbeResult](new IllegalStateException("synthetic-resolver-secret")),
+          hiringReady = IO.raiseError[ProbeResult](new IllegalStateException("synthetic-resolver-secret")),
           diagnostics = executionSink,
           requestId = Some("00000000-0000-0000-0000-000000000901")
         )
@@ -928,12 +925,9 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       result <- IO.fromEither(
         execution.left.map(failure => new AssertionError(s"Expected field error result: $failure"))
       )
-      probe = new DatabaseProbe[IO] {
-        def check(requestId: Option[String]): IO[ProbeResult] = IO.pure(ProbeResult.Ready)
-      }
       id <- IO.randomUUID.map(_.toString)
       response <- TestGraphQLSupport.dependencies().use { dependencies =>
-        new GraphQLHttpRoutes(new HealthService(probe, sink), sink, dependencies).completedGraphQL(parsed, result, id)
+        new GraphQLHttpRoutes(sink, dependencies).completedGraphQL(parsed, result, id)
       }
       body <- response.as[Json]
       captured <- records.get
@@ -945,7 +939,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       assertEquals(errors.map(_.size), Right(1))
       val error = errors.toOption.get.head
       assertEquals(error.hcursor.get[String]("message"), Right("Execution failed"))
-      assertEquals(error.hcursor.get[Vector[String]]("path"), Right(Vector("readiness")))
+      assertEquals(error.hcursor.get[Vector[String]]("path"), Right(Vector("me")))
       assert(error.hcursor.downField("locations").succeeded)
       assertEquals(captured.map(_._1), Vector(LogEvent.GraphQLCompleted))
       assert(captured.forall(_._2.contains(id)))
@@ -985,7 +979,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
           def check(requestId: Option[String]): IO[ProbeResult] = IO.pure(ProbeResult.Ready)
         }
         http <- buildRoutes(new HealthService(probe, sink), sink).flatMap(defaultApp)
-        slow = health.withBodyStream(
+        slow = ping.withBodyStream(
           fs2.Stream
             .eval(entered.complete(()) *> IO.never[Byte])
             .onFinalize(finalizing.complete(()) *> finish.get *> IO.delay(finalized.set(true)))
@@ -1069,16 +1063,16 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     }
   }
 
-  test("GraphQL completion shares the HTTP and readiness diagnostic request ID") {
+  test("GraphQL completion shares the HTTP diagnostic request ID") {
     for {
       records <- Ref.of[IO, Vector[DiagnosticRecord]](Vector.empty)
       http <- app(IO.pure(ProbeResult.Unavailable), capture(records))
-      response <- http(request("query LocalCheck { readiness { status } }"))
+      response <- http(request("query LocalCheck { __typename }"))
       captured <- records.get
     } yield {
       val id = requestId(response)
       assertEquals(response.status, Status.Ok)
-      assertEquals(captured.map(_._1), Vector(LogEvent.MongoUnavailable, LogEvent.GraphQLCompleted))
+      assertEquals(captured.map(_._1), Vector(LogEvent.GraphQLCompleted))
       assert(captured.forall(_._2 == id))
       assert(captured.filter(_._1 == LogEvent.GraphQLCompleted).forall { case (_, _, fields) =>
         fields.get(LogField.OperationName).contains("LocalCheck") && fields.get(LogField.Outcome).contains("COMPLETED")
@@ -1091,8 +1085,8 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     for {
       records <- Ref.of[IO, Vector[DiagnosticRecord]](Vector.empty)
       http <- app(IO.pure(ProbeResult.Ready), capture(records))
-      first <- http(health.putHeaders(Header.Raw(CIString("X-Request-ID"), inboundId)))
-      second <- http(health.putHeaders(Header.Raw(CIString("X-Request-ID"), inboundId)))
+      first <- http(ping.putHeaders(Header.Raw(CIString("X-Request-ID"), inboundId)))
+      second <- http(ping.putHeaders(Header.Raw(CIString("X-Request-ID"), inboundId)))
       captured <- records.get
     } yield {
       assert(requestId(first).exists(isUuid))
@@ -1115,7 +1109,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
           records.update(_ :+ ((event, id, fields)))
       }
       http <- app(IO.pure(ProbeResult.Ready), sink)
-      slow = health.withBodyStream(
+      slow = ping.withBodyStream(
         fs2.Stream
           .eval(entered.complete(()) *> IO.never[Byte])
           .onFinalize(finalizing.complete(()) *> finish.get)
@@ -1148,10 +1142,10 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       }
       for {
         http <- app(IO.pure(ProbeResult.Unavailable), sink)
-        success <- http(request("{ readiness { status } }"))
+        success <- http(ping)
         rejected <- http(request("{ missingField }"))
         unexpected <- http(
-          health.withBodyStream(fs2.Stream.raiseError[IO](new IllegalStateException("synthetic-body-secret")))
+          ping.withBodyStream(fs2.Stream.raiseError[IO](new IllegalStateException("synthetic-body-secret")))
         )
         bodies <- List(success, rejected, unexpected).traverse(_.as[String])
       } yield {
@@ -1174,7 +1168,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     )
     app(IO.pure(ProbeResult.Ready)).flatMap { http =>
       cases.traverse_ { case (accept, expected, mediaType) =>
-        http(health.putHeaders(Header.Raw(CIString("Accept"), accept)))
+        http(ping.putHeaders(Header.Raw(CIString("Accept"), accept)))
           .map { response =>
             assertEquals(response.status, expected, accept)
             assertEquals(
@@ -1199,7 +1193,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     )
     app(IO.pure(ProbeResult.Ready)).flatMap { http =>
       cases.traverse_ { case (accept, expectedStatus, expectedMediaType) =>
-        http(health.putHeaders(Header.Raw(CIString("Accept"), accept))).map { response =>
+        http(ping.putHeaders(Header.Raw(CIString("Accept"), accept))).map { response =>
           assertEquals(response.status, expectedStatus, accept)
           assertEquals(
             response.contentType.map(header => s"${header.mediaType.mainType}/${header.mediaType.subType}"),
@@ -1222,10 +1216,10 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     )
     app(IO.pure(ProbeResult.Ready)).flatMap { http =>
       accepted.traverse_ { accept =>
-        http(health.putHeaders(Header.Raw(CIString("Accept"), accept)))
+        http(ping.putHeaders(Header.Raw(CIString("Accept"), accept)))
           .map(response => assertEquals(response.status, Status.Ok, accept))
       } *> rejected.traverse_ { accept =>
-        http(health.putHeaders(Header.Raw(CIString("Accept"), accept)))
+        http(ping.putHeaders(Header.Raw(CIString("Accept"), accept)))
           .flatMap { response =>
             response.as[Json].map { body =>
               assertEquals(response.status, Status.NotAcceptable, accept)
@@ -1244,20 +1238,23 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     for {
       graphqlEntered <- Deferred[IO, Unit]
       readinessEntered <- Deferred[IO, Unit]
-      calls <- Ref.of[IO, Int](0)
+      release <- Deferred[IO, Unit]
       probe = new DatabaseProbe[IO] {
-        def check(requestId: Option[String]): IO[ProbeResult] = calls.updateAndGet(_ + 1).flatMap {
-          case 1 => graphqlEntered.complete(()) *> IO.never[ProbeResult]
-          case _ => readinessEntered.complete(()) *> IO.pure(ProbeResult.Ready)
-        }
+        def check(requestId: Option[String]): IO[ProbeResult] =
+          readinessEntered.complete(()) *> IO.pure(ProbeResult.Ready)
       }
-      routes <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop)
+      routes <- buildRoutes(
+        new HealthService(probe, Diagnostics.noop),
+        Diagnostics.noop,
+        hiringReady = graphqlEntered.complete(()) *> release.get.as(ProbeResult.Ready)
+      )
       http <- routes.httpApp(HiringApiRoutes.HttpConfig(1L, 5.seconds))
-      graphqlFiber <- http(request("{ readiness { status } }")).start
+      graphqlFiber <- http(request("{ me { id } }")).start
       _ <- graphqlEntered.get.timeout(2.seconds)
       readiness <- http(Request[IO](Method.GET, Uri.unsafeFromString("/ready")))
       _ <- readinessEntered.get.timeout(2.seconds)
-      _ <- graphqlFiber.cancel
+      _ <- release.complete(())
+      _ <- graphqlFiber.joinWithNever
       _ <- IO(assertEquals(readiness.status, Status.Ok))
     } yield ()
   }
@@ -1270,43 +1267,45 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     } yield {
       assertEquals(response.status, Status.Ok)
       assertEquals(schema, HiringGraphQLSchema.sdl)
-      assert(schema.contains("users(first: Int!"))
+      assert(schema.contains("  users(\n"))
+      assert(schema.contains("scalar Long"))
+      assert(schema.contains("directive @oneOf on INPUT_OBJECT"))
     }
   }
 
-  test("health contract, correlation, and no database access") {
+  test("a public GraphQL request has a correlation id and needs no database access") {
     for {
       count <- Ref.of[IO, Int](0)
       http <- app(count.update(_ + 1).as(ProbeResult.Ready))
-      response <- http(health)
+      response <- http(ping)
       body <- response.as[Json]
       calls <- count.get
     } yield {
       assertEquals(response.status, Status.Ok)
-      assertEquals(body.hcursor.downField("data").downField("health").get[String]("status"), Right("UP"))
+      assertEquals(body.hcursor.downField("data").get[String]("__typename"), Right("Query"))
       assertEquals(calls, 0)
       assert(requestId(response).exists(isUuid))
       assert(response.headers.get(CIString("Access-Control-Allow-Origin")).isEmpty)
     }
   }
 
-  test("readiness aliases share a ping, recover, and retain HTTP200 on GraphQL failure") {
+  test("AC-13.1 /ready reports the probe and recovers while GraphQL stays independent of it") {
     for {
       count <- Ref.of[IO, Int](0)
       result <- Ref.of[IO, ProbeResult](ProbeResult.Unavailable)
       http <- app(count.update(_ + 1) *> result.get)
-      response <- http(request("{ first: readiness { status } second: readiness { status } }"))
-      body <- response.as[Json]
-      firstCount <- count.get
+      graphQL <- http(ping)
+      notReady <- http(Request[IO](Method.GET, Uri.unsafeFromString("/ready")))
       _ <- result.set(ProbeResult.Ready)
       recovered <- http(Request[IO](Method.GET, Uri.unsafeFromString("/ready")))
       ready <- recovered.as[Json]
+      probes <- count.get
     } yield {
-      assertEquals(response.status, Status.Ok)
-      assertEquals(body.hcursor.downField("data").downField("first").get[String]("status"), Right("NOT_READY"))
-      assertEquals(firstCount, 1)
+      assertEquals(graphQL.status, Status.Ok)
+      assertEquals(notReady.status, Status.ServiceUnavailable)
       assertEquals(recovered.status, Status.Ok)
       assertEquals(ready.hcursor.get[String]("status"), Right("READY"))
+      assertEquals(probes, 2)
     }
   }
 
@@ -1315,19 +1314,19 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       "not-json",
       "[]",
       "{\"query\":1}",
-      "{\"query\":\"{ health { status } }\",\"variables\":[]}",
-      "{\"query\":\"{ health { status } }\",\"operationName\":2}"
-    ).map(body => health.withEntity(body).putHeaders(Header.Raw(CIString("Content-Type"), "application/json")))
+      "{\"query\":\"{ __typename }\",\"variables\":[]}",
+      "{\"query\":\"{ __typename }\",\"operationName\":2}"
+    ).map(body => ping.withEntity(body).putHeaders(Header.Raw(CIString("Content-Type"), "application/json")))
     val queries = List(
       "{ privateSecret }",
       "{ users { email } }",
-      "query A { health { status } } query B { health { status } }",
-      "query Test($include: Boolean!) { readiness @include(if: $include) { status } }",
-      "{ health"
+      "query A { __typename } query B { __typename }",
+      "query Test($include: Boolean!) { me @include(if: $include) { id } }",
+      "{ __typename"
     ).map(request)
     for {
       count <- Ref.of[IO, Int](0)
-      http <- app(count.update(_ + 1).as(ProbeResult.Ready))
+      http <- app(IO.pure(ProbeResult.Ready), hiringReady = count.update(_ + 1).as(ProbeResult.Ready))
       responses <- (malformed ++ queries).traverse(http.run)
       bodies <- responses.traverse(_.as[String])
       calls <- count.get
@@ -1344,7 +1343,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     val query = s"{ __type(name: \"Job\") { fields { type { $nestedType } } } }"
     for {
       calls <- Ref.of[IO, Int](0)
-      http <- app(calls.update(_ + 1).as(ProbeResult.Ready))
+      http <- app(IO.pure(ProbeResult.Ready), hiringReady = calls.update(_ + 1).as(ProbeResult.Ready))
       response <- http(request(query))
       body <- response.as[String]
       count <- calls.get
@@ -1357,18 +1356,18 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
   }
 
   test("GraphQL execution rejects excessive complexity through Sangria reducers before resolver work") {
-    val selections = (0 to 1000).map(index => s"r$index: readiness { status }").mkString(" ")
+    val selections = (0 to 1000).map(index => s"r$index: me { id }").mkString(" ")
     val query = s"{ $selections }"
     for {
       calls <- Ref.of[IO, Int](0)
-      http <- app(calls.update(_ + 1).as(ProbeResult.Ready))
+      http <- app(IO.pure(ProbeResult.Ready), hiringReady = calls.update(_ + 1).as(ProbeResult.Ready))
       response <- http(request(query))
       body <- response.as[String]
       count <- calls.get
     } yield {
       assertEquals(response.status, Status.BadRequest)
       assertEquals(count, 0)
-      assert(!body.contains("readiness"))
+      assert(!body.contains("\"me\""))
       assert(!body.contains("complexity"))
     }
   }
@@ -1378,7 +1377,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     val query = s"{ jobs(first: 100) { edges { node { recruiter { $selections } } } } }"
     for {
       calls <- Ref.of[IO, Int](0)
-      http <- app(calls.update(_ + 1).as(ProbeResult.Ready))
+      http <- app(IO.pure(ProbeResult.Ready), hiringReady = calls.update(_ + 1).as(ProbeResult.Ready))
       response <- http(request(query))
       count <- calls.get
     } yield {
@@ -1390,8 +1389,8 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
   test("ARR-01.1 a negative first is rejected as VALIDATION_FAILED before resolver work") {
     for {
       calls <- Ref.of[IO, Int](0)
-      http <- app(calls.update(_ + 1).as(ProbeResult.Ready))
-      response <- http(request("{ jobs(first: -1) { edges { cursor } } readiness { status } }"))
+      http <- app(IO.pure(ProbeResult.Ready), hiringReady = calls.update(_ + 1).as(ProbeResult.Ready))
+      response <- http(request("{ jobs(first: -1) { edges { cursor } } me { id } }"))
       body <- response.as[String]
       count <- calls.get
     } yield {
@@ -1404,10 +1403,10 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     val selections = (1 to 20).map(index => s"name$index: name").mkString(" ")
     val query =
       s"{ costly: jobs(first: 100) { edges { node { recruiter { $selections } } } } " +
-        "offset: jobs(first: -1000) { edges { cursor } } readiness { status } }"
+        "offset: jobs(first: -1000) { edges { cursor } } me { id } }"
     for {
       calls <- Ref.of[IO, Int](0)
-      http <- app(calls.update(_ + 1).as(ProbeResult.Ready))
+      http <- app(IO.pure(ProbeResult.Ready), hiringReady = calls.update(_ + 1).as(ProbeResult.Ready))
       response <- http(request(query))
       body <- response.as[String]
       count <- calls.get
@@ -1420,8 +1419,8 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
   test("ARR-01.3 an oversized first is rejected as VALIDATION_FAILED before resolver work") {
     for {
       calls <- Ref.of[IO, Int](0)
-      http <- app(calls.update(_ + 1).as(ProbeResult.Ready))
-      response <- http(request("{ jobs(first: 101) { edges { cursor } } readiness { status } }"))
+      http <- app(IO.pure(ProbeResult.Ready), hiringReady = calls.update(_ + 1).as(ProbeResult.Ready))
+      response <- http(request("{ jobs(first: 101) { edges { cursor } } me { id } }"))
       body <- response.as[String]
       count <- calls.get
     } yield {
@@ -1433,7 +1432,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
   private def assertPageSizeRefused(query: String, variables: Json = Json.obj()): IO[Unit] =
     for {
       calls <- Ref.of[IO, Int](0)
-      http <- app(calls.update(_ + 1).as(ProbeResult.Ready))
+      http <- app(IO.pure(ProbeResult.Ready), hiringReady = calls.update(_ + 1).as(ProbeResult.Ready))
       response <- http(
         Request[IO](Method.POST, Uri.unsafeFromString("/graphql"))
           .withEntity(Json.obj("query" -> Json.fromString(query), "variables" -> variables))
@@ -1449,23 +1448,23 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
 
   test("ARR-01.1 a negative first supplied through a variable is rejected before resolver work") {
     assertPageSizeRefused(
-      "query Q($n: Int!) { jobs(first: $n) { edges { cursor } } readiness { status } }",
+      "query Q($n: Int!) { jobs(first: $n) { edges { cursor } } me { id } }",
       Json.obj("n" -> Json.fromInt(-1))
     )
   }
 
   test("ARR-01.1 a negative first inside a named fragment is rejected before resolver work") {
     assertPageSizeRefused(
-      "{ readiness { status } ...Page } fragment Page on Query { jobs(first: -1) { edges { cursor } } }"
+      "{ me { id } ...Page } fragment Page on Query { jobs(first: -1) { edges { cursor } } }"
     )
   }
 
   test("ARR-01.1 a negative first inside an inline fragment is rejected before resolver work") {
-    assertPageSizeRefused("{ readiness { status } ... on Query { jobs(first: -5) { edges { cursor } } } }")
+    assertPageSizeRefused("{ me { id } ... on Query { jobs(first: -5) { edges { cursor } } } }")
   }
 
   test("ARR-01.1 a negative first under an alias is rejected before resolver work") {
-    assertPageSizeRefused("{ readiness { status } harmless: jobs(first: -1) { edges { cursor } } }")
+    assertPageSizeRefused("{ me { id } harmless: jobs(first: -1) { edges { cursor } } }")
   }
 
   test("ARR-01.1 an oversized first supplied through a variable inside a fragment is rejected before resolver work") {
@@ -1503,10 +1502,10 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
   }
 
   test("named operation, variables, explicit nulls, methods and media negotiation") {
-    val selected = health.withEntity(
+    val selected = ping.withEntity(
       Json.obj(
         "query" -> Json.fromString(
-          "query First { readiness { status } } query Second($include: Boolean!) { health @include(if: $include) { status } }"
+          "query First { me { id } } query Second($include: Boolean!) { __typename @include(if: $include) }"
         ),
         "operationName" -> Json.fromString("Second"),
         "variables" -> Json.obj("include" -> Json.True)
@@ -1516,9 +1515,9 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       http <- app(IO.raiseError(new IllegalStateException("probe must not execute")))
       named <- http(selected)
       nulls <- http(
-        health.withEntity(
+        ping.withEntity(
           Json.obj(
-            "query" -> Json.fromString("{health{status}}"),
+            "query" -> Json.fromString("{__typename}"),
             "operationName" -> Json.Null,
             "variables" -> Json.Null
           )
@@ -1527,16 +1526,16 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       missingOperation <- http(
         selected.withEntity(
           Json.obj(
-            "query" -> Json.fromString("query Named { health { status } }"),
+            "query" -> Json.fromString("query Named { __typename }"),
             "operationName" -> Json.fromString("Missing")
           )
         )
       )
       method <- http(Request[IO](Method.GET, Uri.unsafeFromString("/graphql")))
-      media <- http(health.withEntity("query"))
-      accept <- http(health.putHeaders(Header.Raw(CIString("Accept"), "text/html")))
-      zeroQuality <- http(health.putHeaders(Header.Raw(CIString("Accept"), "application/json;q=0")))
-      charset <- http(health.putHeaders(Header.Raw(CIString("Content-Type"), "application/json; charset=utf-8")))
+      media <- http(ping.withEntity("query"))
+      accept <- http(ping.putHeaders(Header.Raw(CIString("Accept"), "text/html")))
+      zeroQuality <- http(ping.putHeaders(Header.Raw(CIString("Accept"), "application/json;q=0")))
+      charset <- http(ping.putHeaders(Header.Raw(CIString("Content-Type"), "application/json; charset=utf-8")))
     } yield {
       assertEquals(named.status, Status.Ok)
       assertEquals(nulls.status, Status.Ok)
@@ -1554,7 +1553,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       http <- app(IO.pure(ProbeResult.Ready))
       health <- http(Request[IO](Method.GET, Uri.unsafeFromString("/health/")))
       ready <- http(Request[IO](Method.GET, Uri.unsafeFromString("/ready/")))
-      graphql <- http(request("{ health { status } }").withUri(Uri.unsafeFromString("/graphql/")))
+      graphql <- http(request("{ __typename }").withUri(Uri.unsafeFromString("/graphql/")))
       schema <- http(Request[IO](Method.GET, Uri.unsafeFromString("/schema.graphql/")))
     } yield {
       assertEquals(health.status, Status.NotFound)
@@ -1564,18 +1563,18 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     }
   }
 
-  test("invalid field in an unselected operation rejects a valid selected health operation") {
-    val selected = health.withEntity(
+  test("invalid field in an unselected operation rejects a valid selected operation") {
+    val selected = ping.withEntity(
       Json.obj(
         "query" -> Json.fromString(
-          "query Selected { health { status } } query Unselected { invalidField readiness { status } }"
+          "query Selected { __typename } query Unselected { invalidField me { id } }"
         ),
         "operationName" -> Json.fromString("Selected")
       )
     )
     for {
       calls <- Ref.of[IO, Int](0)
-      http <- app(calls.update(_ + 1).as(ProbeResult.Ready))
+      http <- app(IO.pure(ProbeResult.Ready), hiringReady = calls.update(_ + 1).as(ProbeResult.Ready))
       response <- http(selected)
       body <- response.as[String]
       count <- calls.get
@@ -1596,7 +1595,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       }
       http <- app(IO.pure(ProbeResult.Ready), diagnostics)
       response <- http(
-        health
+        ping
           .withEntity(
             Json.obj(
               "query" -> Json.fromString("{ unknownField }"),
@@ -1627,7 +1626,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
           events.update(_ :+ (event -> requestId))
       }
       http <- app(IO.pure(ProbeResult.Ready), diagnostics)
-      response <- http(health.withBodyStream(fs2.Stream.raiseError[IO](new IllegalStateException(secret))))
+      response <- http(ping.withBodyStream(fs2.Stream.raiseError[IO](new IllegalStateException(secret))))
       body <- response.as[Json]
       captured <- events.get
     } yield {
@@ -1641,34 +1640,24 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     }
   }
 
-  test("a failing readiness diagnostic preserves the GraphQL result and HTTP200") {
+  test("a failing GraphQL completion diagnostic preserves the GraphQL result and HTTP200") {
     val secret = "synthetic-resolver-failure-secret"
     for {
-      calls <- Ref.of[IO, Int](0)
       events <- Ref.of[IO, List[(LogEvent, Option[String])]](Nil)
       diagnostics = new Diagnostics[IO] {
         def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]): IO[Unit] =
           events.update(_ :+ (event -> requestId)) *>
-            (if (event == LogEvent.MongoUnavailable) IO.raiseError(new IllegalStateException(secret)) else IO.unit)
+            (if (event == LogEvent.GraphQLCompleted) IO.raiseError(new IllegalStateException(secret)) else IO.unit)
       }
-      http <- app(calls.update(_ + 1).as(ProbeResult.Unavailable), diagnostics)
-      response <- http(request("{ readiness { status } }"))
+      http <- app(IO.pure(ProbeResult.Ready), diagnostics)
+      response <- http(ping)
       body <- response.as[Json]
-      count <- calls.get
       captured <- events.get
     } yield {
       assertEquals(response.status, Status.Ok)
-      assertEquals(count, 1)
-      assertEquals(body.hcursor.downField("data").downField("readiness").get[String]("status"), Right("NOT_READY"))
+      assertEquals(body.hcursor.downField("data").get[String]("__typename"), Right("Query"))
       assert(!body.hcursor.downField("errors").succeeded)
-      val correlationId = requestId(response)
-      assertEquals(
-        captured,
-        List(
-          LogEvent.MongoUnavailable -> correlationId,
-          LogEvent.GraphQLCompleted -> correlationId
-        )
-      )
+      assertEquals(captured, List(LogEvent.GraphQLCompleted -> requestId(response)))
       assert(!body.noSpaces.contains(secret))
       assert(!response.headers.toString.contains(secret))
       assert(!captured.toString.contains(secret))
@@ -1679,12 +1668,12 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     for {
       records <- Ref.of[IO, Vector[DiagnosticRecord]](Vector.empty)
       http <- app(IO.pure(ProbeResult.Ready), capture(records))
-      large <- http(health.withBodyStream(fs2.Stream.repeatEval(IO.pure(32.toByte)).take(65537)))
+      large <- http(ping.withBodyStream(fs2.Stream.repeatEval(IO.pure(32.toByte)).take(65537)))
       finalized <- Deferred[IO, Unit]
-      slow = health.withBodyStream(fs2.Stream.eval(IO.never[Byte]).onFinalize(finalized.complete(()).void))
+      slow = ping.withBodyStream(fs2.Stream.eval(IO.never[Byte]).onFinalize(finalized.complete(()).void))
       response <- http(slow)
       _ <- finalized.get.timeout(1.second)
-      successful <- http(health)
+      successful <- http(ping)
       body <- response.as[Json]
       captured <- records.get
     } yield {
@@ -1716,39 +1705,40 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       allStarted <- Deferred[IO, Unit]
       release <- Deferred[IO, Unit]
       http <- app(
-        started.updateAndGet(_ + 1).flatMap(count => if (count == 16) allStarted.complete(()).void else IO.unit) *>
-          release.get.as(ProbeResult.Ready),
+        IO.pure(ProbeResult.Ready),
+        hiringReady =
+          started.updateAndGet(_ + 1).flatMap(count => if (count == 16) allStarted.complete(()).void else IO.unit) *>
+            release.get.as(ProbeResult.Ready),
         diagnostics = capture(records)
       )
-      _ <- List.fill(16)(Resource.make(http(request("{ readiness { status } }")).start)(_.cancel)).sequence.use {
-        fibers =>
-          for {
-            _ <- allStarted.get.timeout(5.seconds)
-            rejected <- http(health)
-            rejectedBody <- rejected.as[Json]
-            liveness <- http(Request[IO](Method.GET, Uri.unsafeFromString("/health")))
-            _ <- release.complete(())
-            _ <- fibers.traverse_(_.joinWithNever)
-            captured <- records.get
-            _ <- IO {
-              assertEquals(rejected.status, Status.ServiceUnavailable)
-              assertEquals(
-                rejectedBody,
-                Json.obj("errors" -> Json.arr(Json.obj("message" -> Json.fromString("Server busy"))))
-              )
-              assertEquals(liveness.status, Status.Ok)
-              val id = requestId(rejected)
-              assert(
-                id.exists(value =>
-                  captured.exists(record =>
-                    record._1 == LogEvent.RequestRejected && record._2.contains(value) &&
-                      record._3.get(LogField.Reason).contains("OVERLOADED") &&
-                      record._3.get(LogField.Status).contains("503")
-                  )
+      _ <- List.fill(16)(Resource.make(http(request("{ me { id } }")).start)(_.cancel)).sequence.use { fibers =>
+        for {
+          _ <- allStarted.get.timeout(5.seconds)
+          rejected <- http(ping)
+          rejectedBody <- rejected.as[Json]
+          liveness <- http(Request[IO](Method.GET, Uri.unsafeFromString("/health")))
+          _ <- release.complete(())
+          _ <- fibers.traverse_(_.joinWithNever)
+          captured <- records.get
+          _ <- IO {
+            assertEquals(rejected.status, Status.ServiceUnavailable)
+            assertEquals(
+              rejectedBody,
+              Json.obj("errors" -> Json.arr(Json.obj("message" -> Json.fromString("Server busy"))))
+            )
+            assertEquals(liveness.status, Status.Ok)
+            val id = requestId(rejected)
+            assert(
+              id.exists(value =>
+                captured.exists(record =>
+                  record._1 == LogEvent.RequestRejected && record._2.contains(value) &&
+                    record._3.get(LogField.Reason).contains("OVERLOADED") &&
+                    record._3.get(LogField.Status).contains("503")
                 )
               )
-            }
-          } yield ()
+            )
+          }
+        } yield ()
       }
     } yield ()
   }
@@ -1759,20 +1749,21 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       bothStarted <- Deferred[IO, Unit]
       release <- Deferred[IO, Unit]
       http <- app(
-        started.updateAndGet(_ + 1).flatMap(count => if (count == 2) bothStarted.complete(()).void else IO.unit) *>
-          release.get *> IO.pure(ProbeResult.Ready),
+        IO.pure(ProbeResult.Ready),
+        hiringReady =
+          started.updateAndGet(_ + 1).flatMap(count => if (count == 2) bothStarted.complete(()).void else IO.unit) *>
+            release.get *> IO.pure(ProbeResult.Ready),
         admissionPermits = 2
       )
-      _ <- List.fill(2)(Resource.make(http(request("{ readiness { status } }")).start)(_.cancel)).sequence.use {
-        fibers =>
-          (for {
-            _ <- bothStarted.get.timeout(2.seconds)
-            overflow <- http(health)
-            _ <- IO(assertEquals(overflow.status, Status.ServiceUnavailable))
-            _ <- release.complete(())
-            completed <- fibers.traverse(_.joinWithNever)
-            _ <- IO(assert(completed.forall(_.status == Status.Ok)))
-          } yield ()).guarantee(release.complete(()).void)
+      _ <- List.fill(2)(Resource.make(http(request("{ me { id } }")).start)(_.cancel)).sequence.use { fibers =>
+        (for {
+          _ <- bothStarted.get.timeout(2.seconds)
+          overflow <- http(ping)
+          _ <- IO(assertEquals(overflow.status, Status.ServiceUnavailable))
+          _ <- release.complete(())
+          completed <- fibers.traverse(_.joinWithNever)
+          _ <- IO(assert(completed.forall(_.status == Status.Ok)))
+        } yield ()).guarantee(release.complete(()).void)
       }
     } yield ()
   }
@@ -1785,7 +1776,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop).flatMap(defaultApp)
       ui <- http(Request[IO](Method.GET, Uri.unsafeFromString("/graphiql")))
       asset <- http(Request[IO](Method.GET, Uri.unsafeFromString("/graphiql/assets/graphiql.js")))
-      work <- http(health)
+      work <- http(ping)
       live <- http(Request[IO](Method.GET, Uri.unsafeFromString("/health")))
     } yield {
       assertEquals(ui.status, Status.NotFound)

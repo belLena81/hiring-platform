@@ -33,7 +33,7 @@ final class FixedWindowRateLimiterSpec extends CatsEffectSuite {
     } yield {
       assertEquals(first, Right(()))
       assertEquals(second, Right(()))
-      assertEquals(third, Left(FixedWindowRateLimiter.RateLimited(60.seconds)))
+      assertEquals(third.left.map(_.retryAfterSeconds), Left(60L))
     }
   }
 

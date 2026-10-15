@@ -63,7 +63,7 @@ final class HiringPersistenceScalingIntegrationSpec extends MongoIntegrationSuit
       Set("Scala", s"Skill$index"),
       Location(
         "Cyprus",
-        "Nicosia",
+        Some("Nicosia"),
         remote = false,
         coordinates = Some(GeoPoint(center.latitude + (index % 20) * 0.00001d, center.longitude))
       ),
@@ -224,6 +224,7 @@ final class HiringPersistenceScalingIntegrationSpec extends MongoIntegrationSuit
           application.candidateId,
           now,
           None,
+          None,
           None
         )
         applicant = candidate.copy(id = application.candidateId, name = s"Synthetic applicant $index")
@@ -378,6 +379,7 @@ final class HiringPersistenceScalingIntegrationSpec extends MongoIntegrationSuit
               ApplicationStatus.Accepted,
               actor,
               now.minusMillis(index.toLong),
+              None,
               None,
               None
             )

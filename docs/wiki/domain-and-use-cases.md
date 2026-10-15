@@ -29,7 +29,7 @@ The diagram expresses references, not SQL foreign keys. MongoDB indexes, transac
 | `CandidateResidence`, `CandidateAvailabilityStatus` | Country and optional city; availability is `AVAILABLE_NOW` or `UNAVAILABLE`. These are optional private filter attributes. | [User.scala](../../src/main/scala/com/example/graphQL/cats/domain/model/User.scala) |
 | `RecruiterProfile`, `UserProfile` | Organization and optional job title; an ADT associates Candidate/Recruiter profile shapes with their role. Admin has no profile. | [User.scala](../../src/main/scala/com/example/graphQL/cats/domain/model/User.scala) |
 | `Job` | Owner recruiter, title, description, requirements, skills, location, Draft/Open/Closed status, creation/update/closure times and optional embedding. | [Job.scala](../../src/main/scala/com/example/graphQL/cats/domain/model/Job.scala) |
-| `Location`, `GeoPoint` | Country/city, remote flag and optional latitude/longitude. Coordinate validation rejects non-finite values and values outside latitude ±90 / longitude ±180. | [Job.scala](../../src/main/scala/com/example/graphQL/cats/domain/model/Job.scala) |
+| `Location`, `GeoPoint` | Country, optional city, remote flag and optional latitude/longitude. Coordinate validation rejects non-finite values and values outside latitude ±90 / longitude ±180. | [Job.scala](../../src/main/scala/com/example/graphQL/cats/domain/model/Job.scala) |
 | `Application` | Candidate/job reference pair, current status and creation/update times. Creation always starts at `Created`. | [Application.scala](../../src/main/scala/com/example/graphQL/cats/domain/model/Application.scala) |
 | `ApplicationEvent` | History identity, application, optional previous status, new status, actor, UTC occurrence time, feedback and reason. Initial history has no previous status. | [Application.scala](../../src/main/scala/com/example/graphQL/cats/domain/model/Application.scala) |
 | `JobSubmissionSnapshot` | Minimal job identity/status/revision required to decide submission and guard it against concurrent job changes. | [JobSubmissionSnapshot.scala](../../src/main/scala/com/example/graphQL/cats/domain/model/JobSubmissionSnapshot.scala) |
@@ -38,7 +38,7 @@ The diagram expresses references, not SQL foreign keys. MongoDB indexes, transac
 
 | Type/function | Purpose |
 |---|---|
-| `UserId`, `JobId`, `ApplicationId`, `ApplicationEventId` | Opaque UUID-backed IDs prevent accidental interchange of entity identities in Scala. [Identifiers](../../src/main/scala/com/example/graphQL/cats/domain/model/Identifiers.scala). |
+| `UserId`, `JobId`, `ApplicationId`, `ApplicationEventId`, `InterviewWorkflowId`, `SearchId` | Opaque UUID-backed IDs prevent accidental interchange of entity identities in Scala; the GraphQL schema exposes each as a typed scalar of the same role. [Identifiers](../../src/main/scala/com/example/graphQL/cats/domain/model/Identifiers.scala). |
 | `EmailAddress`, `PasswordHash` | Opaque boundary values. `EmailAddress.from` currently validates trimmed nonblank bounded text; it does **not** implement comprehensive email syntax validation. `PasswordHash.fromEncoded` lifts an already encoded hash at the hashing/persistence boundary. [AccountValues](../../src/main/scala/com/example/graphQL/cats/domain/model/AccountValues.scala). |
 | `AccountCredentials`, `AccountToken` | Internal user/hash pair and issued token/expiration pair. Credentials are not the public user entity. [Account](../../src/main/scala/com/example/graphQL/cats/domain/model/Account.scala). |
 | `AccountName.canonical` | Trims names, applies Unicode NFKC normalization and locale-independent lowercase for account-name matching. [Account](../../src/main/scala/com/example/graphQL/cats/domain/model/Account.scala). |
@@ -102,11 +102,11 @@ These capabilities support the numbered use cases rather than introducing extra 
 | Startup Admin seed | Explicit disabled-by-default `auth.admin-seed` configuration initializes the singleton before workers/HTTP. Same-name valid singleton is preserved without a password reset; conflicting registry/identity fails startup. No public bootstrap mutation or seed token exists. |
 | `login` | Public, rate-limited account-name/password authentication; successful active-account login returns user and expiring token. |
 | `me` | Resolves the authenticated active user. |
-| `updateMyProfile` | Updates the current role-appropriate profile and associated derived-search work; Admin profile updates are rejected. |
+| `updateMyProfile` | Replaces the current role-appropriate profile (full replacement; omitted optional parts are cleared) and updates associated derived-search work; Admin profile updates are rejected. |
 | `deleteMyAccount` | Requests self-deletion and returns a receipt; Admin deletion is forbidden. Deleted identities can be resolved for authorized deletion replay/status. |
 | `accountDeletionStatus` | Checks the caller's receipt and asynchronous cleanup completion. |
 | `users` | Admin-only paginated account listing, with account-status and optional role selection. |
-| `health`, `readiness` | Runtime health/readiness information, separate from hiring records. |
+| HTTP `GET /health`, `GET /ready` | Runtime liveness/readiness, separate from hiring records. Not GraphQL fields; the schema has no `health` or `readiness`. |
 
 Sources: [AccountUseCases](../../src/main/scala/com/example/graphQL/cats/service/protocol/AccountUseCases.scala), [account resolvers](../../src/main/scala/com/example/graphQL/cats/api/graphql/HiringGraphQLAccountResolvers.scala), [UserAccountService](../../src/main/scala/com/example/graphQL/cats/service/auth/UserAccountService.scala), [MongoUserRepository](../../src/main/scala/com/example/graphQL/cats/repository/mongo/MongoUserRepository.scala), [ActorAuthorization](../../src/main/scala/com/example/graphQL/cats/service/auth/ActorAuthorization.scala).
 

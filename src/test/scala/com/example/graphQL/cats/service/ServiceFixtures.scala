@@ -72,7 +72,7 @@ private[cats] object ServiceFixtures {
     "Build backend services",
     List("Scala"),
     Set("Scala"),
-    Location("Ukraine", "Kyiv", remote = true),
+    Location("Ukraine", Some("Kyiv"), remote = true),
     JobStatus.Open,
     now,
     now
@@ -248,7 +248,7 @@ private[cats] object ServiceFixtures {
             _.values
               .filter { job =>
                 job.status == JobStatus.Open &&
-                filter.city.forall(_ == job.location.city) &&
+                filter.city.forall(c => job.location.city.contains(c)) &&
                 filter.skills.subsetOf(job.skills) &&
                 filter.createdAfter.forall(!job.createdAt.isBefore(_)) &&
                 matches(page)(job) &&
@@ -286,7 +286,7 @@ private[cats] object ServiceFixtures {
           }
           .filter(value =>
             value.job.status == JobStatus.Open && !value.job.location.remote &&
-              query.filter.city.forall(_ == value.job.location.city) && query.filter.skills
+              query.filter.city.forall(c => value.job.location.city.contains(c)) && query.filter.skills
                 .subsetOf(value.job.skills) &&
               query.filter.createdAfter.forall(!value.job.createdAt.isBefore(_))
           )
@@ -303,7 +303,7 @@ private[cats] object ServiceFixtures {
         val filter = query.filter
         val eligible = all.values.toList.filter(job =>
           job.status == JobStatus.Open && matchedIds.forall(_.contains(job.id)) &&
-            filter.city.forall(_ == job.location.city) && filter.skills.subsetOf(
+            filter.city.forall(c => job.location.city.contains(c)) && filter.skills.subsetOf(
               job.skills
             ) &&
             filter.createdAfter.forall(!job.createdAt.isBefore(_)) && query.radius.forall(radius =>

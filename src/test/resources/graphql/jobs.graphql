@@ -1,0 +1,33 @@
+query OpenJobs($filter: JobFilter, $first: Int!, $after: String, $searchId: SearchID) {
+  jobs(filter: $filter, first: $first, after: $after, searchId: $searchId) {
+    searchId
+    edges {
+      cursor
+      node { id title skills location { country city remote } status createdAt }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+
+query NearbyJobs($center: GeoPointInput!, $radiusKm: Float!, $filter: JobFilter, $first: Int!, $after: String) {
+  nearbyJobs(center: $center, radiusKm: $radiusKm, filter: $filter, first: $first, after: $after) {
+    edges {
+      cursor
+      distanceKm
+      node { id title location { country city remote coordinates { latitude longitude } } }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+
+query SemanticJobs($query: String!, $filter: JobFilter, $first: Int!, $searchId: SearchID) {
+  semanticJobSearch(query: $query, filter: $filter, first: $first, searchId: $searchId) {
+    results { searchId score searchMode model matchedSkills retrievalScore job { id title } }
+  }
+}
+
+query CandidateMatches($jobId: JobID!, $first: Int!) {
+  candidateMatches(jobId: $jobId, first: $first) {
+    results { searchId score candidate { id name profile { skills experienceSummary } } }
+  }
+}

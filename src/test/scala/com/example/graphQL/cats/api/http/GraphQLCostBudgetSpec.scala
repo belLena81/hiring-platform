@@ -17,10 +17,10 @@ import scala.concurrent.duration.*
 
 /** ARR-14: GraphQL complexity is charged to a per-actor or per-client budget before any resolver runs. */
 final class GraphQLCostBudgetSpec extends CatsEffectSuite {
-  // Each `readiness { status }` selection weighs 2, so this request costs 8.
+  // Each `me { id }` selection weighs 2, so this request costs 8.
   private val spend =
-    "{ a: readiness { status } b: readiness { status } c: readiness { status } d: readiness { status } }"
-  private val cheap = "{ readiness { status } }"
+    "{ a: me { id } b: me { id } c: me { id } d: me { id } }"
+  private val cheap = "{ me { id } }"
   private val login =
     """mutation {
       |  login(input: { idempotencyKey: "00000000-0000-0000-0000-000000000021", name: "Candidate", password: "password-password" }) { __typename }
@@ -35,10 +35,13 @@ final class GraphQLCostBudgetSpec extends CatsEffectSuite {
     for {
       probeCalls <- Ref.of[IO, Int](0)
       probe = new DatabaseProbe[IO] {
-        def check(requestId: Option[String]): IO[ProbeResult] = probeCalls.update(_ + 1).as(ProbeResult.Ready)
+        def check(requestId: Option[String]): IO[ProbeResult] = IO.pure(ProbeResult.Ready)
       }
       built <- TestGraphQLSupport
         .dependencies(
+          // A resolver that starts reaches the hiring-readiness check once per request, so this counts requests that
+          // got past the budget.
+          hiringReady = probeCalls.update(_ + 1).as(ProbeResult.Ready),
           authenticate = request => IO.pure(Right(request.headers.get(actorHeader).map(h => actor(h.head.value)))),
           trustedProxy = proxies,
           costBudget = budget
@@ -76,11 +79,7 @@ final class GraphQLCostBudgetSpec extends CatsEffectSuite {
       count <- calls.get
     } yield {
       assertEquals(response.status, Status.Ok)
-      assertEquals(
-        body.hcursor.downField("data").downField("readiness").get[String]("status"),
-        Right("READY"),
-        clue(body)
-      )
+      assertEquals(body.hcursor.downField("data").downField("me").focus, Some(Json.Null), clue(body))
       assertEquals(count, 1)
     }
   }

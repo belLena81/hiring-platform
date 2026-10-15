@@ -29,7 +29,7 @@ final class InterviewActionRateLimiterSpec extends CatsEffectSuite {
       results <- List.fill(5)(limiter.permit(actor(1))).sequence
     } yield {
       assertEquals(results.take(3), List.fill(3)(Right(())))
-      assertEquals(results.drop(3), List.fill(2)(Left(InterviewActionRateLimiter.RateLimited(60.seconds))))
+      assertEquals(results.drop(3).map(_.left.map(_.retryAfterSeconds)), List.fill(2)(Left(60L)))
     }
   }
 
@@ -73,6 +73,22 @@ final class InterviewActionRateLimiterSpec extends CatsEffectSuite {
       _ <- limiter.permit(actor(1))
       refused <- limiter.permit(actor(1))
     } yield assertEquals(refused.left.map(_.retryAfterSeconds), Left(30L))
+  }
+
+  test("AC-11.1 a refusal reports the time left in the window, rounded up and never below one second") {
+    val config = RateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 10)
+    for {
+      (ticker, advance) <- testTicker
+      limiter <- InterviewActionRateLimiter.create(config, ticker)
+      _ <- limiter.permit(actor(1))
+      _ <- advance(44.seconds + 500.millis)
+      midWindow <- limiter.permit(actor(1))
+      _ <- advance(15.seconds + 500.millis - 1.nanos)
+      lastNanosecond <- limiter.permit(actor(1))
+    } yield {
+      assertEquals(midWindow.left.map(_.retryAfterSeconds), Left(16L))
+      assertEquals(lastNanosecond.left.map(_.retryAfterSeconds), Left(1L))
+    }
   }
 
   test("a full cache charges unseen actors to shared overflow counters instead of refusing or evicting a counted one") {

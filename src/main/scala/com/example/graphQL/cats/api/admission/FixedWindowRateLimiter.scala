@@ -41,7 +41,7 @@ final class FixedWindowRateLimiter[K] private (
 
   def permit(key: K): IO[Either[RateLimited, Unit]] = acquire(key, 1)
 
-  /** Charges `cost` (at least 1) against the key's window. */
+  /** Charges `cost` (at least 1) against the key's window. A refusal reports the time left in that window. */
   def acquire(key: K, cost: Int): IO[Either[RateLimited, Unit]] = IO.delay(acquireNow(key, cost))
 
   /** The same charge as a bounded in-memory step with no I/O, for synchronous framework hooks (Sangria reducers) that
@@ -55,7 +55,7 @@ final class FixedWindowRateLimiter[K] private (
     val bucket = Option(charge(normalized, weight, now, admitNew = cache.estimatedSize() < maxBuckets))
       .getOrElse(chargeOverflow(overflow, normalized, weight, now))
     if (bucket.hits <= attempts.toLong) Right(())
-    else Left(RateLimited(windowSeconds.seconds))
+    else Left(RateLimited(math.max(0L, bucket.expiresAtNanos - now).nanos))
   }
 
   /** Charges a tracked bucket; `null` when the key is unseen and new buckets are not admitted. */
@@ -111,7 +111,9 @@ final class FixedWindowRateLimiter[K] private (
 
 object FixedWindowRateLimiter {
   final case class RateLimited(retryAfter: FiniteDuration) {
-    def retryAfterSeconds: Long = math.max(1L, (retryAfter + 999.millis).toSeconds)
+
+    /** The remaining window rounded up to whole seconds, at least 1. */
+    def retryAfterSeconds: Long = math.max(1L, (retryAfter.toNanos + NanosPerSecond - 1L) / NanosPerSecond)
   }
 
   private[admission] final case class Bucket(hits: Long, expiresAtNanos: Long)

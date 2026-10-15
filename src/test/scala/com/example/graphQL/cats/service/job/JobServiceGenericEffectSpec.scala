@@ -22,7 +22,7 @@ final class JobServiceGenericEffectSpec extends munit.FunSuite {
     " Build services ",
     List(" Scala "),
     Set(" Cats Effect "),
-    Location("Cyprus", "Nicosia", remote = true),
+    Location("Cyprus", Some("Nicosia"), remote = true),
     JobStatus.Open
   )
   private val world = World(

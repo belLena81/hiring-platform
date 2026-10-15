@@ -536,6 +536,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         assertEquals(scheduled.candidateId, own.candidateId)
         assertEquals(scheduled.recruiterId, own.recruiterId)
         assertEquals(scheduled.initiatedBy, own.recruiterId)
+        assertEquals(scheduled.initiatedByRole, Some(UserRole.Recruiter))
         assertEquals(candidateView.map(_.id), Right(scheduled.id))
         assertEquals(strangerView, Left(UseCaseError.Domain(DomainError.NotFound("interviewWorkflow"))))
         assertEquals(recruiterRepair, Left(UseCaseError.Authentication(AuthenticationError.Unauthorized)))
@@ -560,7 +561,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         now,
         adminSingleton = true
       )
-      val initiated = target.copy(initiatedBy = admin.id)
+      val initiated = target.copy(initiatedBy = admin.id, initiatedByRole = Some(UserRole.Admin))
       val eventId =
         UUID.nameUUIDFromBytes(s"${initiated.id.value}:status".getBytes(java.nio.charset.StandardCharsets.UTF_8))
       val calendar = LedgerInterviewCalendarProvider.durable(repository)
@@ -606,7 +607,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         )
         expected <- IO.fromEither(
           ApplicationLifecycle
-            .changeStatus(ApplicationStatus.Interview, admin.id, now, None, None)
+            .changeStatus(ApplicationStatus.Interview, admin.id, Some(UserRole.Admin), now, None, None)
             .run(original)
             .leftMap(error => new AssertionError(s"Unexpected lifecycle rejection: $error"))
         )
@@ -619,7 +620,8 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
           expectedChange.actorId,
           expectedChange.occurredAt,
           expectedChange.feedback,
-          expectedChange.reason
+          expectedChange.reason,
+          expectedChange.actorRole
         )
         _ <- success(repository.commitHiring(pending.workflow, now))
         _ <- success(repository.commitHiring(pending.workflow, now.plusSeconds(1)))

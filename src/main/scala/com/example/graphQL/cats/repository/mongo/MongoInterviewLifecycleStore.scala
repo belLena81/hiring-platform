@@ -240,6 +240,7 @@ final class MongoInterviewLifecycleStore(store: MongoInterviewWorkflowStore) {
         .changeStatus(
           ApplicationStatus.Rejected,
           access.actorId,
+          Some(access.role),
           at,
           Some(InterviewCancellationFeedback.text(initiator)),
           None
@@ -263,7 +264,8 @@ final class MongoInterviewLifecycleStore(store: MongoInterviewWorkflowStore) {
                   change.actorId,
                   change.occurredAt,
                   change.feedback,
-                  change.reason
+                  change.reason,
+                  change.actorRole
                 )
                 .toEither
                 .leftMap(_ => RepositoryError.InvalidEvent)

@@ -36,15 +36,15 @@ private[graphql] object HiringGraphQLInterviewResolvers {
       )
     }
 
-  def interviewWorkflow(context: Context[RequestContext, Unit]): HiringGraphQLResult[InterviewWorkflow] =
+  /** A workflow that does not exist and one the actor may not see are both `None`, so existence is not revealed. */
+  def interviewWorkflow(context: Context[RequestContext, Unit]): HiringGraphQLResult[Option[InterviewWorkflow]] =
     authenticated(context) { case (actor, hiring) =>
       available(hiring).flatMap(service =>
-        raiseOnUseCaseError(
-          service.inspect(
-            actor,
-            InterviewWorkflowId(context.arg(workflowIdArgument))
-          )
-        )
+        EitherT(service.inspect(actor, context.arg(workflowIdArgument)).value.map {
+          case Right(workflow) => Right(Some(workflow))
+          case Left(UseCaseError.Domain(com.example.graphQL.cats.domain.error.DomainError.NotFound(_))) => Right(None)
+          case Left(error) => Left(HiringGraphQLFailure.UseCase(error))
+        })
       )
     }
 
@@ -57,7 +57,7 @@ private[graphql] object HiringGraphQLInterviewResolvers {
         mutationResult(
           service.repair(
             actor,
-            InterviewWorkflowId(input.workflowId),
+            input.workflowId,
             input.expectedRevision,
             input.idempotencyKey
           )
@@ -114,7 +114,7 @@ private[graphql] object HiringGraphQLInterviewResolvers {
     interviewActionOutcome(context)((service, actor) =>
       service.proposeReschedule(
         actor,
-        InterviewWorkflowId(input.workflowId),
+        input.workflowId,
         input.expectedRevision,
         input.startsAt,
         input.endsAt,
@@ -124,7 +124,7 @@ private[graphql] object HiringGraphQLInterviewResolvers {
   }
 
   private def workflowOf(input: InterviewActionGraphQLInput): InterviewWorkflowId =
-    InterviewWorkflowId(input.workflowId)
+    input.workflowId
 
   private def interviewAction(context: Context[RequestContext, Unit])(
       run: (InterviewSchedulingService[IO], ActorContext, InterviewActionGraphQLInput) => InterviewActionF[
@@ -144,10 +144,14 @@ private[graphql] object HiringGraphQLInterviewResolvers {
       run: (InterviewSchedulingService[IO], ActorContext) => InterviewActionF[IO, InterviewWorkflow]
   ): HiringGraphQLResult[MutationOutcome[InterviewWorkflow]] =
     context.ctx.takeInterviewActionAllowance.flatMap {
-      case Left(_) =>
+      case Left(limited) =>
         val failure = GraphQLFailureCatalog.interviewActionRateLimited
         EitherT.rightT[IO, HiringGraphQLFailure](
-          DomainError(failure.code, failure.message): MutationOutcome[InterviewWorkflow]
+          DomainError(
+            failure.code,
+            failure.message,
+            Some(math.min(limited.retryAfterSeconds, Int.MaxValue.toLong).toInt)
+          ): MutationOutcome[InterviewWorkflow]
         )
       case Right(_) =>
         authenticated(context) { case (actor, hiring) =>

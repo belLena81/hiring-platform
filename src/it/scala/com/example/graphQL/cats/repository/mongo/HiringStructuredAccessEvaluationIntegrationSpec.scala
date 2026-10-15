@@ -62,7 +62,7 @@ final class HiringStructuredAccessEvaluationIntegrationSpec extends MongoIntegra
       "Synthetic description",
       List("Synthetic requirement"),
       Set("Scala"),
-      Location("Cyprus", "Nicosia", remote = false),
+      Location("Cyprus", Some("Nicosia"), remote = false),
       if (index % 4 == 3) JobStatus.Closed else JobStatus.Open,
       fixtureTime.minusSeconds(index.toLong),
       fixtureTime

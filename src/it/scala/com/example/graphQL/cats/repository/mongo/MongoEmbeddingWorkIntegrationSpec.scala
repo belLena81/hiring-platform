@@ -434,7 +434,7 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
         "Hiring infrastructure",
         List("Cats Effect"),
         Set("Scala"),
-        Location("Cyprus", "Nicosia", remote = true),
+        Location("Cyprus", Some("Nicosia"), remote = true),
         JobStatus.Open,
         now,
         now

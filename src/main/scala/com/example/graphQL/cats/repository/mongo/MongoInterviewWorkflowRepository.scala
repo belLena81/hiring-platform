@@ -142,7 +142,14 @@ final class MongoInterviewWorkflowRepository(
                   .at[IO]
                   .fromEither(
                     ApplicationLifecycle
-                      .changeStatus(ApplicationStatus.Interview, workflow.initiatedBy, now, None, None)
+                      .changeStatus(
+                        ApplicationStatus.Interview,
+                        workflow.initiatedBy,
+                        workflow.initiatedByRole,
+                        now,
+                        None,
+                        None
+                      )
                       .run(decoded)
                       .leftMap(_ => RepositoryError.Conflict)
                   )
@@ -169,7 +176,8 @@ final class MongoInterviewWorkflowRepository(
                   change.actorId,
                   change.occurredAt,
                   change.feedback,
-                  change.reason
+                  change.reason,
+                  change.actorRole
                 )
                 _ <- insert(session, applicationEvents, MongoHiringCodecs.event(statusEvent))
                 _ <- MongoOperationalEventInsertion.insert(

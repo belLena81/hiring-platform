@@ -6,7 +6,7 @@ import cats.syntax.all.*
 import com.example.graphQL.cats.api.auth.AuthFailure
 import com.example.graphQL.cats.api.graphql.{GraphQLRequest, HiringGraphQLSchema, RequestContextParameters}
 import com.example.graphQL.cats.shared.HiringHttpPaths
-import com.example.graphQL.cats.service.{ActorContext, Diagnostics, HealthService, LogEvent, LogField, LogOutcome}
+import com.example.graphQL.cats.service.{ActorContext, Diagnostics, LogEvent, LogField, LogOutcome}
 import com.example.graphQL.cats.service.Diagnostics.*
 import com.example.graphQL.cats.service.FailureReason
 import io.circe.Json
@@ -40,7 +40,6 @@ private[http] enum HttpRejection(val status: Status, val message: String, val re
 }
 
 private[http] final class GraphQLHttpRoutes(
-    service: HealthService[IO],
     diagnostics: Diagnostics[IO],
     dependencies: HiringApiRoutes.Dependencies,
     tracer: Tracer[IO] = Tracer.noop[IO]
@@ -89,6 +88,32 @@ private[http] final class GraphQLHttpRoutes(
           .putHeaders(Header.Raw(ci"Retry-After", retryAfterSeconds.toString))
       )
 
+  /** HTTP 400 `PERSISTED_QUERY_NOT_FOUND`; the document is never echoed and no cost budget is charged. */
+  private def persistedQueryNotFound(requestId: String, mediaType: MediaType): IO[Response[IO]] =
+    diagnostics
+      .emit(
+        LogEvent.RequestRejected,
+        Some(requestId),
+        fields = Map(
+          LogField.Reason -> FailureReason.PersistedQueryNotFound.reason,
+          LogField.Status -> Status.BadRequest.code.toString
+        )
+      )
+      .as(
+        graphqlJson(
+          Status.BadRequest,
+          Json.obj(
+            "errors" -> Json.arr(
+              Json.obj(
+                "message" -> Json.fromString("Persisted query not found"),
+                "extensions" -> Json.obj("code" -> Json.fromString("PERSISTED_QUERY_NOT_FOUND"))
+              )
+            )
+          ),
+          mediaType
+        )
+      )
+
   private def graphql(
       request: Request[IO],
       requestId: String,
@@ -103,45 +128,46 @@ private[http] final class GraphQLHttpRoutes(
         .foldF(
           _ => rejected(HttpRejection.InvalidRequest, requestId, mediaType = mediaType),
           parsed =>
-            dependencies.documentCache.document(parsed.query).flatMap {
-              case Left(_)         => rejected(HttpRejection.InvalidQuery, requestId, mediaType = mediaType)
-              case Right(document) => {
-                val context = dependencies.contextFactory.resource(
-                  RequestContextParameters(
-                    service.readiness(Some(requestId)),
-                    actor,
-                    dependencies.hiring,
-                    dependencies.ensureHiringReady,
-                    tracer,
-                    diagnostics,
-                    Some(requestId),
-                    dependencies.clientAddressResolver.resolve(request),
-                    key => dependencies.rateLimiter.permit(key),
-                    dependencies.discoveryMaxRoots,
-                    actorId => dependencies.interviewActionLimiter.permit(actorId),
-                    (key, cost) => dependencies.costBudgetLimiter.acquireNow(key, cost),
-                    dependencies.schemaExposure
+            if (!dependencies.persistedQueries.admits(parsed.query)) persistedQueryNotFound(requestId, mediaType)
+            else
+              dependencies.documentCache.document(parsed.query).flatMap {
+                case Left(_)         => rejected(HttpRejection.InvalidQuery, requestId, mediaType = mediaType)
+                case Right(document) => {
+                  val context = dependencies.contextFactory.resource(
+                    RequestContextParameters(
+                      actor,
+                      dependencies.hiring,
+                      dependencies.ensureHiringReady,
+                      tracer,
+                      diagnostics,
+                      Some(requestId),
+                      dependencies.clientAddressResolver.resolve(request),
+                      key => dependencies.rateLimiter.permit(key),
+                      dependencies.discoveryMaxRoots,
+                      actorId => dependencies.interviewActionLimiter.permit(actorId),
+                      (key, cost) => dependencies.costBudgetLimiter.acquireNow(key, cost),
+                      dependencies.schemaExposure
+                    )
                   )
-                )
-                context
-                  .use(HiringGraphQLSchema.executeInContext(parsed, document, _))
-                  .flatTap {
-                    case Right(_) if !document.cached =>
-                      dependencies.documentCache.store(parsed.query, document.document)
-                    case _ => IO.unit
-                  }
-                  .flatMap {
-                    case Right(result) =>
-                      completedGraphQL(parsed, result, requestId, mediaType, Some(document.document))
-                    case Left(HiringGraphQLSchema.Failure.InvalidQuery) =>
-                      rejected(HttpRejection.InvalidQuery, requestId, mediaType = mediaType)
-                    case Left(HiringGraphQLSchema.Failure.CostBudgetExhausted(retryAfterSeconds)) =>
-                      costBudgetExhausted(retryAfterSeconds, requestId, mediaType)
-                    case Left(HiringGraphQLSchema.Failure.Internal) =>
-                      rejected(HttpRejection.Internal, requestId, mediaType = mediaType)
-                  }
+                  context
+                    .use(HiringGraphQLSchema.executeInContext(parsed, document, _))
+                    .flatTap {
+                      case Right(_) if !document.cached =>
+                        dependencies.documentCache.store(parsed.query, document.document)
+                      case _ => IO.unit
+                    }
+                    .flatMap {
+                      case Right(result) =>
+                        completedGraphQL(parsed, result, requestId, mediaType, Some(document.document))
+                      case Left(HiringGraphQLSchema.Failure.InvalidQuery) =>
+                        rejected(HttpRejection.InvalidQuery, requestId, mediaType = mediaType)
+                      case Left(HiringGraphQLSchema.Failure.CostBudgetExhausted(retryAfterSeconds)) =>
+                        costBudgetExhausted(retryAfterSeconds, requestId, mediaType)
+                      case Left(HiringGraphQLSchema.Failure.Internal) =>
+                        rejected(HttpRejection.Internal, requestId, mediaType = mediaType)
+                    }
+                }
               }
-            }
         )
     }
   }

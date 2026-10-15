@@ -122,7 +122,6 @@ object TestGraphQLSupport {
   )
 
   def context(
-      probe: IO[ProbeResult],
       actor: Option[ActorContext] = None,
       hiring: HiringGraphQLServices = emptyServices,
       hiringReady: IO[ProbeResult] = IO.pure(ProbeResult.Ready),
@@ -135,7 +134,6 @@ object TestGraphQLSupport {
     RequestContextFactory.resource.flatMap(
       _.resource(
         RequestContextParameters(
-          probe,
           actor,
           hiring,
           hiringReady,

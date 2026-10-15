@@ -35,7 +35,7 @@ private[mongo] object InterviewSchedulingFixtures {
           "Scheduling evidence",
           List("Scala"),
           Set("Scala"),
-          Location("Cyprus", "Nicosia", false),
+          Location("Cyprus", Some("Nicosia"), false),
           JobStatus.Open,
           now,
           now

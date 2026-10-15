@@ -435,7 +435,8 @@ Current GraphQL query (candidate visibility is enforced by the service):
 
 ```graphql
 query {
-  jobs(city: "Kyiv", first: 20) {
+  jobs(filter: { city: "Kyiv" }, first: 20) {
+    searchId
     edges { node { id title } }
     pageInfo { hasNextPage endCursor }
   }
@@ -638,6 +639,7 @@ Document:
   newStatus: "Interview",
 
   actorId: "<user-uuid>",
+  actorRole: "RECRUITER",   // optional; absent on events stored before the role was recorded. Not exposed by GraphQL as an identifier.
 
   reason: null,
   feedback: null,
@@ -912,7 +914,7 @@ Applications
                              })
 ```
 
-Batch loaders should be scoped to the GraphQL request to provide both batching and request-local caching.
+Batch loaders should be scoped to the GraphQL request to provide both batching and request-local caching. The implemented fetchers (`HiringGraphQLDsl`) cap each repository call at 100 keys (`PageSize.Max`) and split larger sets into batches; their caches live only for one request, so no data is shared across users or requests.
 
 ---
 

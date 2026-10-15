@@ -15,62 +15,262 @@ import com.example.graphQL.cats.service.{
 }
 
 private[graphql] object GraphQLFailureCatalog {
-  private enum FailureMetadata(val code: String, val exceptional: Boolean) {
-    case AuthenticationRequired extends FailureMetadata("UNAUTHORIZED", exceptional = true)
-    case SingletonAdminForbidden extends FailureMetadata("FORBIDDEN", exceptional = true)
-    case AdminBootstrapRequired extends FailureMetadata("ADMIN_BOOTSTRAP_REQUIRED", exceptional = false)
-    case AdminAlreadyBootstrapped extends FailureMetadata("ADMIN_ALREADY_BOOTSTRAPPED", exceptional = false)
-    case RegistrationFailed extends FailureMetadata("REGISTRATION_FAILED", exceptional = false)
-    case InvalidCredentials extends FailureMetadata("INVALID_CREDENTIALS", exceptional = false)
-    case DeletedAccountAuthenticationRequired extends FailureMetadata("UNAUTHORIZED", exceptional = false)
-    case ProfileRoleMismatch extends FailureMetadata("PROFILE_ROLE_MISMATCH", exceptional = false)
-    case ProfileUnsupportedForRole extends FailureMetadata("PROFILE_UNSUPPORTED_FOR_ROLE", exceptional = false)
-    case InvalidPassword extends FailureMetadata("INVALID_PASSWORD", exceptional = false)
-    case AccountAlreadyDeleted extends FailureMetadata("ACCOUNT_ALREADY_DELETED", exceptional = false)
-    case AdminBootstrapOnly extends FailureMetadata("ADMIN_BOOTSTRAP_ONLY", exceptional = false)
-    case ServiceNotReady extends FailureMetadata("SERVICE_NOT_READY", exceptional = true)
-    case Forbidden extends FailureMetadata("FORBIDDEN", exceptional = true)
-    case SchemaExposureDisabled extends FailureMetadata("FORBIDDEN", exceptional = false)
-    case NotFound extends FailureMetadata("NOT_FOUND", exceptional = false)
-    case DuplicateApplication extends FailureMetadata("DUPLICATE_APPLICATION", exceptional = false)
-    case SearchSessionPending extends FailureMetadata("SEARCH_SESSION_PENDING", exceptional = false)
-    case SearchSessionUnavailable extends FailureMetadata("SEARCH_SESSION_UNAVAILABLE", exceptional = false)
-    case JobMustBeOpen extends FailureMetadata("JOB_MUST_BE_OPEN", exceptional = false)
-    case CandidateRequired extends FailureMetadata("CANDIDATE_REQUIRED", exceptional = false)
-    case RecruiterRequired extends FailureMetadata("RECRUITER_REQUIRED", exceptional = false)
-    case InvalidJobTransition extends FailureMetadata("INVALID_JOB_TRANSITION", exceptional = false)
-    case InvalidInitialJobStatus extends FailureMetadata("INVALID_INITIAL_JOB_STATUS", exceptional = false)
-    case InvalidStatusTransition extends FailureMetadata("INVALID_STATUS_TRANSITION", exceptional = false)
-    case RejectionFeedbackRequired extends FailureMetadata("REJECTION_FEEDBACK_REQUIRED", exceptional = false)
-    case DeclineReasonRequired extends FailureMetadata("DECLINE_REASON_REQUIRED", exceptional = false)
-    case Conflict extends FailureMetadata("CONFLICT", exceptional = false)
-    case RepositoryUnavailable extends FailureMetadata("UNAVAILABLE", exceptional = true)
-    case MissingEmbedding extends FailureMetadata("MISSING_EMBEDDING", exceptional = true)
-    case StaleEmbedding extends FailureMetadata("STALE_EMBEDDING", exceptional = true)
-    case InputTooLarge extends FailureMetadata("INPUT_TOO_LARGE", exceptional = true)
-    case InvalidSearchFilter extends FailureMetadata("INVALID_SEARCH_FILTER", exceptional = false)
-    case ProviderUnavailable extends FailureMetadata("PROVIDER_UNAVAILABLE", exceptional = true)
-    case VectorSearchUnavailable extends FailureMetadata("VECTOR_SEARCH_UNAVAILABLE", exceptional = true)
-    case FacetsUnavailable extends FailureMetadata("FACETS_UNAVAILABLE", exceptional = true)
-    case ValidationFailed extends FailureMetadata("VALIDATION_FAILED", exceptional = false)
-    case AnalyticsUnavailable extends FailureMetadata("ANALYTICS_UNAVAILABLE", exceptional = true)
-    case AnalyticsInvalidPeriod extends FailureMetadata("INVALID_ANALYTICS_PERIOD", exceptional = false)
-    case AnalyticsContextRequired extends FailureMetadata("ANALYTICS_CONTEXT_REQUIRED", exceptional = true)
-    case InvalidCursor extends FailureMetadata("INVALID_CURSOR", exceptional = false)
-    case WrongCursorKind extends FailureMetadata("WRONG_CURSOR_KIND", exceptional = false)
-    case InvalidFilter extends FailureMetadata("INVALID_FILTER", exceptional = false)
-    case RateLimited extends FailureMetadata("RATE_LIMITED", exceptional = false)
-    case StaleRevision extends FailureMetadata("STALE_REVISION", exceptional = false)
-    case InterviewAlreadyStarted extends FailureMetadata("INTERVIEW_ALREADY_STARTED", exceptional = false)
-    case InterviewAlreadyCancelled extends FailureMetadata("INTERVIEW_ALREADY_CANCELLED", exceptional = false)
-    case InterviewNotSettled extends FailureMetadata("INTERVIEW_NOT_SETTLED", exceptional = false)
-    case InvalidInterviewInterval extends FailureMetadata("INVALID_INTERVIEW_INTERVAL", exceptional = false)
-    case RescheduleIntervalUnchanged extends FailureMetadata("RESCHEDULE_INTERVAL_UNCHANGED", exceptional = false)
-    case ProposalAlreadyOpen extends FailureMetadata("PROPOSAL_ALREADY_OPEN", exceptional = false)
-    case NoOpenProposal extends FailureMetadata("NO_OPEN_PROPOSAL", exceptional = false)
-    case ProposalExpired extends FailureMetadata("PROPOSAL_EXPIRED", exceptional = false)
-    case NoRescheduleRequest extends FailureMetadata("NO_RESCHEDULE_REQUEST", exceptional = false)
+  // Several entries share FORBIDDEN and UNAUTHORIZED; they use one generic description each, so the public
+  // ErrorCode description does not depend on catalog order.
+  private val GenericForbidden = "The caller may not perform this operation on this resource."
+  private val GenericUnauthorized = "Authentication is required, or the credentials or account are no longer valid."
+
+  private enum FailureMetadata(val code: String, val exceptional: Boolean, val description: String) {
+    case AuthenticationRequired
+        extends FailureMetadata(
+          "UNAUTHORIZED",
+          exceptional = true,
+          GenericUnauthorized
+        )
+    case SingletonAdminForbidden extends FailureMetadata("FORBIDDEN", exceptional = true, GenericForbidden)
+    case AdminBootstrapRequired
+        extends FailureMetadata(
+          "ADMIN_BOOTSTRAP_REQUIRED",
+          exceptional = false,
+          "The first Admin has not been bootstrapped yet."
+        )
+    case AdminAlreadyBootstrapped
+        extends FailureMetadata(
+          "ADMIN_ALREADY_BOOTSTRAPPED",
+          exceptional = false,
+          "The Admin bootstrap has already completed."
+        )
+    case RegistrationFailed
+        extends FailureMetadata(
+          "REGISTRATION_FAILED",
+          exceptional = false,
+          "Registration was refused; the reason is deliberately not disclosed."
+        )
+    case InvalidCredentials
+        extends FailureMetadata("INVALID_CREDENTIALS", exceptional = false, "The name or password is wrong.")
+    case DeletedAccountAuthenticationRequired
+        extends FailureMetadata("UNAUTHORIZED", exceptional = false, GenericUnauthorized)
+    case ProfileRoleMismatch
+        extends FailureMetadata(
+          "PROFILE_ROLE_MISMATCH",
+          exceptional = false,
+          "The profile variant does not match the role of the account."
+        )
+    case ProfileUnsupportedForRole
+        extends FailureMetadata(
+          "PROFILE_UNSUPPORTED_FOR_ROLE",
+          exceptional = false,
+          "The role has no profile, so none can be set."
+        )
+    case InvalidPassword
+        extends FailureMetadata(
+          "INVALID_PASSWORD",
+          exceptional = false,
+          "The password is shorter than the minimum length."
+        )
+    case AccountAlreadyDeleted
+        extends FailureMetadata("ACCOUNT_ALREADY_DELETED", exceptional = false, "The account is already deleted.")
+    case AdminBootstrapOnly
+        extends FailureMetadata(
+          "ADMIN_BOOTSTRAP_ONLY",
+          exceptional = false,
+          "Admin accounts can only be created through the bootstrap configuration."
+        )
+    case ServiceNotReady
+        extends FailureMetadata(
+          "SERVICE_NOT_READY",
+          exceptional = true,
+          "The service is not ready to handle the request; retry later."
+        )
+    case Forbidden
+        extends FailureMetadata(
+          "FORBIDDEN",
+          exceptional = true,
+          GenericForbidden
+        )
+    case SchemaExposureDisabled
+        extends FailureMetadata(
+          "FORBIDDEN",
+          exceptional = false,
+          GenericForbidden
+        )
+    case NotFound
+        extends FailureMetadata(
+          "NOT_FOUND",
+          exceptional = false,
+          "The resource does not exist or is not visible to the caller."
+        )
+    case DuplicateApplication
+        extends FailureMetadata(
+          "DUPLICATE_APPLICATION",
+          exceptional = false,
+          "The candidate has already applied to this job."
+        )
+    case SearchSessionPending
+        extends FailureMetadata(
+          "SEARCH_SESSION_PENDING",
+          exceptional = false,
+          "The search session is still being prepared; retry shortly."
+        )
+    case SearchSessionUnavailable
+        extends FailureMetadata(
+          "SEARCH_SESSION_UNAVAILABLE",
+          exceptional = false,
+          "The search session is not available."
+        )
+    case JobMustBeOpen
+        extends FailureMetadata("JOB_MUST_BE_OPEN", exceptional = false, "The job must be open for this operation.")
+    case CandidateRequired
+        extends FailureMetadata(
+          "CANDIDATE_REQUIRED",
+          exceptional = false,
+          "Only a Candidate may perform this operation."
+        )
+    case RecruiterRequired
+        extends FailureMetadata(
+          "RECRUITER_REQUIRED",
+          exceptional = false,
+          "Only a Recruiter may perform this operation."
+        )
+    case InvalidJobTransition
+        extends FailureMetadata(
+          "INVALID_JOB_TRANSITION",
+          exceptional = false,
+          "The job cannot move to the requested status."
+        )
+    case InvalidInitialJobStatus
+        extends FailureMetadata("INVALID_INITIAL_JOB_STATUS", exceptional = false, "New jobs must start open.")
+    case InvalidStatusTransition
+        extends FailureMetadata(
+          "INVALID_STATUS_TRANSITION",
+          exceptional = false,
+          "The application or interview cannot move to the requested state from its current state."
+        )
+    case RejectionFeedbackRequired
+        extends FailureMetadata(
+          "REJECTION_FEEDBACK_REQUIRED",
+          exceptional = false,
+          "Rejecting an application requires feedback."
+        )
+    case DeclineReasonRequired
+        extends FailureMetadata(
+          "DECLINE_REASON_REQUIRED",
+          exceptional = false,
+          "Declining an application requires a reason."
+        )
+    case Conflict
+        extends FailureMetadata(
+          "CONFLICT",
+          exceptional = false,
+          "A concurrent change conflicted with this operation; reload and retry."
+        )
+    case RepositoryUnavailable
+        extends FailureMetadata("UNAVAILABLE", exceptional = true, "The data store is temporarily unavailable.")
+    case MissingEmbedding
+        extends FailureMetadata(
+          "MISSING_EMBEDDING",
+          exceptional = true,
+          "A required embedding has not been computed yet."
+        )
+    case StaleEmbedding
+        extends FailureMetadata("STALE_EMBEDDING", exceptional = true, "A required embedding is out of date.")
+    case InputTooLarge
+        extends FailureMetadata("INPUT_TOO_LARGE", exceptional = true, "An input text exceeds its maximum length.")
+    case InvalidSearchFilter
+        extends FailureMetadata("INVALID_SEARCH_FILTER", exceptional = false, "A search filter value is invalid.")
+    case ProviderUnavailable
+        extends FailureMetadata("PROVIDER_UNAVAILABLE", exceptional = true, "The embedding provider is unavailable.")
+    case VectorSearchUnavailable
+        extends FailureMetadata("VECTOR_SEARCH_UNAVAILABLE", exceptional = true, "Semantic search is unavailable.")
+    case FacetsUnavailable
+        extends FailureMetadata("FACETS_UNAVAILABLE", exceptional = true, "Discovery facets are unavailable.")
+    case ValidationFailed
+        extends FailureMetadata("VALIDATION_FAILED", exceptional = false, "One or more input fields are invalid.")
+    case AnalyticsUnavailable
+        extends FailureMetadata("ANALYTICS_UNAVAILABLE", exceptional = true, "Analytics reports are unavailable.")
+    case AnalyticsInvalidPeriod
+        extends FailureMetadata(
+          "INVALID_ANALYTICS_PERIOD",
+          exceptional = false,
+          "The analytics period must be ordered and at most 30 days."
+        )
+    case AnalyticsContextRequired
+        extends FailureMetadata(
+          "ANALYTICS_CONTEXT_REQUIRED",
+          exceptional = true,
+          "Account deletion needs analytics erasure context that is not available."
+        )
+    case InvalidCursor
+        extends FailureMetadata(
+          "INVALID_CURSOR",
+          exceptional = false,
+          "The pagination cursor is malformed, expired or does not match the query."
+        )
+    case WrongCursorKind
+        extends FailureMetadata(
+          "WRONG_CURSOR_KIND",
+          exceptional = false,
+          "The cursor belongs to a different connection."
+        )
+    case InvalidFilter
+        extends FailureMetadata("INVALID_FILTER", exceptional = false, "The combination of arguments is inconsistent.")
+    case RateLimited
+        extends FailureMetadata(
+          "RATE_LIMITED",
+          exceptional = false,
+          "Too many requests; retry after the indicated time."
+        )
+    case StaleRevision
+        extends FailureMetadata(
+          "STALE_REVISION",
+          exceptional = false,
+          "The workflow changed since the supplied revision was read."
+        )
+    case InterviewAlreadyStarted
+        extends FailureMetadata("INTERVIEW_ALREADY_STARTED", exceptional = false, "The interview has already started.")
+    case InterviewAlreadyCancelled
+        extends FailureMetadata(
+          "INTERVIEW_ALREADY_CANCELLED",
+          exceptional = false,
+          "The interview is already cancelled."
+        )
+    case InterviewNotSettled
+        extends FailureMetadata(
+          "INTERVIEW_NOT_SETTLED",
+          exceptional = false,
+          "The interview is still being updated; retry later."
+        )
+    case InvalidInterviewInterval
+        extends FailureMetadata(
+          "INVALID_INTERVIEW_INTERVAL",
+          exceptional = false,
+          "The interview must start in the future and end after it starts."
+        )
+    case RescheduleIntervalUnchanged
+        extends FailureMetadata(
+          "RESCHEDULE_INTERVAL_UNCHANGED",
+          exceptional = false,
+          "The proposed time equals the current interview time."
+        )
+    case ProposalAlreadyOpen
+        extends FailureMetadata("PROPOSAL_ALREADY_OPEN", exceptional = false, "A reschedule proposal is already open.")
+    case NoOpenProposal
+        extends FailureMetadata("NO_OPEN_PROPOSAL", exceptional = false, "There is no open reschedule proposal.")
+    case ProposalExpired
+        extends FailureMetadata("PROPOSAL_EXPIRED", exceptional = false, "The reschedule proposal has expired.")
+    case NoRescheduleRequest
+        extends FailureMetadata("NO_RESCHEDULE_REQUEST", exceptional = false, "There is no reschedule request.")
   }
+
+  /** Every code a failure can carry, with its one description. This is the single source of the public `ErrorCode`
+    * enum, so the enum and the codes the API emits cannot drift apart.
+    */
+  def errorCodes: List[(String, String)] =
+    FailureMetadata.values.toList.map(metadata => metadata.code -> metadata.description).distinct
+
+  /** Codes whose catalog entries disagree on the description; empty when every code has exactly one. */
+  private[graphql] def codesWithConflictingDescriptions: List[String] =
+    errorCodes.groupBy(_._1).collect { case (code, entries) if entries.size > 1 => code }.toList.sorted
 
   def classify(error: UseCaseError): GraphQLFailure =
     error match {
@@ -264,6 +464,16 @@ private[graphql] object GraphQLFailureCatalog {
       case _                                                               => FailureMetadata.ValidationFailed
     }
     failure(metadata, if (fields.isEmpty) "Validation failed" else fields)
+      .copy(field = errors.head match {
+        case DomainValidationError.BlankField(field)               => Some(field)
+        case DomainValidationError.EmptyCollection(field)          => Some(field)
+        case DomainValidationError.InvalidNumber(field, _, _, _)   => Some(field)
+        case DomainValidationError.TextTooLong(field, _, _)        => Some(field)
+        case DomainValidationError.ByteLengthExceeded(field, _, _) => Some(field)
+        case DomainValidationError.TooManyValues(field, _, _)      => Some(field)
+        case DomainValidationError.PasswordTooShort(_, _)          => Some("password")
+        case DomainValidationError.InvalidCoordinates              => Some("coordinates")
+      })
   }
 
   private def validationMessage(error: DomainValidationError): String =

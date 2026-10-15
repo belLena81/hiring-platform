@@ -197,7 +197,7 @@ final class HiringGraphQLInterviewActionSpec extends CatsEffectSuite {
         .map(error => new IllegalArgumentException("Invalid test request", error))
     ).flatMap(request =>
       TestGraphQLSupport
-        .context(IO.pure(ProbeResult.Ready), actor, a.services, hiringReady, interviewActionRateLimit = allowance)
+        .context(actor, a.services, hiringReady, interviewActionRateLimit = allowance)
         .use(TestGraphQLSupport.parseAndExecute(request, _))
     )
 
@@ -361,7 +361,9 @@ final class HiringGraphQLInterviewActionSpec extends CatsEffectSuite {
     )
   }
 
-  test("DHW-31 the lifecycle fields read back through the query for participants and Admin, hidden from strangers") {
+  test(
+    "AC-03.1 AC-07.2 the lifecycle fields read back through the query for participants and Admin, hidden from strangers"
+  ) {
     val withProposal = proposalOpen()
     val read = (a: Arrangement, actor: ActorContext) =>
       operations.flatMap(query =>
@@ -383,7 +385,12 @@ final class HiringGraphQLInterviewActionSpec extends CatsEffectSuite {
       } yield {
         List(asCandidate, asRecruiter, asAdmin).foreach { json =>
           val workflow = json.hcursor.downField("data").downField("interviewWorkflow")
-          assertEquals(workflow.get[String]("progress"), Right("ProposalPending"), clue(json))
+          assertEquals(workflow.get[String]("progress"), Right("PROPOSAL_PENDING"), clue(json))
+          assertEquals(
+            workflow.get[List[String]]("notifiedParticipants"),
+            Right(List("CANDIDATE", "RECRUITER")),
+            clue(json)
+          )
           assertEquals(workflow.get[String]("proposedStartsAt"), Right(replacement.startsAt.toString))
           assertEquals(workflow.get[String]("proposedEndsAt"), Right(replacement.endsAt.toString))
           assertEquals(workflow.get[String]("proposalExpiresAt"), Right(withProposal.proposal.get.expiresAt.toString))
@@ -391,9 +398,80 @@ final class HiringGraphQLInterviewActionSpec extends CatsEffectSuite {
           assertEquals(workflow.downField("cancelledAt").focus, Some(Json.Null))
           assertEquals(workflow.downField("pendingStartsAt").focus, Some(Json.Null))
         }
-        assertEquals(errorCode(asStranger), Some("NOT_FOUND"), clue(asStranger))
-        assertEquals(errorCode(asOtherRecruiter), Some("NOT_FOUND"), clue(asOtherRecruiter))
-        assertEquals(asStranger.hcursor.downField("data").focus, Some(Json.Null))
+        List(asStranger, asOtherRecruiter).foreach { json =>
+          assertEquals(json.hcursor.downField("data").downField("interviewWorkflow").focus, Some(Json.Null), clue(json))
+          assert(json.hcursor.downField("errors").focus.isEmpty, clue(json))
+        }
+      }
+    }
+  }
+
+  private def readWorkflow(a: Arrangement, actor: ActorContext, id: UUID = workflowId.value): IO[Json] =
+    operations.flatMap(query =>
+      run(a, query, Some("InterviewLifecycle"), Json.obj("workflowId" -> Json.fromString(id.toString)), Some(actor))
+        .map(_.fold(failure => fail(failure.toString), identity))
+    )
+
+  test("AC-02.1 the service receives the exact expectedRevision, even beyond double precision") {
+    val large = 9007199254740993L
+    arranged(completed.copy(revision = large)).flatMap { a =>
+      for {
+        json <- act(a, Action.Request, Some(candidateActor), variables(Action.Request, expectedRevision = large))
+        stale <- act(a, Action.Request, Some(candidateActor), variables(Action.Request, expectedRevision = large - 1))
+        after <- a.stored
+      } yield {
+        assertEquals(payload(json, Action.Request).hcursor.get[Long]("revision"), Right(large + 1), clue(json))
+        assertEquals(after.revision, large + 1)
+        assertEquals(code(stale, Action.Request), Some("STALE_REVISION"), clue(stale))
+      }
+    }
+  }
+
+  test("AC-07.1 an unknown workflowId reads as null with no errors") {
+    arranged(completed).flatMap { a =>
+      readWorkflow(a, candidateActor, new UUID(0L, 999L)).map { json =>
+        assertEquals(json.hcursor.downField("data").downField("interviewWorkflow").focus, Some(Json.Null), clue(json))
+        assert(json.hcursor.downField("errors").focus.isEmpty, clue(json))
+      }
+    }
+  }
+
+  test("AC-07.2 a stranger's read of an existing workflow is indistinguishable from an unknown workflowId") {
+    arranged(completed).flatMap { a =>
+      for {
+        hidden <- readWorkflow(a, otherCandidateActor)
+        unknown <- readWorkflow(a, otherCandidateActor, new UUID(0L, 999L))
+      } yield {
+        assertEquals(hidden, unknown)
+        assertEquals(hidden.hcursor.downField("data").downField("interviewWorkflow").focus, Some(Json.Null))
+      }
+    }
+  }
+
+  test("AC-07.3 a store failure is still a GraphQL error, not null") {
+    arranged(completed).flatMap { a =>
+      val failing = new com.example.graphQL.cats.service.protocol.HiringReadModel[IO] {
+        private val delegate = a.services.readModel
+        def viewer(actor: ActorContext) =
+          cats.data.EitherT.leftT(
+            com.example.graphQL.cats.service.UseCaseError.Repository(RepositoryError.Unavailable)
+          )
+        def canViewUserEmails(actor: ActorContext, userIds: List[UserId]) = delegate.canViewUserEmails(actor, userIds)
+        def application(id: ApplicationId) = delegate.application(id)
+        def canViewApplication(actor: ActorContext, applicationId: ApplicationId) =
+          delegate.canViewApplication(actor, applicationId)
+        def relatedUsers(actor: ActorContext, keys: List[com.example.graphQL.cats.service.read.UserRelationKey]) =
+          delegate.relatedUsers(actor, keys)
+        def relatedJobs(actor: ActorContext, keys: List[com.example.graphQL.cats.service.read.JobRelationKey]) =
+          delegate.relatedJobs(actor, keys)
+        def applicationHistory(
+            actor: ActorContext,
+            applicationId: ApplicationId,
+            page: com.example.graphQL.cats.domain.pagination.ApplicationEventPageRequest
+        ) = delegate.applicationHistory(actor, applicationId, page)
+      }
+      readWorkflow(a.copy(services = a.services.copy(readModel = failing)), candidateActor).map { json =>
+        assertEquals(errorCode(json), Some("UNAVAILABLE"), clue(json))
       }
     }
   }
@@ -409,12 +487,12 @@ final class HiringGraphQLInterviewActionSpec extends CatsEffectSuite {
       history <- c.repository.store.get.map(_.history)
     } yield {
       assertEquals(payload(requested, Action.Request).hcursor.get[Boolean]("rescheduleRequested"), Right(true))
-      assertEquals(payload(accepted, Action.Accept).hcursor.get[String]("progress"), Right("RescheduleHoldPending"))
+      assertEquals(payload(accepted, Action.Accept).hcursor.get[String]("progress"), Right("RESCHEDULE_HOLD_PENDING"))
       assertEquals(
         payload(accepted, Action.Accept).hcursor.get[String]("pendingStartsAt"),
         Right(replacement.startsAt.toString)
       )
-      assertEquals(payload(cancelled, Action.Cancel).hcursor.get[String]("progress"), Right("CancelPending"))
+      assertEquals(payload(cancelled, Action.Cancel).hcursor.get[String]("progress"), Right("CANCEL_PENDING"))
       assertEquals(history.map(_._4), Vector("Interview cancelled by the candidate."))
     }
   }
@@ -562,14 +640,16 @@ final class HiringGraphQLInterviewActionSpec extends CatsEffectSuite {
         s"""a$index: $field(input: { workflowId: "${workflowId.value}", expectedRevision: $revision, idempotencyKey: "${new UUID(
             7L,
             index.toLong
-          )}" }) { ... on InterviewWorkflow { revision } ... on DomainError { code } }"""
+          )}" }) { ... on InterviewWorkflow { revision } ... on DomainError { code retryAfterSeconds } }"""
       )
       .mkString("mutation { ", "\n", " }")
 
   private def limiter(attempts: Int): IO[UserId => IO[Either[InterviewActionRateLimiter.RateLimited, Unit]]] =
     InterviewActionRateLimiter.create(RateLimitConfig(60, attempts, 100)).map(limiter => limiter.permit)
 
-  test("DHW-34 aliased mutations in one request each take an allowance unit and the surplus is a typed refusal") {
+  test(
+    "AC-03.2 AC-11.1 AC-11.2 DHW-34 aliased mutations each take an allowance unit; the surplus is a typed refusal with a retry hint"
+  ) {
     for {
       a <- arranged(completed)
       permit <- limiter(2)
@@ -582,6 +662,14 @@ final class HiringGraphQLInterviewActionSpec extends CatsEffectSuite {
       assertEquals(data.downField("a2").get[String]("code"), Right("STALE_REVISION"), clue(json))
       assertEquals(data.downField("a3").get[String]("code"), Right("RATE_LIMITED"), clue(json))
       assertEquals(data.downField("a4").get[String]("code"), Right("RATE_LIMITED"), clue(json))
+      // The refused calls carry the time left in the window; every other error has no hint.
+      List("a3", "a4").foreach(alias =>
+        assert(
+          data.downField(alias).get[Int]("retryAfterSeconds").exists(seconds => seconds >= 1 && seconds <= 60),
+          clue(json)
+        )
+      )
+      assertEquals(data.downField("a2").downField("retryAfterSeconds").focus, Some(Json.Null), clue(json))
       assert(!json.noSpaces.contains("attempts") && !json.noSpaces.contains("window"), clue(json))
     }
   }

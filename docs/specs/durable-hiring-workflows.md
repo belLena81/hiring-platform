@@ -346,9 +346,9 @@ Add a closed kind (`Scheduled`, `Cancelled`, `Rescheduled`, `RescheduleProposed`
 ### Public GraphQL contract (additive)
 
 ```graphql
-input InterviewActionInput { workflowId: UUID!, expectedRevision: Long!, idempotencyKey: UUID! }
+input InterviewActionInput { workflowId: InterviewWorkflowID!, expectedRevision: Long!, idempotencyKey: UUID! }
 input ProposeInterviewRescheduleInput {
-  workflowId: UUID!, expectedRevision: Long!, startsAt: Instant!, endsAt: Instant!, idempotencyKey: UUID!
+  workflowId: InterviewWorkflowID!, expectedRevision: Long!, startsAt: Instant!, endsAt: Instant!, idempotencyKey: UUID!
 }
 union InterviewActionResult = InterviewWorkflow | ValidationError | DomainError
 # Mutations, each taking input and returning InterviewActionResult (one result union, single shape):
@@ -361,7 +361,7 @@ union InterviewActionResult = InterviewWorkflow | ValidationError | DomainError
 #   acceptInterviewReschedule(input: InterviewActionInput!)            candidate only
 #   declineInterviewReschedule(input: InterviewActionInput!)           candidate only
 # InterviewWorkflow gains nullable pendingStartsAt, pendingEndsAt, cancelledAt, proposedStartsAt,
-# proposedEndsAt, proposalExpiresAt and a Boolean rescheduleRequested; progress gains new documented values.
+# proposedEndsAt, proposalExpiresAt and a Boolean rescheduleRequested; progress is the non-null InterviewProgress enum (SCREAMING_SNAKE_CASE values, see docs/api.md).
 ```
 
 Mutations return the workflow with its new `progress` (accepted, asynchronous where a provider call follows); `cancelInterview` takes the same `InterviewActionInput` as the other actions (workflow id, expected revision, idempotency key) and no feedback or other text; the stored feedback is system-generated per initiator (see "Cancel feedback"). `DomainError.code` values: the existing invalid-status-transition code is reused unchanged, plus `INTERVIEW_ALREADY_STARTED`, `INTERVIEW_ALREADY_CANCELLED`, `INTERVIEW_NOT_SETTLED`, `PROPOSAL_ALREADY_OPEN`, `NO_OPEN_PROPOSAL`, `NO_RESCHEDULE_REQUEST` (dismissing a request that was never made), `PROPOSAL_EXPIRED`, `STALE_REVISION`, `FORBIDDEN`, `NOT_FOUND`. Receipt fingerprints include the operation name and canonical input so a reused key with a different operation or input is a typed conflict; the existing request-receipt lookup is keyed by the acting user (rename its recruiter-named parameter to actor), because candidates now act. Authorization runs in the service from trusted actor context against the stored workflow participants, and the participant predicate is also carried into the guarded write filter so a concurrent reassignment cannot bypass it. Matrix (anything not allowed is denied):

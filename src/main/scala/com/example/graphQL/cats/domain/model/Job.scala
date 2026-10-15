@@ -25,18 +25,18 @@ object GeoPoint {
     )
 }
 
-final case class Location(country: String, city: String, remote: Boolean, coordinates: Option[GeoPoint] = None)
+final case class Location(country: String, city: Option[String], remote: Boolean, coordinates: Option[GeoPoint] = None)
 
 object Location {
   def validate(
       country: String,
-      city: String,
+      city: Option[String],
       remote: Boolean,
       coordinates: Option[GeoPoint] = None
   ): ValidatedNel[DomainValidationError, Location] =
     (
       validateText("country", country),
-      validateText("city", city),
+      city.traverse(validateText("city", _)),
       coordinates.traverse(point =>
         Either.cond(point.isValid, point, DomainValidationError.InvalidCoordinates).toValidatedNel
       )

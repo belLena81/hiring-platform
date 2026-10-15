@@ -1,0 +1,15 @@
+mutation SignUpRecruiter($input: SignUpInput!) {
+  signUp(input: $input) {
+    ... on AuthSuccess { accessToken expiresAt user { id role profile { ... on RecruiterProfile { organizationName jobTitle } } } }
+    ... on ValidationError { code message field }
+    ... on DomainError { code message retryAfterSeconds }
+  }
+}
+
+mutation UpdateMyProfile($input: UpdateMyProfileInput!) {
+  updateMyProfile(input: $input) {
+    ... on User { id profile { ... on CandidateProfile { skills currentResidence { country city } availabilityStatus } } }
+    ... on ValidationError { code message field }
+    ... on DomainError { code message }
+  }
+}

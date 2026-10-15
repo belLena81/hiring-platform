@@ -311,7 +311,7 @@ Quality has no arbitrary initial threshold. Establish a baseline dataset first a
 ### GraphQL
 
 ```graphql
-query Job($id: ID!) {
+query Job($id: JobID!) {
   job(id: $id) {
     id
     title
@@ -686,7 +686,7 @@ Embedding generation is asynchronous and is not included in mutation latency.
 
 ```graphql
 query JobApplications(
-  $jobId: ID!
+  $jobId: JobID!
   $status: ApplicationStatus
   $first: Int!
   $after: String
@@ -768,16 +768,14 @@ no N+1 behavior
 Prefer action-oriented mutations:
 
 ```graphql
-mutation MoveToInterview(
-  $applicationId: ID!
-) {
-  moveApplicationToInterview(
-    applicationId: $applicationId
-  ) {
-    application {
+mutation MoveToInterview($input: ApplicationActionInput!) {
+  moveApplicationToInterview(input: $input) {
+    ... on Application {
       id
       status
     }
+    ... on ValidationError { code message field }
+    ... on DomainError { code message }
   }
 }
 ```
@@ -872,7 +870,7 @@ Contract, authorization matrix and error codes: [API reference](api.md#interview
 
 ```graphql
 query CandidateMatches(
-  $jobId: ID!
+  $jobId: JobID!
   $first: Int!
 ) {
   candidateMatches(

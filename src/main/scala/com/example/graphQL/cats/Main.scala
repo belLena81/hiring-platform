@@ -5,7 +5,12 @@ import cats.data.NonEmptyList
 import cats.effect.{ExitCode, IO, IOApp, Resource}
 import cats.data.Kleisli
 import cats.syntax.all.*
-import com.example.graphQL.cats.api.admission.{AuthRateLimiter, CostBudgetLimiter, InterviewActionRateLimiter}
+import com.example.graphQL.cats.api.admission.{
+  AuthRateLimiter,
+  CostBudgetLimiter,
+  InterviewActionRateLimiter,
+  PersistedQueryPolicy
+}
 import com.example.graphQL.cats.api.auth.JwtActorAuthenticator
 import com.example.graphQL.cats.api.graphql.{GraphQLDocumentCache, RequestContextFactory}
 import com.example.graphQL.cats.api.http.{ClientAddressResolver, HiringApiRoutes}
@@ -30,7 +35,11 @@ object Main extends IOApp {
       diagnostics.emit(LogEvent.RuntimeFailed, fields = LogFields.failure(error))
     }
 
-  private def program(config: AppConfig, diagnostics: Diagnostics[IO]): Resource[IO, Unit] = for {
+  private def program(
+      config: AppConfig,
+      persistedQueries: PersistedQueryPolicy,
+      diagnostics: Diagnostics[IO]
+  ): Resource[IO, Unit] = for {
     telemetry <- TelemetryRuntime.resource
     runtime <- MongoHiringRuntime.resource(config, diagnostics)
     contextFactory <- RequestContextFactory.resource
@@ -57,7 +66,8 @@ object Main extends IOApp {
         costBudgetLimiter,
         ClientAddressResolver(config.trustedProxy),
         config.discovery.maxRoots,
-        config.graphql.schemaExposure
+        config.graphql.schemaExposure,
+        persistedQueries
       ),
       telemetry.tracer
     )
@@ -90,11 +100,18 @@ object Main extends IOApp {
       exit <- loaded.fold(
         errors => configInvalidEvents(diagnostics, errors).as(ExitCode.Error),
         config =>
-          program(config, diagnostics).useForever
-            .as(ExitCode.Success)
-            .handleErrorWith(error =>
-              diagnostics.emit(LogEvent.StartupFailed, fields = LogFields.failure(error)).as(ExitCode.Error)
-            )
+          // The allowlist manifest is read once, before anything is acquired; a bad one stops startup.
+          PersistedQueryPolicy.load(config.graphql.persistedQueries).flatMap {
+            case Left(_) =>
+              configInvalidEvents(diagnostics, NonEmptyList.one(ConfigError.InvalidPersistedQueryManifest))
+                .as(ExitCode.Error)
+            case Right(persistedQueries) =>
+              program(config, persistedQueries, diagnostics).useForever
+                .as(ExitCode.Success)
+                .handleErrorWith(error =>
+                  diagnostics.emit(LogEvent.StartupFailed, fields = LogFields.failure(error)).as(ExitCode.Error)
+                )
+          }
       )
     } yield exit
 }

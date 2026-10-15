@@ -26,7 +26,7 @@ final class HiringGraphQLDocumentExpansionSpec extends CatsEffectSuite {
   ): String = {
     val fragments = (0 until levels).map { level =>
       val fields = (0 until aliases)
-        .map(alias => s"${if (sharedResponseNames) "" else s"l$level"}a$alias: readiness { status }")
+        .map(alias => s"${if (sharedResponseNames) "" else s"l$level"}a$alias: me { id }")
         .mkString(" ")
       val spreads =
         if (spreadsAllLater) ((level + 1) until levels).map(next => s"...${fragmentName(next)}")
@@ -39,7 +39,7 @@ final class HiringGraphQLDocumentExpansionSpec extends CatsEffectSuite {
 
   private def timedExecution(query: String): IO[(FiniteDuration, Either[HiringGraphQLSchema.Failure, Json])] =
     TestGraphQLSupport
-      .context(IO.raiseError(new IllegalStateException("no resolver may run")), schemaExposure = false)
+      .context(schemaExposure = false)
       .use(context =>
         TestGraphQLSupport.parseAndExecute(GraphQLRequest(query, Json.obj(), None), context).timed.map {
           case (elapsed, result) => (elapsed, result)
@@ -70,8 +70,8 @@ final class HiringGraphQLDocumentExpansionSpec extends CatsEffectSuite {
   }
 
   test("F4 thousands of aliases for one field, and thousands of repeats of one response name, stay within the bound") {
-    val distinct = (0 until 1500).map(index => s"a$index: readiness { status }").mkString("{ ", " ", " }")
-    val repeated = (0 until 1500).map(_ => "a: readiness { status }").mkString("{ ", " ", " }")
+    val distinct = (0 until 1500).map(index => s"a$index: me { id }").mkString("{ ", " ", " }")
+    val repeated = (0 until 1500).map(_ => "a: me { id }").mkString("{ ", " ", " }")
     assert(distinct.length < 64 * 1024 && repeated.length < 64 * 1024)
     assertBounded("1500 distinct aliases", distinct) *> assertBounded("1500 repeated response names", repeated)
   }

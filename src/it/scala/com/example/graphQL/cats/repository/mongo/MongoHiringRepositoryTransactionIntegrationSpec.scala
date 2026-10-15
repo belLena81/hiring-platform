@@ -52,7 +52,7 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends MongoIntegrationSu
       "Build hiring infrastructure",
       List("Cats Effect"),
       Set("Scala", "MongoDB"),
-      Location("Cyprus", "Nicosia", remote = true),
+      Location("Cyprus", Some("Nicosia"), remote = true),
       JobStatus.Open,
       now,
       now
@@ -738,6 +738,7 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends MongoIntegrationSu
               ApplicationStatus.Created,
               candidate.id,
               now,
+              None,
               None,
               None
             )

@@ -64,7 +64,8 @@ final class ApplicationService[F[_]: Monad](
             candidate.id,
             now,
             None,
-            None
+            None,
+            Some(candidate.role)
           )
           event = OperationalEvents.applicationCreated(eventId.value, application, candidate.id, now)
           _ <- UseCaseF.repository(
@@ -120,7 +121,7 @@ final class ApplicationService[F[_]: Monad](
           eventId <- EitherT.liftF(uuidGen.randomUUID.map(uuid => ApplicationEventId(uuid)))
           (persistedApplication, change) <- EitherT.fromEither[F](
             ApplicationLifecycle
-              .changeStatus(target, actorUser.id, now, feedback, reason)
+              .changeStatus(target, actorUser.id, Some(actorUser.role), now, feedback, reason)
               .run(application)
               .leftMap(UseCaseError.Domain.apply)
           )
@@ -176,7 +177,8 @@ final class ApplicationService[F[_]: Monad](
         change.actorId,
         change.occurredAt,
         change.feedback,
-        change.reason
+        change.reason,
+        change.actorRole
       )
       .toEither
       .leftMap(UseCaseError.ValidationFailed.apply)

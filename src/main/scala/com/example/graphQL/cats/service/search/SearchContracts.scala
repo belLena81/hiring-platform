@@ -110,7 +110,7 @@ object JobDiscoveryFacets {
         .map { case (value, count) => JobFacetBucket(value, count) }
     val skillBuckets = buckets(jobs.flatMap(_.skills))
     val countryBuckets = buckets(jobs.map(_.location.country).filter(_.nonEmpty))
-    val cityBuckets = buckets(jobs.map(_.location.city).filter(_.nonEmpty))
+    val cityBuckets = buckets(jobs.flatMap(_.location.city).filter(_.nonEmpty))
     val remoteBuckets = buckets(jobs.map(job => job.location.remote.toString))
     JobDiscoveryFacets(
       skillBuckets.take(MaxBucketsPerDimension),

@@ -13,7 +13,7 @@ import com.example.graphQL.cats.service.ProbeResult
 import com.example.graphQL.cats.service.protocol.{IdempotencyRequest, UseCaseF}
 import com.example.graphQL.cats.service.events.{OperationalEventPayload, SearchFilterSnapshot}
 import com.example.graphQL.cats.domain.pagination.*
-import com.example.graphQL.cats.service.search.{JobSearchFilter, SearchSessionEntry}
+import com.example.graphQL.cats.service.search.{JobDiscoveryValidation, JobSearchFilter, SearchSessionEntry}
 import io.circe.{Json, Printer}
 import io.circe.syntax.*
 import sangria.schema.Context
@@ -30,10 +30,13 @@ private[graphql] object HiringGraphQLResolverSupport {
   def inputResult[A](value: Either[GraphQLFailure, A]): HiringGraphQLResult[A] =
     EitherT.fromEither[IO](value.leftMap(HiringGraphQLFailure.Input(_)))
 
-  def mutationResult[A](value: UseCaseF[IO, A]): HiringGraphQLResult[MutationOutcome[A]] =
+  def mutationResult[A](
+      value: UseCaseF[IO, A],
+      fieldPath: InputFieldPaths.Path = InputFieldPaths.none
+  ): HiringGraphQLResult[MutationOutcome[A]] =
     EitherT(value.value.flatMap {
       case Right(result)                               => IO.pure(Right(result))
-      case Left(UseCaseError.ValidationFailed(errors)) => IO.pure(Right(validationError(errors)))
+      case Left(UseCaseError.ValidationFailed(errors)) => IO.pure(Right(validationError(errors, fieldPath)))
       case Left(error)                                 =>
         val failure = GraphQLFailureCatalog.classify(error)
         if (failure.exceptional) IO.pure(Left(HiringGraphQLFailure.UseCase(error)))
@@ -62,6 +65,13 @@ private[graphql] object HiringGraphQLResolverSupport {
       case Some(filter) =>
         JobSearchFilter(filter.city, filter.skills.fold(Set.empty[String])(_.toSet), filter.createdAfter)
     }
+
+  /** The filter after the shared discovery validation, so every job discovery operation rejects the same values. */
+  def discoveryFilter(value: Option[JobFilterGraphQLInput]): Either[GraphQLFailure, JobSearchFilter] =
+    JobDiscoveryValidation
+      .filter(jobFilter(value))
+      .toEither
+      .leftMap(errors => GraphQLFailureCatalog.classify(UseCaseError.Search(SearchError.accumulated(errors))))
 
   def filterSnapshot(value: JobSearchFilter): SearchFilterSnapshot =
     SearchFilterSnapshot.jobCriteria(value.city, value.skills, value.createdAfter)
@@ -135,9 +145,12 @@ private[graphql] object HiringGraphQLResolverSupport {
     Connection(edges, PageInfo(values.size > requested, edges.lastOption.map(_.cursor)))
   }
 
-  private def validationError(errors: NonEmptyList[DomainValidationError]): ValidationError = {
+  private def validationError(
+      errors: NonEmptyList[DomainValidationError],
+      fieldPath: InputFieldPaths.Path
+  ): ValidationError = {
     val failure = GraphQLFailureCatalog.classify(UseCaseError.ValidationFailed(errors))
-    ValidationError(failure.code, failure.message)
+    ValidationError(failure.code, failure.message, failure.field.flatMap(fieldPath))
   }
 
   private def authenticated(

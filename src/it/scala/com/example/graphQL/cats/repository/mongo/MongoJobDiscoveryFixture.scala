@@ -24,7 +24,7 @@ private[mongo] abstract class MongoJobDiscoveryFixture extends MongoIntegrationS
       "Build hiring",
       List("Scala"),
       Set("Scala", s"Skill$index"),
-      Location("Cyprus", "Nicosia", remote, point),
+      Location("Cyprus", Some("Nicosia"), remote, point),
       JobStatus.Open,
       now,
       now

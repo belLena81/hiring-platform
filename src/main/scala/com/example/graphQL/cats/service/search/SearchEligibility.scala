@@ -34,7 +34,9 @@ object SearchEligibilityPolicy {
   def job(current: JobSearchEligibility, retrieved: EmbeddingMeta, model: String, filter: JobSearchFilter): Boolean =
     current.job.status == JobStatus.Open && current.metadata.exists(meta =>
       meta == retrieved && meta.model == model && meta.sourceHash == SourceHash.sha256(SearchableText.job(current.job))
-    ) && filter.city.forall(_ == current.job.location.city) && filter.skills.subsetOf(current.job.skills) &&
+    ) && filter.city.forall(requested => current.job.location.city.contains(requested)) && filter.skills.subsetOf(
+      current.job.skills
+    ) &&
       filter.createdAfter.forall(after => !current.job.createdAt.isBefore(after))
 
   def candidate(

@@ -34,7 +34,7 @@ final class LexicalQueryFacetsSpec extends CatsEffectSuite {
       id = jobId(n),
       skills = skills,
       status = status,
-      location = Location("Cyprus", city, remote, coordinates),
+      location = Location("Cyprus", Some(city), remote, coordinates),
       createdAt = createdAt
     )
   private def scored(ids: Int*): Map[JobId, Double] =

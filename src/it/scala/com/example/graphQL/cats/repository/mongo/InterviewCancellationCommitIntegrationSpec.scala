@@ -259,6 +259,7 @@ final class InterviewCancellationCommitIntegrationSpec extends MongoIntegrationS
         a.workflow.recruiterId,
         now,
         None,
+        None,
         None
       )
       for {

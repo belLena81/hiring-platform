@@ -11,7 +11,7 @@ class DomainValidationSpec extends FunSuite {
   private val now = Instant.parse("2026-09-16T10:15:30Z")
   private val userId = UserId(UUID.fromString("00000000-0000-0000-0000-000000000001"))
   private val jobId = JobId(UUID.fromString("00000000-0000-0000-0000-000000000002"))
-  private val location = Location("Ukraine", "Kyiv", remote = true)
+  private val location = Location("Ukraine", Some("Kyiv"), remote = true)
 
   test("user validation accumulates independent field errors with ValidatedNel") {
     val result = User.validate(userId, Some(" "), "", UserRole.Candidate, None, now)
@@ -53,7 +53,7 @@ class DomainValidationSpec extends FunSuite {
       "Build services",
       List("Scala"),
       Set("Cats Effect"),
-      Location(" ", "", remote = true),
+      Location(" ", Some(""), remote = true),
       JobStatus.Open,
       now,
       now
@@ -75,7 +75,7 @@ class DomainValidationSpec extends FunSuite {
     assert(GeoPoint.validate(35.2, 33.4).isRight)
     assert(GeoPoint.validate(90.01, 33.4).isLeft)
     assert(GeoPoint.validate(35.2, Double.NaN).isLeft)
-    assert(Location.validate("Cyprus", "Nicosia", remote = false, Some(GeoPoint(35.2, 181d))).isInvalid)
+    assert(Location.validate("Cyprus", Some("Nicosia"), remote = false, Some(GeoPoint(35.2, 181d))).isInvalid)
   }
 
   test("job validation retains accepted location coordinates") {
@@ -87,7 +87,7 @@ class DomainValidationSpec extends FunSuite {
       "Build services",
       List("Scala"),
       Set("Cats Effect"),
-      Location("Cyprus", "Nicosia", remote = false, Some(point)),
+      Location("Cyprus", Some("Nicosia"), remote = false, Some(point)),
       JobStatus.Open,
       now,
       now
@@ -110,7 +110,7 @@ class DomainValidationSpec extends FunSuite {
         "Build services",
         List("Scala"),
         Set("Cats Effect"),
-        Location("Cyprus", "Nicosia", remote = false, Some(point)),
+        Location("Cyprus", Some("Nicosia"), remote = false, Some(point)),
         JobStatus.Open,
         now,
         now
@@ -140,5 +140,14 @@ class DomainValidationSpec extends FunSuite {
     assertEquals(job.requirements, List("Scala", "Cats Effect"))
     assertEquals(job.skills, Set("Scala", "MongoDB"))
     assertEquals(job.status, JobStatus.Open)
+  }
+
+  test("AC-09.2 location accepts a missing city but rejects a present blank city") {
+    assert(Location.validate("Cyprus", None, remote = true).isValid)
+    assert(Location.validate("Cyprus", Some("  "), remote = true).isInvalid)
+    assertEquals(
+      Location.validate("Cyprus", Some(" Nicosia "), remote = true).toOption.flatMap(_.city),
+      Some("Nicosia")
+    )
   }
 }

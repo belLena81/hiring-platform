@@ -15,7 +15,7 @@ class JobDiscoverySpec extends FunSuite {
     "Build",
     List("Scala"),
     skills,
-    Location("Cyprus", city, remote = false),
+    Location("Cyprus", Some(city), remote = false),
     JobStatus.Open,
     now,
     now
@@ -38,6 +38,13 @@ class JobDiscoverySpec extends FunSuite {
     assertEquals(result.skills, List(JobFacetBucket("Cats", 2L), JobFacetBucket("Scala", 2L)))
     assertEquals(result.cities, List(JobFacetBucket("Nicosia", 2L), JobFacetBucket("Limassol", 1L)))
     assert(!result.truncated)
+  }
+
+  test("AC-09.3 city facet counts exclude jobs without a city") {
+    val cityless = job(4, Set("Scala"), "Nicosia").copy(location = Location("Cyprus", None, remote = false))
+    val result = JobDiscoveryFacets.fromJobs(List(job(1, Set("Scala"), "Nicosia"), cityless))
+    assertEquals(result.cities, List(JobFacetBucket("Nicosia", 1L)))
+    assertEquals(result.countries, List(JobFacetBucket("Cyprus", 2L)))
   }
 
   test("nearby cursors are bound to center, radius, normalized filters and ordering") {
@@ -119,7 +126,7 @@ class JobDiscoverySpec extends FunSuite {
     val result = JobDiscoveryFacets.fromJobs(
       List(
         job(1, Set("Scala", "Cats"), "Nicosia"),
-        job(2, Set("Scala"), "Limassol").copy(location = Location("Greece", "Limassol", remote = true)),
+        job(2, Set("Scala"), "Limassol").copy(location = Location("Greece", Some("Limassol"), remote = true)),
         job(3, Set("Cats"), "Nicosia")
       )
     )
@@ -138,7 +145,7 @@ class JobDiscoverySpec extends FunSuite {
   test("facet bucket bounds preserve tied value order and report truncation only above twenty") {
     val jobs = (1 to 21).toList.map { index =>
       job(index, Set(f"Skill$index%02d"), f"City$index%02d")
-        .copy(location = Location(f"Country$index%02d", f"City$index%02d", remote = false))
+        .copy(location = Location(f"Country$index%02d", Some(f"City$index%02d"), remote = false))
     }
     val result = JobDiscoveryFacets.fromJobs(jobs)
     assertEquals(result.skills, (1 to 20).toList.map(index => JobFacetBucket(f"Skill$index%02d", 1L)))

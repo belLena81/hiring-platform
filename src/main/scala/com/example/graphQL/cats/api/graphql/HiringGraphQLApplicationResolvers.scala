@@ -103,7 +103,12 @@ private[graphql] object HiringGraphQLApplicationResolvers {
           status,
           feedback,
           reason
-        )
+        ),
+        status match {
+          case ApplicationStatus.Rejected => InputFieldPaths.rejectApplication
+          case ApplicationStatus.Declined => InputFieldPaths.declineApplication
+          case _                          => InputFieldPaths.none
+        }
       )
     }
 

@@ -119,7 +119,7 @@ class MongoDatabaseProbeIntegrationSpec extends CatsEffectSuite {
       "Build hiring infrastructure",
       List("Cats Effect"),
       Set("Scala", "MongoDB"),
-      Location("Cyprus", "Nicosia", remote = true),
+      Location("Cyprus", Some("Nicosia"), remote = true),
       JobStatus.Open,
       fixtureTime,
       fixtureTime
@@ -351,23 +351,17 @@ class MongoDatabaseProbeIntegrationSpec extends CatsEffectSuite {
                 dependencies <- TestGraphQLSupport.dependencies().allocated.map(_._1)
                 http <- new HiringApiRoutes(new HealthService(rejected, diagnostics), diagnostics, dependencies)
                   .httpApp(HiringApiRoutes.HttpConfig(16L, 5.seconds))
-                response <- http(
-                  Request[IO](Method.POST, Uri.unsafeFromString("/graphql"))
-                    .withEntity(Json.obj("query" -> Json.fromString("{ readiness { status } }")))
-                )
+                response <- http(Request[IO](Method.GET, Uri.unsafeFromString("/ready")))
                 body <- response.as[Json]
                 correlated <- records.get
               } yield {
                 val id = response.headers.get(CIString("X-Request-ID")).map(_.head.value)
-                assertEquals(response.status, Status.Ok)
-                assertEquals(
-                  body.hcursor.downField("data").downField("readiness").get[String]("status"),
-                  Right("NOT_READY")
-                )
+                assertEquals(response.status, Status.ServiceUnavailable)
+                assertEquals(body.hcursor.get[String]("status"), Right("NOT_READY"))
                 val domainEvents = correlated.map(_._1)
                 assertEquals(
                   domainEvents,
-                  Vector(LogEvent.MongoProbeFailed, LogEvent.MongoAuthFailed, LogEvent.GraphQLCompleted)
+                  Vector(LogEvent.MongoProbeFailed, LogEvent.MongoAuthFailed, LogEvent.RequestRejected)
                 )
                 assert(id.exists(value => scala.util.Try(UUID.fromString(value)).isSuccess))
                 assert(correlated.forall(_._2 == id))

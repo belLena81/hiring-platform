@@ -37,7 +37,7 @@ final class AuthRateLimiterSpec extends CatsEffectSuite {
       results <- (1 to 3).toList.traverse(_ => limiter.permit(key("203.0.113.1")))
     } yield {
       assertEquals(results.take(2), List(Right(()), Right(())))
-      assertEquals(results(2), Left(AuthRateLimiter.RateLimited(60.seconds)))
+      assertEquals(results(2).left.map(_.retryAfterSeconds), Left(60L))
     }
   }
   test("IPv6 addresses in the same /64 share a bucket") {
@@ -46,7 +46,7 @@ final class AuthRateLimiterSpec extends CatsEffectSuite {
       limiter <- AuthRateLimiter.create(config); first <- limiter.permit(key("2001:db8:1:2::1"));
       sameNetwork <- limiter.permit(key("2001:db8:1:2::2")); otherNetwork <- limiter.permit(key("2001:db8:1:3::1"))
     } yield {
-      assertEquals(first, Right(())); assertEquals(sameNetwork, Left(AuthRateLimiter.RateLimited(60.seconds)));
+      assertEquals(first, Right(())); assertEquals(sameNetwork.left.map(_.retryAfterSeconds), Left(60L));
       assertEquals(otherNetwork, Right(()))
     }
   }
@@ -62,8 +62,8 @@ final class AuthRateLimiterSpec extends CatsEffectSuite {
       _ <- advance(100.millis)
       afterExpiry <- limiter.permit(key("203.0.113.1"))
     } yield {
-      assertEquals(first, Right(())); assertEquals(blocked, Left(AuthRateLimiter.RateLimited(1.second)))
-      assertEquals(stillBlocked, Left(AuthRateLimiter.RateLimited(1.second)))
+      assertEquals(first, Right(())); assertEquals(blocked.left.map(_.retryAfterSeconds), Left(1L))
+      assertEquals(stillBlocked.left.map(_.retryAfterSeconds), Left(1L))
       assertEquals(afterExpiry, Right(()))
     }
   }
@@ -80,8 +80,8 @@ final class AuthRateLimiterSpec extends CatsEffectSuite {
       _ <- limiter.permit(replacement)
       stillLimitedHot <- limiter.permit(hot)
     } yield {
-      assertEquals(limitedHot, Left(AuthRateLimiter.RateLimited(60.seconds)))
-      assertEquals(stillLimitedHot, Left(AuthRateLimiter.RateLimited(60.seconds)))
+      assertEquals(limitedHot.left.map(_.retryAfterSeconds), Left(60L))
+      assertEquals(stillLimitedHot.left.map(_.retryAfterSeconds), Left(60L))
     }
   }
   test("unique IPv6 flooding stays within the bucket bound") {
@@ -95,7 +95,7 @@ final class AuthRateLimiterSpec extends CatsEffectSuite {
       _ <- flood.traverse_(limiter.permit)
       size <- limiter.cleanUpAndSize
     } yield {
-      assertEquals(limitedHot, Left(AuthRateLimiter.RateLimited(60.seconds)))
+      assertEquals(limitedHot.left.map(_.retryAfterSeconds), Left(60L))
       assert(size <= config.maxBuckets.toLong)
     }
   }
@@ -125,7 +125,7 @@ final class AuthRateLimiterSpec extends CatsEffectSuite {
       after <- limiter.permit(victim)
     } yield {
       assert(limited.isLeft)
-      assertEquals(after, Left(AuthRateLimiter.RateLimited(60.seconds)))
+      assertEquals(after.left.map(_.retryAfterSeconds), Left(60L))
     }
   }
   test("ARR-05.1 a newcomer is still admitted through overflow while the stripe has headroom") {

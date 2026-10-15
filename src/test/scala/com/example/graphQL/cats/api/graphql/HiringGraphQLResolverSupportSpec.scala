@@ -33,30 +33,31 @@ final class HiringGraphQLResolverSupportSpec extends CatsEffectSuite {
       "Candidate",
       UserRole.Candidate,
       "secret",
-      Some(List("Scala", "Cats Effect")),
-      None,
-      None,
-      None,
-      None,
-      None,
-      None,
-      None,
-      None
+      Some(
+        ProfileGraphQLInput(
+          Some(
+            CandidateProfileGraphQLInput(Some(List("Scala", "Cats Effect")), None, None, None, None, None)
+          ),
+          None
+        )
+      )
     )
     val expected = Json.obj(
-      "availabilityStatus" -> Json.Null,
-      "currentResidenceCity" -> Json.Null,
-      "currentResidenceCountry" -> Json.Null,
-      "experienceSummary" -> Json.Null,
       "idempotencyKey" -> Json.fromString(idempotencyKey.toString),
-      "jobTitle" -> Json.Null,
       "name" -> Json.fromString("Candidate"),
-      "organizationName" -> Json.Null,
       "password" -> Json.fromString("secret"),
-      "recruiterSearchOptIn" -> Json.Null,
-      "resumeRef" -> Json.Null,
-      "role" -> Json.fromString("CANDIDATE"),
-      "skills" -> Json.arr(Json.fromString("Scala"), Json.fromString("Cats Effect"))
+      "profile" -> Json.obj(
+        "candidate" -> Json.obj(
+          "availabilityStatus" -> Json.Null,
+          "experienceSummary" -> Json.Null,
+          "recruiterSearchOptIn" -> Json.Null,
+          "residence" -> Json.Null,
+          "resumeRef" -> Json.Null,
+          "skills" -> Json.arr(Json.fromString("Scala"), Json.fromString("Cats Effect"))
+        ),
+        "recruiter" -> Json.Null
+      ),
+      "role" -> Json.fromString("CANDIDATE")
     )
     val payload = input.idempotencyPayload
     val request = idempotencyRequest(idempotencyKey, payload)
@@ -87,7 +88,7 @@ final class HiringGraphQLResolverSupportSpec extends CatsEffectSuite {
     )
     assertNotEquals(request, legacyRequest)
     assertEquals(updateJob.asJson.hcursor.get[String]("id"), Right(jobId.value.toString))
-    assertEquals(updateJob.asJson.hcursor.downField("patch").get[Option[String]]("city"), Right(None))
+    assertEquals(updateJob.asJson.hcursor.downField("job").get[Option[String]]("city"), Right(None))
 
     val firstObject = Json.obj(
       "z" -> Json.obj("second" -> Json.fromInt(2), "first" -> Json.fromInt(1)),
@@ -309,55 +310,90 @@ final class HiringGraphQLResolverSupportSpec extends CatsEffectSuite {
         GraphQLFailure("VECTOR_SEARCH_UNAVAILABLE", "Vector search unavailable", exceptional = true)
       ),
       Scenario(
-        "blank field",
+        "AC-10.1 blank field names its field",
         UseCaseError.ValidationFailed(NonEmptyList.one(DomainValidationError.BlankField("name"))),
-        GraphQLFailure("VALIDATION_FAILED", "name is required", exceptional = false)
+        GraphQLFailure("VALIDATION_FAILED", "name is required", exceptional = false, field = Some("name"))
       ),
       Scenario(
         "empty collection",
         UseCaseError.ValidationFailed(NonEmptyList.one(DomainValidationError.EmptyCollection("skills"))),
-        GraphQLFailure("VALIDATION_FAILED", "skills must not be empty", exceptional = false)
+        GraphQLFailure("VALIDATION_FAILED", "skills must not be empty", exceptional = false, field = Some("skills"))
       ),
       Scenario(
         "invalid number",
         UseCaseError.ValidationFailed(NonEmptyList.one(DomainValidationError.InvalidNumber("first", 1, 100, 101))),
-        GraphQLFailure("VALIDATION_FAILED", "first must be between 1 and 100", exceptional = false)
+        GraphQLFailure(
+          "VALIDATION_FAILED",
+          "first must be between 1 and 100",
+          exceptional = false,
+          field = Some("first")
+        )
       ),
       Scenario(
         "text too long",
         UseCaseError.ValidationFailed(NonEmptyList.one(DomainValidationError.TextTooLong("summary", 500, 501))),
-        GraphQLFailure("VALIDATION_FAILED", "summary must be at most 500 characters", exceptional = false)
+        GraphQLFailure(
+          "VALIDATION_FAILED",
+          "summary must be at most 500 characters",
+          exceptional = false,
+          field = Some("summary")
+        )
       ),
       Scenario(
         "byte length",
         UseCaseError.ValidationFailed(
           NonEmptyList.one(DomainValidationError.ByteLengthExceeded("description", 1000, 1001))
         ),
-        GraphQLFailure("VALIDATION_FAILED", "description must be at most 1000 bytes", exceptional = false)
+        GraphQLFailure(
+          "VALIDATION_FAILED",
+          "description must be at most 1000 bytes",
+          exceptional = false,
+          field = Some("description")
+        )
       ),
       Scenario(
         "short password alone",
         UseCaseError.ValidationFailed(NonEmptyList.one(DomainValidationError.PasswordTooShort(12, 5))),
-        GraphQLFailure("INVALID_PASSWORD", "password must be at least 12 bytes", exceptional = false)
+        GraphQLFailure(
+          "INVALID_PASSWORD",
+          "password must be at least 12 bytes",
+          exceptional = false,
+          field = Some("password")
+        )
       ),
       Scenario(
         "short password with another violation",
         UseCaseError.ValidationFailed(
           NonEmptyList.of(DomainValidationError.BlankField("name"), DomainValidationError.PasswordTooShort(12, 5))
         ),
-        GraphQLFailure("VALIDATION_FAILED", "name is required, password must be at least 12 bytes", exceptional = false)
+        GraphQLFailure(
+          "VALIDATION_FAILED",
+          "name is required, password must be at least 12 bytes",
+          exceptional = false,
+          field = Some("name")
+        )
       ),
       Scenario(
         "too many values",
         UseCaseError.ValidationFailed(NonEmptyList.one(DomainValidationError.TooManyValues("skills", 20, 21))),
-        GraphQLFailure("VALIDATION_FAILED", "skills must contain at most 20 values", exceptional = false)
+        GraphQLFailure(
+          "VALIDATION_FAILED",
+          "skills must contain at most 20 values",
+          exceptional = false,
+          field = Some("skills")
+        )
       ),
       Scenario(
-        "multiple validation errors",
+        "AC-10.2 multiple validation errors name the first field and join the messages",
         UseCaseError.ValidationFailed(
           NonEmptyList.of(DomainValidationError.BlankField("name"), DomainValidationError.EmptyCollection("skills"))
         ),
-        GraphQLFailure("VALIDATION_FAILED", "name is required, skills must not be empty", exceptional = false)
+        GraphQLFailure(
+          "VALIDATION_FAILED",
+          "name is required, skills must not be empty",
+          exceptional = false,
+          field = Some("name")
+        )
       )
     )
 

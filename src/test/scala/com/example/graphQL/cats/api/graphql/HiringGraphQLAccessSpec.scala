@@ -8,6 +8,7 @@ import cats.effect.IO
 import cats.effect.Ref
 import cats.syntax.all.*
 import com.example.graphQL.cats.api.graphql.{GraphQLRequest, HiringGraphQLSchema, HiringGraphQLServices}
+import com.example.graphQL.cats.domain.error.DomainValidationError
 import com.example.graphQL.cats.service.{
   ActorContext,
   AnalyticsError,
@@ -113,7 +114,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     val users =
       """query { users(first: 10) { edges { node { id } } __typename } }"""
     val update =
-      """mutation { updateMyProfile(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001", skills: ["Scala"] }) { __typename } }"""
+      """mutation { updateMyProfile(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001", profile: { candidate: { skills: ["Scala"] } } }) { __typename } }"""
     val delete =
       """mutation { deleteMyAccount(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001" }) { __typename ... on DeletionReceipt { receiptId status } } }"""
 
@@ -373,14 +374,14 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     for {
       request <- parseRequest(query)
       result <- TestGraphQLSupport
-        .context(IO.pure(ProbeResult.Ready), None)
+        .context(None)
         .use(TestGraphQLSupport.parseAndExecute(request, _))
     } yield assertEquals(result, Left(HiringGraphQLSchema.Failure.InvalidQuery))
   }
 
   test("public account mutations are unavailable until hiring setup is ready") {
     val signUp =
-      """mutation { signUp(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001", name: "Candidate", role: CANDIDATE, password: "password-password", skills: ["Scala"] }) { __typename } }"""
+      """mutation { signUp(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001", name: "Candidate", role: CANDIDATE, password: "password-password", profile: { candidate: { skills: ["Scala"] } } }) { __typename } }"""
     val login =
       """mutation { login(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001", name: "Candidate", password: "password-password" }) { __typename } }"""
     for {
@@ -603,7 +604,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
 
   test("an unauthenticated payload errors on each owner-only profile field and still resolves skills alone") {
     def signUp(selection: String) =
-      s"""mutation { signUp(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001", name: "Candidate", role: CANDIDATE, password: "password-password", skills: ["Scala"] }) { ... on AuthSuccess { user { profile { ... on CandidateProfile { $selection } } } } } }"""
+      s"""mutation { signUp(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001", name: "Candidate", role: CANDIDATE, password: "password-password", profile: { candidate: { skills: ["Scala"] } } }) { ... on AuthSuccess { user { profile { ... on CandidateProfile { $selection } } } } } }"""
     val privateFields = List("currentResidence", "availabilityStatus", "recruiterSearchOptIn")
     (
       executeWithUsers(
@@ -660,10 +661,10 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     }
   }
 
-  test("injected hiring context searches only open jobs and preserves nested recruiter batching boundary") {
+  test("AC-06.1 injected hiring context searches only open jobs and preserves nested recruiter batching boundary") {
     val query =
       """query {
-        |  jobs(first: 10, city: "Kyiv", skills: ["Scala"]) {
+        |  jobs(first: 10, filter: { city: "Kyiv", skills: ["Scala"] }) {
         |    edges {
         |      cursor
         |      node {
@@ -724,7 +725,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
   test("job search rejects malformed createdAfter instead of widening results") {
     val query =
       """query {
-        |  jobs(first: 10, createdAfter: "not-an-instant") {
+        |  jobs(first: 10, filter: { createdAfter: "not-an-instant" }) {
         |    edges { node { id } }
         | __typename
         |  }
@@ -733,7 +734,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     for {
       request <- parseRequest(query)
       context <- TestGraphQLSupport
-        .context(IO.pure(ProbeResult.Ready), Some(ActorContext(candidateId, UserRole.Candidate)))
+        .context(Some(ActorContext(candidateId, UserRole.Candidate)))
         .allocated
       result <- TestGraphQLSupport.parseAndExecute(request, context._1).guarantee(context._2)
     } yield assertEquals(result, Left(HiringGraphQLSchema.Failure.InvalidQuery))
@@ -783,7 +784,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       accountService = new RecordingAccountService(updateCalls)
       query =
         """mutation {
-          |  updateMyProfile(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001", skills: ["Scala"] }) {
+          |  updateMyProfile(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001", profile: { candidate: { skills: ["Scala"] } } }) {
           |    __typename
           | __typename
           |  }
@@ -805,7 +806,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       accountService = new RecordingAccountService(updateCalls)
       query =
         """mutation {
-          |  updateMyProfile(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001", jobTitle: "Hiring Lead" }) {
+          |  updateMyProfile(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001", profile: { recruiter: { organizationName: "", jobTitle: "Hiring Lead" } } }) {
           |    __typename
           | __typename
           |  }
@@ -931,7 +932,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       )
       request <- parseRequest(query)
       result <- TestGraphQLSupport
-        .context(IO.pure(ProbeResult.Ready), Some(ActorContext(candidateId, UserRole.Candidate)), services)
+        .context(Some(ActorContext(candidateId, UserRole.Candidate)), services)
         .use(TestGraphQLSupport.parseAndExecute(request, _))
       batches <- userBatches.get
     } yield {
@@ -1135,7 +1136,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     for {
       request <- parseRequest(query)
       result <- TestGraphQLSupport
-        .context(IO.pure(ProbeResult.Ready))
+        .context()
         .use(TestGraphQLSupport.parseAndExecute(request, _))
     } yield assertEquals(result, Left(HiringGraphQLSchema.Failure.InvalidQuery))
   }
@@ -1166,7 +1167,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
   test("signup canonical-name conflicts return a generic registration failure") {
     val query =
       """mutation {
-        |  signUp(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001", name: "Candidate", role: CANDIDATE, password: "password-password", skills: ["Scala"] }) {
+        |  signUp(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001", name: "Candidate", role: CANDIDATE, password: "password-password", profile: { candidate: { skills: ["Scala"] } } }) {
         |    __typename
         | __typename
         |  }
@@ -1215,7 +1216,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       "update" -> Json.obj(
         "idempotencyKey" -> Json.fromString("00000000-0000-0000-0000-000000000001"),
         "id" -> Json.fromString(jobId.value.toString),
-        "patch" -> Json.obj(
+        "job" -> Json.obj(
           "title" -> Json.fromString("Principal Scala Developer"),
           "description" -> Json.fromString("Build reliable services"),
           "requirements" -> Json.arr(Json.fromString("Scala")),
@@ -1237,7 +1238,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
         "name" -> Json.fromString("Candidate"),
         "role" -> Json.fromString("CANDIDATE"),
         "password" -> Json.fromString("password-password"),
-        "skills" -> Json.arr(Json.fromString("Scala"))
+        "profile" -> Json.obj("candidate" -> Json.obj("skills" -> Json.arr(Json.fromString("Scala"))))
       )
     )
 
@@ -1271,6 +1272,526 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
         signupJson.hcursor.downField("data").downField("signUp").get[String]("__typename"),
         Right("DomainError")
       )
+    }
+  }
+
+  // --- Public contract: error codes, pagination, profile input, typed identifiers --------------------------------
+
+  private val candidateActor = ActorContext(candidateId, UserRole.Candidate)
+  private val recruiterActor = ActorContext(recruiterId, UserRole.Recruiter)
+
+  private def outputFields(typeName: String): Set[String] =
+    HiringGraphQLSchema.schema.outputTypes(typeName) match {
+      case objectType: sangria.schema.ObjectType[?, ?] => objectType.fields.map(_.name).toSet
+      case other                                       => fail(s"unexpected type $other")
+    }
+
+  test("AC-03.3 a top-level authentication refusal keeps the UNAUTHORIZED extensions code string") {
+    execute("query { me { id } }", None).map(json => assertEquals(errorCode(json), Right("UNAUTHORIZED")))
+  }
+
+  test("AC-04.2 jobs returns the identifier of its search and no other connection carries one") {
+    execute("query { jobs(first: 2) { searchId edges { cursor } pageInfo { hasNextPage } } }", Some(candidateActor))
+      .map { json =>
+        val searchId = json.hcursor.downField("data").downField("jobs").get[String]("searchId")
+        assert(searchId.toOption.exists(value => scala.util.Try(UUID.fromString(value)).isSuccess), clue(json))
+        assert(outputFields("JobSearchConnection").contains("searchId"))
+        List(
+          "JobConnection",
+          "ApplicationConnection",
+          "ApplicationEventConnection",
+          "UserConnection",
+          "NearbyJobsConnection"
+        ).foreach(name => assert(!outputFields(name).contains("searchId"), name))
+      }
+  }
+
+  test("AC-04.3 ranked results are documented bounded top-N lists with no pageInfo") {
+    assertEquals(outputFields("RankedJobResults"), Set("results"))
+    assertEquals(outputFields("RankedCandidateResults"), Set("results"))
+    List("semanticJobSearch", "recommendedJobs", "candidateMatches").foreach { field =>
+      val description = HiringGraphQLSchema.schema.query.fieldsByName(field).head.description.getOrElse("")
+      assert(description.contains("bounded top-N list") && description.contains("no pageInfo"), description)
+    }
+  }
+
+  test("AC-06.3 semanticJobSearch rejects the same invalid filter as the other job discovery operations") {
+    val blankCity =
+      """query { semanticJobSearch(query: "scala", filter: { city: " " }, first: 5) { results { searchId } } }"""
+    val tooManySkills = {
+      val skills = (1 to 101).map(index => s""""Skill$index"""").mkString(", ")
+      s"""query { semanticJobSearch(query: "scala", filter: { skills: [$skills] }, first: 5) { results { searchId } } }"""
+    }
+    List(blankCity, tooManySkills).traverse(executeWithSemanticSearch(_, Some(candidateActor))).map { results =>
+      results.foreach(json => assertEquals(errorCode(json), Right("INVALID_SEARCH_FILTER"), clue(json)))
+    }
+  }
+
+  test("AC-08.1 the typed identifier scalars are used on inputs and outputs, and a malformed one fails coercion") {
+    val sdl = HiringGraphQLSchema.sdl
+    List(
+      "workflowId: InterviewWorkflowID!",
+      "searchId: SearchID",
+      "id: ApplicationEventID!",
+      "receiptId: DeletionReceiptID!",
+      "id: InterviewWorkflowID!"
+    ).foreach(line => assert(sdl.contains(line), line))
+    assert(sdl.contains("type CandidateMatchCandidate {\n  id: UserID!"))
+    assert(!sdl.contains("  actorId:"), "ApplicationEvent exposes the role, not the actor identifier")
+    executeEitherWithUsers(
+      """query { jobs(first: 1, searchId: "not-a-uuid") { searchId } }""",
+      Some(candidateActor),
+      List(candidate, recruiter),
+      TestGraphQLSupport.accountService,
+      Json.obj(),
+      IO.pure(ProbeResult.Ready),
+      AnalyticsReportingUseCases.unavailable,
+      _ => EmbeddingCoverageUseCases.denyAll[IO]
+    ).map(result => assertEquals(result, Left(HiringGraphQLSchema.Failure.InvalidQuery)))
+  }
+
+  private def historyEvent(id: Long, role: Option[UserRole]): ApplicationEvent =
+    ApplicationEvent(
+      Identifiers.ApplicationEventId(new UUID(0L, id)),
+      applicationId,
+      Some(ApplicationStatus.Created),
+      ApplicationStatus.Accepted,
+      recruiterId,
+      now.plusSeconds(id),
+      None,
+      None,
+      role
+    )
+
+  private val historyQuery =
+    s"""query { applicationHistory(applicationId: "${applicationId.value}", first: 10) {
+       |  edges { node { id newStatus actorRole } } } }""".stripMargin
+
+  test("AC-08.2 AC-08.3 application history exposes the actor's role and reads a stored event without one as null") {
+    val events = Vector(historyEvent(1, Some(UserRole.Recruiter)), historyEvent(2, None))
+    executeWithUsers(historyQuery, Some(recruiterActor), List(candidate, recruiter), events = events).map { json =>
+      val nodes = json.hcursor.downField("data").downField("applicationHistory").downField("edges").values.get.toList
+      val roles = nodes.map(_.hcursor.downField("node").downField("actorRole").focus.get)
+      assertEquals(roles.toSet, Set(Json.fromString("RECRUITER"), Json.Null), clue(json))
+      assert(!json.noSpaces.contains(recruiterId.value.toString), "the actor's identifier is not exposed")
+      assert(!outputFields("ApplicationEvent").contains("actorId"))
+      assertEquals(
+        nodes.map(_.hcursor.downField("node").get[String]("id").isRight).distinct,
+        List(true)
+      )
+    }
+  }
+
+  test("AC-08.4 a candidate cannot read the history of another candidate's application") {
+    val stranger = candidate.copy(id = UserId(UUID.fromString("10000000-0000-0000-0000-0000000000f1")), name = "Other")
+    val events = Vector(historyEvent(1, Some(UserRole.Recruiter)))
+    executeWithUsers(
+      historyQuery,
+      Some(ActorContext(stranger.id, UserRole.Candidate)),
+      List(candidate, recruiter, stranger),
+      events = events
+    ).map { json =>
+      assert(json.hcursor.downField("errors").succeeded, clue(json))
+      assert(!json.noSpaces.contains("RECRUITER"), clue(json))
+    }
+  }
+
+  test("AC-09.1 recordJobView returns the event identifier it recorded") {
+    val eventId = "20000000-0000-0000-0000-000000000001"
+    val query =
+      s"""mutation { recordJobView(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001",
+         |  eventId: "$eventId", jobId: "${jobId.value}" }) {
+         |  __typename ... on InteractionSuccess { eventId } } }""".stripMargin
+    execute(query, Some(candidateActor)).map { json =>
+      val payload = json.hcursor.downField("data").downField("recordJobView")
+      assertEquals(payload.get[String]("__typename"), Right("InteractionSuccess"), clue(json))
+      assertEquals(payload.get[String]("eventId"), Right(eventId))
+    }
+  }
+
+  private def createJobQuery(title: String, description: String) =
+    s"""mutation { createJob(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001",
+       |  title: "$title", description: "$description", requirements: ["Scala"], skills: ["Scala"],
+       |  country: "Cyprus", remote: true }) {
+       |  __typename ... on ValidationError { code message field } } }""".stripMargin
+
+  test("AC-10.1 a blank title returns a ValidationError that names the title field") {
+    execute(createJobQuery(" ", "Build platform services"), Some(recruiterActor)).map { json =>
+      val payload = json.hcursor.downField("data").downField("createJob")
+      assertEquals(payload.get[String]("__typename"), Right("ValidationError"), clue(json))
+      assertEquals(payload.get[String]("code"), Right("VALIDATION_FAILED"))
+      assertEquals(payload.get[String]("field"), Right("title"))
+    }
+  }
+
+  test("AC-10.2 two invalid fields return the first field and a message joining both") {
+    execute(createJobQuery(" ", " "), Some(recruiterActor)).map { json =>
+      val payload = json.hcursor.downField("data").downField("createJob")
+      val message = payload.get[String]("message").getOrElse("")
+      assertEquals(payload.get[String]("field"), Right("title"), clue(json))
+      assert(message.startsWith("title") && message.contains("description"), message)
+    }
+  }
+
+  private final class ValidationFailingAccountService(errors: cats.data.NonEmptyList[DomainValidationError])
+      extends AccountUseCases[IO] {
+    private def failed[A]: UseCaseF[IO, A] = EitherT.leftT(UseCaseError.ValidationFailed(errors))
+    override def signUp(request: IdempotencyRequest, input: SignUpInput): UseCaseF[IO, (User, AccountToken)] = failed
+    override def login(request: IdempotencyRequest, input: LoginInput): UseCaseF[IO, (User, AccountToken)] = failed
+    override def me(actor: ActorContext): UseCaseF[IO, User] = failed
+    override def updateMyProfile(
+        request: IdempotencyRequest,
+        actor: ActorContext,
+        input: AccountProfileInput
+    ): UseCaseF[IO, User] = failed
+    override def deleteMyAccount(request: IdempotencyRequest, actor: ActorContext): UseCaseF[IO, String] = failed
+    override def accountDeletionStatus(actor: ActorContext, receiptId: String): UseCaseF[IO, AccountDeletionStatus] =
+      EitherT.rightT(AccountDeletionStatus.NotFound)
+    override def listUsers(actor: ActorContext, page: UserPageRequest): UseCaseF[IO, List[User]] = failed
+  }
+
+  private def fieldOf(json: Json, operation: String): Option[String] =
+    json.hcursor.downField("data").downField(operation).downField("field").focus.flatMap(_.asString)
+
+  test("AC-10.3 ValidationError.field is the input path of the operation, per account operation") {
+    val loginQuery =
+      """mutation { login(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001", name: "x", password: "password-password" }) {
+        |  ... on ValidationError { field } } }""".stripMargin
+    val signUp = signUpQuery("CANDIDATE", """, profile: { candidate: { skills: ["Scala"] } }""")
+      .replace("... on ValidationError { code field }", "... on ValidationError { field }")
+    val update = updateProfileQuery("""{ candidate: { skills: ["Scala"] } }""")
+      .replace("... on ValidationError { code field }", "... on ValidationError { field }")
+    val cases = List(
+      (
+        signUp,
+        "signUp",
+        DomainValidationError.BlankField("currentResidence.country"),
+        Some("profile.candidate.residence.country")
+      ),
+      (
+        signUp,
+        "signUp",
+        DomainValidationError.BlankField("organizationName"),
+        Some("profile.recruiter.organizationName")
+      ),
+      (signUp, "signUp", DomainValidationError.BlankField("name"), Some("name")),
+      (signUp, "signUp", DomainValidationError.BlankField("email"), None),
+      (
+        update,
+        "updateMyProfile",
+        DomainValidationError.TooManyValues("skills", 100, 101),
+        Some("profile.candidate.skills")
+      ),
+      (
+        update,
+        "updateMyProfile",
+        DomainValidationError.TextTooLong("jobTitle", 10, 11),
+        Some("profile.recruiter.jobTitle")
+      ),
+      (loginQuery, "login", DomainValidationError.BlankField("password"), Some("password"))
+    )
+    cases.traverse { case (query, operation, error, expected) =>
+      val actor = if (operation == "updateMyProfile") Some(candidateActor) else None
+      executeWithUsers(
+        query,
+        actor,
+        List(candidate, recruiter),
+        new ValidationFailingAccountService(cats.data.NonEmptyList.one(error))
+      )
+        .map(json => assertEquals(fieldOf(json, operation), expected, clue((operation, error, json))))
+    }
+  }
+
+  test("AC-10.3 job and application operations map their field names to their input paths") {
+    val update =
+      s"""mutation { updateJob(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001", id: "${jobId.value}",
+         |  job: { title: " ", description: "d", requirements: ["r"], skills: ["Scala"], country: "Cyprus", remote: true } }) {
+         |  ... on ValidationError { field } } }""".stripMargin
+    val tooLong = "x" * (FieldLimits.LongTextMaxChars + 1)
+    val reject =
+      s"""mutation { rejectApplication(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001",
+         |  applicationId: "${applicationId.value}", feedback: "${tooLong}" }) { ... on ValidationError { field } } }""".stripMargin
+    for {
+      updated <- execute(update, Some(recruiterActor))
+      rejected <- execute(reject, Some(recruiterActor))
+    } yield {
+      assertEquals(fieldOf(updated, "updateJob"), Some("job.title"), clue(updated))
+      assertEquals(fieldOf(rejected, "rejectApplication"), Some("feedback"), clue(rejected))
+      assertEquals(InputFieldPaths.declineApplication("reason"), Some("reason"))
+      assertEquals(InputFieldPaths.declineApplication("title"), None)
+    }
+  }
+
+  private final class CapturingAccountService(
+      signUps: Ref[IO, Vector[SignUpInput]],
+      updates: Ref[IO, Vector[(UserRole, UserProfile)]]
+  ) extends AccountUseCases[IO] {
+    private def unsupported[A]: UseCaseF[IO, A] =
+      EitherT.leftT(UseCaseError.Account(com.example.graphQL.cats.service.AccountError.ProfileUnsupportedForRole))
+
+    override def signUp(request: IdempotencyRequest, input: SignUpInput): UseCaseF[IO, (User, AccountToken)] =
+      EitherT.liftF[IO, UseCaseError, Unit](signUps.update(_ :+ input)) *>
+        EitherT.rightT((recruiter, AccountToken("token", now.plusSeconds(60))))
+    override def login(request: IdempotencyRequest, input: LoginInput): UseCaseF[IO, (User, AccountToken)] =
+      unsupported
+    override def me(actor: ActorContext): UseCaseF[IO, User] = unsupported
+
+    // Mirrors the service rule that the profile variant must match the caller's role.
+    override def updateMyProfile(
+        request: IdempotencyRequest,
+        actor: ActorContext,
+        input: AccountProfileInput
+    ): UseCaseF[IO, User] =
+      EitherT.liftF[IO, UseCaseError, Unit](updates.update(_ :+ (actor.role -> input.profile))) *> {
+        (actor.role, input.profile) match {
+          case (UserRole.Candidate, _: UserProfile.Candidate) => EitherT.rightT[IO, UseCaseError](candidate)
+          case (UserRole.Recruiter, _: UserProfile.Recruiter) => EitherT.rightT[IO, UseCaseError](recruiter)
+          case _                                              =>
+            EitherT.leftT[IO, User](
+              UseCaseError.Account(com.example.graphQL.cats.service.AccountError.ProfileRoleMismatch)
+            )
+        }
+      }
+    override def deleteMyAccount(request: IdempotencyRequest, actor: ActorContext): UseCaseF[IO, String] = unsupported
+    override def accountDeletionStatus(actor: ActorContext, receiptId: String): UseCaseF[IO, AccountDeletionStatus] =
+      EitherT.rightT(AccountDeletionStatus.NotFound)
+    override def listUsers(actor: ActorContext, page: UserPageRequest): UseCaseF[IO, List[User]] = unsupported
+  }
+
+  private def withCapturingService[A](
+      run: (AccountUseCases[IO], IO[Vector[SignUpInput]], IO[Vector[(UserRole, UserProfile)]]) => IO[A]
+  ): IO[A] =
+    for {
+      signUps <- Ref.of[IO, Vector[SignUpInput]](Vector.empty)
+      updates <- Ref.of[IO, Vector[(UserRole, UserProfile)]](Vector.empty)
+      result <- run(new CapturingAccountService(signUps, updates), signUps.get, updates.get)
+    } yield result
+
+  private def signUpQuery(role: String, profile: String) =
+    s"""mutation { signUp(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001", name: "Rita",
+       |  role: $role, password: "password-password"$profile }) {
+       |  __typename ... on ValidationError { code field } ... on DomainError { code } } }""".stripMargin
+
+  private def updateProfileQuery(profile: String) =
+    s"""mutation { updateMyProfile(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001", profile: $profile }) {
+       |  __typename ... on ValidationError { code field } ... on DomainError { code } } }""".stripMargin
+
+  test("AC-05.1 a recruiter signs up with the recruiter variant and the service receives a recruiter profile") {
+    val query = signUpQuery("RECRUITER", """, profile: { recruiter: { organizationName: "Acme", jobTitle: "Lead" } }""")
+    withCapturingService { (service, signUps, _) =>
+      for {
+        json <- executeWithUsers(query, None, List(candidate, recruiter), service)
+        received <- signUps
+      } yield {
+        assertEquals(json.hcursor.downField("data").downField("signUp").get[String]("__typename"), Right("AuthSuccess"))
+        assertEquals(
+          received,
+          Vector(
+            SignUpInput(
+              "Rita",
+              UserRole.Recruiter,
+              "password-password",
+              Some(UserProfile.Recruiter(RecruiterProfile("Acme", Some("Lead"))))
+            )
+          )
+        )
+      }
+    }
+  }
+
+  test("AC-05.4 a residence with only a country stores no city, and omitting residence clears it") {
+    val withCountry = updateProfileQuery("""{ candidate: { skills: ["Scala"], residence: { country: "DE" } } }""")
+    val withoutResidence = updateProfileQuery("""{ candidate: { skills: ["Scala"] } }""")
+    withCapturingService { (service, _, updates) =>
+      for {
+        _ <- executeWithUsers(withCountry, Some(candidateActor), List(candidate, recruiter), service)
+        _ <- executeWithUsers(withoutResidence, Some(candidateActor), List(candidate, recruiter), service)
+        received <- updates
+      } yield {
+        val residences = received.collect { case (_, UserProfile.Candidate(profile)) => profile.currentResidence }
+        assertEquals(residences, Vector(Some(CandidateResidence("DE", None)), None))
+      }
+    }
+  }
+
+  test("AC-05.2 both profile variants or neither fail validation before any resolver runs") {
+    val inputs = List(
+      updateProfileQuery("""{ candidate: { skills: ["Scala"] }, recruiter: { organizationName: "Acme" } }"""),
+      updateProfileQuery("{ }")
+    )
+    withCapturingService { (service, _, updates) =>
+      for {
+        results <- inputs.traverse(query =>
+          executeEitherWithUsers(
+            query,
+            Some(candidateActor),
+            List(candidate, recruiter),
+            service,
+            Json.obj(),
+            IO.pure(ProbeResult.Ready),
+            AnalyticsReportingUseCases.unavailable,
+            _ => EmbeddingCoverageUseCases.denyAll[IO]
+          )
+        )
+        received <- updates
+      } yield {
+        assertEquals(results, List.fill(2)(Left(HiringGraphQLSchema.Failure.InvalidQuery)))
+        assertEquals(received, Vector.empty)
+      }
+    }
+  }
+
+  test("AC-05.2 when query validation is bypassed the resolver still rejects both or no variants itself") {
+    val mutation =
+      """mutation Update($input: UpdateMyProfileInput!) {
+        |  updateMyProfile(input: $input) { __typename ... on ValidationError { code field } }
+        |}""".stripMargin
+    val key = Json.fromString("00000000-0000-0000-0000-000000000001")
+    val candidateVariant = Json.obj("skills" -> Json.arr(Json.fromString("Scala")))
+    val recruiterVariant = Json.obj("organizationName" -> Json.fromString("Acme"))
+    val variables = List(
+      Json.obj("input" -> Json.obj("idempotencyKey" -> key, "profile" -> Json.obj())),
+      Json.obj(
+        "input" -> Json.obj(
+          "idempotencyKey" -> key,
+          "profile" -> Json.obj("candidate" -> candidateVariant, "recruiter" -> recruiterVariant)
+        )
+      )
+    )
+    withCapturingService { (service, _, updates) =>
+      for {
+        results <- variables.traverse(vars =>
+          executeWithUsers(
+            mutation,
+            Some(candidateActor),
+            List(candidate, recruiter),
+            service,
+            vars,
+            unvalidated = true
+          )
+        )
+        received <- updates
+      } yield {
+        results.foreach { json =>
+          val payload = json.hcursor.downField("data").downField("updateMyProfile")
+          assertEquals(payload.get[String]("__typename"), Right("ValidationError"), clue(json))
+          assertEquals(payload.get[String]("field"), Right("profile"))
+        }
+        assertEquals(received, Vector.empty)
+      }
+    }
+  }
+
+  test("AC-15.2 a cached document is validated again, so an invalid oneOf variable is refused on the second request") {
+    val mutation =
+      """mutation Update($profile: ProfileInput!) {
+        |  updateMyProfile(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001", profile: $profile }) { __typename }
+        |}""".stripMargin
+    val bad = Json.obj(
+      "profile" -> Json.obj(
+        "candidate" -> Json.obj(),
+        "recruiter" -> Json.obj("organizationName" -> Json.fromString("Acme"))
+      )
+    )
+    withCapturingService { (service, _, updates) =>
+      executeEitherWithUsers(
+        mutation,
+        Some(candidateActor),
+        List(candidate, recruiter),
+        service,
+        bad,
+        IO.pure(ProbeResult.Ready),
+        AnalyticsReportingUseCases.unavailable,
+        _ => EmbeddingCoverageUseCases.denyAll[IO],
+        warmedCache = true
+      ).flatMap(result => updates.map(received => (result, received))).map { case (result, received) =>
+        assertEquals(result, Left(HiringGraphQLSchema.Failure.InvalidQuery))
+        assertEquals(received, Vector.empty)
+      }
+    }
+  }
+
+  test("AC-15.3 a cached document with a missing required variable is refused on the second request") {
+    val mutation =
+      """mutation Update($profile: ProfileInput!) {
+        |  updateMyProfile(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001", profile: $profile }) { __typename }
+        |}""".stripMargin
+    withCapturingService { (service, _, updates) =>
+      executeEitherWithUsers(
+        mutation,
+        Some(candidateActor),
+        List(candidate, recruiter),
+        service,
+        Json.obj(),
+        IO.pure(ProbeResult.Ready),
+        AnalyticsReportingUseCases.unavailable,
+        _ => EmbeddingCoverageUseCases.denyAll[IO],
+        warmedCache = true
+      ).flatMap(result => updates.map(received => (result, received))).map { case (result, received) =>
+        assertEquals(result, Left(HiringGraphQLSchema.Failure.InvalidQuery))
+        assertEquals(received, Vector.empty)
+      }
+    }
+  }
+
+  test("AC-05.3 a variant that does not match the caller's role is the service's PROFILE_ROLE_MISMATCH") {
+    val recruiterVariant = updateProfileQuery("""{ recruiter: { organizationName: "Acme" } }""")
+    val candidateVariant = updateProfileQuery("""{ candidate: { skills: ["Scala"] } }""")
+    withCapturingService { (service, _, updates) =>
+      for {
+        candidateSendsRecruiter <- executeWithUsers(
+          recruiterVariant,
+          Some(candidateActor),
+          List(candidate, recruiter),
+          service
+        )
+        recruiterSendsCandidate <- executeWithUsers(
+          candidateVariant,
+          Some(recruiterActor),
+          List(candidate, recruiter),
+          service
+        )
+        received <- updates
+      } yield {
+        List(candidateSendsRecruiter, recruiterSendsCandidate).foreach { json =>
+          val payload = json.hcursor.downField("data").downField("updateMyProfile")
+          assertEquals(payload.get[String]("__typename"), Right("DomainError"), clue(json))
+          assertEquals(payload.get[String]("code"), Right("PROFILE_ROLE_MISMATCH"))
+        }
+        assertEquals(received.size, 2)
+      }
+    }
+  }
+
+  test("AC-05.3 an Admin gets PROFILE_UNSUPPORTED_FOR_ROLE without reaching the service") {
+    withCapturingService { (service, _, updates) =>
+      for {
+        json <- executeWithUsers(
+          updateProfileQuery("""{ candidate: { skills: ["Scala"] } }"""),
+          Some(ActorContext(adminId, UserRole.Admin)),
+          List(admin),
+          service
+        )
+        received <- updates
+      } yield {
+        val payload = json.hcursor.downField("data").downField("updateMyProfile")
+        assertEquals(payload.get[String]("code"), Right("PROFILE_UNSUPPORTED_FOR_ROLE"), clue(json))
+        assertEquals(received, Vector.empty)
+      }
+    }
+  }
+
+  test("AC-05.0 a candidate or recruiter sign-up without a profile is a ValidationError naming profile") {
+    withCapturingService { (service, signUps, _) =>
+      for {
+        json <- executeWithUsers(signUpQuery("CANDIDATE", ""), None, List(candidate, recruiter), service)
+        received <- signUps
+      } yield {
+        val payload = json.hcursor.downField("data").downField("signUp")
+        assertEquals(payload.get[String]("__typename"), Right("ValidationError"), clue(json))
+        assertEquals(payload.get[String]("field"), Right("profile"))
+        assertEquals(received, Vector.empty)
+      }
     }
   }
 
@@ -1344,7 +1865,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       )
       request <- parseRequest(query)
       result <- TestGraphQLSupport
-        .context(IO.pure(ProbeResult.Ready), actor, services)
+        .context(actor, services)
         .use(TestGraphQLSupport.parseAndExecute(request, _))
     } yield result.fold(failure => fail(failure.toString), identity)
   }
@@ -1358,7 +1879,10 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       hiringReady: IO[ProbeResult] = IO.pure(ProbeResult.Ready),
       analyticsReporting: AnalyticsReportingUseCases[IO] = AnalyticsReportingUseCases.unavailable,
       embeddingCoverage: com.example.graphQL.cats.service.port.UserRepository[IO] => EmbeddingCoverageUseCases[IO] =
-        _ => EmbeddingCoverageUseCases.denyAll[IO]
+        _ => EmbeddingCoverageUseCases.denyAll[IO],
+      events: Vector[ApplicationEvent] = Vector.empty,
+      warmedCache: Boolean = false,
+      unvalidated: Boolean = false
   ): IO[Json] =
     executeEitherWithUsers(
       query,
@@ -1368,7 +1892,10 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       variables,
       hiringReady,
       analyticsReporting,
-      embeddingCoverage
+      embeddingCoverage,
+      events,
+      warmedCache,
+      unvalidated
     )
       .map(_.fold(failure => fail(failure.toString), identity))
 
@@ -1380,13 +1907,16 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       variables: Json = Json.obj(),
       hiringReady: IO[ProbeResult] = IO.pure(ProbeResult.Ready),
       analyticsReporting: AnalyticsReportingUseCases[IO] = AnalyticsReportingUseCases.unavailable,
-      embeddingCoverage: com.example.graphQL.cats.service.port.UserRepository[IO] => EmbeddingCoverageUseCases[IO]
+      embeddingCoverage: com.example.graphQL.cats.service.port.UserRepository[IO] => EmbeddingCoverageUseCases[IO],
+      events: Vector[ApplicationEvent] = Vector.empty,
+      warmedCache: Boolean = false,
+      unvalidated: Boolean = false
   ): IO[Either[HiringGraphQLSchema.Failure, Json]] = {
     for {
       usersRef <- Ref.of[IO, Map[UserId, User]](users.map(user => user.id -> user).toMap)
       jobsRef <- Ref.of[IO, Map[JobId, Job]](List(openJob, closedJob).map(job => job.id -> job).toMap)
       applicationsRef <- Ref.of[IO, Map[ApplicationId, Application]](Map(application.id -> application))
-      eventsRef <- Ref.of[IO, Vector[ApplicationEvent]](Vector.empty)
+      eventsRef <- Ref.of[IO, Vector[ApplicationEvent]](events)
       nextCreateError <- Ref.of[IO, Option[com.example.graphQL.cats.service.RepositoryError]](None)
       users = InMemoryUsers(
         usersRef,
@@ -1416,10 +1946,59 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       )
       request <- parseRequest(query, variables)
       result <- TestGraphQLSupport
-        .context(IO.pure(ProbeResult.Ready), actor, services, hiringReady)
-        .use(TestGraphQLSupport.parseAndExecute(request, _))
+        .context(actor, services, hiringReady)
+        .use(context =>
+          if (warmedCache || unvalidated) executeFromWarmedCache(request, context, unvalidated)
+          else TestGraphQLSupport.parseAndExecute(request, context)
+        )
     } yield result
   }
+
+  /** Runs the document the way a repeated request does: the first, validated parse is cached and the second request
+    * reuses it without query validation.
+    */
+  /** Runs a document with query validation switched off, to prove the resolvers do not rely on it. */
+  private def executeWithoutQueryValidation(
+      request: GraphQLRequest,
+      document: sangria.ast.Document,
+      context: RequestContext
+  ): IO[Either[HiringGraphQLSchema.Failure, Json]] =
+    IO.executionContext.flatMap { executionContext =>
+      given scala.concurrent.ExecutionContext = executionContext
+      import sangria.marshalling.circe.*
+      IO.fromFuture(
+        IO(
+          sangria.execution.Executor.execute(
+            HiringGraphQLSchema.schema,
+            document,
+            context,
+            variables = request.variables,
+            queryValidator = sangria.validation.QueryValidator.empty,
+            deferredResolver = HiringGraphQLSchemaAssembly.deferredResolver
+          )
+        )
+      ).map(Right(_))
+    }
+
+  private def executeFromWarmedCache(
+      request: GraphQLRequest,
+      context: RequestContext,
+      unvalidated: Boolean
+  ): IO[Either[HiringGraphQLSchema.Failure, Json]] =
+    GraphQLDocumentCache.resource.use { cache =>
+      for {
+        fresh <- cache.document(request.query)
+        _ <- fresh.traverse_(document => cache.store(request.query, document.document))
+        cached <- cache.document(request.query)
+        result <- cached match {
+          case Right(document) =>
+            assert(document.cached, "the second parse must come from the cache")
+            if (unvalidated) executeWithoutQueryValidation(request, document.document, context)
+            else HiringGraphQLSchema.executeInContext(request, document, context)
+          case Left(failure) => IO.pure(Left(failure))
+        }
+      } yield result
+    }
 
   private def encodeCursor(json: Json): String =
     Base64.getUrlEncoder.withoutPadding().encodeToString(json.noSpaces.getBytes(StandardCharsets.UTF_8))
@@ -1613,7 +2192,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       "Build backend services",
       List("Scala"),
       Set("Scala", "Cats Effect"),
-      Location("Ukraine", "Kyiv", remote = true),
+      Location("Ukraine", Some("Kyiv"), remote = true),
       status,
       now,
       now

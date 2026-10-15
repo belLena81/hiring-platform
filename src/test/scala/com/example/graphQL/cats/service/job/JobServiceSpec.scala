@@ -43,7 +43,7 @@ class JobServiceSpec extends CatsEffectSuite {
         " Build services ",
         List(" Scala "),
         Set(" Cats Effect "),
-        Location("Cyprus", "Nicosia", remote = true),
+        Location("Cyprus", Some("Nicosia"), remote = true),
         JobStatus.Draft
       )
       created <- service
@@ -73,7 +73,7 @@ class JobServiceSpec extends CatsEffectSuite {
             "Build services",
             List("Scala"),
             Set("Scala"),
-            Location("Cyprus", "Nicosia", remote = true),
+            Location("Cyprus", Some("Nicosia"), remote = true),
             JobStatus.Closed
           )
         )
@@ -91,7 +91,7 @@ class JobServiceSpec extends CatsEffectSuite {
       "Build updated services",
       List("Scala", "Cats Effect"),
       Set("Scala", "MongoDB"),
-      Location("Cyprus", "Nicosia", remote = true)
+      Location("Cyprus", Some("Nicosia"), remote = true)
     )
     for {
       users <- Ref.of[IO, Map[UserId, User]](Map(recruiterId -> recruiter, candidateId -> candidate))
@@ -102,7 +102,7 @@ class JobServiceSpec extends CatsEffectSuite {
         "Build services",
         List("Scala"),
         Set("Cats Effect"),
-        Location("Cyprus", "Nicosia", remote = true),
+        Location("Cyprus", Some("Nicosia"), remote = true),
         JobStatus.Open
       )
       created <- service.createJob(request("create"), ActorContext(recruiterId, UserRole.Recruiter), input).value
@@ -127,7 +127,7 @@ class JobServiceSpec extends CatsEffectSuite {
       "Build services",
       List("Scala"),
       Set("Cats Effect"),
-      Location("Cyprus", "Nicosia", remote = false, Some(initialPoint)),
+      Location("Cyprus", Some("Nicosia"), remote = false, Some(initialPoint)),
       JobStatus.Open
     )
     for {
@@ -163,7 +163,7 @@ class JobServiceSpec extends CatsEffectSuite {
 
   test("createJob and updateJob reject invalid coordinates without changing persisted jobs") {
     val initialPoint = GeoPoint(35.2, 33.4)
-    val existing = openJob.copy(location = Location("Cyprus", "Nicosia", remote = false, Some(initialPoint)))
+    val existing = openJob.copy(location = Location("Cyprus", Some("Nicosia"), remote = false, Some(initialPoint)))
     val invalidLocation = existing.location.copy(coordinates = Some(GeoPoint(35.2, 181d)))
     val expectedError =
       UseCaseError.ValidationFailed(cats.data.NonEmptyList.one(DomainValidationError.InvalidCoordinates))
@@ -226,7 +226,7 @@ class JobServiceSpec extends CatsEffectSuite {
             "Build services",
             List("Scala"),
             Set("Scala"),
-            Location("Cyprus", "Nicosia", remote = true),
+            Location("Cyprus", Some("Nicosia"), remote = true),
             JobStatus.Open
           )
         )
@@ -270,7 +270,7 @@ class JobServiceSpec extends CatsEffectSuite {
             "Build services",
             List("Scala"),
             Set("Scala"),
-            Location("Cyprus", "Nicosia", true),
+            Location("Cyprus", Some("Nicosia"), true),
             JobStatus.Draft
           )
         )
@@ -302,7 +302,7 @@ class JobServiceSpec extends CatsEffectSuite {
             "Build services",
             List("Scala"),
             Set("Scala"),
-            Location("Cyprus", "Nicosia", remote = true),
+            Location("Cyprus", Some("Nicosia"), remote = true),
             JobStatus.Open
           )
         )

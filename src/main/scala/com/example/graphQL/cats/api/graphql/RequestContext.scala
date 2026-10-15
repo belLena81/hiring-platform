@@ -51,7 +51,6 @@ final case class HiringGraphQLServices(
 final case class EmailVisibility(userId: UserId)
 
 final case class RequestContextParameters(
-    probe: IO[ProbeResult],
     actor: Option[ActorContext],
     hiring: HiringGraphQLServices,
     ensureHiringReady: IO[ProbeResult],
@@ -71,7 +70,6 @@ final class RequestContext private (
     sangriaAdapter: HiringGraphQLSangriaAdapter,
     closed: Deferred[IO, Unit],
     spanContext: Option[SpanContext],
-    readinessProbe: IO[ProbeResult],
     hiringReadinessProbe: IO[ProbeResult],
     viewer: Option[UseCaseF[IO, AuthenticatedActor]],
     viewerInvalidated: Ref[IO, Boolean]
@@ -83,8 +81,6 @@ final class RequestContext private (
   private[graphql] def discoveryMaxRoots: Int = parameters.discoveryMaxRoots
 
   private[graphql] def schemaExposure: Boolean = parameters.schemaExposure
-
-  def readiness: IO[ProbeResult] = readinessProbe
 
   def hiringAvailable: IO[ProbeResult] = hiringReadinessProbe
 
@@ -203,7 +199,6 @@ object RequestContext {
   ): Resource[IO, RequestContext] =
     for {
       closed <- Resource.eval(Deferred[IO, Unit])
-      memoized <- Resource.eval(parameters.probe.memoize)
       memoizedHiringReady <- Resource.eval(parameters.ensureHiringReady.memoize)
       memoizedViewer <- Resource.eval(
         parameters.actor
@@ -216,7 +211,6 @@ object RequestContext {
         sangriaAdapter,
         closed,
         spanContext,
-        memoized,
         memoizedHiringReady,
         memoizedViewer,
         viewerInvalidated

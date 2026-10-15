@@ -5,12 +5,19 @@ import io.circe.Json
 import sangria.ast
 import sangria.execution.Executor
 import sangria.marshalling.circe.*
-import sangria.renderer.SchemaRenderer
+import sangria.renderer.{SchemaFilter, SchemaRenderer}
 import sangria.schema.Schema
+import sangria.validation.QueryValidator
 
 object HiringGraphQLSchema {
   lazy val schema: Schema[RequestContext, Unit] = HiringGraphQLSchemaAssembly.schema
-  lazy val sdl: String = SchemaRenderer.renderSchema(schema) + "\n"
+  // The default filter hides every Sangria built-in scalar by name, including the declared `Long`; only the GraphQL
+  // built-ins are hidden here, so the SDL declares `scalar Long`.
+  // The renderer treats `@oneOf` as built in and omits its declaration, but the SDL uses it; declare it so that strict
+  // SDL consumers accept the document.
+  lazy val sdl: String =
+    "directive @oneOf on INPUT_OBJECT\n\n" +
+      SchemaRenderer.renderSchema(schema, SchemaFilter.withoutGraphQLBuiltIn) + "\n"
 
   enum Failure {
     case InvalidQuery, Internal
@@ -87,7 +94,7 @@ object HiringGraphQLSchema {
               userContext = context,
               variables = request.variables,
               operationName = request.operationName,
-              queryValidator = document.queryValidator,
+              queryValidator = QueryValidator.default,
               exceptionHandler = exceptionHandler,
               queryReducers = HiringGraphQLSchemaAssembly.queryReducers,
               deferredResolver = HiringGraphQLSchemaAssembly.deferredResolver,

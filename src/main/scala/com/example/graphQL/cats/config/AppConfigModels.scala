@@ -65,6 +65,10 @@ enum ConfigError(val key: String, val paths: Set[String] = Set.empty) {
       extends ConfigError("GRAPHQL_COST_BUDGET_WINDOW_SECONDS", Set("graphql.cost-budget.window-seconds"))
   case InvalidCostBudgetMaxCost extends ConfigError("GRAPHQL_COST_BUDGET_MAX_COST", Set("graphql.cost-budget.max-cost"))
   case InvalidSchemaExposure extends ConfigError("GRAPHQL_SCHEMA_EXPOSURE", Set("graphql.schema-exposure"))
+  case InvalidPersistedQueryMode
+      extends ConfigError("GRAPHQL_PERSISTED_QUERIES_MODE", Set("graphql.persisted-queries.mode"))
+  case InvalidPersistedQueryManifest
+      extends ConfigError("GRAPHQL_PERSISTED_QUERIES_MANIFEST", Set("graphql.persisted-queries.manifest"))
   case InvalidCostBudgetActorBuckets
       extends ConfigError("GRAPHQL_COST_BUDGET_MAX_ACTOR_BUCKETS", Set("graphql.cost-budget.max-actor-buckets"))
   case InvalidCostBudgetClientBuckets
@@ -329,8 +333,27 @@ object GraphQLConfig {
   val MaxQueryComplexity: Int = 1000
 }
 
+enum PersistedQueryMode(val wire: String) {
+  case Off extends PersistedQueryMode("off")
+  case Allowlist extends PersistedQueryMode("allowlist")
+}
+
+object PersistedQueryMode {
+  def parse(value: String): Option[PersistedQueryMode] = PersistedQueryMode.values.find(_.wire == value)
+}
+
+/** `Allowlist` admits only full documents whose SHA-256 is listed in the manifest file; `manifest` is required then. */
+final case class PersistedQueryConfig(
+    mode: PersistedQueryMode = PersistedQueryMode.Off,
+    manifest: Option[String] = None
+)
+
 /** `schemaExposure` enables introspection and the SDL download; it is off unless configuration turns it on. */
-final case class GraphQLConfig(costBudget: CostBudgetConfig = CostBudgetConfig(), schemaExposure: Boolean = false)
+final case class GraphQLConfig(
+    costBudget: CostBudgetConfig = CostBudgetConfig(),
+    schemaExposure: Boolean = false,
+    persistedQueries: PersistedQueryConfig = PersistedQueryConfig()
+)
 final case class TrustedProxyConfig(cidrs: List[Cidr[IpAddress]])
 final case class KafkaPublisherConfig(
     workerId: String,

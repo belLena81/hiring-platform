@@ -4,6 +4,7 @@ package com.example.graphQL.cats.service
 enum FailureReason(val reason: String) {
   case InvalidRequest extends FailureReason("INVALID_REQUEST")
   case InvalidQuery extends FailureReason("INVALID_QUERY")
+  case PersistedQueryNotFound extends FailureReason("PERSISTED_QUERY_NOT_FOUND")
   case UnsupportedMedia extends FailureReason("UNSUPPORTED_MEDIA")
   case NotAcceptable extends FailureReason("NOT_ACCEPTABLE")
   case PayloadTooLarge extends FailureReason("PAYLOAD_TOO_LARGE")

@@ -37,7 +37,8 @@ final case class ApplicationEvent(
     actorId: UserId,
     occurredAt: Instant,
     feedback: Option[String],
-    reason: Option[String]
+    reason: Option[String],
+    actorRole: Option[UserRole]
 )
 
 object ApplicationEvent {
@@ -49,12 +50,23 @@ object ApplicationEvent {
       actorId: UserId,
       occurredAt: Instant,
       feedback: Option[String],
-      reason: Option[String]
+      reason: Option[String],
+      actorRole: Option[UserRole]
   ): ValidatedNel[DomainValidationError, ApplicationEvent] =
     (
       validateOptionalText("feedback", feedback, FieldLimits.LongTextMaxChars),
       validateOptionalText("reason", reason, FieldLimits.LongTextMaxChars)
     ).mapN { (validFeedback, validReason) =>
-      ApplicationEvent(id, applicationId, previousStatus, newStatus, actorId, occurredAt, validFeedback, validReason)
+      ApplicationEvent(
+        id,
+        applicationId,
+        previousStatus,
+        newStatus,
+        actorId,
+        occurredAt,
+        validFeedback,
+        validReason,
+        actorRole
+      )
     }
 }

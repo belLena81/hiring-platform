@@ -288,4 +288,45 @@ final class MongoJobDiscoveryIntegrationSpec extends MongoJobDiscoveryFixture {
     }
   }
 
+  test(
+    "AC-09.5 city-filtered job listing is served by the open-city index with no sort stage; city-less jobs never match"
+  ) {
+    mongoResource.use { fixture =>
+      val cities = List.fill(5)(Some("Nicosia")) ++ List.fill(4)(Some("Limassol")) ++ List.fill(3)(None)
+      val values = cities.zipWithIndex.map { case (city, index) =>
+        val base = job(index + 1)
+        base.copy(location = base.location.copy(city = city), createdAt = now.plusSeconds(index.toLong))
+      }
+      val command = new Document("find", MongoCollections.Jobs)
+        .append("filter", MongoJobRepository.discoveryFilter(JobSearchFilter(Some("Nicosia"), Set.empty, None), None))
+        .append("sort", new Document(MongoFields.CreatedAt, -1).append(MongoFields.Id, -1))
+        .append("limit", 3)
+      for {
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
+        _ <- values.traverse_(value =>
+          MongoRepositoryTestSupport.insertOne(fixture.database, MongoCollections.Jobs, MongoHiringCodecs.job(value))
+        )
+        explained <- MongoAccessEvaluationSupport
+          .command(fixture.database, new Document("explain", command).append("verbosity", "executionStats"))
+        json <- IO.fromEither(io.circe.parser.parse(explained.toJson))
+        stages = json.hcursor
+          .downField("queryPlanner")
+          .downField("winningPlan")
+          .focus
+          .toList
+          .flatMap(plan => plan.findAllByKey("stage") ++ plan.findAllByKey("indexName"))
+          .flatMap(_.asString)
+        stats = json.hcursor.downField("executionStats")
+        keys = stats.get[Long]("totalKeysExamined")
+        docs = stats.get[Long]("totalDocsExamined")
+        returned = stats.get[Long]("nReturned")
+        _ = println(s"AC-09.5 evidence: keysExamined=$keys docsExamined=$docs nReturned=$returned plan=$stages")
+        _ = assert(stages.contains("IXSCAN"), stages)
+        _ = assert(stages.contains(MongoIndexNames.JobsOpenCityCreated), stages)
+        _ = assert(!stages.contains("SORT"), stages)
+        _ = assertEquals(returned, Right(3L))
+        _ = assertEquals(docs, Right(3L))
+      } yield ()
+    }
+  }
 }

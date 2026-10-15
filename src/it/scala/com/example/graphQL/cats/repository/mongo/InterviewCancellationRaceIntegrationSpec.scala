@@ -158,6 +158,7 @@ final class InterviewCancellationRaceIntegrationSpec extends MongoIntegrationSui
             s.workflow.recruiterId,
             now,
             None,
+            None,
             None
           )
           written <- applications

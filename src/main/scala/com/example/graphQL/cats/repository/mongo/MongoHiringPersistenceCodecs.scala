@@ -13,7 +13,12 @@ import java.util.Date
 /** Persistence-shaped records used by the generated BSON codecs. */
 private[mongo] object MongoHiringPersistenceCodecs {
   final case class StoredGeoPoint(`type`: String, coordinates: List[Double])
-  final case class StoredLocation(country: String, city: String, remote: Boolean, point: Option[StoredGeoPoint] = None)
+  final case class StoredLocation(
+      country: String,
+      city: Option[String],
+      remote: Boolean,
+      point: Option[StoredGeoPoint] = None
+  )
   final case class StoredCandidateResidence(
       country: String,
       city: Option[String],
@@ -87,7 +92,8 @@ private[mongo] object MongoHiringPersistenceCodecs {
       actorId: String,
       occurredAt: Date,
       feedback: Option[String],
-      reason: Option[String]
+      reason: Option[String],
+      actorRole: Option[String] = None
   )
 
   final case class StoredOperationalEvent(

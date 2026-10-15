@@ -1,8 +1,17 @@
+directive @oneOf on INPUT_OBJECT
+
+"The outcome of the mutation: Application on success, or a typed ValidationError or DomainError."
 union AcceptApplicationResult = Application | ValidationError | DomainError
 
+"Progress of an account deletion request."
 enum AccountDeletionStatus {
+  "The deletion has been requested and is still being applied."
   PENDING
+
+  "The deletion and the analytics erasure are complete."
   COMPLETE
+
+  "No deletion with this receipt exists for the caller."
   NOT_FOUND
 }
 
@@ -47,15 +56,18 @@ type Application {
   job: Job
 }
 
+"A status change of an application that needs no further data."
 input ApplicationActionInput {
+  "Client-generated key; repeating it with the same input replays the result."
   idempotencyKey: UUID!
+
+  "The application."
   applicationId: ApplicationID!
 }
 
 type ApplicationConnection {
   edges: [ApplicationEdge!]!
   pageInfo: PageInfo!
-  searchId: ID
 }
 
 type ApplicationEdge {
@@ -64,10 +76,10 @@ type ApplicationEdge {
 }
 
 type ApplicationEvent {
-  id: ID!
+  id: ApplicationEventID!
   previousStatus: ApplicationStatus
   newStatus: ApplicationStatus!
-  actorId: ID!
+  actorRole: UserRole
   occurredAt: Instant!
   feedback: String
   reason: String
@@ -76,7 +88,6 @@ type ApplicationEvent {
 type ApplicationEventConnection {
   edges: [ApplicationEventEdge!]!
   pageInfo: PageInfo!
-  searchId: ID
 }
 
 type ApplicationEventEdge {
@@ -84,14 +95,30 @@ type ApplicationEventEdge {
   cursor: String!
 }
 
+"The identifier of an entry in an application's history."
+scalar ApplicationEventID
+
+"The identifier of an application."
 scalar ApplicationID
 
+"The state of an application."
 enum ApplicationStatus {
+  "Submitted by the candidate."
   CREATED
+
+  "Accepted by the recruiter for further steps."
   ACCEPTED
+
+  "Declined by the candidate, with a reason."
   DECLINED
+
+  "An interview stage has started."
   INTERVIEW
+
+  "The candidate was hired."
   HIRED
+
+  "Rejected by the recruiter, with feedback."
   REJECTED
 }
 
@@ -101,21 +128,33 @@ type AuthSuccess {
   expiresAt: Instant!
 }
 
+"Whether a candidate is open to opportunities."
 enum CandidateAvailabilityStatus {
+  "Open to opportunities now."
   AVAILABLE_NOW
+
+  "Not open to opportunities."
   UNAVAILABLE
 }
 
 type CandidateMatchCandidate {
-  id: ID!
+  id: UserID!
   name: String!
   profile: CandidateMatchProfile
 }
 
+"Narrows the candidates considered for a job."
 input CandidateMatchFilter {
+  "Skills every candidate must have."
   requiredSkills: [String!]
+
+  "Candidate's current residence country."
   country: String
+
+  "Candidate's current residence city."
   city: String
+
+  "Candidate availability."
   availabilityStatus: CandidateAvailabilityStatus
 }
 
@@ -133,49 +172,110 @@ type CandidateProfile {
   recruiterSearchOptIn: Boolean!
 }
 
+"The profile of a candidate."
+input CandidateProfileInput {
+  "The candidate's skills."
+  skills: [String!]
+
+  "A short summary of experience."
+  experienceSummary: String
+
+  "A reference to the stored resume."
+  resumeRef: String
+
+  "Where the candidate lives; omitting it clears the stored residence."
+  residence: ResidenceInput
+
+  "Whether the candidate is open to opportunities."
+  availabilityStatus: CandidateAvailabilityStatus
+
+  "Whether recruiters may find this candidate; defaults to false."
+  recruiterSearchOptIn: Boolean
+}
+
 type CandidateResidence {
   country: String!
   city: String
 }
 
+"The outcome of the mutation: Job on success, or a typed ValidationError or DomainError."
 union CloseJobResult = Job | ValidationError | DomainError
 
+"Creates an open job owned by the calling recruiter."
 input CreateJobInput {
+  "Client-generated key; repeating it with the same input replays the result."
   idempotencyKey: UUID!
+
+  "The job title."
   title: String!
+
+  "The job description."
   description: String!
+
+  "Free-text requirements."
   requirements: [String!]!
+
+  "Skills the job requires."
   skills: [String!]!
+
+  "The job's country."
   country: String!
+
+  "The job's city, if it has one."
   city: String
+
+  "Whether the job can be done remotely."
   remote: Boolean!
+
+  "Geographic position used by nearby search."
   coordinates: GeoPointInput
 }
 
+"The outcome of the mutation: Job on success, or a typed ValidationError or DomainError."
 union CreateJobResult = Job | ValidationError | DomainError
 
+"Declines an application as its candidate; a reason is required."
 input DeclineApplicationInput {
+  "Client-generated key; repeating it with the same input replays the result."
   idempotencyKey: UUID!
+
+  "The application."
   applicationId: ApplicationID!
+
+  "Why the candidate declines; required by the rule, checked on submit."
   reason: String
 }
 
+"The outcome of the mutation: Application on success, or a typed ValidationError or DomainError."
 union DeclineApplicationResult = Application | ValidationError | DomainError
 
+"Requests deletion of the caller's account."
 input DeleteMyAccountInput {
+  "Client-generated key; repeating it with the same input replays the result."
   idempotencyKey: UUID!
 }
 
+"The outcome of the mutation: DeletionReceipt on success, or a typed ValidationError or DomainError."
 union DeleteMyAccountResult = DeletionReceipt | ValidationError | DomainError
 
 type DeletionReceipt {
-  receiptId: ID!
+  receiptId: DeletionReceiptID!
   status: AccountDeletionStatus!
 }
 
+"The receipt identifier returned when an account deletion was requested."
+scalar DeletionReceiptID
+
+"A business rule or authorization refusal."
 type DomainError implements UserError {
-  code: String!
+  "The stable error code."
+  code: ErrorCode!
+
+  "A sanitized, human-readable message."
   message: String!
+
+  "Seconds to wait before retrying; set only when a rate limit refused the call."
+  retryAfterSeconds: Int
 }
 
 type EmbeddingCoverageCell {
@@ -192,19 +292,33 @@ type EmbeddingCoverageCheck {
   offendingCount: Long!
 }
 
+"A health check over the embedding coverage."
 enum EmbeddingCoverageCheckName {
+  "Every entity without a current embedding has queued work."
   NO_ORPHANED_GAP
+
+  "No queued work is stuck."
   NO_STUCK_WORK
 }
 
+"The result of a coverage check."
 enum EmbeddingCoverageCheckStatus {
+  "The check passed."
   PASSED
+
+  "The check found offending entities."
   FAILED
+
+  "The scan was truncated, so the check cannot decide."
   INCONCLUSIVE
 }
 
+"The kind of entity that has an embedding."
 enum EmbeddingCoverageEntityKind {
+  "A job posting."
   JOB
+
+  "A candidate profile."
   CANDIDATE_PROFILE
 }
 
@@ -237,17 +351,33 @@ type EmbeddingCoverageReport {
   checks: [EmbeddingCoverageCheck!]!
 }
 
+"Why an embedding repair failed permanently."
 enum EmbeddingFailureReason {
+  "Every retry failed."
   RETRY_EXHAUSTED
+
+  "The document is too large to embed."
   DOCUMENT_TOO_LARGE
+
+  "The queued work item was malformed."
   INVALID_WORK_KEY
+
+  "The provider returned an unusable response."
   INVALID_RESPONSE
 }
 
+"Whether an entity's embedding matches its current content."
 enum EmbeddingFreshness {
+  "The embedding matches the content and the expected model."
   CURRENT
+
+  "The content changed after the embedding was computed."
   CONTENT_CHANGED
+
+  "The embedding was computed by a different model."
   MODEL_MISMATCH
+
+  "The entity has no embedding."
   NOT_EMBEDDED
 }
 
@@ -257,17 +387,189 @@ type EmbeddingObservedModel {
   count: Long!
 }
 
+"Whether a repair is scheduled for an entity."
 enum EmbeddingRepairState {
+  "No repair is queued."
   NO_QUEUED_WORK
+
+  "A repair is queued and ready."
   WAITING
+
+  "A repair failed and is waiting to be retried."
   RETRYING
+
+  "A worker is repairing the entity."
   IN_PROGRESS
+
+  "A worker claimed the repair and its lease expired."
   LEASE_EXPIRED
+
+  "The repair failed permanently."
   FAILED
 }
 
+"A stable, machine-readable error code; the same strings appear as extensions.code in top-level errors."
+enum ErrorCode {
+  "Authentication is required, or the credentials or account are no longer valid."
+  UNAUTHORIZED
+
+  "The caller may not perform this operation on this resource."
+  FORBIDDEN
+
+  "The first Admin has not been bootstrapped yet."
+  ADMIN_BOOTSTRAP_REQUIRED
+
+  "The Admin bootstrap has already completed."
+  ADMIN_ALREADY_BOOTSTRAPPED
+
+  "Registration was refused; the reason is deliberately not disclosed."
+  REGISTRATION_FAILED
+
+  "The name or password is wrong."
+  INVALID_CREDENTIALS
+
+  "The profile variant does not match the role of the account."
+  PROFILE_ROLE_MISMATCH
+
+  "The role has no profile, so none can be set."
+  PROFILE_UNSUPPORTED_FOR_ROLE
+
+  "The password is shorter than the minimum length."
+  INVALID_PASSWORD
+
+  "The account is already deleted."
+  ACCOUNT_ALREADY_DELETED
+
+  "Admin accounts can only be created through the bootstrap configuration."
+  ADMIN_BOOTSTRAP_ONLY
+
+  "The service is not ready to handle the request; retry later."
+  SERVICE_NOT_READY
+
+  "The resource does not exist or is not visible to the caller."
+  NOT_FOUND
+
+  "The candidate has already applied to this job."
+  DUPLICATE_APPLICATION
+
+  "The search session is still being prepared; retry shortly."
+  SEARCH_SESSION_PENDING
+
+  "The search session is not available."
+  SEARCH_SESSION_UNAVAILABLE
+
+  "The job must be open for this operation."
+  JOB_MUST_BE_OPEN
+
+  "Only a Candidate may perform this operation."
+  CANDIDATE_REQUIRED
+
+  "Only a Recruiter may perform this operation."
+  RECRUITER_REQUIRED
+
+  "The job cannot move to the requested status."
+  INVALID_JOB_TRANSITION
+
+  "New jobs must start open."
+  INVALID_INITIAL_JOB_STATUS
+
+  "The application or interview cannot move to the requested state from its current state."
+  INVALID_STATUS_TRANSITION
+
+  "Rejecting an application requires feedback."
+  REJECTION_FEEDBACK_REQUIRED
+
+  "Declining an application requires a reason."
+  DECLINE_REASON_REQUIRED
+
+  "A concurrent change conflicted with this operation; reload and retry."
+  CONFLICT
+
+  "The data store is temporarily unavailable."
+  UNAVAILABLE
+
+  "A required embedding has not been computed yet."
+  MISSING_EMBEDDING
+
+  "A required embedding is out of date."
+  STALE_EMBEDDING
+
+  "An input text exceeds its maximum length."
+  INPUT_TOO_LARGE
+
+  "A search filter value is invalid."
+  INVALID_SEARCH_FILTER
+
+  "The embedding provider is unavailable."
+  PROVIDER_UNAVAILABLE
+
+  "Semantic search is unavailable."
+  VECTOR_SEARCH_UNAVAILABLE
+
+  "Discovery facets are unavailable."
+  FACETS_UNAVAILABLE
+
+  "One or more input fields are invalid."
+  VALIDATION_FAILED
+
+  "Analytics reports are unavailable."
+  ANALYTICS_UNAVAILABLE
+
+  "The analytics period must be ordered and at most 30 days."
+  INVALID_ANALYTICS_PERIOD
+
+  "Account deletion needs analytics erasure context that is not available."
+  ANALYTICS_CONTEXT_REQUIRED
+
+  "The pagination cursor is malformed, expired or does not match the query."
+  INVALID_CURSOR
+
+  "The cursor belongs to a different connection."
+  WRONG_CURSOR_KIND
+
+  "The combination of arguments is inconsistent."
+  INVALID_FILTER
+
+  "Too many requests; retry after the indicated time."
+  RATE_LIMITED
+
+  "The workflow changed since the supplied revision was read."
+  STALE_REVISION
+
+  "The interview has already started."
+  INTERVIEW_ALREADY_STARTED
+
+  "The interview is already cancelled."
+  INTERVIEW_ALREADY_CANCELLED
+
+  "The interview is still being updated; retry later."
+  INTERVIEW_NOT_SETTLED
+
+  "The interview must start in the future and end after it starts."
+  INVALID_INTERVIEW_INTERVAL
+
+  "The proposed time equals the current interview time."
+  RESCHEDULE_INTERVAL_UNCHANGED
+
+  "A reschedule proposal is already open."
+  PROPOSAL_ALREADY_OPEN
+
+  "There is no open reschedule proposal."
+  NO_OPEN_PROPOSAL
+
+  "The reschedule proposal has expired."
+  PROPOSAL_EXPIRED
+
+  "There is no reschedule request."
+  NO_RESCHEDULE_REQUEST
+}
+
+"How much of the match set the facet counts cover."
 enum FacetCoverage {
+  "Counts cover every match."
   ALL_MATCHES
+
+  "Counts cover only the top matches; see coverageLimit."
   TOP_MATCHES
 }
 
@@ -276,43 +578,105 @@ type GeoPoint {
   longitude: Float!
 }
 
+"A WGS84 coordinate."
 input GeoPointInput {
+  "Degrees, from -90 to 90."
   latitude: Float!
+
+  "Degrees, from -180 to 180."
   longitude: Float!
 }
 
-type Health {
-  status: HealthStatus!
-}
-
-enum HealthStatus {
-  UP
-}
-
+"The outcome of the mutation: Application on success, or a typed ValidationError or DomainError."
 union HireApplicationResult = Application | ValidationError | DomainError
 
+"A UTC instant in ISO-8601 format, for example 2026-01-31T09:30:00Z."
 scalar Instant
 
 type InteractionSuccess {
-  recorded: Boolean!
+  eventId: UUID!
 }
 
+"The shared input of the interview cancel and reschedule actions. The actor comes from the access token."
 input InterviewActionInput {
-  workflowId: UUID!
+  "The workflow the action applies to."
+  workflowId: InterviewWorkflowID!
+
+  "The revision the caller last read; a different one is rejected."
   expectedRevision: Long!
+
+  "Client-generated key; repeating it with the same input replays the result."
   idempotencyKey: UUID!
 }
 
+"The outcome of the mutation: InterviewWorkflow on success, or a typed ValidationError or DomainError."
 union InterviewActionResult = InterviewWorkflow | ValidationError | DomainError
 
+"A party to an interview."
+enum InterviewParticipant {
+  "The candidate."
+  CANDIDATE
+
+  "The recruiter."
+  RECRUITER
+}
+
+"Where an interview workflow is in its scheduling, cancellation or reschedule steps."
+enum InterviewProgress {
+  "The calendar slot is being reserved."
+  RESERVATION_PENDING
+
+  "The application is being moved to the interview stage."
+  STATUS_COMMIT_PENDING
+
+  "A failed scheduling is being undone."
+  COMPENSATION_PENDING
+
+  "Participants are being notified."
+  NOTIFICATIONS_PENDING
+
+  "Scheduled; all steps finished."
+  COMPLETED
+
+  "A step failed and an Admin must repair the workflow."
+  REPAIR_REQUIRED
+
+  "A reschedule proposal is waiting for a response."
+  PROPOSAL_PENDING
+
+  "The cancellation is being applied."
+  CANCEL_PENDING
+
+  "Participants are being told about the cancellation."
+  CANCEL_NOTIFICATIONS_PENDING
+
+  "The interview is cancelled."
+  CANCELLED
+
+  "The new slot is being held."
+  RESCHEDULE_HOLD_PENDING
+
+  "The old slot is being swapped for the new one."
+  RESCHEDULE_SWAP_PENDING
+
+  "The old slot is being released."
+  RESCHEDULE_CANCEL_OLD_PENDING
+
+  "Participants are being told about the new time."
+  RESCHEDULE_NOTIFICATIONS_PENDING
+
+  "A failed reschedule is being undone."
+  RESCHEDULE_COMPENSATION_PENDING
+}
+
 type InterviewWorkflow {
-  id: UUID!
+  id: InterviewWorkflowID!
   applicationId: ApplicationID!
   startsAt: Instant!
   endsAt: Instant!
   revision: Long!
-  progress: String!
-  notifiedParticipants: [String!]!
+  progress: InterviewProgress!
+  notifiedParticipants: [InterviewParticipant!]!
   pendingStartsAt: Instant
   pendingEndsAt: Instant
   cancelledAt: Instant
@@ -321,6 +685,9 @@ type InterviewWorkflow {
   proposalExpiresAt: Instant
   rescheduleRequested: Boolean!
 }
+
+"The identifier of an interview workflow."
+scalar InterviewWorkflowID
 
 type Job {
   id: JobID!
@@ -335,15 +702,18 @@ type Job {
   recruiter: User
 }
 
+"A lifecycle action on a job owned by the caller."
 input JobActionInput {
+  "Client-generated key; repeating it with the same input replays the result."
   idempotencyKey: UUID!
+
+  "The job."
   jobId: JobID!
 }
 
 type JobConnection {
   edges: [JobEdge!]!
   pageInfo: PageInfo!
-  searchId: ID
 }
 
 type JobDiscoveryFacets {
@@ -366,91 +736,231 @@ type JobFacetBucket {
   count: Long!
 }
 
+"Structured filters shared by every job discovery operation."
 input JobFilter {
+  "Only jobs in this city; it must not be blank."
   city: String
+
+  "Only jobs that require all of these skills; at most 100, each of bounded length."
   skills: [String!]
+
+  "Only jobs created after this instant."
   createdAfter: Instant
 }
 
+"The identifier of a job."
 scalar JobID
 
+"The full editable content of a job. Updating a job replaces all of it."
 input JobInput {
+  "The job title."
   title: String!
+
+  "The job description."
   description: String!
+
+  "Free-text requirements."
   requirements: [String!]!
+
+  "Skills the job requires."
   skills: [String!]!
+
+  "The job's country."
   country: String!
+
+  "The job's city, if it has one."
   city: String
+
+  "Whether the job can be done remotely."
   remote: Boolean!
+
+  "Geographic position used by nearby search."
   coordinates: GeoPointInput
 }
 
+type JobSearchConnection {
+  edges: [JobEdge!]!
+  pageInfo: PageInfo!
+  searchId: SearchID!
+}
+
+"The lifecycle state of a job."
 enum JobStatus {
+  "Not yet visible to candidates."
   DRAFT
+
+  "Visible to candidates, who may apply."
   OPEN
+
+  "No longer accepting applications."
   CLOSED
 }
 
 type Location {
   country: String!
-  city: String!
+  city: String
   remote: Boolean!
   coordinates: GeoPoint
 }
 
+"Credentials for signing in."
 input LoginInput {
+  "Client-generated key; repeating it with the same input replays the result."
   idempotencyKey: UUID!
+
+  "The sign-in name."
   name: String!
+
+  "The password."
   password: String!
 }
 
+"The outcome of the mutation: AuthSuccess on success, or a typed ValidationError or DomainError."
 union LoginResult = AuthSuccess | ValidationError | DomainError
 
+"A signed 64-bit integer, serialized as a JSON number. Fractions and strings are rejected."
+scalar Long
+
+"The outcome of the mutation: Application on success, or a typed ValidationError or DomainError."
 union MoveApplicationToInterviewResult = Application | ValidationError | DomainError
 
+"The write operations. Each takes one input object and returns a union of the success type and typed errors."
 type Mutation {
-  scheduleInterview(input: ScheduleInterviewInput!): ScheduleInterviewResult!
-  repairInterviewWorkflow(input: RepairInterviewInput!): RepairInterviewResult!
-  cancelInterview(input: InterviewActionInput!): InterviewActionResult!
-  requestInterviewReschedule(input: InterviewActionInput!): InterviewActionResult!
-  dismissInterviewRescheduleRequest(input: InterviewActionInput!): InterviewActionResult!
-  proposeInterviewReschedule(input: ProposeInterviewRescheduleInput!): InterviewActionResult!
-  withdrawInterviewReschedule(input: InterviewActionInput!): InterviewActionResult!
-  acceptInterviewReschedule(input: InterviewActionInput!): InterviewActionResult!
-  declineInterviewReschedule(input: InterviewActionInput!): InterviewActionResult!
-  submitApplication(input: SubmitApplicationInput!): SubmitApplicationResult!
-  createJob(input: CreateJobInput!): CreateJobResult!
-  updateJob(input: UpdateJobInput!): UpdateJobResult!
-  publishJob(input: JobActionInput!): PublishJobResult!
-  closeJob(input: JobActionInput!): CloseJobResult!
-  acceptApplication(input: ApplicationActionInput!): AcceptApplicationResult!
-  moveApplicationToInterview(input: ApplicationActionInput!): MoveApplicationToInterviewResult!
-  hireApplication(input: ApplicationActionInput!): HireApplicationResult!
-  rejectApplication(input: RejectApplicationInput!): RejectApplicationResult!
-  declineApplication(input: DeclineApplicationInput!): DeclineApplicationResult!
-  signUp(input: SignUpInput!): SignUpResult!
-  login(input: LoginInput!): LoginResult!
-  updateMyProfile(input: UpdateMyProfileInput!): UpdateMyProfileResult!
-  deleteMyAccount(input: DeleteMyAccountInput!): DeleteMyAccountResult!
-  recordJobView(input: RecordJobViewInput!): RecordJobViewResult!
-  recordSearchResultClick(input: RecordSearchResultClickInput!): RecordSearchResultClickResult!
+  "Schedules an interview for an accepted application."
+  scheduleInterview(
+    "The scheduling input."
+    input: ScheduleInterviewInput!): ScheduleInterviewResult!
+
+  "Repairs an interview workflow that stopped and needs attention. Admin only."
+  repairInterviewWorkflow(
+    "The repair input."
+    input: RepairInterviewInput!): RepairInterviewResult!
+
+  "Cancels an interview, which rejects the application. A refusal is returned as a typed DomainError; RATE_LIMITED carries retryAfterSeconds."
+  cancelInterview(
+    "The action input."
+    input: InterviewActionInput!): InterviewActionResult!
+
+  "The candidate flags that a different time is wanted; no slot changes. A refusal is returned as a typed DomainError; RATE_LIMITED carries retryAfterSeconds."
+  requestInterviewReschedule(
+    "The action input."
+    input: InterviewActionInput!): InterviewActionResult!
+
+  "A recruiter or Admin dismisses an open reschedule request. A refusal is returned as a typed DomainError; RATE_LIMITED carries retryAfterSeconds."
+  dismissInterviewRescheduleRequest(
+    "The action input."
+    input: InterviewActionInput!): InterviewActionResult!
+
+  "A recruiter or Admin proposes another time; it only takes effect if the candidate accepts it in time. A refusal is returned as a typed DomainError; RATE_LIMITED carries retryAfterSeconds."
+  proposeInterviewReschedule(
+    "The proposal input."
+    input: ProposeInterviewRescheduleInput!): InterviewActionResult!
+
+  "Withdraws the open reschedule proposal. A refusal is returned as a typed DomainError; RATE_LIMITED carries retryAfterSeconds."
+  withdrawInterviewReschedule(
+    "The action input."
+    input: InterviewActionInput!): InterviewActionResult!
+
+  "The candidate accepts the open proposal; the interview moves to the proposed time. A refusal is returned as a typed DomainError; RATE_LIMITED carries retryAfterSeconds."
+  acceptInterviewReschedule(
+    "The action input."
+    input: InterviewActionInput!): InterviewActionResult!
+
+  "The candidate declines the open proposal; the interview keeps its time. A refusal is returned as a typed DomainError; RATE_LIMITED carries retryAfterSeconds."
+  declineInterviewReschedule(
+    "The action input."
+    input: InterviewActionInput!): InterviewActionResult!
+
+  "Applies to an open job as the calling candidate; a second application to the same job is refused. Repeating the same idempotencyKey with the same input replays the original result."
+  submitApplication(
+    "The application to submit."
+    input: SubmitApplicationInput!): SubmitApplicationResult!
+
+  "Creates an open job owned by the calling recruiter. Repeating the same idempotencyKey with the same input replays the original result."
+  createJob(
+    "The job to create."
+    input: CreateJobInput!): CreateJobResult!
+
+  "Replaces the content of a job the caller owns. Repeating the same idempotencyKey with the same input replays the original result."
+  updateJob(
+    "The job update."
+    input: UpdateJobInput!): UpdateJobResult!
+
+  "Publishes a draft job the caller owns. Repeating the same idempotencyKey with the same input replays the original result."
+  publishJob(
+    "The job action."
+    input: JobActionInput!): PublishJobResult!
+
+  "Closes a job the caller owns; closed jobs accept no new applications. Repeating the same idempotencyKey with the same input replays the original result."
+  closeJob(
+    "The job action."
+    input: JobActionInput!): CloseJobResult!
+
+  "Accepts an application to a job the caller owns. Repeating the same idempotencyKey with the same input replays the original result."
+  acceptApplication(
+    "The application action."
+    input: ApplicationActionInput!): AcceptApplicationResult!
+
+  "Moves an application to the interview stage. Repeating the same idempotencyKey with the same input replays the original result."
+  moveApplicationToInterview(
+    "The application action."
+    input: ApplicationActionInput!): MoveApplicationToInterviewResult!
+
+  "Hires the candidate of an application. Repeating the same idempotencyKey with the same input replays the original result."
+  hireApplication(
+    "The application action."
+    input: ApplicationActionInput!): HireApplicationResult!
+
+  "Rejects an application; feedback is required. Repeating the same idempotencyKey with the same input replays the original result."
+  rejectApplication(
+    "The rejection."
+    input: RejectApplicationInput!): RejectApplicationResult!
+
+  "Declines an application as its candidate; a reason is required. Repeating the same idempotencyKey with the same input replays the original result."
+  declineApplication(
+    "The decline."
+    input: DeclineApplicationInput!): DeclineApplicationResult!
+
+  "Creates a Candidate or Recruiter account and signs it in. The caller is not authenticated, so rate-limit refusals are top-level errors with extensions.code RATE_LIMITED; expected refusals are typed errors, and availability failures (SERVICE_NOT_READY, UNAVAILABLE) are top-level errors. Repeating the same idempotencyKey with the same input replays the original result."
+  signUp(
+    "The account to create."
+    input: SignUpInput!): SignUpResult!
+
+  "Signs in with a name and password. The caller is not authenticated, so rate-limit refusals are top-level errors with extensions.code RATE_LIMITED; expected refusals are typed errors, and availability failures (SERVICE_NOT_READY, UNAVAILABLE) are top-level errors."
+  login(
+    "The credentials."
+    input: LoginInput!): LoginResult!
+
+  "Replaces the caller's whole profile; omitted optional parts are cleared. The variant must match the caller's role. Repeating the same idempotencyKey with the same input replays the original result."
+  updateMyProfile(
+    "The new profile."
+    input: UpdateMyProfileInput!): UpdateMyProfileResult!
+
+  "Requests deletion of the caller's account and returns a receipt to poll with accountDeletionStatus. Repeating the same idempotencyKey with the same input replays the original result."
+  deleteMyAccount(
+    "The deletion request."
+    input: DeleteMyAccountInput!): DeleteMyAccountResult!
+
+  "Records that the caller viewed a job. Repeating the same idempotencyKey with the same input replays the original result."
+  recordJobView(
+    "The view to record."
+    input: RecordJobViewInput!): RecordJobViewResult!
+
+  "Records that the caller opened a search result. Repeating the same idempotencyKey with the same input replays the original result."
+  recordSearchResultClick(
+    "The click to record."
+    input: RecordSearchResultClickInput!): RecordSearchResultClickResult!
 }
 
-type NearbyJob {
-  job: Job!
+type NearbyJobEdge {
+  node: Job!
   distanceKm: Float!
   cursor: String!
 }
 
 type NearbyJobsConnection {
-  results: [NearbyJob!]!
-  hasNextPage: Boolean!
-}
-
-input NearbyJobsFilter {
-  city: String
-  skills: [String!]
-  createdAfter: Instant
+  edges: [NearbyJobEdge!]!
+  pageInfo: PageInfo!
 }
 
 type PageInfo {
@@ -458,36 +968,213 @@ type PageInfo {
   endCursor: String
 }
 
+"A role-specific profile. Exactly one of candidate and recruiter must be set, and it must match the account's role."
+input ProfileInput @oneOf {
+  "The profile of a Candidate account."
+  candidate: CandidateProfileInput
+
+  "The profile of a Recruiter account."
+  recruiter: RecruiterProfileInput
+}
+
+"Proposes a new time for a scheduled interview."
 input ProposeInterviewRescheduleInput {
-  workflowId: UUID!
+  "The workflow to reschedule."
+  workflowId: InterviewWorkflowID!
+
+  "The revision the caller last read; a different one is rejected."
   expectedRevision: Long!
+
+  "The proposed start; must be in the future."
   startsAt: Instant!
+
+  "The proposed end; must be after the start."
   endsAt: Instant!
+
+  "Client-generated key; repeating it with the same input replays the result."
   idempotencyKey: UUID!
 }
 
+"The outcome of the mutation: Job on success, or a typed ValidationError or DomainError."
 union PublishJobResult = Job | ValidationError | DomainError
 
+"The read operations. Every operation except introspection requires authentication."
 type Query {
-  interviewWorkflow(workflowId: UUID!): InterviewWorkflow!
-  health: Health!
-  readiness: Readiness!
+  "An interview workflow the caller may see. Null when it does not exist or is not visible to the caller, so existence is not revealed."
+  interviewWorkflow(
+    "The workflow to read."
+    workflowId: InterviewWorkflowID!): InterviewWorkflow
+
+  "The calling user."
   me: User
-  analyticsReport(from: Instant!, to: Instant!): AnalyticsReport!
-  embeddingCoverage(expectedModel: String): EmbeddingCoverageReport!
-  accountDeletionStatus(receiptId: ID!): AccountDeletionStatus!
-  users(first: Int!, after: String, role: UserRole, status: UserStatus): UserConnection!
-  jobs(first: Int!, after: String, city: String, skills: [String!], createdAfter: Instant, searchId: UUID): JobConnection!
-  nearbyJobs(center: GeoPointInput!, radiusKm: Float!, filter: NearbyJobsFilter, first: Int!, after: String): NearbyJobsConnection!
-  jobDiscoveryFacets(query: String, filter: NearbyJobsFilter, center: GeoPointInput, radiusKm: Float): JobDiscoveryFacets!
-  semanticJobSearch(query: String!, filter: JobFilter, first: Int!, searchId: UUID): RankedJobResults!
-  recommendedJobs(first: Int!, searchId: UUID): RankedJobResults!
-  candidateMatches(jobId: JobID!, query: String, filter: CandidateMatchFilter, first: Int!, searchId: UUID): RankedCandidateResults!
-  job(id: JobID!): Job
-  myJobs(first: Int!, after: String, status: JobStatus): JobConnection!
-  myApplications(first: Int!, after: String, status: ApplicationStatus): ApplicationConnection!
-  jobApplications(jobId: JobID!, first: Int!, after: String, status: ApplicationStatus): ApplicationConnection!
-  applicationHistory(applicationId: ApplicationID!, first: Int!, after: String): ApplicationEventConnection!
+
+  "Hiring analytics for a period of at most 30 days. Admin only."
+  analyticsReport(
+    "Start of the reporting period (inclusive)."
+    from: Instant!,
+
+    "End of the reporting period; at most 30 days after the start."
+    to: Instant!): AnalyticsReport!
+
+  "Health of the search embeddings: counts only, no identifiers or content. Admin only."
+  embeddingCoverage(
+    "The embedding model the deployment is expected to use."
+    expectedModel: String): EmbeddingCoverageReport!
+
+  "Progress of an account deletion requested by the caller."
+  accountDeletionStatus(
+    "The receipt returned by deleteMyAccount."
+    receiptId: DeletionReceiptID!): AccountDeletionStatus!
+
+  "A page of users, newest first. Admin only."
+  users(
+    "The page size; between 1 and 100."
+    first: Int!,
+
+    "The cursor of the last item of the previous page."
+    after: String,
+
+    "Only users with this role."
+    role: UserRole,
+
+    "Only users with this status; defaults to ACTIVE."
+    status: UserStatus): UserConnection!
+
+  "A page of open jobs matching the filter, newest first. The result carries the identifier of the search."
+  jobs(
+    "Optional structured filters."
+    filter: JobFilter,
+
+    "The page size; between 1 and 100."
+    first: Int!,
+
+    "The cursor of the last item of the previous page."
+    after: String,
+
+    "Reuses a search identifier so repeated pages and later interactions correlate; the server issues one if absent."
+    searchId: SearchID): JobSearchConnection!
+
+  "Open jobs within a radius of a point, nearest first. Each edge carries its distance."
+  nearbyJobs(
+    "The point to search around."
+    center: GeoPointInput!,
+
+    "The search radius in kilometres."
+    radiusKm: Float!,
+
+    "Optional structured filters."
+    filter: JobFilter,
+
+    "The page size; between 1 and 100."
+    first: Int!,
+
+    "The cursor of the last item of the previous page."
+    after: String): NearbyJobsConnection!
+
+  "Facet counts over the open jobs that match the filter, an optional radius and an optional lexical query."
+  jobDiscoveryFacets(
+    "Optional lexical query the facets are computed for."
+    query: String,
+
+    "Optional structured filters."
+    filter: JobFilter,
+
+    "The point to restrict to; supplied together with radiusKm."
+    center: GeoPointInput,
+
+    "The radius in kilometres; supplied together with center."
+    radiusKm: Float): JobDiscoveryFacets!
+
+  "Open jobs ranked by relevance to a query. A bounded top-N list of at most `first` results: it has no pageInfo and cannot be paged."
+  semanticJobSearch(
+    "The free-text search query."
+    query: String!,
+
+    "Optional structured filters."
+    filter: JobFilter,
+
+    "The page size; between 1 and 100."
+    first: Int!,
+
+    "Reuses a search identifier so repeated pages and later interactions correlate; the server issues one if absent."
+    searchId: SearchID): RankedJobResults!
+
+  "Open jobs ranked against the calling candidate's profile. A bounded top-N list of at most `first` results: it has no pageInfo and cannot be paged."
+  recommendedJobs(
+    "The page size; between 1 and 100."
+    first: Int!,
+
+    "Reuses a search identifier so repeated pages and later interactions correlate; the server issues one if absent."
+    searchId: SearchID): RankedJobResults!
+
+  "Candidates ranked against a job the caller owns. A bounded top-N list of at most `first` results: it has no pageInfo and cannot be paged."
+  candidateMatches(
+    "The job."
+    jobId: JobID!,
+
+    "Optional free-text query to rank candidates against."
+    query: String,
+
+    "Optional candidate filters."
+    filter: CandidateMatchFilter,
+
+    "The page size; between 1 and 100."
+    first: Int!,
+
+    "Reuses a search identifier so repeated pages and later interactions correlate; the server issues one if absent."
+    searchId: SearchID): RankedCandidateResults!
+
+  "A job the caller may see."
+  job(
+    "The job to read."
+    id: JobID!): Job
+
+  "A page of the calling recruiter's jobs, newest first."
+  myJobs(
+    "The page size; between 1 and 100."
+    first: Int!,
+
+    "The cursor of the last item of the previous page."
+    after: String,
+
+    "Only jobs in this status."
+    status: JobStatus): JobConnection!
+
+  "A page of the calling candidate's applications, newest first."
+  myApplications(
+    "The page size; between 1 and 100."
+    first: Int!,
+
+    "The cursor of the last item of the previous page."
+    after: String,
+
+    "Only applications in this status."
+    status: ApplicationStatus): ApplicationConnection!
+
+  "A page of the applications to a job the caller owns, newest first."
+  jobApplications(
+    "The job."
+    jobId: JobID!,
+
+    "The page size; between 1 and 100."
+    first: Int!,
+
+    "The cursor of the last item of the previous page."
+    after: String,
+
+    "Only applications in this status."
+    status: ApplicationStatus): ApplicationConnection!
+
+  "The append-only status history of an application the caller may see."
+  applicationHistory(
+    "The application."
+    applicationId: ApplicationID!,
+
+    "The page size; between 1 and 100."
+    first: Int!,
+
+    "The cursor of the last item of the previous page."
+    after: String): ApplicationEventConnection!
 }
 
 type RankedCandidate {
@@ -495,7 +1182,7 @@ type RankedCandidate {
   score: Float!
   searchMode: SearchMode!
   model: String!
-  searchId: ID!
+  searchId: SearchID!
   matchedSkills: [String!]!
   retrievalScore: Float
 }
@@ -509,7 +1196,7 @@ type RankedJob {
   score: Float!
   searchMode: SearchMode!
   model: String!
-  searchId: ID!
+  searchId: SearchID!
   matchedSkills: [String!]!
   retrievalScore: Float
 }
@@ -518,31 +1205,40 @@ type RankedJobResults {
   results: [RankedJob!]!
 }
 
-type Readiness {
-  status: ReadinessStatus!
-}
-
-enum ReadinessStatus {
-  READY
-  NOT_READY
-}
-
+"Records that the caller viewed a job."
 input RecordJobViewInput {
+  "Client-generated key; repeating it with the same input replays the result."
   idempotencyKey: UUID!
+
+  "Client-generated identifier of this interaction event."
   eventId: UUID!
+
+  "The viewed job."
   jobId: JobID!
-  searchId: UUID
+
+  "The search that led to the view, if any."
+  searchId: SearchID
 }
 
+"The outcome of the mutation: InteractionSuccess on success, or a typed ValidationError or DomainError."
 union RecordJobViewResult = InteractionSuccess | ValidationError | DomainError
 
+"Records that the caller opened a result of a search."
 input RecordSearchResultClickInput {
+  "Client-generated key; repeating it with the same input replays the result."
   idempotencyKey: UUID!
+
+  "Client-generated identifier of this interaction event."
   eventId: UUID!
-  searchId: UUID!
+
+  "The search that produced the result."
+  searchId: SearchID!
+
+  "The identifier of the clicked result."
   resultId: UUID!
 }
 
+"The outcome of the mutation: InteractionSuccess on success, or a typed ValidationError or DomainError."
 union RecordSearchResultClickResult = InteractionSuccess | ValidationError | DomainError
 
 type RecruiterProfile {
@@ -550,85 +1246,148 @@ type RecruiterProfile {
   jobTitle: String
 }
 
+"The profile of a recruiter."
+input RecruiterProfileInput {
+  "The organization the recruiter hires for."
+  organizationName: String!
+
+  "The recruiter's job title."
+  jobTitle: String
+}
+
+"Rejects an application; feedback is required."
 input RejectApplicationInput {
+  "Client-generated key; repeating it with the same input replays the result."
   idempotencyKey: UUID!
+
+  "The application."
   applicationId: ApplicationID!
+
+  "Why the application was rejected; required by the rule, checked on submit."
   feedback: String
 }
 
+"The outcome of the mutation: Application on success, or a typed ValidationError or DomainError."
 union RejectApplicationResult = Application | ValidationError | DomainError
 
+"Admin repair of an interview workflow that needs attention."
 input RepairInterviewInput {
-  workflowId: UUID!
+  "The workflow to repair."
+  workflowId: InterviewWorkflowID!
+
+  "The revision the caller last read; a different one is rejected."
   expectedRevision: Long!
+
+  "Client-generated key; repeating it with the same input replays the result."
   idempotencyKey: UUID!
 }
 
+"The outcome of the mutation: InterviewWorkflow on success, or a typed ValidationError or DomainError."
 union RepairInterviewResult = InterviewWorkflow | ValidationError | DomainError
 
+"Where a candidate currently lives."
+input ResidenceInput {
+  "The country."
+  country: String!
+
+  "The city, if known."
+  city: String
+}
+
+"Schedules an interview for an accepted application."
 input ScheduleInterviewInput {
+  "The accepted application the interview belongs to."
   applicationId: ApplicationID!
+
+  "When the interview starts; must be in the future."
   startsAt: Instant!
+
+  "When the interview ends; must be after the start."
   endsAt: Instant!
+
+  "Client-generated key; repeating it with the same input replays the result."
   idempotencyKey: UUID!
 }
 
+"The outcome of the mutation: InterviewWorkflow on success, or a typed ValidationError or DomainError."
 union ScheduleInterviewResult = InterviewWorkflow | ValidationError | DomainError
 
+"The identifier of one search, issued by the server or supplied by the client to correlate later interactions."
+scalar SearchID
+
+"How a ranked result was found."
 enum SearchMode {
+  "Structured filters only."
   FILTER
+
+  "Semantic (embedding) similarity only."
   VECTOR
+
+  "Lexical and semantic results combined."
   HYBRID
 }
 
+"Creates a Candidate or Recruiter account."
 input SignUpInput {
+  "Client-generated key; repeating it with the same input replays the result."
   idempotencyKey: UUID!
+
+  "The unique sign-in name."
   name: String!
+
+  "CANDIDATE or RECRUITER; ADMIN accounts come from configuration only."
   role: UserRole!
+
+  "The password."
   password: String!
-  skills: [String!]
-  experienceSummary: String
-  resumeRef: String
-  currentResidenceCountry: String
-  currentResidenceCity: String
-  availabilityStatus: CandidateAvailabilityStatus
-  recruiterSearchOptIn: Boolean
-  organizationName: String
-  jobTitle: String
+
+  "The role-specific profile; required for Candidate and Recruiter."
+  profile: ProfileInput
 }
 
+"The outcome of the mutation: AuthSuccess on success, or a typed ValidationError or DomainError."
 union SignUpResult = AuthSuccess | ValidationError | DomainError
 
+"Applies to an open job as the calling candidate."
 input SubmitApplicationInput {
+  "The open job to apply to."
   jobId: JobID!
+
+  "Client-generated key; repeating it with the same input replays the result."
   idempotencyKey: UUID!
 }
 
+"The outcome of the mutation: Application on success, or a typed ValidationError or DomainError."
 union SubmitApplicationResult = Application | ValidationError | DomainError
 
+"A UUID in its canonical textual form."
 scalar UUID
 
+"Replaces the content of a job owned by the caller."
 input UpdateJobInput {
+  "Client-generated key; repeating it with the same input replays the result."
   idempotencyKey: UUID!
+
+  "The job to update."
   id: JobID!
-  patch: JobInput!
+
+  "The new content; it replaces the whole previous content, not a partial patch."
+  job: JobInput!
 }
 
+"The outcome of the mutation: Job on success, or a typed ValidationError or DomainError."
 union UpdateJobResult = Job | ValidationError | DomainError
 
+"Replaces the caller's profile."
 input UpdateMyProfileInput {
+  "Client-generated key; repeating it with the same input replays the result."
   idempotencyKey: UUID!
-  skills: [String!]
-  experienceSummary: String
-  resumeRef: String
-  currentResidenceCountry: String
-  currentResidenceCity: String
-  availabilityStatus: CandidateAvailabilityStatus
-  recruiterSearchOptIn: Boolean
-  organizationName: String
-  jobTitle: String
+
+  "The new profile; it replaces the whole stored profile, not a partial update."
+  profile: ProfileInput!
 }
 
+"The outcome of the mutation: User on success, or a typed ValidationError or DomainError."
 union UpdateMyProfileResult = User | ValidationError | DomainError
 
 type User {
@@ -644,7 +1403,6 @@ type User {
 type UserConnection {
   edges: [UserEdge!]!
   pageInfo: PageInfo!
-  searchId: ID
 }
 
 type UserEdge {
@@ -652,27 +1410,50 @@ type UserEdge {
   cursor: String!
 }
 
+"A refusal returned as data instead of a top-level error."
 interface UserError {
-  code: String!
+  "The stable error code."
+  code: ErrorCode!
+
+  "A sanitized, human-readable message."
   message: String!
 }
 
+"The identifier of a user."
 scalar UserID
 
+"The role-specific profile of a user: a CandidateProfile or a RecruiterProfile."
 union UserProfile = CandidateProfile | RecruiterProfile
 
+"The role of a user account."
 enum UserRole {
+  "Searches open jobs and applies to them."
   CANDIDATE
+
+  "Manages owned jobs and the applications to them."
   RECRUITER
+
+  "The singleton administrator."
   ADMIN
 }
 
+"Whether a user account is usable."
 enum UserStatus {
+  "The account can sign in."
   ACTIVE
+
+  "The account was deleted."
   DELETED
 }
 
+"One or more input fields were invalid."
 type ValidationError implements UserError {
-  code: String!
+  "The stable error code."
+  code: ErrorCode!
+
+  "All violated rules, joined into one message."
   message: String!
+
+  "The GraphQL input path of the first violated rule, for example profile.candidate.residence.country or job.title; null when that rule has no input counterpart."
+  field: String
 }

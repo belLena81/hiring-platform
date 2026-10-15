@@ -11,5 +11,10 @@ private[config] final case class RawCostBudgetConfig(
     overflowBuckets: Int
 ) derives ConfigReader
 
-private[config] final case class RawGraphQLConfig(costBudget: RawCostBudgetConfig, schemaExposure: Boolean)
-    derives ConfigReader
+private[config] final case class RawPersistedQueryConfig(mode: String, manifest: Option[String]) derives ConfigReader
+
+private[config] final case class RawGraphQLConfig(
+    costBudget: RawCostBudgetConfig,
+    schemaExposure: Boolean,
+    persistedQueries: Option[RawPersistedQueryConfig]
+) derives ConfigReader

@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.api.graphql
 
+import com.example.graphQL.cats.api.graphql.HiringGraphQLDsl.describedEnum
 import com.example.graphQL.cats.api.graphql.HiringGraphQLInputs.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.AnalyticsReportPayload
 import com.example.graphQL.cats.api.graphql.HiringGraphQLTypes.simple
@@ -14,12 +15,12 @@ private[graphql] object HiringGraphQLReportingTypes {
       "AnalyticsFunnelDay",
       fields[RequestContext, com.example.graphQL.cats.service.AnalyticsFunnelDay](
         instantField("day", _.day),
-        simple("created", LongType)(_.created),
-        simple("accepted", LongType)(_.accepted),
-        simple("declined", LongType)(_.declined),
-        simple("interview", LongType)(_.interview),
-        simple("hired", LongType)(_.hired),
-        simple("rejected", LongType)(_.rejected)
+        simple("created", longType)(_.created),
+        simple("accepted", longType)(_.accepted),
+        simple("declined", longType)(_.declined),
+        simple("interview", longType)(_.interview),
+        simple("hired", longType)(_.hired),
+        simple("rejected", longType)(_.rejected)
       )
     )
   lazy val analyticsTimeToHireType: ObjectType[RequestContext, com.example.graphQL.cats.service.AnalyticsTimeToHire] =
@@ -30,8 +31,8 @@ private[graphql] object HiringGraphQLReportingTypes {
         simple("p75Hours", FloatType)(_.p75Hours),
         simple("p90Hours", FloatType)(_.p90Hours),
         simple("p95Hours", FloatType)(_.p95Hours),
-        simple("eligibleCount", LongType)(_.eligibleCount),
-        simple("excludedCount", LongType)(_.excludedCount)
+        simple("eligibleCount", longType)(_.eligibleCount),
+        simple("excludedCount", longType)(_.excludedCount)
       )
     )
   lazy val analyticsSkillPostingDayType
@@ -41,7 +42,7 @@ private[graphql] object HiringGraphQLReportingTypes {
       fields[RequestContext, com.example.graphQL.cats.service.AnalyticsSkillPostingDay](
         instantField("day", _.day),
         simple("skill", StringType)(_.skill),
-        simple("postings", LongType)(_.postings)
+        simple("postings", longType)(_.postings)
       )
     )
   lazy val analyticsReportType: ObjectType[RequestContext, AnalyticsReportPayload] =
@@ -56,23 +57,74 @@ private[graphql] object HiringGraphQLReportingTypes {
     )
 
   lazy val embeddingCoverageEntityKindType: EnumType[EmbeddingWorkKind] =
-    enumType("EmbeddingCoverageEntityKind", EmbeddingWorkKind.values.toList)
+    describedEnum(
+      "EmbeddingCoverageEntityKind",
+      "The kind of entity that has an embedding.",
+      EmbeddingWorkKind.values.toList
+    ) {
+      case EmbeddingWorkKind.Job              => "A job posting."
+      case EmbeddingWorkKind.CandidateProfile => "A candidate profile."
+    }
   lazy val embeddingFreshnessType: EnumType[EmbeddingFreshness] =
-    enumType("EmbeddingFreshness", EmbeddingFreshness.values.toList)
+    describedEnum(
+      "EmbeddingFreshness",
+      "Whether an entity's embedding matches its current content.",
+      EmbeddingFreshness.values.toList
+    ) {
+      case EmbeddingFreshness.Current        => "The embedding matches the content and the expected model."
+      case EmbeddingFreshness.ContentChanged => "The content changed after the embedding was computed."
+      case EmbeddingFreshness.ModelMismatch  => "The embedding was computed by a different model."
+      case EmbeddingFreshness.NotEmbedded    => "The entity has no embedding."
+    }
   lazy val embeddingRepairStateType: EnumType[EmbeddingRepairState] =
-    enumType("EmbeddingRepairState", EmbeddingRepairState.values.toList)
+    describedEnum(
+      "EmbeddingRepairState",
+      "Whether a repair is scheduled for an entity.",
+      EmbeddingRepairState.values.toList
+    ) {
+      case EmbeddingRepairState.NoQueuedWork => "No repair is queued."
+      case EmbeddingRepairState.Waiting      => "A repair is queued and ready."
+      case EmbeddingRepairState.Retrying     => "A repair failed and is waiting to be retried."
+      case EmbeddingRepairState.InProgress   => "A worker is repairing the entity."
+      case EmbeddingRepairState.LeaseExpired => "A worker claimed the repair and its lease expired."
+      case EmbeddingRepairState.Failed       => "The repair failed permanently."
+    }
   lazy val embeddingFailureReasonType: EnumType[EmbeddingWorkFailure] =
-    enumType("EmbeddingFailureReason", EmbeddingWorkFailure.values.toList)
+    describedEnum(
+      "EmbeddingFailureReason",
+      "Why an embedding repair failed permanently.",
+      EmbeddingWorkFailure.values.toList
+    ) {
+      case EmbeddingWorkFailure.RetryExhausted   => "Every retry failed."
+      case EmbeddingWorkFailure.DocumentTooLarge => "The document is too large to embed."
+      case EmbeddingWorkFailure.InvalidWorkKey   => "The queued work item was malformed."
+      case EmbeddingWorkFailure.InvalidResponse  => "The provider returned an unusable response."
+    }
   lazy val embeddingCoverageCheckNameType: EnumType[EmbeddingCoverageCheckName] =
-    enumType("EmbeddingCoverageCheckName", EmbeddingCoverageCheckName.values.toList)
+    describedEnum(
+      "EmbeddingCoverageCheckName",
+      "A health check over the embedding coverage.",
+      EmbeddingCoverageCheckName.values.toList
+    ) {
+      case EmbeddingCoverageCheckName.NoOrphanedGap => "Every entity without a current embedding has queued work."
+      case EmbeddingCoverageCheckName.NoStuckWork   => "No queued work is stuck."
+    }
   lazy val embeddingCoverageCheckStatusType: EnumType[EmbeddingCoverageCheckStatus] =
-    enumType("EmbeddingCoverageCheckStatus", EmbeddingCoverageCheckStatus.values.toList)
+    describedEnum(
+      "EmbeddingCoverageCheckStatus",
+      "The result of a coverage check.",
+      EmbeddingCoverageCheckStatus.values.toList
+    ) {
+      case EmbeddingCoverageCheckStatus.Passed       => "The check passed."
+      case EmbeddingCoverageCheckStatus.Failed       => "The check found offending entities."
+      case EmbeddingCoverageCheckStatus.Inconclusive => "The scan was truncated, so the check cannot decide."
+    }
   lazy val embeddingCoverageKindSummaryType: ObjectType[RequestContext, EmbeddingCoverageKindSummary] = ObjectType(
     "EmbeddingCoverageKindSummary",
     fields[RequestContext, EmbeddingCoverageKindSummary](
       simple("kind", embeddingCoverageEntityKindType)(_.kind),
-      simple("searchableCount", LongType)(_.searchableCount),
-      simple("scannedCount", LongType)(_.scannedCount),
+      simple("searchableCount", longType)(_.searchableCount),
+      simple("scannedCount", longType)(_.scannedCount),
       simple("truncated", BooleanType)(_.truncated),
       simple("coverageShare", OptionType(FloatType))(_.coverageShare)
     )
@@ -84,7 +136,7 @@ private[graphql] object HiringGraphQLReportingTypes {
       simple("freshness", embeddingFreshnessType)(_.freshness),
       simple("repairState", embeddingRepairStateType)(_.repairState),
       simple("failureReason", OptionType(embeddingFailureReasonType))(_.failure),
-      simple("count", LongType)(_.count)
+      simple("count", longType)(_.count)
     )
   )
   lazy val embeddingObservedModelType: ObjectType[RequestContext, EmbeddingObservedModel] = ObjectType(
@@ -92,16 +144,16 @@ private[graphql] object HiringGraphQLReportingTypes {
     fields[RequestContext, EmbeddingObservedModel](
       simple("kind", embeddingCoverageEntityKindType)(_.kind),
       simple("model", StringType)(_.model),
-      simple("count", LongType)(_.count)
+      simple("count", longType)(_.count)
     )
   )
   lazy val embeddingCoverageLagType: ObjectType[RequestContext, EmbeddingCoverageLag] = ObjectType(
     "EmbeddingCoverageLag",
     fields[RequestContext, EmbeddingCoverageLag](
-      simple("p50Seconds", LongType)(_.p50Seconds),
-      simple("p95Seconds", LongType)(_.p95Seconds),
-      simple("p99Seconds", LongType)(_.p99Seconds),
-      simple("sampleCount", LongType)(_.sampleCount)
+      simple("p50Seconds", longType)(_.p50Seconds),
+      simple("p95Seconds", longType)(_.p95Seconds),
+      simple("p99Seconds", longType)(_.p99Seconds),
+      simple("sampleCount", longType)(_.sampleCount)
     )
   )
   lazy val embeddingCoverageCheckType: ObjectType[RequestContext, EmbeddingCoverageCheck] = ObjectType(
@@ -109,7 +161,7 @@ private[graphql] object HiringGraphQLReportingTypes {
     fields[RequestContext, EmbeddingCoverageCheck](
       simple("check", embeddingCoverageCheckNameType)(_.name),
       simple("status", embeddingCoverageCheckStatusType)(_.status),
-      simple("offendingCount", LongType)(_.offendingCount)
+      simple("offendingCount", longType)(_.offendingCount)
     )
   )
   lazy val embeddingCoverageReportType: ObjectType[RequestContext, EmbeddingCoverageReport] = ObjectType(
@@ -121,8 +173,8 @@ private[graphql] object HiringGraphQLReportingTypes {
       simple("cells", ListType(embeddingCoverageCellType))(_.cells),
       simple("observedModels", ListType(embeddingObservedModelType))(_.observedModels),
       simple("queueTruncated", BooleanType)(_.queueTruncated),
-      simple("oldestQueuedWorkAgeSeconds", OptionType(LongType))(_.oldestQueuedWorkAgeSeconds),
-      simple("oldestNotCurrentAgeSeconds", OptionType(LongType))(_.oldestNotCurrentAgeSeconds),
+      simple("oldestQueuedWorkAgeSeconds", OptionType(longType))(_.oldestQueuedWorkAgeSeconds),
+      simple("oldestNotCurrentAgeSeconds", OptionType(longType))(_.oldestNotCurrentAgeSeconds),
       simple("lagEntityKinds", ListType(embeddingCoverageEntityKindType))(_.lagEntityKinds),
       simple("lagSeconds", OptionType(embeddingCoverageLagType))(_.lagSeconds),
       simple("checks", ListType(embeddingCoverageCheckType))(_.checks)

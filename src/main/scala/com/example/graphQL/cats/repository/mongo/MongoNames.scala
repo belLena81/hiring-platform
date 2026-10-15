@@ -144,6 +144,7 @@ private[mongo] object MongoFields {
   val PreviousStatus = "previousStatus"
   val NewStatus = "newStatus"
   val ActorId = "actorId"
+  val ActorRole = "actorRole"
   val OccurredAt = "occurredAt"
   val Feedback = "feedback"
   val Reason = "reason"

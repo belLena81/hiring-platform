@@ -1,0 +1,3 @@
+query AccountDeletionStatus($receiptId: DeletionReceiptID!) {
+  accountDeletionStatus(receiptId: $receiptId)
+}

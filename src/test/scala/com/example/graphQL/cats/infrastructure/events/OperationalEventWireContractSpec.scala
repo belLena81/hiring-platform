@@ -40,7 +40,7 @@ class OperationalEventWireContractSpec extends FunSuite {
       "description",
       Nil,
       skills,
-      Location("CY", "Nicosia", remote = false),
+      Location("CY", Some("Nicosia"), remote = false),
       status,
       now,
       now
@@ -55,6 +55,7 @@ class OperationalEventWireContractSpec extends FunSuite {
       next,
       actor,
       now,
+      None,
       None,
       None
     )

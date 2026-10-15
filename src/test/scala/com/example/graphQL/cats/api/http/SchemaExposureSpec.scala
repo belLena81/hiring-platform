@@ -114,7 +114,7 @@ final class SchemaExposureSpec extends CatsEffectSuite {
       http <- build(exposure = false)
       body <- http(
         variablePost(
-          "query Q($on: Boolean!) { __schema @include(if: $on) { queryType { name } } readiness { status } }",
+          "query Q($on: Boolean!) { __schema @include(if: $on) { queryType { name } } me { id } }",
           Json.obj("on" -> Json.False)
         )
       ).flatMap(_.as[Json])
@@ -128,7 +128,7 @@ final class SchemaExposureSpec extends CatsEffectSuite {
       http <- build(exposure = false)
       response <- http(
         variablePost(
-          "query Harmless { readiness { status } } query Probe { __schema { queryType { name } } }",
+          "query Harmless { me { id } } query Probe { __schema { queryType { name } } }",
           Json.obj(),
           Some("Harmless")
         )

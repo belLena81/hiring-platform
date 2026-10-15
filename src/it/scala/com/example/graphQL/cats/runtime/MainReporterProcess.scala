@@ -43,7 +43,7 @@ object MainReporterProcess {
           val port = argumentValue("test-http-port").getOrElse("8080")
           val authority = if (host.contains(':')) s"[$host]" else host
           val query =
-            """{"query":"query LocalHealth($include: Boolean = true) { health @include(if: $include) { status } __type(name: \"synthetic-secret\") { name } } # synthetic-comment", "variables":{"include":true,"password":"synthetic-secret","api-key":"synthetic-secret"}}"""
+            """{"query":"query LocalPing($include: Boolean = true) { __typename @include(if: $include) __type(name: \"synthetic-secret\") { name } } # synthetic-comment", "variables":{"include":true,"password":"synthetic-secret","api-key":"synthetic-secret"}}"""
           val request = HttpRequest
             .newBuilder(URI.create(s"http://$authority:$port/graphql"))
             .timeout(Duration.ofSeconds(8))

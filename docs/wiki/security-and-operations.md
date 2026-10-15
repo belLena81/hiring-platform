@@ -26,7 +26,9 @@ The [operation map](domain-and-use-cases.md) gives field-specific rules. [ActorA
 | Execution | Configured admission permits and timeout; probes bypass application admission | [HiringApiRoutes](../../src/main/scala/com/example/graphQL/cats/api/http/HiringApiRoutes.scala) |
 | Server | 64 connections, 8,192-byte headers, 5-second header timeout, 10-second idle/shutdown timeouts | [HiringPlatformServer](../../src/main/scala/com/example/graphQL/cats/runtime/HiringPlatformServer.scala) |
 | GraphQL | Depth 16, complexity 1,000, page-aware costs, configurable discovery-root limit | [Schema assembly](../../src/main/scala/com/example/graphQL/cats/api/graphql/HiringGraphQLSchemaAssembly.scala) |
-| Parsed document cache | 256 entries, 60-second expiry; validated document reuse | [GraphQLDocumentCache](../../src/main/scala/com/example/graphQL/cats/api/graphql/GraphQLDocumentCache.scala) |
+| Parsed document cache | 256 entries, 60-second expiry; parsed documents are reused, validation runs on every request | [GraphQLDocumentCache](../../src/main/scala/com/example/graphQL/cats/api/graphql/GraphQLDocumentCache.scala) |
+| Persisted-query allowlist | Optional `allowlist` mode (default `off`): only full documents whose SHA-256 is in the startup manifest run; introspection-only documents are governed by schema exposure | [PersistedQueryAllowlist](../../src/main/scala/com/example/graphQL/cats/api/admission/PersistedQueryAllowlist.scala); [API reference](../api.md#persisted-query-allowlist) |
+| Relationship batches | At most 100 keys per fetcher repository call; larger sets are split | [HiringGraphQLDsl](../../src/main/scala/com/example/graphQL/cats/api/graphql/HiringGraphQLDsl.scala) |
 | Database discovery | Shared permits and Mongo maximum query time | [DiscoveryQueryPolicy](../../src/main/scala/com/example/graphQL/cats/repository/mongo/DiscoveryQueryPolicy.scala) |
 | Workers | Bounded parallelism/batches, leases, retry limits, provider timeouts, resource-owned fibers | [Workflow patterns](workflows-and-patterns.md) |
 

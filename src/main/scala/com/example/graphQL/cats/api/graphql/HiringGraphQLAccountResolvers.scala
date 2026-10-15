@@ -21,7 +21,7 @@ private[graphql] object HiringGraphQLAccountResolvers {
       val input = context.arg(signUpInputArgument)
       withHiring(context) { hiring =>
         signUpProfile(input).fold(
-          error => mutationResult(EitherT.leftT(error)),
+          error => mutationResult(EitherT.leftT(error), InputFieldPaths.signUp),
           profile =>
             mutationResult(
               hiring.accountService
@@ -29,7 +29,8 @@ private[graphql] object HiringGraphQLAccountResolvers {
                   idempotencyRequest(input.idempotencyKey, input.idempotencyPayload),
                   SignUpInput(input.name, input.role, input.password, profile)
                 )
-                .map(authSuccess)
+                .map(authSuccess),
+              InputFieldPaths.signUp
             )
         )
       }
@@ -45,7 +46,8 @@ private[graphql] object HiringGraphQLAccountResolvers {
               idempotencyRequest(input.idempotencyKey, input.idempotencyPayload),
               LoginInput(input.name, input.password)
             )
-            .map(authSuccess)
+            .map(authSuccess),
+          InputFieldPaths.login
         )
       }
     }
@@ -54,14 +56,15 @@ private[graphql] object HiringGraphQLAccountResolvers {
     authenticated(context) { case (actor, hiring) =>
       val input = context.arg(updateProfileInputArgument)
       updateProfileInput(actor.role, input).fold(
-        error => mutationResult(EitherT.leftT(error)),
+        error => mutationResult(EitherT.leftT(error), InputFieldPaths.updateMyProfile),
         profile =>
           mutationResult(
             hiring.accountService.updateMyProfile(
               idempotencyRequest(input.idempotencyKey, input.idempotencyPayload),
               actor,
               profile
-            )
+            ),
+            InputFieldPaths.updateMyProfile
           )
       )
     }
@@ -101,79 +104,48 @@ private[graphql] object HiringGraphQLAccountResolvers {
       role: UserRole,
       input: UpdateProfileGraphQLInput
   ): Either[UseCaseError, AccountProfileInput] =
-    profileFor(
-      role,
-      input.skills,
-      input.experienceSummary,
-      input.resumeRef,
-      input.currentResidenceCountry,
-      input.currentResidenceCity,
-      input.availabilityStatus,
-      input.recruiterSearchOptIn,
-      input.organizationName,
-      input.jobTitle
-    )
-      .map(AccountProfileInput.apply)
+    role match {
+      case UserRole.Admin => Left(UseCaseError.Account(AccountError.ProfileUnsupportedForRole))
+      case _              => profileFrom(input.profile).map(AccountProfileInput.apply)
+    }
 
   private def signUpProfile(input: SignUpGraphQLInput): Either[UseCaseError, Option[UserProfile]] =
     input.role match {
       case UserRole.Admin => Right(None)
-      case other          =>
-        profileFor(
-          other,
-          input.skills,
-          input.experienceSummary,
-          input.resumeRef,
-          input.currentResidenceCountry,
-          input.currentResidenceCity,
-          input.availabilityStatus,
-          input.recruiterSearchOptIn,
-          input.organizationName,
-          input.jobTitle
-        ).map(Some(_))
+      case _              =>
+        input.profile
+          .toRight(profileInvalid(DomainValidationError.BlankField("profile")))
+          .flatMap(profileFrom)
+          .map(Some(_))
     }
 
-  private def profileFor(
-      role: UserRole,
-      skills: Option[List[String]],
-      experienceSummary: Option[String],
-      resumeRef: Option[String],
-      currentResidenceCountry: Option[String],
-      currentResidenceCity: Option[String],
-      availabilityStatus: Option[CandidateAvailabilityStatus],
-      recruiterSearchOptIn: Option[Boolean],
-      organizationName: Option[String],
-      jobTitle: Option[String]
-  ): Either[UseCaseError, UserProfile] =
-    role match {
-      case UserRole.Candidate =>
-        val residence = currentResidenceCountry.map(country => CandidateResidence(country, currentResidenceCity))
-        if (currentResidenceCountry.isEmpty && currentResidenceCity.nonEmpty)
-          Left(
-            UseCaseError.ValidationFailed(
-              cats.data.NonEmptyList.one(
-                DomainValidationError.BlankField("currentResidence.country")
-              )
+  /** The `@oneOf` rule is checked here too: Sangria enforces it only for a variable typed directly as `ProfileInput`,
+    * so the resolver does not rely on query validation alone. Whether the variant matches the account's role is decided
+    * by the service.
+    */
+  private def profileFrom(input: ProfileGraphQLInput): Either[UseCaseError, UserProfile] =
+    (input.candidate, input.recruiter) match {
+      case (Some(candidate), None) =>
+        Right(
+          UserProfile.Candidate(
+            CandidateProfile(
+              candidate.skills.getOrElse(Nil).toSet,
+              candidate.experienceSummary,
+              candidate.resumeRef,
+              candidate.residence.map(residence => CandidateResidence(residence.country, residence.city)),
+              candidate.availabilityStatus,
+              candidate.recruiterSearchOptIn.getOrElse(false)
             )
           )
-        else
-          Right(
-            UserProfile.Candidate(
-              CandidateProfile(
-                skills.getOrElse(Nil).toSet,
-                experienceSummary,
-                resumeRef,
-                residence,
-                availabilityStatus,
-                recruiterSearchOptIn.getOrElse(false)
-              )
-            )
-          )
-      case UserRole.Recruiter =>
-        Right(UserProfile.Recruiter(RecruiterProfile(organizationName.getOrElse(""), jobTitle)))
-      case UserRole.Admin =>
-        Left(UseCaseError.Account(AccountError.ProfileUnsupportedForRole))
+        )
+      case (None, Some(recruiter)) =>
+        Right(UserProfile.Recruiter(RecruiterProfile(recruiter.organizationName, recruiter.jobTitle)))
+      case (None, None)       => Left(profileInvalid(DomainValidationError.BlankField("profile")))
+      case (Some(_), Some(_)) => Left(profileInvalid(DomainValidationError.TooManyValues("profile", 1, 2)))
     }
+
+  private def profileInvalid(error: DomainValidationError): UseCaseError =
+    UseCaseError.ValidationFailed(cats.data.NonEmptyList.one(error))
 
   private def authSuccess(result: (User, AccountToken)): AuthSuccess = result match {
     case (user, token) => AuthSuccess(user, token.value, token.expiresAt)

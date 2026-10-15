@@ -66,7 +66,7 @@ final class MongoOperationalAccessEvaluationIntegrationSpec extends MongoIntegra
       "Synthetic job description",
       List("Bounded fixture"),
       if (index % 3 == 0) Set("Scala", "MongoDB") else Set("Scala"),
-      Location("Cyprus", if (index % 2 == 0) "Nicosia" else "Limassol", remote = false),
+      Location("Cyprus", Some(if (index % 2 == 0) "Nicosia" else "Limassol"), remote = false),
       if (index % 4 == 3) JobStatus.Closed else JobStatus.Open,
       now.minusSeconds((index / 8).toLong),
       now
@@ -91,6 +91,7 @@ final class MongoOperationalAccessEvaluationIntegrationSpec extends MongoIntegra
         ApplicationStatus.Created,
         application.candidateId,
         now.minusSeconds(index.toLong),
+        None,
         None,
         None
       )

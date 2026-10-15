@@ -235,7 +235,7 @@ Recommendation: **(a)**. It is the only option that keeps the existing authorita
 - GraphQL: add an optional `query: String` argument to the existing field. The sibling-field alternative would duplicate the payload type and diverge filter semantics.
 
   ```graphql
-  jobDiscoveryFacets(query: String, filter: NearbyJobsFilter, center: GeoPointInput, radiusKm: Float): JobDiscoveryFacets!
+  jobDiscoveryFacets(query: String, filter: JobFilter, center: GeoPointInput, radiusKm: Float): JobDiscoveryFacets!
   ```
 
   `JobDiscoveryFacets` gains two additive fields; existing fields keep their meaning (`truncated` stays bucket truncation only):

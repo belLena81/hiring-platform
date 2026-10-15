@@ -82,7 +82,7 @@ final class AtlasLexicalQueryFacetsIntegrationSpec extends CatsEffectSuite {
       s"Synthetic hiring description $n",
       List("requirement"),
       skills,
-      Location("Cyprus", city, remote, Option.when(city == "Nicosia" && !remote)(nicosia)),
+      Location("Cyprus", Some(city), remote, Option.when(city == "Nicosia" && !remote)(nicosia)),
       status,
       now,
       now,
@@ -184,7 +184,7 @@ final class AtlasLexicalQueryFacetsIntegrationSpec extends CatsEffectSuite {
         assertEquals(typical, Right(JobDiscoveryFacets.fromJobs(matching)))
         assertEquals(
           conjunction,
-          Right(JobDiscoveryFacets.fromJobs(matching.filter(_.location.city == "Nicosia")))
+          Right(JobDiscoveryFacets.fromJobs(matching.filter(_.location.city.contains("Nicosia"))))
         )
         assertEquals(
           radius,

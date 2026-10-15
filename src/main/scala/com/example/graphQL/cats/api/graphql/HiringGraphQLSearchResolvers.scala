@@ -7,15 +7,7 @@ import com.example.graphQL.cats.api.graphql.HiringGraphQLInputs.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLResolverSupport.*
 import com.example.graphQL.cats.service.search.{RankedCandidate, RankedJob}
-import com.example.graphQL.cats.service.search.{
-  JobFacetQuery,
-  NearbyRadius,
-  JobSearchFilter,
-  NearbyJobCursor,
-  NearbyJobsQuery,
-  JobDiscoveryValidation
-}
-import com.example.graphQL.cats.service.{SearchError, UseCaseError}
+import com.example.graphQL.cats.service.search.{JobFacetQuery, NearbyRadius, NearbyJobCursor, NearbyJobsQuery}
 import com.example.graphQL.cats.service.events.OperationalEventPayload.SearchKind
 import com.example.graphQL.cats.service.events.SearchFilterSnapshot
 import com.example.graphQL.cats.domain.model.GeoPoint
@@ -24,11 +16,11 @@ import java.time.Instant
 import sangria.schema.Context
 
 private[graphql] object HiringGraphQLSearchResolvers {
-  def nearbyJobs(context: Context[RequestContext, Unit]): HiringGraphQLResult[NearbyJobsResults] =
+  def nearbyJobs(context: Context[RequestContext, Unit]): HiringGraphQLResult[NearbyJobsConnection] =
     authenticated(context) { case (actor, hiring) =>
       given CursorCodec.CursorKey = hiring.cursorKey
       val center = context.arg(nearbyCenterArgument)
-      val inputFilter = context.arg(nearbyFilterArgument)
+      val inputFilter = context.arg(jobFilterArgument)
       for {
         now <- EitherT.liftF[IO, HiringGraphQLFailure, Instant](IO.realTimeInstant)
         limit <- inputResult(pageSize(context.arg(firstArgument)))
@@ -44,17 +36,16 @@ private[graphql] object HiringGraphQLSearchResolvers {
           )
         )
       } yield {
-        val page = values.take(limit.value)
-        NearbyJobsResults(
-          page.map(value =>
-            NearbyJobResult(
+        val edges = values
+          .take(limit.value)
+          .map(value =>
+            NearbyJobEdge(
               value.job,
               value.distanceKm,
               CursorCodec.encode(NearbyJobCursor(value.distanceKm, value.job.id, baseQuery.fingerprint), now)
             )
-          ),
-          values.size > limit.value
-        )
+          )
+        NearbyJobsConnection(edges, PageInfo(values.size > limit.value, edges.lastOption.map(_.cursor)))
       }
     }
 
@@ -73,7 +64,7 @@ private[graphql] object HiringGraphQLSearchResolvers {
       context: Context[RequestContext, Unit]
   ): HiringGraphQLResult[com.example.graphQL.cats.service.search.JobDiscoveryFacets] =
     authenticated(context) { case (actor, hiring) =>
-      val inputFilter = context.arg(nearbyFilterArgument)
+      val inputFilter = context.arg(jobFilterArgument)
       val radiusArgs = (context.arg(optionalNearbyCenterArgument), context.arg(optionalRadiusKmArgument)) match {
         case (None, None)                 => Right(None)
         case (Some(center), Some(radius)) =>
@@ -91,24 +82,12 @@ private[graphql] object HiringGraphQLSearchResolvers {
       } yield facets
     }
 
-  private def discoveryFilter(value: Option[NearbyJobsFilterGraphQLInput]): Either[GraphQLFailure, JobSearchFilter] =
-    JobDiscoveryValidation
-      .filter(
-        JobSearchFilter(
-          value.flatMap(_.city),
-          value.flatMap(_.skills).getOrElse(Nil).toSet,
-          value.flatMap(_.createdAfter)
-        )
-      )
-      .toEither
-      .leftMap(errors => GraphQLFailureCatalog.classify(UseCaseError.Search(SearchError.accumulated(errors))))
-
   def semanticJobSearch(context: Context[RequestContext, Unit]): HiringGraphQLResult[RankedJobResults] =
     authenticatedSearch(context).flatMap { case (actor, hiring, service) =>
-      val filter = jobFilter(context.arg(jobFilterArgument))
       for {
+        filter <- inputResult(discoveryFilter(context.arg(jobFilterArgument)))
         size <- inputResult(pageSize(context.arg(firstArgument)))
-        searchId <- searchIdFor(hiring, context.arg(searchIdArgument))
+        searchId <- searchIdFor(hiring, context.arg(searchIdArgument).map(_.value))
         results <- raiseOnUseCaseError(
           service.semanticJobSearch(actor, context.arg(queryArgument), filter, size, searchId)
         )
@@ -127,7 +106,7 @@ private[graphql] object HiringGraphQLSearchResolvers {
     authenticatedSearch(context).flatMap { case (actor, hiring, service) =>
       for {
         size <- inputResult(pageSize(context.arg(firstArgument)))
-        searchId <- searchIdFor(hiring, context.arg(searchIdArgument))
+        searchId <- searchIdFor(hiring, context.arg(searchIdArgument).map(_.value))
         results <- raiseOnUseCaseError(service.recommendedJobs(actor, size, searchId))
         _ <- recordSearch(
           hiring,
@@ -152,7 +131,7 @@ private[graphql] object HiringGraphQLSearchResolvers {
       )
       for {
         size <- inputResult(pageSize(context.arg(firstArgument)))
-        searchId <- searchIdFor(hiring, context.arg(searchIdArgument))
+        searchId <- searchIdFor(hiring, context.arg(searchIdArgument).map(_.value))
         results <- raiseOnUseCaseError(
           service.candidateMatches(
             actor,
@@ -182,7 +161,7 @@ private[graphql] object HiringGraphQLSearchResolvers {
           value.score,
           value.mode,
           value.meta.model,
-          value.searchId.toString,
+          SearchId(value.searchId),
           value.matchedSkills,
           value.retrievalScore
         )
@@ -194,14 +173,14 @@ private[graphql] object HiringGraphQLSearchResolvers {
       values.map(value =>
         RankedCandidatePayload(
           CandidateMatchCandidate(
-            value.candidate.id.value.toString,
+            value.candidate.id,
             value.candidate.name,
             Some(CandidateMatchProfile(value.candidate.skills, value.candidate.experienceSummary))
           ),
           value.score,
           value.mode,
           value.meta.model,
-          value.searchId.toString,
+          SearchId(value.searchId),
           value.matchedSkills,
           value.retrievalScore
         )

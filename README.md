@@ -99,7 +99,7 @@ Worker failures persist a fixed operational category and retry count; exhausted 
 
 The accelerated Compose proof scripts and their overlay files were removed in commit `3755455`; the pre-production Kafka/Delta retention proof, external-writer exclusion, guarded key retirement and operational signoff remain required before production and are tracked in the analytics specs.
 
-`GET /health` reports application liveness; `GET /ready` answers 503 only when MongoDB is unreachable or the Mongo-writes breaker is open; otherwise 200 with a `degraded` list naming stalled workers (including the embedding worker when vector search is enabled) and aged durable work, for internal probes only. `POST /graphql` accepts `{"query":"{ health { status } readiness { status } }"}`. MongoDB outages leave HTTP running and readiness reports `NOT_READY`. `GET /schema.graphql` exports the current schema and GraphQL introspection supports API documentation/testing clients, but only when `graphql.schema-exposure` is true (set `GRAPHQL_SCHEMA_EXPOSURE=true`, or `graphql.schema-exposure = true` in your own git-ignored `local.conf`; it is off in the packaged default and no local default is shipped, so both are refused with 404 and `FORBIDDEN` until you opt in). Anonymous callers share one query cost budget when the peer address is missing or the service sits behind a proxy not listed in `http.trusted-proxy-cidrs`; configure the real proxy networks for per-client budgets. See the [API reference](docs/api.md).
+`GET /health` reports application liveness; `GET /ready` answers 503 only when MongoDB is unreachable or the Mongo-writes breaker is open; otherwise 200 with a `degraded` list naming stalled workers (including the embedding worker when vector search is enabled) and aged durable work, for internal probes only. `POST /graphql` accepts `{"query":"{ me { id } }"}`. MongoDB outages leave HTTP running and readiness reports `NOT_READY`. `GET /schema.graphql` exports the current schema and GraphQL introspection supports API documentation/testing clients, but only when `graphql.schema-exposure` is true (set `GRAPHQL_SCHEMA_EXPOSURE=true`, or `graphql.schema-exposure = true` in your own git-ignored `local.conf`; it is off in the packaged default and no local default is shipped, so both are refused with 404 and `FORBIDDEN` until you opt in). Anonymous callers share one query cost budget when the peer address is missing or the service sits behind a proxy not listed in `http.trusted-proxy-cidrs`; configure the real proxy networks for per-client budgets. See the [API reference](docs/api.md).
 
 See the [API reference](docs/api.md) and the [current reset specification](docs/specs/pre-mvp-contract-reset.md) for the active contract and verification evidence.
 
@@ -159,7 +159,8 @@ JaCoCo coverage is available for both SBT builds. Run `sbt jacoco` from the repo
 
 ### GraphQL
 - Sangria API with queries and mutations; subscriptions are not implemented.
-- Typed inputs/enums, nested resolvers, cursor-based pagination
+- Typed inputs/enums, typed identifier scalars, a closed `ErrorCode` enum, nested resolvers, cursor-based pagination; every schema element is documented in the SDL
+- Health and readiness are HTTP endpoints (`/health`, `/ready`), not GraphQL fields; an optional persisted-query allowlist (`off` by default) can restrict `/graphql` to reviewed full documents, see [API reference](docs/api.md#persisted-query-allowlist)
 - Batched relationship loading (N+1 prevention)
 - Typed domain/API errors, query depth & complexity limits
 

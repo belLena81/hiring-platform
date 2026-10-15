@@ -20,7 +20,7 @@ class JobLifecycleSpec extends FunSuite {
     "Build backend services",
     List("Scala"),
     Set("Scala"),
-    Location("Ukraine", "Kyiv", remote = true),
+    Location("Ukraine", Some("Kyiv"), remote = true),
     JobStatus.Draft,
     createdAt,
     createdAt
@@ -54,7 +54,7 @@ class JobLifecycleSpec extends FunSuite {
       description = "Own backend services",
       requirements = List("Cats Effect", "MongoDB"),
       skills = Set("Scala", "Cats"),
-      location = Location("Poland", "Warsaw", remote = true),
+      location = Location("Poland", Some("Warsaw"), remote = true),
       updatedAt = updatedAt
     )
     val updated = JobLifecycle.update(input).run(draftJob).map(_._1).toOption.getOrElse(fail("expected job update"))

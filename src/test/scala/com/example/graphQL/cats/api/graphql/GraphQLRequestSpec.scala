@@ -4,7 +4,7 @@ import io.circe.Json
 import munit.CatsEffectSuite
 
 final class GraphQLRequestSpec extends CatsEffectSuite {
-  private val query = Json.fromString("{ health { status } }")
+  private val query = Json.fromString("{ me { id } }")
 
   test("defaults absent and null optional envelope fields identically") {
     val absent = Json.obj("query" -> query).as[GraphQLRequest]
@@ -18,7 +18,7 @@ final class GraphQLRequestSpec extends CatsEffectSuite {
   test("decodes variables and operation name through the typed envelope") {
     val request = Json
       .obj(
-        "query" -> Json.fromString("query Health { health { status } }"),
+        "query" -> Json.fromString("query Health { me { id } }"),
         "variables" -> Json.obj("include" -> Json.True),
         "operationName" -> Json.fromString("Health")
       )
@@ -33,8 +33,8 @@ final class GraphQLRequestSpec extends CatsEffectSuite {
   test("uses Circe failures for missing and wrongly typed envelope fields") {
     val malformed = List(
       Json.obj(),
-      Json.obj("query" -> Json.fromString("{ health { status } }"), "variables" -> Json.arr()),
-      Json.obj("query" -> Json.fromString("{ health { status } }"), "operationName" -> Json.fromInt(1))
+      Json.obj("query" -> Json.fromString("{ me { id } }"), "variables" -> Json.arr()),
+      Json.obj("query" -> Json.fromString("{ me { id } }"), "operationName" -> Json.fromInt(1))
     )
 
     malformed.foreach { json =>
@@ -46,8 +46,8 @@ final class GraphQLRequestSpec extends CatsEffectSuite {
   }
 
   test("retains raw query text for lazy parsing") {
-    val request = Json.obj("query" -> Json.fromString("{ health")).as[GraphQLRequest]
+    val request = Json.obj("query" -> Json.fromString("{ me")).as[GraphQLRequest]
 
-    assertEquals(request.map(_.query), Right("{ health"))
+    assertEquals(request.map(_.query), Right("{ me"))
   }
 }

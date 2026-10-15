@@ -2,6 +2,7 @@ package com.example.graphQL.cats.repository.mongo
 
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
+import com.example.graphQL.cats.domain.model.UserRole
 import com.example.graphQL.cats.domain.workflow.*
 import com.example.graphQL.cats.repository.mongo.MongoDocumentFields.Repository.*
 import com.example.graphQL.cats.service.port.*
@@ -34,8 +35,9 @@ private[mongo] object MongoInterviewWorkflowCodec {
       .append(RevisionField, value.revision)
       .append("phase", value.phase.toString)
       .append("notified", value.notified.toList.map(_.toString).sorted.asJava)
-    MongoInterviewWorkflowLifecycleCodec.insertFields(value).foldLeft(base) { case (document, (field, fieldValue)) =>
-      document.append(field, fieldValue)
+    val withRole = value.initiatedByRole.fold(base)(role => base.append("initiatedByRole", role.toString))
+    MongoInterviewWorkflowLifecycleCodec.insertFields(value).foldLeft(withRole) {
+      case (document, (field, fieldValue)) => document.append(field, fieldValue)
     }
   }
 
@@ -141,6 +143,10 @@ private[mongo] object MongoInterviewWorkflowCodec {
           .map(_.toSet)
       )
       lifecycle <- MongoInterviewWorkflowLifecycleCodec.decode(document, phase)
+      initiatorRole <- Option(document.get("initiatedByRole")).traverse {
+        case name: String => named(UserRole.values)(name)
+        case _            => Left(RepositoryError.InvalidStoredData)
+      }
       _ <- Either.cond(
         revision >= 0L && (!Set(InterviewWorkflowPhase.Completed, InterviewWorkflowPhase.Cancelled)(phase) ||
           notified == InterviewParticipant.values.toSet),
@@ -165,7 +171,8 @@ private[mongo] object MongoInterviewWorkflowCodec {
       lifecycle.proposal,
       lifecycle.rescheduleRequestedAt,
       lifecycle.repairOrigin,
-      lifecycle.skippedGenerations
+      lifecycle.skippedGenerations,
+      initiatorRole
     )
 
   /** A reservation is addressed by workflow and reserve key, never by workflow alone. */

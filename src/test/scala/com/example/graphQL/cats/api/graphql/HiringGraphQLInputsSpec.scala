@@ -82,7 +82,7 @@ final class HiringGraphQLInputsSpec extends CatsEffectSuite {
             "inspectUpdate",
             StringType,
             arguments = updateInputArgument :: Nil,
-            resolve = context => context.arg(updateInputArgument).patch.title
+            resolve = context => context.arg(updateInputArgument).job.title
           )
         )
       )
@@ -115,12 +115,12 @@ final class HiringGraphQLInputsSpec extends CatsEffectSuite {
     }
   }
 
-  test("null or scalar nested job patches are rejected without exposing conversion failures") {
+  test("null or scalar nested job content are rejected without exposing conversion failures") {
     val id = "00000000-0000-0000-0000-000000000001"
-    val nullPatch = Json.obj("input" -> Json.obj("id" -> Json.fromString(id), "patch" -> Json.Null))
-    val scalarPatch = Json.obj("input" -> Json.obj("id" -> Json.fromString(id), "patch" -> Json.fromString("invalid")))
+    val nullJob = Json.obj("input" -> Json.obj("id" -> Json.fromString(id), "job" -> Json.Null))
+    val scalarJob = Json.obj("input" -> Json.obj("id" -> Json.fromString(id), "job" -> Json.fromString("invalid")))
 
-    (executeUpdate(nullPatch), executeUpdate(scalarPatch)).mapN { (nullResult, scalarResult) =>
+    (executeUpdate(nullJob), executeUpdate(scalarJob)).mapN { (nullResult, scalarResult) =>
       List(nullResult, scalarResult).foreach { result =>
         assert(result.isLeft)
         val message = result.fold(_.getMessage, _.noSpaces)

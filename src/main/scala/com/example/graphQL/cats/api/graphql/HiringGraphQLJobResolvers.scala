@@ -9,21 +9,16 @@ import com.example.graphQL.cats.domain.model.{Job, JobStatus, Location}
 import com.example.graphQL.cats.domain.model.Identifiers.JobId
 import com.example.graphQL.cats.service.job.{CreateJobInput, UpdateJobInput}
 import com.example.graphQL.cats.service.protocol.{IdempotencyRequest, JobUseCases, UseCaseF}
-import com.example.graphQL.cats.service.search.JobSearchFilter
 import com.example.graphQL.cats.domain.pagination.{JobCursor, JobPageRequest}
 import com.example.graphQL.cats.service.events.OperationalEventPayload.SearchKind
 import sangria.schema.Context
 
 private[graphql] object HiringGraphQLJobResolvers {
-  def jobs(context: Context[RequestContext, Unit]): HiringGraphQLResult[Connection[Job]] =
+  def jobs(context: Context[RequestContext, Unit]): HiringGraphQLResult[JobSearchConnection] =
     authenticated(context) { case (actor, hiring) =>
-      val filter = JobSearchFilter(
-        context.arg(cityArgument),
-        context.arg(skillsArgument).fold(Set.empty[String])(_.toSet),
-        context.arg(createdAfterArgument)
-      )
       for {
-        searchId <- searchIdFor(hiring, context.arg(searchIdArgument))
+        filter <- inputResult(discoveryFilter(context.arg(jobFilterArgument)))
+        searchId <- searchIdFor(hiring, context.arg(searchIdArgument).map(_.value))
         connection <- paged[JobCursor, JobPageRequest, Job](
           hiring,
           context.arg(firstArgument),
@@ -37,7 +32,7 @@ private[graphql] object HiringGraphQLJobResolvers {
             )
           } yield values
         )(job => JobCursor(job.createdAt, job.id))
-      } yield connection.copy(searchId = Some(searchId.toString))
+      } yield JobSearchConnection(connection, SearchId(searchId))
     }
 
   def job(context: Context[RequestContext, Unit]): HiringGraphQLResult[Job] =
@@ -62,21 +57,23 @@ private[graphql] object HiringGraphQLJobResolvers {
           idempotencyRequest(graphQLInput.idempotencyKey, graphQLInput.idempotencyPayload),
           actor,
           createJobInput(graphQLInput, JobStatus.Open)
-        )
+        ),
+        InputFieldPaths.createJob
       )
     }
 
   def updateJob(context: Context[RequestContext, Unit]): HiringGraphQLResult[MutationOutcome[Job]] =
     authenticated(context) { case (actor, hiring) =>
       val input = context.arg(updateJobInputArgument)
-      val patch = updateInput(input.patch)
+      val patch = updateInput(input.job)
       mutationResult(
         hiring.jobService.updateJob(
           idempotencyRequest(input.idempotencyKey, input.idempotencyPayload),
           actor,
           input.id,
           patch
-        )
+        ),
+        InputFieldPaths.updateJob
       )
     }
 
@@ -107,7 +104,7 @@ private[graphql] object HiringGraphQLJobResolvers {
       input.skills.toSet,
       Location(
         input.country,
-        input.city.getOrElse(""),
+        input.city,
         input.remote,
         input.coordinates.map(point => com.example.graphQL.cats.domain.model.GeoPoint(point.latitude, point.longitude))
       ),
@@ -122,7 +119,7 @@ private[graphql] object HiringGraphQLJobResolvers {
       input.skills.toSet,
       Location(
         input.country,
-        input.city.getOrElse(""),
+        input.city,
         input.remote,
         input.coordinates.map(point => com.example.graphQL.cats.domain.model.GeoPoint(point.latitude, point.longitude))
       )

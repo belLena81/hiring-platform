@@ -180,7 +180,7 @@ class MongoHiringCodecsSpec extends FunSuite {
       "Build services",
       List("Scala"),
       Set("Cats Effect"),
-      Location("Cyprus", "Nicosia", remote = true),
+      Location("Cyprus", Some("Nicosia"), remote = true),
       JobStatus.Closed,
       now,
       later,
@@ -203,7 +203,7 @@ class MongoHiringCodecsSpec extends FunSuite {
       "Build services",
       List("Scala"),
       Set("Cats Effect"),
-      Location("Cyprus", "Nicosia", remote = false, Some(point)),
+      Location("Cyprus", Some("Nicosia"), remote = false, Some(point)),
       JobStatus.Open,
       now,
       later
@@ -226,7 +226,7 @@ class MongoHiringCodecsSpec extends FunSuite {
       "Build services",
       List("Scala"),
       Set("Cats Effect"),
-      Location("Cyprus", "Nicosia", remote = true),
+      Location("Cyprus", Some("Nicosia"), remote = true),
       JobStatus.Open,
       now,
       later,
@@ -249,7 +249,7 @@ class MongoHiringCodecsSpec extends FunSuite {
       "Build services",
       List("Scala"),
       Set("Cats Effect"),
-      Location("Cyprus", "Nicosia", remote = true),
+      Location("Cyprus", Some("Nicosia"), remote = true),
       JobStatus.Open,
       now,
       later
@@ -276,7 +276,7 @@ class MongoHiringCodecsSpec extends FunSuite {
           "Description",
           Nil,
           Set.empty,
-          Location("Cyprus", "Nicosia", true),
+          Location("Cyprus", Some("Nicosia"), true),
           JobStatus.Open,
           now,
           now
@@ -373,7 +373,17 @@ class MongoHiringCodecsSpec extends FunSuite {
     val applicationEventId = ApplicationEventId(UUID.fromString("00000000-0000-0000-0000-000000000206"))
     val application = Application.create(applicationId, candidateId, jobId, now)
     val event =
-      ApplicationEvent(applicationEventId, applicationId, None, ApplicationStatus.Created, candidateId, now, None, None)
+      ApplicationEvent(
+        applicationEventId,
+        applicationId,
+        None,
+        ApplicationStatus.Created,
+        candidateId,
+        now,
+        None,
+        None,
+        None
+      )
     val operational = OperationalEventEnvelope(
       UUID.fromString("00000000-0000-0000-0000-000000000207"),
       OperationalEventType.SEARCH_PERFORMED,

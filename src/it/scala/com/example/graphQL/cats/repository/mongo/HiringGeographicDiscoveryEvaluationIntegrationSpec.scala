@@ -51,7 +51,7 @@ final class HiringGeographicDiscoveryEvaluationIntegrationSpec extends MongoInte
       Set("Scala", s"Skill${index % 24}"),
       Location(
         "Cyprus",
-        if (index % 2 == 0) "Nicosia" else "Limassol",
+        Some(if (index % 2 == 0) "Nicosia" else "Limassol"),
         remote = index % 11 == 0,
         coordinates = Option.when(index % 13 != 0)(GeoPoint(center.latitude + index * 0.0001d, center.longitude))
       ),

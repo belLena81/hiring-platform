@@ -2,7 +2,12 @@ package com.example.graphQL.cats.api.http
 
 import cats.data.{Kleisli, OptionT}
 import cats.effect.IO
-import com.example.graphQL.cats.api.admission.{AuthRateLimiter, CostBudgetLimiter, InterviewActionRateLimiter}
+import com.example.graphQL.cats.api.admission.{
+  AuthRateLimiter,
+  CostBudgetLimiter,
+  InterviewActionRateLimiter,
+  PersistedQueryPolicy
+}
 import com.example.graphQL.cats.api.auth.AuthFailure
 import com.example.graphQL.cats.api.graphql.{GraphQLDocumentCache, HiringGraphQLServices, RequestContextFactory}
 import com.example.graphQL.cats.shared.HiringHttpPaths
@@ -52,7 +57,7 @@ final class HiringApiRoutes(
     )
 
   def httpRoutes(config: HiringApiRoutes.HttpConfig): IO[HttpRoutes[IO]] = {
-    val graphQL = new GraphQLHttpRoutes(service, diagnostics, dependencies, tracer)
+    val graphQL = new GraphQLHttpRoutes(diagnostics, dependencies, tracer)
     val onError = (request: Request[IO], failure: Throwable) =>
       graphQL.rejection(HttpRejection.Internal, request, LogFields.failure(failure))
     val onEntityTooLarge = (request: Request[IO]) => graphQL.rejection(HttpRejection.PayloadTooLarge, request)
@@ -80,7 +85,8 @@ object HiringApiRoutes {
       costBudgetLimiter: CostBudgetLimiter.Limiter,
       clientAddressResolver: ClientAddressResolver,
       discoveryMaxRoots: Int = 4,
-      schemaExposure: Boolean = false
+      schemaExposure: Boolean = false,
+      persistedQueries: PersistedQueryPolicy = PersistedQueryPolicy.Off
   )
 
   final case class HttpConfig(admissionPermits: Long, requestTimeout: FiniteDuration)

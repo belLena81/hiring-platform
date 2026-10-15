@@ -24,7 +24,8 @@ final class HiringGraphQLDiscoveryContractSpec extends CatsEffectSuite {
   private val center = GeoPoint(35d, 33d)
   private val candidate = ServiceFixtures.candidate
   private val actor = ActorContext(candidate.id, candidate.role)
-  private val pointJob = ServiceFixtures.openJob.copy(location = Location("Cyprus", "Nicosia", false, Some(center)))
+  private val pointJob =
+    ServiceFixtures.openJob.copy(location = Location("Cyprus", Some("Nicosia"), false, Some(center)))
 
   private def execute(
       query: String,
@@ -43,7 +44,6 @@ final class HiringGraphQLDiscoveryContractSpec extends CatsEffectSuite {
       )
       result <- TestGraphQLSupport
         .context(
-          IO.pure(ProbeResult.Ready),
           authenticated,
           TestGraphQLSupport.emptyServices.copy(jobService = fixture.service, readModel = readModel)
         )
@@ -73,11 +73,7 @@ final class HiringGraphQLDiscoveryContractSpec extends CatsEffectSuite {
     }"""
     JobDiscoveryTestSupport.fixture(List(candidate)).flatMap { fixture =>
       TestGraphQLSupport
-        .context(
-          IO.pure(ProbeResult.Ready),
-          Some(actor),
-          TestGraphQLSupport.emptyServices.copy(jobService = fixture.service)
-        )
+        .context(Some(actor), TestGraphQLSupport.emptyServices.copy(jobService = fixture.service))
         .use { context =>
           TestGraphQLSupport.parseAndExecute(GraphQLRequest(query, Json.obj(), None), context).flatMap { result =>
             assertEquals(result, Left(HiringGraphQLSchema.Failure.InvalidQuery))
@@ -98,7 +94,6 @@ final class HiringGraphQLDiscoveryContractSpec extends CatsEffectSuite {
         .flatMap(
           _.resource(
             RequestContextParameters(
-              IO.pure(ProbeResult.Ready),
               Some(actor),
               TestGraphQLSupport.emptyServices.copy(jobService = fixture.service),
               IO.pure(ProbeResult.Ready),
@@ -131,12 +126,12 @@ final class HiringGraphQLDiscoveryContractSpec extends CatsEffectSuite {
     }
   }
 
-  test("geographic hits and exact structured facet operations validate against the active schema") {
+  test("AC-04.1 geographic hits and exact structured facet operations validate against the active schema") {
     val query = """query {
       nearbyJobs(center: {latitude: 35.1856, longitude: 33.3823}, radiusKm: 20,
         filter: {city: "Nicosia", skills: ["Scala"]}, first: 7) {
-        results { job { id location { coordinates { latitude longitude } } } distanceKm cursor }
-        hasNextPage
+        edges { node { id location { coordinates { latitude longitude } } } distanceKm cursor }
+        pageInfo { hasNextPage endCursor }
       }
       jobDiscoveryFacets(filter: {skills: ["Scala"]}) {
         skills { value count } countries { value count } cities { value count } remote { value count } truncated
@@ -152,10 +147,12 @@ final class HiringGraphQLDiscoveryContractSpec extends CatsEffectSuite {
     )
   }
 
-  test("discovery resolvers execute authorized hits, facets and cursor encoding with normalized filters") {
-    val query = """query($filter: NearbyJobsFilter) {
+  test(
+    "AC-04.1 AC-06.1 discovery resolvers execute authorized hits, facets and cursor encoding with normalized filters"
+  ) {
+    val query = """query($filter: JobFilter) {
       nearbyJobs(center: {latitude: 35, longitude: 33}, radiusKm: 20, first: 1, filter: $filter) {
-        results { job { id } distanceKm cursor } hasNextPage
+        edges { node { id } distanceKm cursor } pageInfo { hasNextPage endCursor }
       }
       jobDiscoveryFacets(filter: $filter) { skills { value count } cities { value count } truncated }
     }"""
@@ -171,10 +168,12 @@ final class HiringGraphQLDiscoveryContractSpec extends CatsEffectSuite {
         calls <- fixture.calls.get
       } yield {
         assert(!result.hcursor.downField("errors").succeeded, result.noSpaces)
-        val hit = result.hcursor.downField("data").downField("nearbyJobs").downField("results").downArray
-        assertEquals(hit.downField("job").get[String]("id"), Right(pointJob.id.value.toString))
+        val nearby = result.hcursor.downField("data").downField("nearbyJobs")
+        val hit = nearby.downField("edges").downArray
+        assertEquals(hit.downField("node").get[String]("id"), Right(pointJob.id.value.toString))
         assertEquals(hit.get[Double]("distanceKm"), Right(0d))
-        assertEquals(result.hcursor.downField("data").downField("nearbyJobs").get[Boolean]("hasNextPage"), Right(false))
+        assertEquals(nearby.downField("pageInfo").get[Boolean]("hasNextPage"), Right(false))
+        assertEquals(nearby.downField("pageInfo").get[String]("endCursor"), hit.get[String]("cursor"))
         val normalized = JobSearchFilter(Some("Nicosia"), Set("Scala"), None)
         assertEquals(calls.nearby.map(_.filter), List(normalized))
         assertEquals(calls.facets.map(_.filter), List(normalized))
@@ -197,12 +196,12 @@ final class HiringGraphQLDiscoveryContractSpec extends CatsEffectSuite {
 
   test("ARR-01.1 ARR-01.3 executed invalid geographic, page and pairing inputs never call discovery repositories") {
     val cases = List(
-      "nearbyJobs(center: {latitude: 91, longitude: 33}, radiusKm: 20, first: 1) { hasNextPage }" -> "INVALID_SEARCH_FILTER",
-      "nearbyJobs(center: {latitude: 35, longitude: 33}, radiusKm: 501, first: 1) { hasNextPage }" -> "INVALID_SEARCH_FILTER",
-      "nearbyJobs(center: {latitude: 35, longitude: 33}, radiusKm: 0, first: 1) { hasNextPage }" -> "INVALID_SEARCH_FILTER",
-      "nearbyJobs(center: {latitude: 35, longitude: 33}, radiusKm: 20, first: 0) { hasNextPage }" -> "VALIDATION_FAILED",
-      "nearbyJobs(center: {latitude: 35, longitude: 33}, radiusKm: 20, first: -1) { hasNextPage }" -> "VALIDATION_FAILED",
-      "nearbyJobs(center: {latitude: 35, longitude: 33}, radiusKm: 20, first: 101) { hasNextPage }" -> "VALIDATION_FAILED",
+      "nearbyJobs(center: {latitude: 91, longitude: 33}, radiusKm: 20, first: 1) { pageInfo { hasNextPage } }" -> "INVALID_SEARCH_FILTER",
+      "nearbyJobs(center: {latitude: 35, longitude: 33}, radiusKm: 501, first: 1) { pageInfo { hasNextPage } }" -> "INVALID_SEARCH_FILTER",
+      "nearbyJobs(center: {latitude: 35, longitude: 33}, radiusKm: 0, first: 1) { pageInfo { hasNextPage } }" -> "INVALID_SEARCH_FILTER",
+      "nearbyJobs(center: {latitude: 35, longitude: 33}, radiusKm: 20, first: 0) { pageInfo { hasNextPage } }" -> "VALIDATION_FAILED",
+      "nearbyJobs(center: {latitude: 35, longitude: 33}, radiusKm: 20, first: -1) { pageInfo { hasNextPage } }" -> "VALIDATION_FAILED",
+      "nearbyJobs(center: {latitude: 35, longitude: 33}, radiusKm: 20, first: 101) { pageInfo { hasNextPage } }" -> "VALIDATION_FAILED",
       "jobDiscoveryFacets(center: {latitude: 35, longitude: 33}) { truncated }" -> "INVALID_FILTER",
       "jobDiscoveryFacets(radiusKm: 20) { truncated }" -> "INVALID_FILTER",
       "jobDiscoveryFacets(center: {latitude: 35, longitude: 33}, radiusKm: -1) { truncated }" -> "INVALID_SEARCH_FILTER"
@@ -215,7 +214,7 @@ final class HiringGraphQLDiscoveryContractSpec extends CatsEffectSuite {
     }
   }
 
-  test("executed blank and oversized filters fail before discovery calls") {
+  test("AC-06.2 executed blank and oversized filters fail before discovery calls in every job discovery operation") {
     val invalidFilters = List(
       Json.obj("city" -> Json.fromString(" ")),
       Json.obj("city" -> Json.fromString("a" * 257)),
@@ -223,12 +222,13 @@ final class HiringGraphQLDiscoveryContractSpec extends CatsEffectSuite {
       Json.obj("skills" -> Json.fromValues((1 to 101).map(index => Json.fromString(s"Skill$index"))))
     )
     val operations = List(
-      "nearbyJobs(center: {latitude: 35, longitude: 33}, radiusKm: 20, first: 1, filter: $filter) { hasNextPage }",
-      "jobDiscoveryFacets(filter: $filter) { truncated }"
+      "nearbyJobs(center: {latitude: 35, longitude: 33}, radiusKm: 20, first: 1, filter: $filter) { pageInfo { hasNextPage } }",
+      "jobDiscoveryFacets(filter: $filter) { truncated }",
+      "jobs(first: 1, filter: $filter) { searchId }"
     )
     JobDiscoveryTestSupport.fixture(List(candidate)).flatMap { fixture =>
       (invalidFilters, operations).tupled.traverse_ { case (filter, field) =>
-        execute(s"query($$filter: NearbyJobsFilter) { $field }", Json.obj("filter" -> filter), fixture)
+        execute(s"query($$filter: JobFilter) { $field }", Json.obj("filter" -> filter), fixture)
           .map(result => assertEquals(errorCode(result), Right("INVALID_SEARCH_FILTER")))
       } *> fixture.calls.get.map(calls => assertEquals(calls, JobDiscoveryTestSupport.Calls()))
     }
@@ -247,7 +247,7 @@ final class HiringGraphQLDiscoveryContractSpec extends CatsEffectSuite {
         s"1.0|${pointJob.id.value}|${query.fingerprint}".getBytes(java.nio.charset.StandardCharsets.UTF_8)
       )
     val operation = """query($after: String) {
-      nearbyJobs(center: {latitude: 35, longitude: 33}, radiusKm: 20, first: 1, after: $after) { hasNextPage }
+      nearbyJobs(center: {latitude: 35, longitude: 33}, radiusKm: 20, first: 1, after: $after) { pageInfo { hasNextPage } }
     }"""
     JobDiscoveryTestSupport.fixture(List(candidate)).flatMap { fixture =>
       List(
@@ -303,12 +303,12 @@ final class HiringGraphQLDiscoveryContractSpec extends CatsEffectSuite {
 
   test("HDQ-12.11 the SDL fixture declares the query argument, FacetCoverage and both coverage fields") {
     val sdl = scala.io.Source.fromResource("graphql/hiring.graphql").mkString
-    assert(
-      sdl.contains(
-        "jobDiscoveryFacets(query: String, filter: NearbyJobsFilter, center: GeoPointInput, radiusKm: Float): JobDiscoveryFacets!"
-      )
+    val facetsField = sdl.slice(sdl.indexOf("  jobDiscoveryFacets("), sdl.indexOf("): JobDiscoveryFacets!"))
+    List("query: String,", "filter: JobFilter,", "center: GeoPointInput,", "radiusKm: Float").foreach(argument =>
+      assert(facetsField.contains(argument), argument)
     )
-    assert(sdl.contains("enum FacetCoverage {\n  ALL_MATCHES\n  TOP_MATCHES\n}"))
+    assert(sdl.contains("enum FacetCoverage {"))
+    assert(sdl.contains("  ALL_MATCHES\n") && sdl.contains("  TOP_MATCHES\n"))
     assert(sdl.contains("  truncated: Boolean!\n  coverage: FacetCoverage!\n  coverageLimit: Int\n"))
   }
 

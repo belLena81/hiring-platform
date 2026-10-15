@@ -1,0 +1,25 @@
+query ApplicationHistory($applicationId: ApplicationID!, $first: Int!, $after: String) {
+  applicationHistory(applicationId: $applicationId, first: $first, after: $after) {
+    edges {
+      cursor
+      node { id previousStatus newStatus actorRole occurredAt feedback reason }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+
+mutation RecordJobView($input: RecordJobViewInput!) {
+  recordJobView(input: $input) {
+    ... on InteractionSuccess { eventId }
+    ... on ValidationError { code message field }
+    ... on DomainError { code message }
+  }
+}
+
+mutation UpdateJob($input: UpdateJobInput!) {
+  updateJob(input: $input) {
+    ... on Job { id title }
+    ... on ValidationError { code message field }
+    ... on DomainError { code message }
+  }
+}

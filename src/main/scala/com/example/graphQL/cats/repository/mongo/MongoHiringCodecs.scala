@@ -129,7 +129,8 @@ private[mongo] object MongoHiringCodecs {
         event.actorId.value.toString,
         event.occurredAt.toDate,
         event.feedback,
-        event.reason
+        event.reason,
+        event.actorRole.map(_.toString)
       )
     )
 
@@ -143,7 +144,8 @@ private[mongo] object MongoHiringCodecs {
         uuid(MongoFields.ActorId, value.actorId).toValidatedNel.map(UserId.apply),
         value.occurredAt.toInstant.validNel,
         value.feedback.validNel,
-        value.reason.validNel
+        value.reason.validNel,
+        optionalEnum(MongoFields.ActorRole, value.actorRole, UserRole.values).toValidatedNel
       ).mapN(ApplicationEvent.apply)
     }
 
@@ -171,7 +173,7 @@ private[mongo] object MongoHiringCodecs {
       case Some(_) => InvalidField("location.point").invalidNel
     }
     coordinates
-      .andThen(point => Location.validate(value.country, value.city, value.remote, point))
+      .andThen(point => Location.validate(value.country, value.city.filter(_.nonEmpty), value.remote, point))
       .leftMap(_.map(_ => InvalidField("location")))
   }
 
@@ -332,7 +334,8 @@ private[mongo] object MongoHiringCodecs {
       MongoFields.ActorId,
       MongoFields.OccurredAt,
       MongoFields.Feedback,
-      MongoFields.Reason
+      MongoFields.Reason,
+      MongoFields.ActorRole
     )
   private val OperationalEventFields = Set(
     MongoFields.Id,

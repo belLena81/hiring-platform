@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.domain.workflow
 
-import com.example.graphQL.cats.domain.model.ApplicationStatus
+import com.example.graphQL.cats.domain.model.{ApplicationStatus, UserRole}
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, UserId}
 import com.example.hiring.saga.SagaEngine
 import java.time.Instant
@@ -119,7 +119,9 @@ final case class InterviewWorkflow(
       * its (cancelled) reservation stored under its key, so the next attempt must use a fresh generation. Between a
       * committed swap and the old slot's cancellation it is the gap that locates the old reservation.
       */
-    skippedGenerations: Int = 0
+    skippedGenerations: Int = 0,
+    /** Role of the trusted actor who scheduled the interview; absent on workflows stored before it was recorded. */
+    initiatedByRole: Option[UserRole] = None
 ) {
 
   /** Generation of the replacement hold the workflow is attempting (hold, swap and compensation phases). */
@@ -176,7 +178,8 @@ object InterviewWorkflow {
       preCommitDeadline: Instant,
       idempotencyKey: UUID,
       applicationStatus: ApplicationStatus,
-      initiatedBy: Option[UserId] = None
+      initiatedBy: Option[UserId] = None,
+      initiatedByRole: Option[UserRole] = None
   ): Either[InterviewWorkflowError, InterviewWorkflow] =
     Either.cond(
       applicationStatus == ApplicationStatus.Accepted,
@@ -191,7 +194,8 @@ object InterviewWorkflow {
         revision = 0L,
         phase = InterviewWorkflowPhase.ReservationPending,
         notified = Set.empty,
-        initiatedBy = initiatedBy.getOrElse(recruiterId)
+        initiatedBy = initiatedBy.getOrElse(recruiterId),
+        initiatedByRole = initiatedByRole
       ),
       InterviewWorkflowError.ApplicationMustBeAccepted
     )

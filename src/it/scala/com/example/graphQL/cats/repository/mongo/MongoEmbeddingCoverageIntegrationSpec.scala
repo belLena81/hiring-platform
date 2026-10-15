@@ -53,7 +53,7 @@ final class MongoEmbeddingCoverageIntegrationSpec extends MongoIntegrationSuite 
       "Hiring infrastructure",
       List("Cats Effect"),
       Set("Scala"),
-      Location("Cyprus", "Nicosia", remote = true),
+      Location("Cyprus", Some("Nicosia"), remote = true),
       status,
       now.minusSeconds(3600),
       now.minusSeconds(1800),

@@ -43,7 +43,7 @@ final class ApplicationWriteFenceIntegrationSpec extends MongoIntegrationSuite {
       "Fence description",
       List("Fence requirement"),
       Set("Scala"),
-      Location("Cyprus", "Nicosia", remote = false),
+      Location("Cyprus", Some("Nicosia"), remote = false),
       JobStatus.Open,
       at,
       at
@@ -84,7 +84,8 @@ final class ApplicationWriteFenceIntegrationSpec extends MongoIntegrationSuite {
         candidate.id,
         at,
         None,
-        None
+        None,
+        Some(candidate.role)
       )
       applications
         .createForOpenJobWithEvents(
@@ -112,7 +113,8 @@ final class ApplicationWriteFenceIntegrationSpec extends MongoIntegrationSuite {
         actor.id,
         at.plusSeconds(60),
         None,
-        None
+        None,
+        Some(actor.role)
       )
       applications
         .updateStatusWithEvents(

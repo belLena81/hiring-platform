@@ -45,13 +45,14 @@ class HiringPlatformServerSpec extends CatsEffectSuite {
       host: String,
       port: Int,
       database: DatabaseProbe[IO],
+      hiringReady: IO[ProbeResult] = IO.pure(ProbeResult.Ready),
       degraded: Option[IO[List[ReadinessComponent]]] = None
   ): Resource[IO, Server] =
     for {
       dependencies <- TestGraphQLSupport.dependencies(
         TestGraphQLSupport.emptyServices,
         _ => IO.pure(Right(None)),
-        IO.pure(ProbeResult.Ready),
+        hiringReady,
         authRateLimit
       )
       app <- Resource.eval(
@@ -120,10 +121,10 @@ class HiringPlatformServerSpec extends CatsEffectSuite {
   test("ARR-07.1 the served readiness lists a degraded publisher with 200 and a lost database with 503") {
     val degraded = Some(IO.pure(List(ReadinessComponent.KafkaPublisher, ReadinessComponent.OutboxAge)))
     for {
-      served <- server("127.0.0.1", 0, probe(IO.pure(ProbeResult.Ready)), degraded).use { running =>
+      served <- server("127.0.0.1", 0, probe(IO.pure(ProbeResult.Ready)), degraded = degraded).use { running =>
         request(running.address.getPort, "/ready")
       }
-      lost <- server("127.0.0.1", 0, probe(IO.pure(ProbeResult.Unavailable)), degraded).use { running =>
+      lost <- server("127.0.0.1", 0, probe(IO.pure(ProbeResult.Unavailable)), degraded = degraded).use { running =>
         request(running.address.getPort, "/ready")
       }
     } yield {
@@ -147,37 +148,22 @@ class HiringPlatformServerSpec extends CatsEffectSuite {
         val port = server.address.getPort
         for {
           health <- request(port, "/health")
-          graphqlHealth <- request(port, "/graphql", Some("""{"query":"{ health { status } }"}"""))
+          graphqlPing <- request(port, "/graphql", Some("""{"query":"{ __typename }"}"""))
           healthChecks <- checks.get
           ready <- request(port, "/ready")
-          graphqlReady <- request(
-            port,
-            "/graphql",
-            Some("""{"query":"{ first: readiness { status } second: readiness { status } }"}""")
-          )
           totalChecks <- checks.get
           graphiql <- request(port, "/graphiql")
         } yield {
           assertEquals(health.statusCode(), 200)
           assertEquals(json(health).hcursor.get[String]("status"), Right("UP"))
-          assertEquals(graphqlHealth.statusCode(), 200)
-          assertEquals(
-            json(graphqlHealth).hcursor.downField("data").downField("health").get[String]("status"),
-            Right("UP")
-          )
+          assertEquals(graphqlPing.statusCode(), 200)
+          assertEquals(json(graphqlPing).hcursor.downField("data").get[String]("__typename"), Right("Query"))
           assertEquals(healthChecks, 0)
           assertEquals(ready.statusCode(), 200)
           assertEquals(json(ready).hcursor.get[String]("status"), Right("READY"))
-          assertEquals(graphqlReady.statusCode(), 200)
-          List("first", "second").foreach { alias =>
-            assertEquals(
-              json(graphqlReady).hcursor.downField("data").downField(alias).get[String]("status"),
-              Right("READY")
-            )
-          }
-          assertEquals(totalChecks, 2)
+          assertEquals(totalChecks, 1)
           assertEquals(graphiql.statusCode(), 404)
-          List(health, graphqlHealth, ready, graphqlReady).foreach(assertCorrelation)
+          List(health, graphqlPing, ready).foreach(assertCorrelation)
         }
       }
     } yield ()
@@ -191,7 +177,7 @@ class HiringPlatformServerSpec extends CatsEffectSuite {
         for {
           health <- request(port, "/health")
           ready <- request(port, "/ready")
-          graphql <- request(port, "/graphql", Some("""{"query":"{ readiness { status } }"}"""))
+          graphql <- request(port, "/graphql", Some("""{"query":"{ __typename }"}"""))
           _ <- result.set(ProbeResult.Ready)
           recovered <- request(port, "/ready")
         } yield {
@@ -199,10 +185,7 @@ class HiringPlatformServerSpec extends CatsEffectSuite {
           assertEquals(ready.statusCode(), 503)
           assertEquals(json(ready).hcursor.get[String]("status"), Right("NOT_READY"))
           assertEquals(graphql.statusCode(), 200)
-          assertEquals(
-            json(graphql).hcursor.downField("data").downField("readiness").get[String]("status"),
-            Right("NOT_READY")
-          )
+          assertEquals(json(graphql).hcursor.downField("data").get[String]("__typename"), Right("Query"))
           assertEquals(recovered.statusCode(), 200)
         }
       }
@@ -210,7 +193,7 @@ class HiringPlatformServerSpec extends CatsEffectSuite {
   }
 
   private def resetConnection(port: Int, path: String, entered: Deferred[IO, Unit]): IO[Unit] = {
-    val body = """{"query":"{ readiness { status } }"}"""
+    val body = """{"query":"{ me { id } }"}"""
     val wire =
       if (path == "/ready") s"GET /ready HTTP/1.1\r\nHost: 127.0.0.1:$port\r\n\r\n"
       else
@@ -232,16 +215,23 @@ class HiringPlatformServerSpec extends CatsEffectSuite {
       for {
         entered <- Deferred[IO, Unit]
         finalized <- Deferred[IO, Unit]
+        release <- Deferred[IO, Unit]
         calls <- Ref.of[IO, Int](0)
-        fake = probe(calls.getAndUpdate(_ + 1).flatMap {
+        blocking = calls.getAndUpdate(_ + 1).flatMap {
           case 0 => (entered.complete(()).void *> IO.never[ProbeResult]).onCancel(finalized.complete(()).void)
           case _ => IO.pure(ProbeResult.Ready)
-        })
-        _ <- server("127.0.0.1", 0, fake).use { server =>
+        }
+        // GraphQL no longer calls the database probe, so a stuck GraphQL request blocks in the hiring-readiness check.
+        fake = if (path == "/ready") probe(blocking) else probe(IO.pure(ProbeResult.Ready))
+        // The per-request hiring-readiness check is memoized and is not cancelled with the request, so the GraphQL
+        // variant releases it explicitly instead of waiting for a cancellation.
+        stuckHiringReady = entered.complete(()).void *> release.get.as(ProbeResult.Ready)
+        hiringReady = if (path == "/graphql") stuckHiringReady else IO.pure(ProbeResult.Ready)
+        _ <- server("127.0.0.1", 0, fake, hiringReady).use { server =>
           for {
             _ <- resetConnection(server.address.getPort, path, entered)
             resetAt <- IO.monotonic
-            _ <- finalized.get.timeout(cleanupBound)
+            _ <- if (path == "/ready") finalized.get.timeout(cleanupBound) else release.complete(()).void
             elapsed <- IO.monotonic.map(_ - resetAt)
             response <- request(server.address.getPort, "/ready")
             count <- calls.get
@@ -249,7 +239,7 @@ class HiringPlatformServerSpec extends CatsEffectSuite {
             assert(elapsed < cleanupBound, clues(elapsed))
             assertEquals(response.statusCode(), 200)
             assertEquals(json(response).hcursor.get[String]("status"), Right("READY"))
-            assertEquals(count, 2)
+            assertEquals(count, if (path == "/ready") 2 else 0)
           }
         }
       } yield ()

@@ -16,9 +16,9 @@ private[graphql] object HiringGraphQLInteractionResolvers {
             actor,
             input.eventId,
             input.jobId,
-            input.searchId
+            input.searchId.map(_.value)
           )
-          .map(_ => InteractionSuccess(true))
+          .map(_ => InteractionSuccess(input.eventId))
       )
     }
 
@@ -33,10 +33,10 @@ private[graphql] object HiringGraphQLInteractionResolvers {
             idempotencyRequest(input.idempotencyKey, input.idempotencyPayload),
             actor,
             input.eventId,
-            input.searchId,
+            input.searchId.value,
             input.resultId.toString
           )
-          .map(_ => InteractionSuccess(true))
+          .map(_ => InteractionSuccess(input.eventId))
       )
     }
 }

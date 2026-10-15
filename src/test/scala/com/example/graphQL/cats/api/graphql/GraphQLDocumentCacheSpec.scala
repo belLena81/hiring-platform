@@ -5,7 +5,7 @@ import munit.CatsEffectSuite
 
 final class GraphQLDocumentCacheSpec extends CatsEffectSuite {
   test("caches only documents explicitly stored after successful analysis") {
-    val query = "{ health { status } }"
+    val query = "{ me { id } }"
     GraphQLDocumentCache.resource.use { cache =>
       for {
         firstResult <- cache.document(query)
@@ -20,12 +20,14 @@ final class GraphQLDocumentCacheSpec extends CatsEffectSuite {
       } yield {
         assert(!first.cached)
         assert(second.cached)
+        // AC-15.1 the cached parse is reused, not parsed again.
+        assert(second.document eq first.document)
       }
     }
   }
 
   test("defers cache reads until the returned IO runs") {
-    val query = "{ health { status } }"
+    val query = "{ me { id } }"
     GraphQLDocumentCache.resource.use { cache =>
       val lookup = cache.document(query)
       for {
@@ -44,7 +46,7 @@ final class GraphQLDocumentCacheSpec extends CatsEffectSuite {
 
   test("reacquiring one resource value creates an independent cache") {
     val resource = GraphQLDocumentCache.resource
-    val query = "{ health { status } }"
+    val query = "{ me { id } }"
     for {
       _ <- resource.use { cache =>
         cache.document(query).flatMap {
@@ -58,7 +60,7 @@ final class GraphQLDocumentCacheSpec extends CatsEffectSuite {
 
   test("does not parse or cache malformed documents") {
     GraphQLDocumentCache.resource.use { cache =>
-      cache.document("{ health").map(result => assertEquals(result, Left(HiringGraphQLSchema.Failure.InvalidQuery)))
+      cache.document("{ me").map(result => assertEquals(result, Left(HiringGraphQLSchema.Failure.InvalidQuery)))
     }
   }
 }

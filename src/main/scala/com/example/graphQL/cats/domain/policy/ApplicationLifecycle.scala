@@ -8,6 +8,7 @@ import com.example.graphQL.cats.domain.error.DomainError.{
 }
 import com.example.graphQL.cats.domain.model.Application
 import com.example.graphQL.cats.domain.model.ApplicationStatus
+import com.example.graphQL.cats.domain.model.UserRole
 import com.example.graphQL.cats.domain.model.ApplicationStatus.{Accepted, Created, Declined, Hired, Interview, Rejected}
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import java.time.Instant
@@ -19,6 +20,7 @@ object ApplicationLifecycle {
   def changeStatus(
       target: ApplicationStatus,
       actorId: UserId,
+      actorRole: Option[UserRole],
       now: Instant,
       feedback: Option[String],
       reason: Option[String]
@@ -39,6 +41,7 @@ object ApplicationLifecycle {
           previousStatus = application.status,
           newStatus = target,
           actorId = actorId,
+          actorRole = actorRole,
           occurredAt = now,
           feedback = feedback.map(_.trim).filter(_.nonEmpty),
           reason = reason.map(_.trim).filter(_.nonEmpty)
@@ -60,6 +63,7 @@ final case class StatusChange(
     previousStatus: ApplicationStatus,
     newStatus: ApplicationStatus,
     actorId: UserId,
+    actorRole: Option[UserRole],
     occurredAt: Instant,
     feedback: Option[String],
     reason: Option[String]

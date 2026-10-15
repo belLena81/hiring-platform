@@ -3,7 +3,9 @@ package com.example.graphQL.cats.api.graphql
 import cats.effect.{IO, Ref, Resource}
 import cats.syntax.all.*
 import com.example.graphQL.cats.api.graphql.{GraphQLRequest, HiringGraphQLSchema}
-import com.example.graphQL.cats.service.{DatabaseProbe, Diagnostics, HealthService, ProbeResult}
+import com.example.graphQL.cats.domain.model.Identifiers.UserId
+import com.example.graphQL.cats.domain.model.UserRole
+import com.example.graphQL.cats.service.{ActorContext, Diagnostics, ProbeResult}
 import io.circe.Json
 import munit.CatsEffectSuite
 
@@ -14,11 +16,6 @@ final class HiringGraphQLContractSpec extends CatsEffectSuite {
     try new String(stream.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8)
     finally stream.close()
   }
-
-  private val probe = new DatabaseProbe[IO] {
-    def check(requestId: Option[String]): IO[ProbeResult] = IO.pure(ProbeResult.Ready)
-  }
-  private val service = new HealthService(probe, Diagnostics.noop)
 
   private def parseRequest(query: String): IO[GraphQLRequest] =
     IO.fromEither(
@@ -106,8 +103,8 @@ final class HiringGraphQLContractSpec extends CatsEffectSuite {
 
   test("a closed request context causes a sanitized GraphQL field execution error") {
     for {
-      parsed <- parseRequest("{ readiness { status } }")
-      closed <- TestGraphQLSupport.context(IO.pure(ProbeResult.Ready)).use(IO.pure)
+      parsed <- parseRequest("{ me { id } }")
+      closed <- TestGraphQLSupport.context().use(IO.pure)
       result <- TestGraphQLSupport.parseAndExecute(parsed, closed)
     } yield {
       val body = result.fold(failure => fail(failure.toString), identity)
@@ -115,7 +112,7 @@ final class HiringGraphQLContractSpec extends CatsEffectSuite {
       assertEquals(errors.map(_.size), Right(1))
       val error = errors.toOption.get.head
       assertEquals(error.hcursor.get[String]("message"), Right("Execution failed"))
-      assertEquals(error.hcursor.get[Vector[String]]("path"), Right(Vector("readiness")))
+      assertEquals(error.hcursor.get[Vector[String]]("path"), Right(Vector("me")))
       assert(error.hcursor.downField("locations").succeeded)
       assert(!body.noSpaces.contains("Request context is closed"))
       assert(!body.noSpaces.contains("IllegalStateException"))
@@ -132,10 +129,10 @@ final class HiringGraphQLContractSpec extends CatsEffectSuite {
             fields: => Map[com.example.graphQL.cats.service.LogField, String]
         ) = reportCount.update(_ + 1)
       }
-      request <- parseRequest("{ readiness { status } }")
+      request <- parseRequest("{ me { id } }")
       result <- TestGraphQLSupport
         .context(
-          IO.raiseError[ProbeResult](new IllegalStateException("private resolver detail")),
+          hiringReady = IO.raiseError[ProbeResult](new IllegalStateException("private resolver detail")),
           diagnostics = diagnostics
         )
         .use(context => TestGraphQLSupport.parseAndExecute(request, context))
@@ -159,7 +156,6 @@ final class HiringGraphQLContractSpec extends CatsEffectSuite {
             dependencies.documentCache,
             dependencies.contextFactory.resource(
               RequestContextParameters(
-                service.readiness(Some("00000000-0000-0000-0000-000000000001")),
                 None,
                 dependencies.hiring,
                 dependencies.ensureHiringReady,
@@ -173,7 +169,7 @@ final class HiringGraphQLContractSpec extends CatsEffectSuite {
   }
 
   test("query complexity rejection returns the typed invalid-query failure") {
-    val fields = (1 to 510).map(index => s"health$index: health { status }").mkString(" ")
+    val fields = (1 to 510).map(index => s"me$index: me { id }").mkString(" ")
     for {
       request <- parseRequest(s"{ $fields }")
       result <- TestGraphQLSupport.dependencies().use { dependencies =>
@@ -182,7 +178,6 @@ final class HiringGraphQLContractSpec extends CatsEffectSuite {
           dependencies.documentCache,
           dependencies.contextFactory.resource(
             RequestContextParameters(
-              service.readiness(Some("00000000-0000-0000-0000-000000000001")),
               None,
               dependencies.hiring,
               dependencies.ensureHiringReady,
@@ -211,7 +206,6 @@ final class HiringGraphQLContractSpec extends CatsEffectSuite {
               dependencies.documentCache,
               dependencies.contextFactory.resource(
                 RequestContextParameters(
-                  service.readiness(Some("00000000-0000-0000-0000-000000000001")),
                   None,
                   dependencies.hiring,
                   dependencies.ensureHiringReady,
@@ -226,36 +220,213 @@ final class HiringGraphQLContractSpec extends CatsEffectSuite {
       .map(results => assert(results.forall(_ == Left(HiringGraphQLSchema.Failure.InvalidQuery))))
   }
 
-  List("health.graphql", "readiness.graphql", "introspection.graphql").foreach { name =>
-    test(s"execute consumer fixture $name") {
-      for {
-        query <- fixture(name)
-        parsed <- parseRequest(query)
-        result <- TestGraphQLSupport
-          .dependencies()
-          .use(dependencies =>
-            executeRequest(
-              parsed,
-              dependencies.documentCache,
-              dependencies.contextFactory.resource(
-                RequestContextParameters(
-                  service.readiness(Some("00000000-0000-0000-0000-000000000001")),
-                  None,
-                  dependencies.hiring,
-                  dependencies.ensureHiringReady,
-                  diagnostics = Diagnostics.noop,
-                  requestId = Some("00000000-0000-0000-0000-000000000001"),
-                  schemaExposure = true
-                )
+  test("execute consumer fixture introspection.graphql") {
+    for {
+      query <- fixture("introspection.graphql")
+      parsed <- parseRequest(query)
+      result <- TestGraphQLSupport
+        .dependencies()
+        .use(dependencies =>
+          executeRequest(
+            parsed,
+            dependencies.documentCache,
+            dependencies.contextFactory.resource(
+              RequestContextParameters(
+                None,
+                dependencies.hiring,
+                dependencies.ensureHiringReady,
+                diagnostics = Diagnostics.noop,
+                requestId = Some("00000000-0000-0000-0000-000000000001"),
+                schemaExposure = true
               )
             )
           )
-      } yield {
-        val json = result.fold(failure => fail(failure.toString), identity)
-        assert(json.hcursor.downField("data").succeeded)
-        assert(!json.hcursor.downField("errors").succeeded)
+        )
+    } yield {
+      val json = result.fold(failure => fail(failure.toString), identity)
+      assert(json.hcursor.downField("data").succeeded)
+      assert(!json.hcursor.downField("errors").succeeded)
+    }
+  }
+
+  test("AC-13.1 an executed fixture runs a hiring operation without any health or readiness field") {
+    val receipt = "00000000-0000-0000-0000-0000000000a1"
+    val actor =
+      ActorContext(UserId(java.util.UUID.fromString("00000000-0000-0000-0000-0000000000b1")), UserRole.Candidate)
+    for {
+      query <- fixture("account-deletion-status.graphql")
+      result <- TestGraphQLSupport
+        .context(Some(actor))
+        .use(context =>
+          TestGraphQLSupport.parseAndExecute(
+            GraphQLRequest(query, Json.obj("receiptId" -> Json.fromString(receipt)), None),
+            context
+          )
+        )
+    } yield {
+      val json = result.fold(failure => fail(failure.toString), identity)
+      assertEquals(json.hcursor.downField("data").get[String]("accountDeletionStatus"), Right("NOT_FOUND"))
+      assert(!json.hcursor.downField("errors").succeeded, json.noSpaces)
+    }
+  }
+
+  test("AC-13.1 the schema has no health or readiness field, type or enum") {
+    val rootFields = HiringGraphQLSchema.schema.query.fieldsByName.keySet
+    assert(!rootFields.contains("health") && !rootFields.contains("readiness"), rootFields.toString)
+    val typeNames = HiringGraphQLSchema.schema.allTypes.keySet
+    assertEquals(typeNames.filter(name => List("Health", "Readiness").exists(name.startsWith)), Set.empty[String])
+    assert(!HiringGraphQLSchema.sdl.contains("HealthStatus") && !HiringGraphQLSchema.sdl.contains("ReadinessStatus"))
+  }
+
+  test("every operation fixture validates against the active schema") {
+    val names = List(
+      "account-deletion-status.graphql",
+      "account-profile.graphql",
+      "application-history.graphql",
+      "embedding-coverage.graphql",
+      "interview-cancellation.graphql",
+      "interview-scheduling.graphql",
+      "job-discovery-facets.graphql",
+      "jobs.graphql"
+    )
+    names.traverse { name =>
+      fixture(name).map { operation =>
+        val document = sangria.parser.QueryParser.parse(operation).fold(error => fail(error.getMessage), identity)
+        val violations =
+          sangria.validation.QueryValidator.default.validateQuery(HiringGraphQLSchema.schema, document, Map.empty, None)
+        assertEquals(violations.map(_.errorMessage).toList, Nil, name)
       }
     }
+  }
+
+  // --- AC-01 descriptions ---------------------------------------------------------------------------------------
+
+  test("AC-01.1 every root field, argument, input type and field, union and enum value has a description") {
+    assertEquals(SchemaDescriptionCheck.undescribed(HiringGraphQLSchema.schema), Nil)
+  }
+
+  test("AC-01.2 a field added without a description is reported by name") {
+    import sangria.schema.*
+    val bare = Schema(
+      ObjectType(
+        "Query",
+        fields[Unit, Unit](
+          Field("described", StringType, description = Some("Documented."), resolve = _ => "x"),
+          Field("bare", StringType, resolve = _ => "x")
+        )
+      )
+    )
+    assertEquals(SchemaDescriptionCheck.undescribed(bare), List("Query.bare"))
+  }
+
+  test("AC-01.3 login and signup descriptions state how they report refusals while the caller is unauthenticated") {
+    val mutation = HiringGraphQLSchema.schema.mutation.get.fieldsByName
+    List("login", "signUp").foreach { name =>
+      val description = mutation(name).head.description.getOrElse("")
+      assert(description.contains("not authenticated") && description.contains("top-level"), description)
+    }
+  }
+
+  // --- AC-02 Long scalar ----------------------------------------------------------------------------------------
+
+  test("AC-02.1 the SDL declares scalar Long and expectedRevision uses it") {
+    assert(HiringGraphQLSchema.sdl.contains("\nscalar Long\n"))
+    assert(HiringGraphQLSchema.sdl.contains("expectedRevision: Long!"))
+    assert(!HiringGraphQLSchema.sdl.contains("expectedRevision: Int"))
+  }
+
+  private def coerceExpectedRevision(
+      literal: String,
+      variables: Json = Json.obj()
+  ): IO[Either[HiringGraphQLSchema.Failure, Json]] = {
+    val id = "00000000-0000-0000-0000-000000000001"
+    val mutation =
+      s"""mutation Cancel($$revision: Long = $literal) {
+         |  cancelInterview(input: { workflowId: "$id", expectedRevision: $$revision, idempotencyKey: "$id" }) { __typename }
+         |}""".stripMargin
+    TestGraphQLSupport
+      .context(None)
+      .use(context => TestGraphQLSupport.parseAndExecute(GraphQLRequest(mutation, variables, None), context))
+  }
+
+  test("AC-02.1 expectedRevision accepts a whole number as literal or variable") {
+    List(
+      coerceExpectedRevision("3"),
+      coerceExpectedRevision("0", Json.obj("revision" -> Json.fromLong(9007199254740993L)))
+    ).sequence.map(_.foreach(result => assertNotEquals(result, Left(HiringGraphQLSchema.Failure.InvalidQuery))))
+  }
+
+  test("AC-02.2 expectedRevision rejects fractions and strings in literals and variables") {
+    List(
+      coerceExpectedRevision("1.5"),
+      coerceExpectedRevision("\"3\""),
+      coerceExpectedRevision("0", Json.obj("revision" -> Json.fromDouble(1.5).get)),
+      coerceExpectedRevision("0", Json.obj("revision" -> Json.fromString("3"))),
+      coerceExpectedRevision("0", Json.obj("revision" -> Json.fromBigInt(BigInt(Long.MaxValue) + 1)))
+    ).sequence.map(_.foreach(result => assertEquals(result, Left(HiringGraphQLSchema.Failure.InvalidQuery))))
+  }
+
+  // --- AC-03 error codes ----------------------------------------------------------------------------------------
+
+  test("AC-03.0 every catalog error code is an ErrorCode value and every ErrorCode value is a catalog code") {
+    val enumCodes = HiringGraphQLTypes.errorCodeType.values.map(_.name).toSet
+    val catalogCodes = GraphQLFailureCatalog.errorCodes.map(_._1).toSet
+    assertEquals(enumCodes, catalogCodes)
+    assertEquals(HiringGraphQLTypes.errorCodeType.values.size, catalogCodes.size)
+    assert(!enumCodes.contains("PERSISTED_QUERY_NOT_FOUND"))
+    assertEquals(GraphQLFailureCatalog.codesWithConflictingDescriptions, Nil)
+    val forbidden = HiringGraphQLTypes.errorCodeType.values.find(_.name == "FORBIDDEN").flatMap(_.description)
+    assert(forbidden.exists(!_.contains("singleton")), forbidden.toString)
+  }
+
+  test("AC-03.1 all interview phases map to InterviewProgress values and both participants to InterviewParticipant") {
+    import com.example.graphQL.cats.domain.workflow.{InterviewParticipant, InterviewWorkflowPhase}
+    assertEquals(InterviewWorkflowPhase.values.length, 15)
+    assertEquals(
+      HiringGraphQLInputs.interviewProgressType.values.map(_.value).toList,
+      InterviewWorkflowPhase.values.toList
+    )
+    assertEquals(
+      HiringGraphQLInputs.interviewProgressType.values.map(_.name).toList,
+      InterviewWorkflowPhase.values.toList.map(HiringGraphQLDsl.wireName)
+    )
+    assertEquals(
+      HiringGraphQLInputs.interviewParticipantType.values.map(_.name).toList,
+      List("CANDIDATE", "RECRUITER")
+    )
+    assertEquals(
+      HiringGraphQLInputs.interviewParticipantType.values.map(_.value).toList,
+      InterviewParticipant.values.toList
+    )
+  }
+
+  test("AC-03.1 InterviewWorkflow.progress, notifiedParticipants and UserError.code are enums in the SDL") {
+    val sdl = HiringGraphQLSchema.sdl
+    assert(sdl.contains("progress: InterviewProgress!"))
+    assert(sdl.contains("notifiedParticipants: [InterviewParticipant!]!"))
+    assert(sdl.contains("code: ErrorCode!"))
+    assert(sdl.contains("\nenum ErrorCode {"))
+  }
+
+  test("AC-05.5 the SDL declares the @oneOf directive it uses and still parses") {
+    assert(HiringGraphQLSchema.sdl.startsWith("directive @oneOf on INPUT_OBJECT\n"))
+    assertEquals(HiringGraphQLSchema.sdl.split("directive @oneOf", -1).length, 2)
+    assert(sangria.parser.QueryParser.parse(HiringGraphQLSchema.sdl).isSuccess)
+  }
+
+  test("AC-05.0 the profile input is a oneOf input and rejects zero or two variants in a validated document") {
+    assert(HiringGraphQLSchema.sdl.contains("input ProfileInput @oneOf {"))
+    def validate(profile: String) = {
+      val query =
+        s"""mutation { updateMyProfile(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001", profile: $profile }) { __typename } }"""
+      val document = sangria.parser.QueryParser.parse(query).fold(error => fail(error.getMessage), identity)
+      sangria.validation.QueryValidator.default.validateQuery(HiringGraphQLSchema.schema, document, Map.empty, None)
+    }
+    assertEquals(validate("{ candidate: { skills: [\"Scala\"] } }").toList, Nil)
+    assertEquals(validate("{ recruiter: { organizationName: \"Acme\" } }").toList, Nil)
+    assert(validate("{ candidate: {}, recruiter: { organizationName: \"Acme\" } }").nonEmpty)
+    assert(validate("{ }").nonEmpty)
+    assert(validate("{ recruiter: {} }").nonEmpty, "organizationName is required")
   }
 
 }
