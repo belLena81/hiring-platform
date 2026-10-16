@@ -1,4 +1,4 @@
-package com.example.hiring.saga
+package com.example.graphQL.cats.domain.saga
 
 /** Lookup behaviour of a step when its outcome is unknown. */
 enum LookupSupport {

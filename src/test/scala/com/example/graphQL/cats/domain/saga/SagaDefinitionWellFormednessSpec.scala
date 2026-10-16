@@ -1,6 +1,6 @@
-package com.example.hiring.saga
+package com.example.graphQL.cats.domain.saga
 
-import com.example.hiring.saga.BookingSagaFixture.*
+import com.example.graphQL.cats.domain.saga.BookingSagaFixture.*
 import java.nio.file.{Files, Paths}
 import scala.jdk.CollectionConverters.*
 
@@ -18,7 +18,7 @@ class SagaDefinitionWellFormednessSpec extends munit.FunSuite {
 
   test("SAG-03.1 a step without an undo declaration does not compile and the error names undo") {
     val errors = compileErrors(
-      """com.example.hiring.saga.SagaStep[Int, Int, Int](name = "s", phase = 1, key = _ => "k", start = _ => Nil, lookup = _ => Nil, retryBudget = com.example.hiring.saga.RetryBudget("b"))"""
+      """com.example.graphQL.cats.domain.saga.SagaStep[Int, Int, Int](name = "s", phase = 1, key = _ => "k", start = _ => Nil, lookup = _ => Nil, retryBudget = com.example.graphQL.cats.domain.saga.RetryBudget("b"))"""
     )
     assert(errors.contains("undo"), errors)
   }
@@ -100,13 +100,14 @@ class SagaDefinitionWellFormednessSpec extends munit.FunSuite {
     )
   }
 
-  test("SAG-08.2 the shared saga source has no import, so it depends on nothing outside the standard library") {
-    val root = Paths.get(sys.props("user.dir"), "shared", "saga", "src", "main", "scala")
+  test("SAG-08.2 the saga engine source has no import, so it depends on nothing outside the standard library") {
+    val root =
+      Paths.get(sys.props("user.dir"), "src", "main", "scala", "com", "example", "graphQL", "cats", "domain", "saga")
     val files = Files.walk(root).iterator().asScala.filter(_.toString.endsWith(".scala")).toList
-    assert(files.nonEmpty, "shared saga sources not found")
+    assert(files.nonEmpty, "saga engine sources not found")
     val imports = files.flatMap(file => Files.readAllLines(file).asScala.filter(_.trim.startsWith("import ")))
     assertEquals(imports, Nil)
     val packages = files.flatMap(file => Files.readAllLines(file).asScala.filter(_.startsWith("package ")))
-    assertEquals(packages.toSet, Set("package com.example.hiring.saga"))
+    assertEquals(packages.toSet, Set("package com.example.graphQL.cats.domain.saga"))
   }
 }

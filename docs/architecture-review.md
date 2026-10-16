@@ -29,7 +29,7 @@ Absent today, now planned (user-approved 2026-10-14): circuit breakers ([spec](s
 
 - Circuit breakers (done locally): one process-local breaker each around the Voyage embedding provider, Atlas `$search`/`$vectorSearch` discovery, the Kafka operational-event publisher and Mongo transactional writes. Readiness reports `Unavailable` only while the Mongo-writes breaker is open. Section 7, item 5 is addressed locally; the Kafka broker integration check is unverified ([spec](specs/dependency-circuit-breakers.md)).
 - Effect-polymorphic services (done locally): ports and services are written over `F[_]`. `IO` is fixed only in `Main`, `runtime/` wiring, configuration loading, the IO adapters (Mongo, Kafka, auth, embedding) and the Sangria adapter, which is the only unsafe boundary ([spec](specs/effect-polymorphic-services.md)).
-- Saga (in review): a pure generic engine in `shared/saga` runs only the interview scheduling workflow. Interview cancel/reschedule was evaluated and not ported. Interview subject cleanup and analytics erasure were not ported by decision and keep their existing pure policies. The analytics build does not compile the shared module ([spec](specs/hiring-saga-orchestration.md)).
+- Saga (in review): a pure generic engine in `domain/saga` runs only the interview scheduling workflow. Interview cancel/reschedule was evaluated and not ported. Interview subject cleanup and analytics erasure were not ported by decision and keep their existing pure policies. The analytics build does not use the engine ([spec](specs/hiring-saga-orchestration.md)).
 
 ## 2. Pure FP coverage
 

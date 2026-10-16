@@ -1,4 +1,4 @@
-package com.example.hiring.saga
+package com.example.graphQL.cats.domain.saga
 
 /** The generic, pure decision rules, written once: revision compare-and-set, step identity, unknown outcome and lookup,
   * retry exhaustion, rejection and compensation, and Admin repair by lookup. No clock, IDs, I/O or logging.

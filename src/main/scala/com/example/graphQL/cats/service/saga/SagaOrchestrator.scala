@@ -4,7 +4,7 @@ import cats.Monad
 import cats.data.EitherT
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.port.RepositoryF
-import com.example.hiring.saga.{SagaDefinition, SagaEngine, SagaError, SagaInput}
+import com.example.graphQL.cats.domain.saga.{SagaDefinition, SagaEngine, SagaError, SagaInput}
 import java.time.Instant
 
 /** Result of the durable write of one saga step. */

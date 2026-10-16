@@ -1,7 +1,7 @@
 package com.example.graphQL.cats.domain.workflow
 
 import com.example.graphQL.cats.domain.workflow.characterization.InterviewCharacterizationFixtures.*
-import com.example.hiring.saga.{SagaDefinitionChecks, SagaStatus, StepUndo}
+import com.example.graphQL.cats.domain.saga.{SagaDefinitionChecks, SagaInput, SagaStatus, SagaStep, StepUndo}
 
 /** SAG-03 for the interview scheduling definition, plus the step-name mapping of every scheduling event. */
 class InterviewSchedulingSagaSpec extends munit.FunSuite {
@@ -21,9 +21,8 @@ class InterviewSchedulingSagaSpec extends munit.FunSuite {
       Set("reserveCalendarSlot", "commitAcceptedToInterview", "releaseCalendarSlot", "notifyParticipants")
     )
     assertEquals(
-      definition.steps.collect {
-        case step @ com.example.hiring.saga.SagaStep(_, _, _, _, _, StepUndo.Compensate(target), _) =>
-          step.name -> target.name
+      definition.steps.collect { case step @ SagaStep(_, _, _, _, _, StepUndo.Compensate(target), _) =>
+        step.name -> target.name
       },
       List("commitAcceptedToInterview" -> "releaseCalendarSlot")
     )
@@ -51,8 +50,9 @@ class InterviewSchedulingSagaSpec extends munit.FunSuite {
     )
     expectations.foreach { case (event, step) =>
       InterviewSchedulingSaga.input(reserve, event) match {
-        case com.example.hiring.saga.SagaInput.Outcome(name, _, _) => assertEquals(name, step, event.toString)
-        case other                                                 => fail(s"$event mapped to $other")
+        case SagaInput.Outcome(name, _, _) =>
+          assertEquals(name, step, event.toString)
+        case other => fail(s"$event mapped to $other")
       }
     }
   }

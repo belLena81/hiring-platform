@@ -767,7 +767,7 @@ Saga is not a substitute for:
 - transactional outbox for reliable event handoff
 - idempotent Kafka consumers
 
-Future implementation should add Saga in the smallest vertical slice that includes one real external boundary, durable state, retry and compensation tests, and observability. The earlier rule against a generic Saga framework is superseded by the user-approved [hiring saga orchestration](docs/specs/hiring-saga-orchestration.md) (2026-10-14; in review). Its pure engine (`shared/saga`, compiled by the root build only) currently drives only the interview scheduling workflow. Interview cancel/reschedule was evaluated and not ported; interview subject cleanup and analytics erasure were not ported by decision and keep their existing pure policies. The analytics build does not compile the shared module.
+Future implementation should add Saga in the smallest vertical slice that includes one real external boundary, durable state, retry and compensation tests, and observability. The earlier rule against a generic Saga framework is superseded by the user-approved [hiring saga orchestration](docs/specs/hiring-saga-orchestration.md) (2026-10-14; in review). Its pure engine (`domain/saga`, standard library only) currently drives only the interview scheduling workflow. Interview cancel/reschedule was evaluated and not ported; interview subject cleanup and analytics erasure were not ported by decision and keep their existing pure policies. The analytics build does not use the engine.
 
 
 ### Planned Kafka workflow contracts

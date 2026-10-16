@@ -1,6 +1,6 @@
-package com.example.hiring.saga
+package com.example.graphQL.cats.domain.saga
 
-import com.example.hiring.saga.BookingSagaFixture.*
+import com.example.graphQL.cats.domain.saga.BookingSagaFixture.*
 
 /** Compile-time enum case names, so a new generic outcome cannot be left out of the grid. */
 object SagaTestLabels {

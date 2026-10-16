@@ -1,4 +1,4 @@
-package com.example.hiring.saga
+package com.example.graphQL.cats.domain.saga
 
 /** A small booking workflow used only to exercise the engine: reserve (irreversible), commit (compensated by release),
   * a trigger-driven wait, and repair. It is not a hiring definition.

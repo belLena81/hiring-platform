@@ -1,4 +1,4 @@
-package com.example.hiring.saga
+package com.example.graphQL.cats.domain.saga
 
 /** Pure well-formedness rules of a saga definition, evaluated against a sample instance for the keys. */
 object SagaDefinitionChecks {

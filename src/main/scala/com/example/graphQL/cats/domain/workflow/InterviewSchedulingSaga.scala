@@ -1,11 +1,11 @@
 package com.example.graphQL.cats.domain.workflow
 
 import com.example.graphQL.cats.domain.model.ApplicationStatus
-import com.example.hiring.saga.*
+import com.example.graphQL.cats.domain.saga.*
 
 /** The interview scheduling workflow as a saga definition: reserve a calendar slot, commit the Accepted -> Interview
   * status (compensated by releasing the slot), then notify both participants. Every phase name, command and idempotency
-  * key is the one already stored and published; only the decision rules moved into the shared engine.
+  * key is the one already stored and published; only the decision rules moved into the generic engine.
   */
 object InterviewSchedulingSaga {
   import InterviewWorkflowCommand as Command

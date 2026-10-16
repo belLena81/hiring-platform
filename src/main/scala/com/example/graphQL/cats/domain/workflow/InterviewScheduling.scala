@@ -2,7 +2,7 @@ package com.example.graphQL.cats.domain.workflow
 
 import com.example.graphQL.cats.domain.model.{ApplicationStatus, UserRole}
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, UserId}
-import com.example.hiring.saga.SagaEngine
+import com.example.graphQL.cats.domain.saga.SagaEngine
 import java.time.Instant
 import java.util.UUID
 
@@ -209,7 +209,7 @@ object InterviewWorkflow {
     s"${id.value}:notify:$participant"
 
   /** Pure policy: the caller persists the returned state and command intent in one transaction. The rules live in the
-    * shared saga engine; `InterviewSchedulingSaga` is the scheduling definition.
+    * generic saga engine; `InterviewSchedulingSaga` is the scheduling definition.
     */
   def decide(
       workflow: InterviewWorkflow,

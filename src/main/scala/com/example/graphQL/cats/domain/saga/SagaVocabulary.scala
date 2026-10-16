@@ -1,4 +1,4 @@
-package com.example.hiring.saga
+package com.example.graphQL.cats.domain.saga
 
 /** Where a saga instance stands, derived from its phase by the definition; it is never stored as a new field. */
 enum SagaStatus {

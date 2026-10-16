@@ -5,7 +5,7 @@ import cats.data.EitherT
 import com.example.graphQL.cats.domain.workflow.*
 import com.example.graphQL.cats.domain.workflow.characterization.InterviewCharacterizationFixtures.*
 import com.example.graphQL.cats.service.port.RepositoryF
-import com.example.hiring.saga.{SagaError, SagaInput, StepOutcome}
+import com.example.graphQL.cats.domain.saga.{SagaError, SagaInput, StepOutcome}
 import java.time.Instant
 
 /** SAG-05: the orchestrator sequences effects only. It runs here in `Id`, so it needs nothing beyond `Monad`; there are
