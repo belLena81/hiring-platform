@@ -50,6 +50,13 @@ enum LogEvent(val category: String, val component: String, val message: String, 
         "Retained search session verification failed",
         LogLevel.Warn
       )
+  case SearchRecordingFailed
+      extends LogEvent(
+        "SEARCH_RECORDING_FAILED",
+        "SEARCH",
+        "Search session recording failed; the results were still returned",
+        LogLevel.Warn
+      )
   case CircuitBreakerStateChanged
       extends LogEvent(
         "CIRCUIT_BREAKER_STATE_CHANGED",
@@ -115,6 +122,8 @@ enum LogField(val key: String, val sensitive: Boolean = false) {
   case JobStatus extends LogField("jobStatus")
   case Breaker extends LogField("breaker")
   case BreakerTransition extends LogField("breakerTransition")
+  case SearchKind extends LogField("searchKind")
+  case ErrorCode extends LogField("errorCode")
 }
 
 /** Startup-injected allow-lists of values owned by outer layers (adapter/driver failure classes, configuration keys).
@@ -139,6 +148,8 @@ object LogFields {
     "java.io.IOException"
   )
   private val Root = "com.example.graphQL.cats."
+  private val SearchKindWires: Set[String] =
+    com.example.graphQL.cats.service.events.OperationalEventPayload.SearchKind.values.map(_.wire).toSet
   private def canonicalUuid(value: String): Boolean = Parsing.parseUuid(value).exists(_.toString == value)
 
   private val transactionalIdPrefixes =
@@ -189,6 +200,8 @@ object LogFields {
       case LogField.JobStatus                   => Set("Draft", "Open", "Closed").contains(value)
       case LogField.Breaker                     => CircuitBreakerName.values.exists(_.wire == value)
       case LogField.BreakerTransition           => CircuitBreakerPolicy.Transition.values.exists(_.wire == value)
+      case LogField.SearchKind                  => SearchKindWires.contains(value)
+      case LogField.ErrorCode                   => value.matches("[A-Z][A-Z0-9_]{0,63}")
       case _                                    => false
     }
 }

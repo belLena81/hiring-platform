@@ -135,6 +135,21 @@ final case class VectorSearchQuery(
     candidateFilters: ValidatedCandidateMatchFilters = ValidatedCandidateMatchFilters.empty
 )
 
+/** Lexical-only retrieval: text relevance plus live eligibility filters, with no vector and no embedding model. */
+final case class LexicalSearchQuery(
+    text: String,
+    filter: JobSearchFilter,
+    /** Requested response page; repositories may return more hits up to their configured branch-result cap. */
+    first: PageSize,
+    searchId: UUID,
+    candidateFilters: ValidatedCandidateMatchFilters = ValidatedCandidateMatchFilters.empty
+)
+
+/** A lexical hit carries no embedding evidence: lexical eligibility never depends on embedding freshness. */
+final case class LexicalRetrievalHit[Id](id: Id, score: Double, searchId: UUID)
+type LexicalJobHit = LexicalRetrievalHit[JobId]
+type LexicalCandidateHit = LexicalRetrievalHit[UserId]
+
 final case class CandidateMatchFilters(
     requiredSkills: List[String],
     countryCanonical: Option[String],
@@ -186,6 +201,60 @@ final case class RankedCandidate(
     retrievalScore: Option[Double] = None
 ) {
   def retrieval: CandidateRetrievalHit = SearchRetrievalHit(candidate.id, score, mode, meta, searchId, retrievalScore)
+}
+
+/** Why a search answered from the lexical fallback; always `ProviderUnavailable` or `VectorSearchUnavailable`. */
+final case class DegradedSearch(reason: com.example.graphQL.cats.service.SearchError)
+
+/** Ranked hits plus, when the lexical fallback answered, the reason the primary retrieval could not. */
+final case class SearchResults[A](hits: List[A], degraded: Option[DegradedSearch])
+
+/** A ranked job as returned to callers; `model` is absent for lexical fallback hits. */
+final case class SearchedJob(
+    job: Job,
+    score: Double,
+    mode: SearchMode,
+    model: Option[String],
+    searchId: UUID,
+    matchedSkills: List[String] = Nil,
+    retrievalScore: Option[Double] = None
+)
+
+object SearchedJob {
+  def from(ranked: RankedJob): SearchedJob =
+    SearchedJob(
+      ranked.job,
+      ranked.score,
+      ranked.mode,
+      Some(ranked.meta.model),
+      ranked.searchId,
+      ranked.matchedSkills,
+      ranked.retrievalScore
+    )
+}
+
+/** A ranked candidate as returned to recruiters; `model` is absent for lexical fallback hits. */
+final case class SearchedCandidate(
+    candidate: CandidateSearchHit,
+    score: Double,
+    mode: SearchMode,
+    model: Option[String],
+    searchId: UUID,
+    matchedSkills: List[String] = Nil,
+    retrievalScore: Option[Double] = None
+)
+
+object SearchedCandidate {
+  def from(ranked: RankedCandidate): SearchedCandidate =
+    SearchedCandidate(
+      ranked.candidate,
+      ranked.score,
+      ranked.mode,
+      Some(ranked.meta.model),
+      ranked.searchId,
+      ranked.matchedSkills,
+      ranked.retrievalScore
+    )
 }
 
 object SkillMatching {

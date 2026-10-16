@@ -15,8 +15,10 @@ import com.example.graphQL.cats.service.search.{
   JobSearchFilter,
   NearbyJob,
   NearbyJobsQuery,
-  RankedCandidate,
-  RankedJob
+  RankedJob,
+  SearchResults,
+  SearchedCandidate,
+  SearchedJob
 }
 import com.example.graphQL.cats.service.port.RepositoryF
 import com.example.graphQL.cats.service.{ActorContext, AuthenticatedActor}
@@ -81,16 +83,22 @@ trait ApplicationUseCases[F[_]] {
 }
 
 trait SearchUseCases[F[_]] {
+
+  /** Ranked open jobs for a query. When only the embedding provider or vector search is unavailable, the answer comes
+    * from keyword (lexical) retrieval and is marked degraded.
+    */
   def semanticJobSearch(
       actor: ActorContext,
       text: String,
       filter: JobSearchFilter,
       first: PageSize,
       searchId: UUID
-  ): UseCaseF[F, List[RankedJob]]
+  ): UseCaseF[F, SearchResults[SearchedJob]]
 
+  /** Ranked jobs for the calling candidate's profile. It makes no provider call and has no fallback. */
   def recommendedJobs(actor: ActorContext, first: PageSize, searchId: UUID): UseCaseF[F, List[RankedJob]]
 
+  /** Ranked candidates for a job the actor manages, with the same degradation rule as `semanticJobSearch`. */
   def candidateMatches(
       actor: ActorContext,
       jobId: JobId,
@@ -98,7 +106,7 @@ trait SearchUseCases[F[_]] {
       filters: com.example.graphQL.cats.service.search.CandidateMatchFilters,
       first: PageSize,
       searchId: UUID
-  ): UseCaseF[F, List[RankedCandidate]]
+  ): UseCaseF[F, SearchResults[SearchedCandidate]]
 }
 
 trait InteractionUseCases[F[_]] {

@@ -1,6 +1,7 @@
 package com.example.graphQL.cats.api.graphql
 
 import cats.data.EitherT
+import java.util.concurrent.atomic.AtomicReference
 import cats.effect.{Deferred, IO, Ref, Resource}
 import cats.effect.std.Dispatcher
 import cats.syntax.all.*
@@ -16,6 +17,7 @@ import com.example.graphQL.cats.service.{
 }
 import com.example.graphQL.cats.service.{AnalyticsReportingUseCases, EmbeddingCoverageUseCases}
 import com.example.graphQL.cats.service.Diagnostics.*
+import com.example.graphQL.cats.service.LogField
 import com.example.graphQL.cats.domain.model.CandidateProfile
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.service.protocol.{
@@ -48,6 +50,20 @@ final case class HiringGraphQLServices(
     embeddingCoverage: EmbeddingCoverageUseCases[IO] = EmbeddingCoverageUseCases.denyAll[IO]
 )
 
+/** What a response may say about the caller's cost allowance: the charge and the caller's own bucket afterwards. */
+final case class CostReceipt(requested: Int, limit: Int, remaining: Long, resetsInSeconds: Long)
+
+object CostReceipt {
+
+  /** Absent for a shared overflow counter, whose numbers would describe other callers. */
+  def from(requested: Int, grant: FixedWindowRateLimiter.Grant): Option[CostReceipt] =
+    grant match {
+      case FixedWindowRateLimiter.Grant.Tracked(limit, remaining, resets) =>
+        Some(CostReceipt(requested, limit, remaining, resets))
+      case FixedWindowRateLimiter.Grant.Shared => None
+    }
+}
+
 final case class EmailVisibility(userId: UserId)
 
 final case class RequestContextParameters(
@@ -61,7 +77,10 @@ final case class RequestContextParameters(
     rateLimit: AuthRateLimiter.Key => IO[Either[AuthRateLimiter.RateLimited, Unit]] = _ => IO.pure(Right(())),
     discoveryMaxRoots: Int = 4,
     interviewActionRateLimit: UserId => IO[Either[FixedWindowRateLimiter.RateLimited, Unit]] = _ => IO.pure(Right(())),
-    costBudget: (CostBudgetLimiter.Key, Int) => Either[FixedWindowRateLimiter.RateLimited, Unit] = (_, _) => Right(()),
+    costBudget: (CostBudgetLimiter.Key, Int) => Either[
+      FixedWindowRateLimiter.RateLimited,
+      FixedWindowRateLimiter.Grant
+    ] = (_, _) => Right(FixedWindowRateLimiter.Grant.Shared),
     schemaExposure: Boolean = false
 )
 
@@ -74,6 +93,12 @@ final class RequestContext private (
     viewer: Option[UseCaseF[IO, AuthenticatedActor]],
     viewerInvalidated: Ref[IO, Boolean]
 ) {
+  // Written once by the synchronous cost budget reducer and read after execution; Sangria reducers cannot sequence an IO.
+  private val chargedCost = new AtomicReference[Option[CostReceipt]](None)
+
+  /** The cost charge of this request, present only when it was charged to the caller's own bucket. */
+  private[graphql] def costReceipt: Option[CostReceipt] = chargedCost.get()
+
   private[graphql] def effectAdapter: HiringGraphQLSangriaAdapter = sangriaAdapter
 
   def hiring: HiringGraphQLServices = parameters.hiring
@@ -119,15 +144,18 @@ final class RequestContext private (
     })
 
   /** Charges a query's computed complexity to its caller's cost budget before any resolver runs. The key is the actor
-    * id from the verified token claims (no storage read), or the resolved client address when anonymous.
+    * id from the verified token claims (no storage read), or the resolved client address when anonymous. An admitted
+    * charge on the caller's own bucket is remembered for the response; a shared overflow counter leaves nothing.
     */
   private[graphql] def chargeCostBudget(cost: Int): Either[FixedWindowRateLimiter.RateLimited, Unit] =
-    parameters.costBudget(
-      parameters.actor.fold[CostBudgetLimiter.Key](CostBudgetLimiter.Key.Client(parameters.clientAddress))(actor =>
-        CostBudgetLimiter.Key.Actor(actor.userId)
-      ),
-      cost
-    )
+    parameters
+      .costBudget(
+        parameters.actor.fold[CostBudgetLimiter.Key](CostBudgetLimiter.Key.Client(parameters.clientAddress))(actor =>
+          CostBudgetLimiter.Key.Actor(actor.userId)
+        ),
+        cost
+      )
+      .map(grant => chargedCost.set(CostReceipt.from(cost, grant)))
 
   private[graphql] def requestScoped[A](action: HiringGraphQLResult[A]): HiringGraphQLResult[A] =
     cats.data.EitherT(
@@ -142,6 +170,20 @@ final class RequestContext private (
 
   private[graphql] def reportExecutionFailure(error: Throwable): IO[Unit] =
     parameters.diagnostics.emit(LogEvent.RuntimeFailed, parameters.requestId, fields = LogFields.failure(error))
+
+  /** One safe event for a search session that could not be recorded: the kind and either the error code or the failure
+    * class, never result identifiers or query text.
+    */
+  private[graphql] def reportSearchRecordingFailure(
+      kind: com.example.graphQL.cats.service.events.OperationalEventPayload.SearchKind,
+      cause: Either[Throwable, String]
+  ): IO[Unit] =
+    parameters.diagnostics.emit(
+      LogEvent.SearchRecordingFailed,
+      parameters.requestId,
+      fields =
+        Map(LogField.SearchKind -> kind.wire) ++ cause.fold(LogFields.failure, code => Map(LogField.ErrorCode -> code))
+    )
 
   def relatedUsers(keys: List[UserRelationKey]): HiringGraphQLResult[List[RelatedUser]] =
     authenticatedActor.flatMap(actor =>

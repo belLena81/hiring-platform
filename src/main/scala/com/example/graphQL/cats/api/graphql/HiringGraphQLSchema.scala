@@ -21,13 +21,13 @@ object HiringGraphQLSchema {
 
   enum Failure {
     case InvalidQuery, Internal
-    case CostBudgetExhausted(retryAfterSeconds: Long)
+    case CostBudgetExhausted(retryAfterSeconds: Long, cost: Option[CostReceipt])
   }
 
   /** The refusal body for an exhausted query cost budget; the HTTP layer pairs it with status 429. */
-  private[api] def costBudgetResponse(retryAfterSeconds: Long): Json = {
+  private[api] def costBudgetResponse(retryAfterSeconds: Long, cost: Option[CostReceipt]): Json = {
     val failure = GraphQLFailureCatalog.costBudgetExhausted
-    Json.obj(
+    val body = Json.obj(
       "data" -> Json.Null,
       "errors" -> Json.arr(
         Json.obj(
@@ -39,7 +39,30 @@ object HiringGraphQLSchema {
         )
       )
     )
+    withCost(cost)(body)
   }
+
+  /** Sets `extensions.cost` only when the caller has a receipt (none on a shared counter), keeping every other
+    * `extensions` key; an `extensions` value that is not an object is left untouched.
+    */
+  private[api] def withCost(cost: Option[CostReceipt])(response: Json): Json =
+    cost.fold(response)(receipt =>
+      response.asObject.fold(response) { fields =>
+        val costJson = Json.obj(
+          "requested" -> Json.fromInt(receipt.requested),
+          "limit" -> Json.fromInt(receipt.limit),
+          "remaining" -> Json.fromLong(receipt.remaining),
+          "resetsInSeconds" -> Json.fromLong(receipt.resetsInSeconds)
+        )
+        fields("extensions") match {
+          case None           => Json.fromJsonObject(fields.add("extensions", Json.obj("cost" -> costJson)))
+          case Some(existing) =>
+            existing.asObject.fold(response)(extensions =>
+              Json.fromJsonObject(fields.add("extensions", Json.fromJsonObject(extensions.add("cost", costJson))))
+            )
+        }
+      }
+    )
 
   private def rejectedResponse(failure: HiringGraphQLModel.GraphQLFailure): Json =
     Json.obj(
@@ -84,24 +107,26 @@ object HiringGraphQLSchema {
       document: GraphQLDocument,
       context: RequestContext
   ): IO[Either[Failure, Json]] =
-    context.effectAdapter.execute(context, rejectedResponse) { exceptionHandler =>
-      IO.executionContext.flatMap { implicit executionContext =>
-        context.effectAdapter.fromFuture(
-          IO(
-            Executor.execute(
-              schema = schema,
-              queryAst = document.document,
-              userContext = context,
-              variables = request.variables,
-              operationName = request.operationName,
-              queryValidator = QueryValidator.default,
-              exceptionHandler = exceptionHandler,
-              queryReducers = HiringGraphQLSchemaAssembly.queryReducers,
-              deferredResolver = HiringGraphQLSchemaAssembly.deferredResolver,
-              errorsLimit = Some(20)
+    context.effectAdapter
+      .execute(context, rejectedResponse) { exceptionHandler =>
+        IO.executionContext.flatMap { implicit executionContext =>
+          context.effectAdapter.fromFuture(
+            IO(
+              Executor.execute(
+                schema = schema,
+                queryAst = document.document,
+                userContext = context,
+                variables = request.variables,
+                operationName = request.operationName,
+                queryValidator = QueryValidator.default,
+                exceptionHandler = exceptionHandler,
+                queryReducers = HiringGraphQLSchemaAssembly.queryReducers,
+                deferredResolver = HiringGraphQLSchemaAssembly.deferredResolver,
+                errorsLimit = Some(20)
+              )
             )
           )
-        )
+        }
       }
-    }
+      .map(_.map(withCost(context.costReceipt)))
 }

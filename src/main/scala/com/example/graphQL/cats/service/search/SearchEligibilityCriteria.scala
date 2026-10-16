@@ -41,8 +41,14 @@ object SearchEligibilityCriteria {
   /** Open jobs matching the filter regardless of embedding state: derived embedding data is not eligibility. */
   def openJobs(filter: JobSearchFilter): SearchEligibilityCriteria = All(openJob :: jobFilter(filter))
 
-  def candidates(query: VectorSearchQuery, includeEmbeddingModel: Boolean): SearchEligibilityCriteria = {
-    val filters = query.candidateFilters
+  def candidates(query: VectorSearchQuery, includeEmbeddingModel: Boolean): SearchEligibilityCriteria =
+    candidates(query.candidateFilters, Option.when(includeEmbeddingModel)(query.model))
+
+  /** Active Candidates matching the filters; `embeddingModel` is `None` when embedding state is not eligibility. */
+  def candidates(
+      filters: ValidatedCandidateMatchFilters,
+      embeddingModel: Option[String]
+  ): SearchEligibilityCriteria = {
     val requested = filters.countryCanonical.toList.map(value => Equal(ResidenceCountry, Text(value))) ++
       filters.cityCanonical.toList.map(value => Equal(ResidenceCity, Text(value))) ++
       filters.availabilityStatus.toList.map(value => Equal(Availability, Text(value.toString)))
@@ -62,7 +68,7 @@ object SearchEligibilityCriteria {
         Equal(CandidateRole, Text(UserRole.Candidate.toString)),
         Equal(CandidateAccountStatus, Text(AccountStatus.Active.toString))
       ) ++
-        Option.when(includeEmbeddingModel)(Equal(EmbeddingModel, Text(query.model))).toList ++
+        embeddingModel.map(model => Equal(EmbeddingModel, Text(model))).toList ++
         filters.requiredSkills.map(skill => Equal(CandidateSkill, Text(skill))) ++ privacy
     )
   }

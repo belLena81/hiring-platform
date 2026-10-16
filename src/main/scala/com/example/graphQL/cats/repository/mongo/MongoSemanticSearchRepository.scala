@@ -39,10 +39,24 @@ final class MongoSemanticSearchRepository(
     discoveryPolicy.fold(RepositoryF.at[IO].fromEither[A](Left(RepositoryError.Unavailable)))(policy =>
       RepositoryF.fromFEither(
         policy.run(query.value).recover {
+          // An open breaker refused the query: refused, not unreachable, so no other retrieval path is tried.
+          case DiscoveryQueryPolicy.Rejected                      => Left(RepositoryError.Overloaded)
           case error if DiscoveryQueryPolicy.isUnavailable(error) => Left(RepositoryError.Unavailable)
         }
       )
     )
+
+  /** Like `MongoRepositorySupport.discoveryGuard`, but a query cut by its `maxTime` budget is `Overloaded`, not
+    * `Unavailable`: the deployment is reachable, so callers must not answer the same request through another retrieval
+    * path. Failures that count against the breaker still propagate to the policy boundary.
+    */
+  private[mongo] def searchGuard[A](operation: String)(result: RepositoryF[IO, A]): RepositoryF[IO, A] =
+    RepositoryF.fromFEither(result.value.handleErrorWith { error =>
+      MongoRepositorySupport.reportFailure(diagnostics, operation, error) *>
+        (if (MongoSemanticSearchRepository.timeBudgetExpired(error)) IO.pure(Left(RepositoryError.Overloaded))
+         else if (DiscoveryQueryPolicy.countsAgainstBreaker(error)) IO.raiseError(error)
+         else IO.pure(Left(RepositoryError.Unavailable)))
+    })
 
   /** Eligibility is not a search root: with a policy it shares the search admission and breaker; without one it still
     * runs, as before, with unavailability mapped in place.
@@ -142,7 +156,7 @@ final class MongoSemanticSearchRepository(
     else if (selected.isEmpty) RepositoryF.at[IO].pure(Nil)
     else
       // Eligibility queries run on the same search deployment, so they share its admission and breaker.
-      eligibilityAdmitted(MongoRepositorySupport.discoveryGuard(diagnostics, "semanticSearch.authorizedEligibility") {
+      eligibilityAdmitted(searchGuard("semanticSearch.authorizedEligibility") {
         val child = List(
           MongoAuthorizedReadQueries.matching(Filters.in(MongoFields.Id, selected.asJava)),
           new Document("$limit", selected.size),
@@ -172,6 +186,73 @@ final class MongoSemanticSearchRepository(
   override def recommendedJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
     admitted(rankedJobs(query, JobSearchFilter(None, Set.empty, None)))
 
+  /** Lexical fallback: shares the discovery admission, `maxTimeMS` and breaker with every other search root. */
+  override def lexicalJobs(query: LexicalSearchQuery): RepositoryF[IO, List[LexicalJobHit]] = {
+    val stages = lexicalJobStages(
+      query.text,
+      MongoSearchEligibilityRendering.indexed(
+        SearchEligibilityCriteria.openJobs(query.filter)
+      )
+    ).asScala.toList ++ List(searchScoreStage, lexicalProjection)
+    admitted(lexicalFallback("semanticSearch.lexicalFallbackJobs", MongoCollections.Jobs, stages, query)(JobId.apply))
+  }
+
+  override def lexicalCandidates(query: LexicalSearchQuery): RepositoryF[IO, List[LexicalCandidateHit]] =
+    admitted(
+      lexicalFallback(
+        "semanticSearch.lexicalFallbackCandidates",
+        MongoCollections.Users,
+        lexicalCandidateStages(query),
+        query
+      )(
+        UserId.apply
+      )
+    )
+
+  /** The `$search` index can lag the collection, so its `filter` alone admits stale entries. A `$match` on the live
+    * documents sits between `$search` and `$limit`: an entry that is no longer eligible is dropped before the limit
+    * counts it, and cannot shorten the page. The service still re-checks authorization and the open job afterwards.
+    */
+  private[mongo] def lexicalCandidateStages(query: LexicalSearchQuery): List[Document] = {
+    val criteria = SearchEligibilityCriteria.candidates(query.candidateFilters, None)
+    List(
+      lexicalSearchStage(
+        candidateLexicalIndex,
+        query.text,
+        List(MongoFields.ProfileSkills, MongoFields.ProfileExperienceSummary),
+        MongoSearchEligibilityRendering.indexed(criteria)
+      ),
+      MongoAuthorizedReadQueries.matching(MongoSearchEligibilityRendering.operational(criteria)),
+      new Document("$limit", Int.box(branchLimit)),
+      searchScoreStage,
+      lexicalProjection
+    )
+  }
+
+  private def lexicalFallback[Id](
+      operation: String,
+      collection: String,
+      stages: List[Document],
+      query: LexicalSearchQuery
+  )(
+      identify: java.util.UUID => Id
+  ): RepositoryF[IO, List[LexicalRetrievalHit[Id]]] =
+    searchGuard(operation) {
+      RepositoryF
+        .lift(
+          Mongo4catsCollections.documents(database, collection).flatMap { source =>
+            collectWithin(aggregate(source, stages), branchLimit)
+          }
+        )
+        .subflatMap(_.traverse(MongoSemanticSearchResult.lexicalHit(_, query.searchId)(identify)))
+    }
+
+  private val searchScoreStage =
+    new Document("$set", new Document(MongoFields.Score, new Document("$meta", "searchScore")))
+
+  private val lexicalProjection =
+    new Document("$project", new Document(MongoFields.Id, 1).append(MongoFields.Score, 1))
+
   override def candidateMatches(query: VectorSearchQuery): RepositoryF[IO, List[CandidateRetrievalHit]] = {
     val filter = candidateFilter(query, includeEmbeddingModel = true)
     val vectorLimit = branchLimit
@@ -195,7 +276,7 @@ final class MongoSemanticSearchRepository(
       limit: Int
   ): RepositoryF[IO, List[CandidateRetrievalHit]] = {
     val pipeline = candidateVectorPipeline(vector, filter, limit)
-    MongoRepositorySupport.discoveryGuard(diagnostics, "semanticSearch.candidateVector") {
+    searchGuard("semanticSearch.candidateVector") {
       RepositoryF
         .lift(
           Mongo4catsCollections.documents(database, MongoCollections.Users).flatMap { users =>
@@ -210,7 +291,7 @@ final class MongoSemanticSearchRepository(
       query: VectorSearchQuery
   ): RepositoryF[IO, List[CandidateRetrievalHit]] = {
     val pipeline = candidateLexicalPipeline(query, candidateLexicalFilter(query))
-    MongoRepositorySupport.discoveryGuard(diagnostics, "semanticSearch.candidateLexical") {
+    searchGuard("semanticSearch.candidateLexical") {
       RepositoryF
         .lift(
           Mongo4catsCollections.documents(database, MongoCollections.Users).flatMap { users =>
@@ -254,7 +335,7 @@ final class MongoSemanticSearchRepository(
       filter: Bson
   ): RepositoryF[IO, List[JobRetrievalHit]] = {
     val stages = nativeJobFusionStages(query, text, filter)
-    MongoRepositorySupport.discoveryGuard(diagnostics, "semanticSearch.nativeJobs") {
+    searchGuard("semanticSearch.nativeJobs") {
       RepositoryF
         .lift(
           Mongo4catsCollections.documents(database, MongoCollections.Jobs).flatMap { jobs =>
@@ -321,7 +402,7 @@ final class MongoSemanticSearchRepository(
       filter: Bson
   ): RepositoryF[IO, List[CandidateRetrievalHit]] = {
     val pipeline = nativeCandidateFusionStages(query, queryVector, filter)
-    MongoRepositorySupport.discoveryGuard(diagnostics, "semanticSearch.nativeCandidates") {
+    searchGuard("semanticSearch.nativeCandidates") {
       RepositoryF
         .lift(
           Mongo4catsCollections.documents(database, MongoCollections.Users).flatMap { users =>
@@ -392,7 +473,7 @@ final class MongoSemanticSearchRepository(
       limit: Int
   ): RepositoryF[IO, List[JobRetrievalHit]] = {
     val pipeline = jobVectorPipeline(query.vector, filter, limit)
-    MongoRepositorySupport.discoveryGuard(diagnostics, "semanticSearch.vectorJobs") {
+    searchGuard("semanticSearch.vectorJobs") {
       RepositoryF
         .lift(
           Mongo4catsCollections.documents(database, MongoCollections.Jobs).flatMap { jobs =>
@@ -427,7 +508,7 @@ final class MongoSemanticSearchRepository(
       new Document("$set", new Document(MongoFields.Score, new Document("$meta", "searchScore"))),
       retrievalProjection
     )).asJava
-    MongoRepositorySupport.discoveryGuard(diagnostics, "semanticSearch.lexicalJobs") {
+    searchGuard("semanticSearch.lexicalJobs") {
       RepositoryF
         .lift(
           Mongo4catsCollections.documents(database, MongoCollections.Jobs).flatMap { jobs =>
@@ -560,16 +641,35 @@ private[mongo] object MongoSearchFusionPipeline {
 }
 
 private[mongo] object MongoSemanticSearchResult {
+
+  /** Combines the branches of one hybrid query, all of which have run. A refused branch stays refused so the service
+    * does not degrade. A failed vector branch next to a lexical branch that answered is `VectorSearchUnavailable`, the
+    * one signal that a lexical-only answer is possible; every other failure is `Unavailable`.
+    */
+  private[mongo] def fuseBranches[A](
+      vectors: List[Either[RepositoryError, List[A]]],
+      lexical: Either[RepositoryError, List[A]]
+  )(fuse: List[List[A]] => List[A]): Either[RepositoryError, List[A]] = {
+    val branches = lexical :: vectors
+    if (branches.contains(Left(RepositoryError.Overloaded))) Left(RepositoryError.Overloaded)
+    else
+      (vectors.sequence, lexical) match {
+        case (Right(vectorHits), Right(lexicalHits))       => Right(fuse(vectorHits :+ lexicalHits))
+        case (Left(RepositoryError.Unavailable), Right(_)) => Left(RepositoryError.VectorSearchUnavailable)
+        case _                                             => Left(RepositoryError.Unavailable)
+      }
+  }
+
   def fuseJobs(
       vector: RepositoryF[IO, List[JobRetrievalHit]],
       lexical: RepositoryF[IO, List[JobRetrievalHit]],
       limit: Int
   ): RepositoryF[IO, List[JobRetrievalHit]] =
-    (vector, lexical)
-      .parMapN((vectorHits, lexicalHits) =>
-        HybridRankFusion.retrieval(List(vectorHits, lexicalHits), limit)(_.value.toString)
+    RepositoryF.fromFEither(
+      (vector.value, lexical.value).parMapN((vectorHits, lexicalHits) =>
+        fuseBranches(List(vectorHits), lexicalHits)(HybridRankFusion.retrieval(_, limit)(_.value.toString))
       )
-      .leftMap(_ => RepositoryError.Unavailable)
+    )
 
   def fuseCandidates(
       jobVector: RepositoryF[IO, List[CandidateRetrievalHit]],
@@ -577,11 +677,11 @@ private[mongo] object MongoSemanticSearchResult {
       lexical: RepositoryF[IO, List[CandidateRetrievalHit]],
       limit: Int
   ): RepositoryF[IO, List[CandidateRetrievalHit]] =
-    (jobVector, queryVector, lexical)
-      .parMapN((jobs, text, lexicalHits) =>
-        HybridRankFusion.retrieval(List(jobs, text, lexicalHits), limit)(_.value.toString)
+    RepositoryF.fromFEither(
+      (jobVector.value, queryVector.value, lexical.value).parMapN((jobs, text, lexicalHits) =>
+        fuseBranches(List(jobs, text), lexicalHits)(HybridRankFusion.retrieval(_, limit)(_.value.toString))
       )
-      .leftMap(_ => RepositoryError.Unavailable)
+    )
 
   def jobHits(
       documents: List[Document],
@@ -603,6 +703,16 @@ private[mongo] object MongoSemanticSearchResult {
       query: VectorSearchQuery
   ): Either[RepositoryError, Option[CandidateRetrievalHit]] =
     hit(document, query)(UserId.apply)
+
+  /** A lexical hit is identity and relevance only: it needs no embedding metadata. */
+  def lexicalHit[Id](document: Document, searchId: java.util.UUID)(
+      identify: java.util.UUID => Id
+  ): Either[RepositoryError, LexicalRetrievalHit[Id]] =
+    for {
+      raw <- Either.catchNonFatal(document.getString(MongoFields.Id)).leftMap(_ => RepositoryError.InvalidStoredData)
+      id <- parseIdentifier(raw)(identify).toRight(RepositoryError.InvalidStoredData)
+      score <- readScore(document, MongoFields.Score, required = true)
+    } yield LexicalRetrievalHit(id, score.getOrElse(0d), searchId)
 
   private def hit[Id](document: Document, query: VectorSearchQuery)(
       identify: java.util.UUID => Id
@@ -647,6 +757,15 @@ private[mongo] object MongoLexicalSearch {
 }
 
 private[mongo] object MongoSemanticSearchRepository {
+
+  /** `maxTime` expiry: server error code 50 (`MaxTimeMSExpired`) or the driver's operation timeout. */
+  def timeBudgetExpired(error: Throwable): Boolean =
+    com.example.graphQL.cats.shared.CauseChain(error).exists {
+      case _: com.mongodb.MongoExecutionTimeoutException | _: com.mongodb.MongoOperationTimeoutException => true
+      case command: com.mongodb.MongoCommandException => command.getErrorCode == MaxTimeMsExpiredCode
+      case _                                          => false
+    }
+  private val MaxTimeMsExpiredCode = 50
 
   /** Runs a discovery-guarded query without admission control, mapping unreachable-deployment failures to
     * `Unavailable`.

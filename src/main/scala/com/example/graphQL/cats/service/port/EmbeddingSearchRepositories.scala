@@ -2,7 +2,14 @@ package com.example.graphQL.cats.service.port
 
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.service.events.{OperationalEventEnvelope, SearchSession}
-import com.example.graphQL.cats.service.search.{CandidateRetrievalHit, JobRetrievalHit, VectorSearchQuery}
+import com.example.graphQL.cats.service.search.{
+  CandidateRetrievalHit,
+  JobRetrievalHit,
+  LexicalCandidateHit,
+  LexicalJobHit,
+  LexicalSearchQuery,
+  VectorSearchQuery
+}
 import java.time.Instant
 
 trait EmbeddingService[F[_]] {
@@ -87,6 +94,12 @@ trait SemanticSearchRepository[F[_]] {
   def searchJobs(query: VectorSearchQuery): RepositoryF[F, List[JobRetrievalHit]]
   def recommendedJobs(query: VectorSearchQuery): RepositoryF[F, List[JobRetrievalHit]]
   def candidateMatches(query: VectorSearchQuery): RepositoryF[F, List[CandidateRetrievalHit]]
+
+  /** Open jobs matching the lexical text and filters, whatever their embedding state. Shares search admission. */
+  def lexicalJobs(query: LexicalSearchQuery): RepositoryF[F, List[LexicalJobHit]]
+
+  /** Active Candidates matching the lexical text and filters, whatever their embedding state. */
+  def lexicalCandidates(query: LexicalSearchQuery): RepositoryF[F, List[LexicalCandidateHit]]
 }
 
 trait SearchSessionRepository[F[_]] {

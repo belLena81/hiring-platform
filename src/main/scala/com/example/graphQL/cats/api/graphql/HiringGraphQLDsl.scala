@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.api.graphql
 
-import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.MutationOutcome
+import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.{FacetsOutcome, MutationOutcome, SearchOutcome}
 import sangria.execution.deferred.{Fetcher, FetcherConfig, HasId}
 import sangria.schema.{Args, Argument, Context, EnumType, EnumValue, Field, ObjectType, OutputType, UnionType}
 
@@ -57,6 +57,31 @@ private[graphql] object HiringGraphQLDsl {
   ): OutputType[MutationOutcome[A]] =
     UnionType[RequestContext](name, Some(description), List(success, validation, domain))
       .mapValue[MutationOutcome[A]](identity)
+
+  /** A documented result union of an AI search root: the ranked results, or a typed unavailability, validation or
+    * domain refusal.
+    */
+  def searchOutcomeUnion[A](
+      name: String,
+      description: String,
+      success: ObjectType[RequestContext, A],
+      unavailable: ObjectType[RequestContext, HiringGraphQLModel.SearchUnavailable],
+      validation: ObjectType[RequestContext, HiringGraphQLModel.ValidationError],
+      domain: ObjectType[RequestContext, HiringGraphQLModel.DomainError]
+  ): OutputType[SearchOutcome[A]] =
+    UnionType[RequestContext](name, Some(description), List(success, unavailable, validation, domain))
+      .mapValue[SearchOutcome[A]](identity)
+
+  /** The facets union has no domain-refusal member. */
+  def facetsOutcomeUnion[A](
+      name: String,
+      description: String,
+      success: ObjectType[RequestContext, A],
+      unavailable: ObjectType[RequestContext, HiringGraphQLModel.SearchUnavailable],
+      validation: ObjectType[RequestContext, HiringGraphQLModel.ValidationError]
+  ): OutputType[FacetsOutcome[A]] =
+    UnionType[RequestContext](name, Some(description), List(success, unavailable, validation))
+      .mapValue[FacetsOutcome[A]](identity)
 
   /** The most keys one repository call serves; it matches the largest page, so a full page of related entities is one
     * call and a larger batch is split instead of growing without bound.

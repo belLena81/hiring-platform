@@ -17,6 +17,9 @@ import com.example.graphQL.cats.service.search.{
   CandidateMatchFilters,
   CandidateSearchHit,
   JobSearchFilter,
+  LexicalCandidateHit,
+  LexicalJobHit,
+  LexicalSearchQuery,
   RankedCandidate,
   RankedJob,
   VectorSearchQuery
@@ -73,7 +76,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
         )
         .value
     } yield {
-      assertEquals(accepted.map(_.map(_.job.id)), Right(List(jobId)))
+      assertEquals(accepted.map(_.hits.map(_.job.id)), Right(List(jobId)))
       assertEquals(rejected.left.toOption, Some(UseCaseError.Domain(DomainError.CandidateRequired)))
     }
   }
@@ -110,7 +113,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
         .value
       recorded <- queries.get
     } yield {
-      assertEquals(result, Right(Nil))
+      assertEquals(result, Right(SearchResults(Nil, None)))
       assertEquals(recorded.map(_.lexicalQuery), Vector(Some("Scala backend")))
       assertEquals(recorded.map(_.candidateQueryVector), Vector(Some(List(0.3f, 0.4f))))
       assertEquals(recorded.map(_.candidateFilters.requiredSkills), Vector(List("mongodb", "scala")))
@@ -154,8 +157,10 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
         .value
       candidateQueries <- queries.get
     } yield {
-      assertEquals(result, Left(UseCaseError.Search(SearchError.ProviderUnavailable)))
-      assertEquals(candidateResult, Left(UseCaseError.Search(SearchError.ProviderUnavailable)))
+      // The provider answered with another model, so no vector query runs; the keyword fallback store is down here,
+      // so the search is unavailable.
+      assertEquals(result, Left(UseCaseError.Search(SearchError.VectorSearchUnavailable)))
+      assertEquals(candidateResult, Left(UseCaseError.Search(SearchError.VectorSearchUnavailable)))
       assertEquals(recorded, Vector.empty)
       assertEquals(candidateQueries, Vector.empty)
     }
@@ -311,7 +316,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
         .candidateMatches(ActorContext(otherRecruiter, UserRole.Recruiter), jobId, pageSize, searchId)
         .value
     } yield {
-      assertEquals(accepted.map(_.map(_.candidate.id)), Right(List(candidateId)))
+      assertEquals(accepted.map(_.hits.map(_.candidate.id)), Right(List(candidateId)))
       assertEquals(rejected.left.toOption, Some(UseCaseError.Domain(DomainError.Forbidden)))
     }
   }
@@ -545,7 +550,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
         )
         .value
     } yield assertEquals(
-      result.map(_.map(_.candidate.id)),
+      result.map(_.hits.map(_.candidate.id)),
       Right(List(orderedUsers(1).id, orderedUsers(2).id, orderedUsers(3).id))
     )
   }
@@ -583,7 +588,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
           searchId
         )
         .value
-    } yield assertEquals(result.map(_.map(_.job.id)), Right(Nil))
+    } yield assertEquals(result.map(_.hits.map(_.job.id)), Right(Nil))
   }
 
   test("job search considers lower ranked hits when a retrieved job is no longer eligible") {
@@ -624,7 +629,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
           searchId
         )
         .value
-    } yield assertEquals(result.map(_.map(_.job.id)), Right(List(secondJobId)))
+    } yield assertEquals(result.map(_.hits.map(_.job.id)), Right(List(secondJobId)))
   }
 
   test("candidate matching considers lower ranked candidates when the first hit fails current filters") {
@@ -695,7 +700,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
           searchId
         )
         .value
-    } yield assertEquals(result.map(_.map(_.candidate.id)), Right(List(eligible.id)))
+    } yield assertEquals(result.map(_.hits.map(_.candidate.id)), Right(List(eligible.id)))
   }
 
   test("MVR-05 search rechecks the persisted actor when the request carries a cached authenticated viewer") {
@@ -876,7 +881,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
         _ <- usersRef.update(mutate)
         _ <- release.complete(())
         result <- fiber.joinWithNever
-      } yield assertEquals(result, Right(Nil), label)
+      } yield assertEquals(result, Right(SearchResults(Nil, None)), label)
     }
   }
 
@@ -922,7 +927,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
         _ <- jobsRef.update(mutate)
         _ <- release.complete(())
         result <- fiber.joinWithNever
-      } yield assertEquals(result, Right(Nil))
+      } yield assertEquals(result, Right(SearchResults(Nil, None)))
     }
   }
 
@@ -984,6 +989,10 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
           RepositoryF.at[IO].pure(Nil)
         def candidateMatches(query: VectorSearchQuery): RepositoryF[IO, List[CandidateRetrievalHit]] =
           RepositoryF.at[IO].pure(Nil)
+        def lexicalJobs(query: LexicalSearchQuery): RepositoryF[IO, List[LexicalJobHit]] =
+          RepositoryF.at[IO].pure(Nil)
+        def lexicalCandidates(query: LexicalSearchQuery): RepositoryF[IO, List[LexicalCandidateHit]] =
+          RepositoryF.at[IO].pure(Nil)
         def jobEligibility(ids: List[Identifiers.JobId]): RepositoryF[IO, List[JobSearchEligibility]] =
           RepositoryF.lift(
             idsSeen.set(ids) *> (entered.complete(()).void *> IO.never[List[JobSearchEligibility]])
@@ -1025,6 +1034,10 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
           repository.recommendedJobs(query)
         def candidateMatches(query: VectorSearchQuery): RepositoryF[IO, List[CandidateRetrievalHit]] =
           repository.candidateMatches(query)
+        def lexicalJobs(query: LexicalSearchQuery): RepositoryF[IO, List[LexicalJobHit]] =
+          repository.lexicalJobs(query)
+        def lexicalCandidates(query: LexicalSearchQuery): RepositoryF[IO, List[LexicalCandidateHit]] =
+          repository.lexicalCandidates(query)
       }
       result <- SemanticSearchService(users, jobs, embedder, failing, configuredModel)
         .semanticJobSearch(
@@ -1090,7 +1103,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
         }
         _ <- release.complete(())
         result <- fiber.joinWithNever
-      } yield assertEquals(result, Right(Nil), mutation)
+      } yield assertEquals(result, Right(SearchResults(Nil, None)), mutation)
     }
   }
 
@@ -1124,7 +1137,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
       )
       _ <- release.complete(())
       result <- fiber.joinWithNever
-    } yield assertEquals(result, Right(Nil))
+    } yield assertEquals(result, Right(SearchResults(Nil, None)))
   }
 
   test(
@@ -1217,6 +1230,9 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
           search.recommendedJobs(query)
         def candidateMatches(query: VectorSearchQuery): RepositoryF[IO, List[CandidateRetrievalHit]] =
           search.candidateMatches(query)
+        def lexicalJobs(query: LexicalSearchQuery): RepositoryF[IO, List[LexicalJobHit]] = search.lexicalJobs(query)
+        def lexicalCandidates(query: LexicalSearchQuery): RepositoryF[IO, List[LexicalCandidateHit]] =
+          search.lexicalCandidates(query)
         def jobEligibility(ids: List[Identifiers.JobId]): RepositoryF[IO, List[JobSearchEligibility]] =
           ids.traverse(jobs.find).map(_.flatten.map(JobSearchEligibility.fromJob))
         def candidateEligibility(ids: List[Identifiers.UserId]): RepositoryF[IO, List[CandidateSearchEligibility]] =
@@ -1236,6 +1252,10 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
         expected: JobSearchEligibility,
         ids: List[Identifiers.UserId]
     ): RepositoryF[IO, List[CandidateSearchEligibility]] = RepositoryF.at[IO].raise(RepositoryError.Unavailable)
+    def lexicalJobs(query: LexicalSearchQuery): RepositoryF[IO, List[LexicalJobHit]] =
+      RepositoryF.at[IO].raise(RepositoryError.Unavailable)
+    def lexicalCandidates(query: LexicalSearchQuery): RepositoryF[IO, List[LexicalCandidateHit]] =
+      RepositoryF.at[IO].raise(RepositoryError.Unavailable)
   }
 
   private final case class FakeEmbeddingService(result: Either[EmbeddingError, EmbeddingVector])

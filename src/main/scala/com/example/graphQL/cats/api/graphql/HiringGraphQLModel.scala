@@ -30,12 +30,20 @@ private[graphql] object HiringGraphQLModel {
 
   extension [A: Encoder](input: A) def idempotencyPayload: Json = input.asJson
 
+  /** How an AI search root reports a failure of this kind: as an unavailable search or an invalid input (both data), or
+    * not specially (a business refusal when non-exceptional, otherwise a top-level error).
+    */
+  enum SearchRefusal {
+    case Unavailable, InvalidInput, Other
+  }
+
   final case class GraphQLFailure(
       code: String,
       message: String,
       exceptional: Boolean,
       reason: Option[String] = None,
-      field: Option[String] = None
+      field: Option[String] = None,
+      search: SearchRefusal = SearchRefusal.Other
   )
   sealed trait UserError {
     def code: String
@@ -51,6 +59,17 @@ private[graphql] object HiringGraphQLModel {
   /** `retryAfterSeconds` is set only when the operation was refused by a rate limit. */
   final case class DomainError(code: String, message: String, retryAfterSeconds: Option[Int] = None) extends UserError
   type MutationOutcome[+A] = A | ValidationError | DomainError
+
+  /** A search the platform could not serve right now. `retryable` tells the client that the same request may succeed
+    * later; the input was valid and the caller was allowed to ask.
+    */
+  final case class SearchUnavailable(code: String, message: String, retryable: Boolean) extends UserError
+
+  /** The outcome of an AI search root: the ranked results, or a typed refusal that leaves sibling fields intact. */
+  type SearchOutcome[+A] = A | SearchUnavailable | ValidationError | DomainError
+
+  /** The outcome of the facets root; it has no business-rule refusal beyond validation and unavailability. */
+  type FacetsOutcome[+A] = A | SearchUnavailable | ValidationError
   final case class AuthSuccess(user: User, accessToken: String, expiresAt: Instant)
   final case class DeletionReceipt(receiptId: String, status: AccountDeletionStatus)
   final case class InteractionSuccess(eventId: UUID)
@@ -85,7 +104,7 @@ private[graphql] object HiringGraphQLModel {
       job: Job,
       score: Double,
       searchMode: SearchMode,
-      model: String,
+      model: Option[String],
       searchId: SearchId,
       matchedSkills: List[String],
       retrievalScore: Option[Double]
@@ -94,13 +113,21 @@ private[graphql] object HiringGraphQLModel {
       candidate: CandidateMatchCandidate,
       score: Double,
       searchMode: SearchMode,
-      model: String,
+      model: Option[String],
       searchId: SearchId,
       matchedSkills: List[String],
       retrievalScore: Option[Double]
   )
-  final case class RankedJobResults(results: List[RankedJobPayload])
-  final case class RankedCandidateResults(results: List[RankedCandidatePayload])
+  final case class RankedJobResults(
+      results: List[RankedJobPayload],
+      degraded: Boolean = false,
+      degradedReason: Option[String] = None
+  )
+  final case class RankedCandidateResults(
+      results: List[RankedCandidatePayload],
+      degraded: Boolean = false,
+      degradedReason: Option[String] = None
+  )
   final case class AnalyticsReportPayload(
       snapshot: com.example.graphQL.cats.service.AnalyticsReportSnapshot
   )

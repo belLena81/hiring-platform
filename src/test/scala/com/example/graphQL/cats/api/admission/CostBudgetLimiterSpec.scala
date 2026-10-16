@@ -27,7 +27,7 @@ final class CostBudgetLimiterSpec extends CatsEffectSuite {
       budget <- limiter
       _ <- (1 to 500).toList.traverse(n => IO(budget.acquireNow(client(n), 1)))
       admitted <- IO(budget.acquireNow(actor(1), 10))
-    } yield assertEquals(admitted, Right(()))
+    } yield assertEquals(admitted.map(_ => ()), Right(()))
   }
 
   test("ARR-14.2 filling the actor cache does not take capacity from anonymous clients") {
@@ -36,7 +36,7 @@ final class CostBudgetLimiterSpec extends CatsEffectSuite {
       _ <- (1 to 500).toList.traverse(n => IO(budget.acquireNow(actor(n), 1)))
       admitted <- IO(budget.acquireNow(client(1), 10))
     } yield {
-      assertEquals(admitted, Right(()))
+      assertEquals(admitted.map(_ => ()), Right(()))
       assertEquals(budget.clientLimiter.overflowCharges, 0L)
     }
   }
@@ -47,7 +47,7 @@ final class CostBudgetLimiterSpec extends CatsEffectSuite {
       _ <- (1 to 5).toList.traverse(n => IO(budget.acquireNow(client(n), 1)))
       newcomer <- IO(budget.acquireNow(client(1000), 1))
     } yield {
-      assertEquals(newcomer, Right(()))
+      assertEquals(newcomer.map(_ => ()), Right(()))
       assertEquals(budget.clientLimiter.overflowCharges, 1L)
     }
   }
@@ -74,8 +74,47 @@ final class CostBudgetLimiterSpec extends CatsEffectSuite {
       heavy <- IO(budget.acquireNow(client(1000), 10))
       again <- IO(budget.acquireNow(client(1000), 1))
     } yield {
-      assertEquals(heavy, Right(()))
+      assertEquals(heavy.map(_ => ()), Right(()))
       assert(again.isLeft)
+    }
+  }
+
+  test("AIR-08.1 a tracked caller's grant reports remaining as limit minus its own hits") {
+    for {
+      budget <- limiter
+      first <- IO(budget.acquireNow(actor(1), 3))
+      second <- IO(budget.acquireNow(actor(1), 4))
+      refused <- IO(budget.acquireNow(actor(1), 9))
+    } yield {
+      assertEquals(first, Right(FixedWindowRateLimiter.Grant.Tracked(10, 7L, 60L)))
+      assertEquals(second, Right(FixedWindowRateLimiter.Grant.Tracked(10, 3L, 60L)))
+      assertEquals(refused.left.map(_.grant), Left(FixedWindowRateLimiter.Grant.Tracked(10, 0L, 60L)))
+    }
+  }
+
+  test("AIR-08.3 a key charged to an overflow counter gets a shared grant with no numbers") {
+    for {
+      budget <- limiter
+      _ <- (1 to 5).toList.traverse(n => IO(budget.acquireNow(client(n), 1)))
+      newcomer <- IO(budget.acquireNow(client(1000), 1))
+      exhausted <- IO(budget.acquireNow(client(1001), 1000))
+    } yield {
+      assertEquals(newcomer, Right(FixedWindowRateLimiter.Grant.Shared))
+      assertEquals(exhausted.left.map(_.grant), Left(FixedWindowRateLimiter.Grant.Shared))
+    }
+  }
+
+  test("AIR-08.3 an anonymous caller with no resolvable address gets a Shared grant, admitted and refused alike") {
+    for {
+      budget <- limiter
+      admitted <- IO(budget.acquireNow(CostBudgetLimiter.Key.Client(None), 4))
+      _ <- IO(budget.acquireNow(CostBudgetLimiter.Key.Client(None), 6))
+      refused <- IO(budget.acquireNow(CostBudgetLimiter.Key.Client(None), 1))
+      resolved <- IO(budget.acquireNow(client(1), 1))
+    } yield {
+      assertEquals(admitted, Right(FixedWindowRateLimiter.Grant.Shared))
+      assertEquals(refused.left.map(_.grant), Left(FixedWindowRateLimiter.Grant.Shared))
+      assert(resolved.exists(_.isInstanceOf[FixedWindowRateLimiter.Grant.Tracked]), clue(resolved))
     }
   }
 }

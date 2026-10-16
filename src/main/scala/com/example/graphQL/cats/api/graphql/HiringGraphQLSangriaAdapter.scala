@@ -42,9 +42,9 @@ private[graphql] final class HiringGraphQLSangriaAdapter(dispatcher: Dispatcher[
           rejection(error) match {
             // A client input failure that failed the whole execution (the page-size reducer runs before any resolver)
             // is rendered by the caller in its own response shape, with HTTP 200 like a field-level validation error.
-            case Some(Rejection.Input(failure))                => IO.pure(Right(rejected(failure)))
-            case Some(Rejection.CostBudget(retryAfterSeconds)) =>
-              IO.pure(Left(HiringGraphQLSchema.Failure.CostBudgetExhausted(retryAfterSeconds)))
+            case Some(Rejection.Input(failure))                      => IO.pure(Right(rejected(failure)))
+            case Some(Rejection.CostBudget(retryAfterSeconds, cost)) =>
+              IO.pure(Left(HiringGraphQLSchema.Failure.CostBudgetExhausted(retryAfterSeconds, cost)))
             case None if isInvalidQuery(error) => IO.pure(Left(HiringGraphQLSchema.Failure.InvalidQuery))
             case None                          =>
               (context.reportExecutionFailure(error) *> report(context, unexpectedFailures))
@@ -62,7 +62,8 @@ private[graphql] final class HiringGraphQLSangriaAdapter(dispatcher: Dispatcher[
   /** Sangria's reducer requires a Throwable; a cost budget refusal fails the whole execution before any resolver runs,
     * so `execute` reports it as `Failure.CostBudgetExhausted`.
     */
-  def costBudgetRejected(retryAfterSeconds: Long): Throwable = CostBudgetRejected(retryAfterSeconds)
+  def costBudgetRejected(retryAfterSeconds: Long, cost: Option[CostReceipt]): Throwable =
+    CostBudgetRejected(retryAfterSeconds, cost)
 
   private def exceptionHandler(unexpectedFailures: ConcurrentLinkedQueue[Throwable]): ExceptionHandler =
     ExceptionHandler {
@@ -105,7 +106,7 @@ private[graphql] final class HiringGraphQLSangriaAdapter(dispatcher: Dispatcher[
   private def rejection(error: Throwable): Option[Rejection] =
     CauseChain(error).collectFirst {
       case ResolverFailureSignal(HiringGraphQLFailure.Input(failure)) => Rejection.Input(failure)
-      case CostBudgetRejected(seconds)                                => Rejection.CostBudget(seconds)
+      case CostBudgetRejected(seconds, cost)                          => Rejection.CostBudget(seconds, cost)
     }
 
   private def isInvalidQuery(error: Throwable): Boolean =
@@ -117,7 +118,7 @@ private[graphql] final class HiringGraphQLSangriaAdapter(dispatcher: Dispatcher[
 
 private enum Rejection {
   case Input(failure: GraphQLFailure)
-  case CostBudget(retryAfterSeconds: Long)
+  case CostBudget(retryAfterSeconds: Long, cost: Option[CostReceipt])
 }
 
 private final case class ResolverFailureSignal(failure: HiringGraphQLFailure) extends RuntimeException with NoStackTrace
@@ -126,4 +127,6 @@ private final case class ComplexityRejected(limit: Double)
     extends RuntimeException(s"Query complexity exceeds $limit")
     with NoStackTrace
 
-private final case class CostBudgetRejected(retryAfterSeconds: Long) extends RuntimeException with NoStackTrace
+private final case class CostBudgetRejected(retryAfterSeconds: Long, cost: Option[CostReceipt])
+    extends RuntimeException
+    with NoStackTrace

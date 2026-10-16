@@ -4,7 +4,7 @@ import cats.data.{Kleisli, OptionT}
 import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.api.auth.AuthFailure
-import com.example.graphQL.cats.api.graphql.{GraphQLRequest, HiringGraphQLSchema, RequestContextParameters}
+import com.example.graphQL.cats.api.graphql.{CostReceipt, GraphQLRequest, HiringGraphQLSchema, RequestContextParameters}
 import com.example.graphQL.cats.shared.HiringHttpPaths
 import com.example.graphQL.cats.service.{ActorContext, Diagnostics, LogEvent, LogField, LogOutcome}
 import com.example.graphQL.cats.service.Diagnostics.*
@@ -71,6 +71,7 @@ private[http] final class GraphQLHttpRoutes(
   /** HTTP 429 with a GraphQL error body (`RATE_LIMITED`, `retryAfter`) and the standard `Retry-After` header. */
   private def costBudgetExhausted(
       retryAfterSeconds: Long,
+      cost: Option[CostReceipt],
       requestId: String,
       mediaType: MediaType
   ): IO[Response[IO]] =
@@ -84,7 +85,7 @@ private[http] final class GraphQLHttpRoutes(
         )
       )
       .as(
-        graphqlJson(Status.TooManyRequests, HiringGraphQLSchema.costBudgetResponse(retryAfterSeconds), mediaType)
+        graphqlJson(Status.TooManyRequests, HiringGraphQLSchema.costBudgetResponse(retryAfterSeconds, cost), mediaType)
           .putHeaders(Header.Raw(ci"Retry-After", retryAfterSeconds.toString))
       )
 
@@ -144,7 +145,7 @@ private[http] final class GraphQLHttpRoutes(
                       dependencies.clientAddressResolver.resolve(request),
                       key => dependencies.rateLimiter.permit(key),
                       dependencies.discoveryMaxRoots,
-                      actorId => dependencies.interviewActionLimiter.permit(actorId),
+                      actorId => dependencies.interviewActionLimiter.permit(actorId).map(_.void),
                       (key, cost) => dependencies.costBudgetLimiter.acquireNow(key, cost),
                       dependencies.schemaExposure
                     )
@@ -161,8 +162,8 @@ private[http] final class GraphQLHttpRoutes(
                         completedGraphQL(parsed, result, requestId, mediaType, Some(document.document))
                       case Left(HiringGraphQLSchema.Failure.InvalidQuery) =>
                         rejected(HttpRejection.InvalidQuery, requestId, mediaType = mediaType)
-                      case Left(HiringGraphQLSchema.Failure.CostBudgetExhausted(retryAfterSeconds)) =>
-                        costBudgetExhausted(retryAfterSeconds, requestId, mediaType)
+                      case Left(HiringGraphQLSchema.Failure.CostBudgetExhausted(retryAfterSeconds, cost)) =>
+                        costBudgetExhausted(retryAfterSeconds, cost, requestId, mediaType)
                       case Left(HiringGraphQLSchema.Failure.Internal) =>
                         rejected(HttpRejection.Internal, requestId, mediaType = mediaType)
                     }

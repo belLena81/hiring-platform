@@ -72,6 +72,8 @@ private[mongo] final class HiringSearchEvaluationRetrieval(database: MongoDataba
       def authorizedCandidateEligibility(scope: HiringReadScope, job: JobSearchEligibility, ids: List[UserId]) =
         repository.authorizedCandidateEligibility(scope, job, ids)
       def recommendedJobs(query: VectorSearchQuery) = repository.recommendedJobs(query)
+      def lexicalJobs(query: LexicalSearchQuery) = repository.lexicalJobs(query)
+      def lexicalCandidates(query: LexicalSearchQuery) = repository.lexicalCandidates(query)
       def searchJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] = strategy match {
         case SearchEvaluationStrategy.ApplicationRrf => repository.searchJobs(query)
         case SearchEvaluationStrategy.Vector         =>
@@ -130,7 +132,7 @@ private[mongo] final class HiringSearchEvaluationRetrieval(database: MongoDataba
             page,
             id
           )
-          .map(_.map(_.job.id.value.toString))
+          .subflatMap(strictIds(_)(_.job.id.value.toString))
           .value
       case SearchEvaluationUseCase.Recommendations =>
         val actorId =
@@ -152,9 +154,21 @@ private[mongo] final class HiringSearchEvaluationRetrieval(database: MongoDataba
             page,
             id
           )
-          .map(_.map(_.candidate.id.value.toString))
+          .subflatMap(strictIds(_)(_.candidate.id.value.toString))
           .value
     }
     result.map(_.leftMap(_ => SearchEvaluationFailure.RetrievalFailed))
   }
+
+  /** An evaluation measures the configured retrieval strategy, so a degraded (lexical fallback) answer is a failure. */
+  private def strictIds[A](
+      found: com.example.graphQL.cats.service.search.SearchResults[A]
+  )(id: A => String): Either[com.example.graphQL.cats.service.UseCaseError, List[String]] =
+    Either.cond(
+      found.degraded.isEmpty,
+      found.hits.map(id),
+      com.example.graphQL.cats.service.UseCaseError.Search(
+        com.example.graphQL.cats.service.SearchError.VectorSearchUnavailable
+      )
+    )
 }

@@ -144,8 +144,11 @@ object SearchSessionHandoff {
 
   private def errorType(error: RepositoryError): String =
     error match {
-      case RepositoryError.Unavailable | RepositoryError.InvalidStoredData | RepositoryError.MissingStoredResult =>
+      case RepositoryError.Unavailable | RepositoryError.Overloaded | RepositoryError.VectorSearchUnavailable |
+          RepositoryError.InvalidStoredData | RepositoryError.MissingStoredResult =>
         "java.lang.RuntimeException"
-      case _ => "java.lang.IllegalStateException"
+      case RepositoryError.DuplicateApplication | RepositoryError.AuthorityRevoked | RepositoryError.Conflict |
+          RepositoryError.InvalidEvent =>
+        "java.lang.IllegalStateException"
     }
 }

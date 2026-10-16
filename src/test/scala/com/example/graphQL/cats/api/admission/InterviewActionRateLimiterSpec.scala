@@ -28,7 +28,7 @@ final class InterviewActionRateLimiterSpec extends CatsEffectSuite {
       limiter <- InterviewActionRateLimiter.create(config)
       results <- List.fill(5)(limiter.permit(actor(1))).sequence
     } yield {
-      assertEquals(results.take(3), List.fill(3)(Right(())))
+      assertEquals(results.take(3).map(_.map(_ => ())), List.fill(3)(Right(())))
       assertEquals(results.drop(3).map(_.left.map(_.retryAfterSeconds)), List.fill(2)(Left(60L)))
     }
   }
@@ -42,10 +42,10 @@ final class InterviewActionRateLimiterSpec extends CatsEffectSuite {
       other <- limiter.permit(actor(2))
       third <- limiter.permit(actor(3))
     } yield {
-      assertEquals(first, Right(()))
+      assertEquals(first.map(_ => ()), Right(()))
       assert(exhausted.isLeft)
-      assertEquals(other, Right(()))
-      assertEquals(third, Right(()))
+      assertEquals(other.map(_ => ()), Right(()))
+      assertEquals(third.map(_ => ()), Right(()))
     }
   }
 
@@ -60,9 +60,9 @@ final class InterviewActionRateLimiterSpec extends CatsEffectSuite {
       _ <- advance(1.second)
       afterWindow <- limiter.permit(actor(1))
     } yield {
-      assertEquals(first, Right(()))
+      assertEquals(first.map(_ => ()), Right(()))
       assert(early.isLeft)
-      assertEquals(afterWindow, Right(()))
+      assertEquals(afterWindow.map(_ => ()), Right(()))
     }
   }
 
@@ -103,11 +103,11 @@ final class InterviewActionRateLimiterSpec extends CatsEffectSuite {
       _ <- advance(10.seconds)
       afterWindow <- limiter.permit(actor(4))
     } yield {
-      assertEquals(admitted, List.fill(3)(Right(())))
+      assertEquals(admitted.map(_.map(_ => ())), List.fill(3)(Right(())))
       assert(newcomers.exists(_.isRight), "some newcomers are still admitted through the overflow counters")
       assert(newcomers.count(_.isRight) <= 4, "each overflow counter admits only its own allowance")
       assert(counted.forall(_.isLeft), clue(counted))
-      assertEquals(afterWindow, Right(()))
+      assertEquals(afterWindow.map(_ => ()), Right(()))
     }
   }
 

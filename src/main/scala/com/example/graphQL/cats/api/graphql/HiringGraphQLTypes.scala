@@ -4,7 +4,12 @@ import com.example.graphQL.cats.api.graphql.HiringGraphQLFetchers.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLInputs.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.*
 import com.example.graphQL.cats.domain.model.*
-import com.example.graphQL.cats.api.graphql.HiringGraphQLDsl.{describedNames, outcomeUnion}
+import com.example.graphQL.cats.api.graphql.HiringGraphQLDsl.{
+  describedNames,
+  facetsOutcomeUnion,
+  outcomeUnion,
+  searchOutcomeUnion
+}
 import com.example.graphQL.cats.service.search.*
 import sangria.schema.*
 import sangria.schema.Action.deferredAction
@@ -77,6 +82,26 @@ private[graphql] object HiringGraphQLTypes {
             "job.title; null when that rule has no input counterpart."
         ),
         resolve = _.value.field
+      )
+    )
+  )
+  lazy val searchUnavailableType: ObjectType[RequestContext, SearchUnavailable] = ObjectType(
+    "SearchUnavailable",
+    "A search that is valid and permitted but cannot be served right now; sibling fields are unaffected.",
+    List(PossibleInterface[RequestContext, SearchUnavailable](userErrorType)),
+    fields[RequestContext, SearchUnavailable](
+      Field("code", errorCodeType, description = Some("The stable error code."), resolve = _.value.code),
+      Field(
+        "message",
+        StringType,
+        description = Some("A sanitized, human-readable message."),
+        resolve = _.value.message
+      ),
+      Field(
+        "retryable",
+        BooleanType,
+        description = Some("True when repeating the same request later may succeed."),
+        resolve = _.value.retryable
       )
     )
   )
@@ -391,7 +416,7 @@ private[graphql] object HiringGraphQLTypes {
       simple("job", jobType)(_.job),
       simple("score", FloatType)(_.score),
       simple("searchMode", searchMode)(_.searchMode),
-      simple("model", StringType)(_.model),
+      simple("model", OptionType(StringType))(_.model),
       simple("searchId", searchIdType)(_.searchId),
       Field("matchedSkills", ListType(StringType), resolve = _.value.matchedSkills),
       simple("retrievalScore", OptionType(FloatType))(_.retrievalScore)
@@ -404,22 +429,46 @@ private[graphql] object HiringGraphQLTypes {
         simple("candidate", candidateMatchCandidateType)(_.candidate),
         simple("score", FloatType)(_.score),
         simple("searchMode", searchMode)(_.searchMode),
-        simple("model", StringType)(_.model),
+        simple("model", OptionType(StringType))(_.model),
         simple("searchId", searchIdType)(_.searchId),
         Field("matchedSkills", ListType(StringType), resolve = _.value.matchedSkills),
         simple("retrievalScore", OptionType(FloatType))(_.retrievalScore)
       )
     )
+  private def degradedField[A](get: A => Boolean): Field[RequestContext, A] =
+    Field(
+      "degraded",
+      BooleanType,
+      description = Some(
+        "True when the semantic ranking was unavailable and these are keyword (LEXICAL) results; their relevance is " +
+          "not comparable with normal results."
+      ),
+      resolve = context => get(context.value)
+    )
+  private def degradedReasonField[A](get: A => Option[String]): Field[RequestContext, A] =
+    Field(
+      "degradedReason",
+      OptionType(errorCodeType),
+      description =
+        Some("Why the results are degraded (PROVIDER_UNAVAILABLE or VECTOR_SEARCH_UNAVAILABLE); null otherwise."),
+      resolve = context => get(context.value)
+    )
   lazy val rankedJobResultsType: ObjectType[RequestContext, RankedJobResults] =
     ObjectType(
       "RankedJobResults",
-      fields[RequestContext, RankedJobResults](simple("results", ListType(rankedJobType))(_.results))
+      fields[RequestContext, RankedJobResults](
+        simple("results", ListType(rankedJobType))(_.results),
+        degradedField(_.degraded),
+        degradedReasonField(_.degradedReason)
+      )
     )
   lazy val rankedCandidateResultsType: ObjectType[RequestContext, RankedCandidateResults] =
     ObjectType(
       "RankedCandidateResults",
       fields[RequestContext, RankedCandidateResults](
-        simple("results", ListType(rankedCandidateType))(_.results)
+        simple("results", ListType(rankedCandidateType))(_.results),
+        degradedField(_.degraded),
+        degradedReasonField(_.degradedReason)
       )
     )
 
@@ -471,6 +520,37 @@ private[graphql] object HiringGraphQLTypes {
         simple("edges", ListType(edgeType))(_.edges),
         simple("pageInfo", pageInfoType)(_.pageInfo)
       )
+    )
+
+  private def searchResultType[A](
+      name: String,
+      successType: ObjectType[RequestContext, A]
+  ): OutputType[SearchOutcome[A]] =
+    searchOutcomeUnion(
+      name,
+      s"The outcome of the search: ${successType.name}, or SearchUnavailable when it cannot be served now, or a " +
+        "typed ValidationError or DomainError. Authentication, authorization and server failures remain top-level " +
+        "errors that null only this field.",
+      successType,
+      searchUnavailableType,
+      validationErrorType,
+      domainErrorType
+    )
+  lazy val semanticJobSearchResultType: OutputType[SearchOutcome[RankedJobResults]] =
+    searchResultType("SemanticJobSearchResult", rankedJobResultsType)
+  lazy val recommendedJobsResultType: OutputType[SearchOutcome[RankedJobResults]] =
+    searchResultType("RecommendedJobsResult", rankedJobResultsType)
+  lazy val candidateMatchesResultType: OutputType[SearchOutcome[RankedCandidateResults]] =
+    searchResultType("CandidateMatchesResult", rankedCandidateResultsType)
+  lazy val jobDiscoveryFacetsResultType
+      : OutputType[FacetsOutcome[com.example.graphQL.cats.service.search.JobDiscoveryFacets]] =
+    facetsOutcomeUnion(
+      "JobDiscoveryFacetsResult",
+      "The facets, or SearchUnavailable when they cannot be computed now, or a typed ValidationError. " +
+        "Authentication, authorization and server failures remain top-level errors that null only this field.",
+      jobDiscoveryFacetsType,
+      searchUnavailableType,
+      validationErrorType
     )
 
   private def mutationResultType[A](

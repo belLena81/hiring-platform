@@ -163,6 +163,9 @@ type CandidateMatchProfile {
   experienceSummary: String
 }
 
+"The outcome of the search: RankedCandidateResults, or SearchUnavailable when it cannot be served now, or a typed ValidationError or DomainError. Authentication, authorization and server failures remain top-level errors that null only this field."
+union CandidateMatchesResult = RankedCandidateResults | SearchUnavailable | ValidationError | DomainError
+
 type CandidateProfile {
   skills: [String!]!
   experienceSummary: String
@@ -726,6 +729,9 @@ type JobDiscoveryFacets {
   coverageLimit: Int
 }
 
+"The facets, or SearchUnavailable when they cannot be computed now, or a typed ValidationError. Authentication, authorization and server failures remain top-level errors that null only this field."
+union JobDiscoveryFacetsResult = JobDiscoveryFacets | SearchUnavailable | ValidationError
+
 type JobEdge {
   node: Job!
   cursor: String!
@@ -1054,7 +1060,7 @@ type Query {
     "Reuses a search identifier so repeated pages and later interactions correlate; the server issues one if absent."
     searchId: SearchID): JobSearchConnection!
 
-  "Open jobs within a radius of a point, nearest first. Each edge carries its distance."
+  "Open jobs within a radius of a point, nearest first. Each edge carries its distance. Cost: 100 + first * (1 + cost of the selected subfields). Caps per request: total complexity at most 1000, nesting depth at most 16, `first` between 1 and 100, and a configured maximum number of expensive discovery roots (default 4). The cost is charged to the caller's cost budget; the response reports it in `extensions.cost` when the caller has its own allowance."
   nearbyJobs(
     "The point to search around."
     center: GeoPointInput!,
@@ -1071,7 +1077,7 @@ type Query {
     "The cursor of the last item of the previous page."
     after: String): NearbyJobsConnection!
 
-  "Facet counts over the open jobs that match the filter, an optional radius and an optional lexical query."
+  "Facet counts over the open jobs that match the filter, an optional radius and an optional lexical query. Cost: 100 + cost of the selected subfields, or 100 + 25 * (1 + cost of the selected subfields) when `query` is given. Caps per request: total complexity at most 1000, nesting depth at most 16, `first` between 1 and 100, and a configured maximum number of expensive discovery roots (default 4). The cost is charged to the caller's cost budget; the response reports it in `extensions.cost` when the caller has its own allowance."
   jobDiscoveryFacets(
     "Optional lexical query the facets are computed for."
     query: String,
@@ -1083,9 +1089,9 @@ type Query {
     center: GeoPointInput,
 
     "The radius in kilometres; supplied together with center."
-    radiusKm: Float): JobDiscoveryFacets!
+    radiusKm: Float): JobDiscoveryFacetsResult
 
-  "Open jobs ranked by relevance to a query. A bounded top-N list of at most `first` results: it has no pageInfo and cannot be paged."
+  "Open jobs ranked by relevance to a query. A bounded top-N list of at most `first` results: it has no pageInfo and cannot be paged. Cost: 100 + first * (1 + cost of the selected subfields). Caps per request: total complexity at most 1000, nesting depth at most 16, `first` between 1 and 100, and a configured maximum number of expensive discovery roots (default 4). The cost is charged to the caller's cost budget; the response reports it in `extensions.cost` when the caller has its own allowance."
   semanticJobSearch(
     "The free-text search query."
     query: String!,
@@ -1097,17 +1103,17 @@ type Query {
     first: Int!,
 
     "Reuses a search identifier so repeated pages and later interactions correlate; the server issues one if absent."
-    searchId: SearchID): RankedJobResults!
+    searchId: SearchID): SemanticJobSearchResult
 
-  "Open jobs ranked against the calling candidate's profile. A bounded top-N list of at most `first` results: it has no pageInfo and cannot be paged."
+  "Open jobs ranked against the calling candidate's profile. A bounded top-N list of at most `first` results: it has no pageInfo and cannot be paged. Cost: 100 + first * (1 + cost of the selected subfields). Caps per request: total complexity at most 1000, nesting depth at most 16, `first` between 1 and 100, and a configured maximum number of expensive discovery roots (default 4). The cost is charged to the caller's cost budget; the response reports it in `extensions.cost` when the caller has its own allowance."
   recommendedJobs(
     "The page size; between 1 and 100."
     first: Int!,
 
     "Reuses a search identifier so repeated pages and later interactions correlate; the server issues one if absent."
-    searchId: SearchID): RankedJobResults!
+    searchId: SearchID): RecommendedJobsResult
 
-  "Candidates ranked against a job the caller owns. A bounded top-N list of at most `first` results: it has no pageInfo and cannot be paged."
+  "Candidates ranked against a job the caller owns. A bounded top-N list of at most `first` results: it has no pageInfo and cannot be paged. Cost: 100 + first * (1 + cost of the selected subfields). Caps per request: total complexity at most 1000, nesting depth at most 16, `first` between 1 and 100, and a configured maximum number of expensive discovery roots (default 4). The cost is charged to the caller's cost budget; the response reports it in `extensions.cost` when the caller has its own allowance."
   candidateMatches(
     "The job."
     jobId: JobID!,
@@ -1122,7 +1128,7 @@ type Query {
     first: Int!,
 
     "Reuses a search identifier so repeated pages and later interactions correlate; the server issues one if absent."
-    searchId: SearchID): RankedCandidateResults!
+    searchId: SearchID): CandidateMatchesResult
 
   "A job the caller may see."
   job(
@@ -1181,7 +1187,7 @@ type RankedCandidate {
   candidate: CandidateMatchCandidate!
   score: Float!
   searchMode: SearchMode!
-  model: String!
+  model: String
   searchId: SearchID!
   matchedSkills: [String!]!
   retrievalScore: Float
@@ -1189,13 +1195,19 @@ type RankedCandidate {
 
 type RankedCandidateResults {
   results: [RankedCandidate!]!
+
+  "True when the semantic ranking was unavailable and these are keyword (LEXICAL) results; their relevance is not comparable with normal results."
+  degraded: Boolean!
+
+  "Why the results are degraded (PROVIDER_UNAVAILABLE or VECTOR_SEARCH_UNAVAILABLE); null otherwise."
+  degradedReason: ErrorCode
 }
 
 type RankedJob {
   job: Job!
   score: Float!
   searchMode: SearchMode!
-  model: String!
+  model: String
   searchId: SearchID!
   matchedSkills: [String!]!
   retrievalScore: Float
@@ -1203,7 +1215,16 @@ type RankedJob {
 
 type RankedJobResults {
   results: [RankedJob!]!
+
+  "True when the semantic ranking was unavailable and these are keyword (LEXICAL) results; their relevance is not comparable with normal results."
+  degraded: Boolean!
+
+  "Why the results are degraded (PROVIDER_UNAVAILABLE or VECTOR_SEARCH_UNAVAILABLE); null otherwise."
+  degradedReason: ErrorCode
 }
+
+"The outcome of the search: RankedJobResults, or SearchUnavailable when it cannot be served now, or a typed ValidationError or DomainError. Authentication, authorization and server failures remain top-level errors that null only this field."
+union RecommendedJobsResult = RankedJobResults | SearchUnavailable | ValidationError | DomainError
 
 "Records that the caller viewed a job."
 input RecordJobViewInput {
@@ -1325,7 +1346,25 @@ enum SearchMode {
 
   "Lexical and semantic results combined."
   HYBRID
+
+  "Keyword relevance only: a degraded answer while semantic search is unavailable."
+  LEXICAL
 }
+
+"A search that is valid and permitted but cannot be served right now; sibling fields are unaffected."
+type SearchUnavailable implements UserError {
+  "The stable error code."
+  code: ErrorCode!
+
+  "A sanitized, human-readable message."
+  message: String!
+
+  "True when repeating the same request later may succeed."
+  retryable: Boolean!
+}
+
+"The outcome of the search: RankedJobResults, or SearchUnavailable when it cannot be served now, or a typed ValidationError or DomainError. Authentication, authorization and server failures remain top-level errors that null only this field."
+union SemanticJobSearchResult = RankedJobResults | SearchUnavailable | ValidationError | DomainError
 
 "Creates a Candidate or Recruiter account."
 input SignUpInput {

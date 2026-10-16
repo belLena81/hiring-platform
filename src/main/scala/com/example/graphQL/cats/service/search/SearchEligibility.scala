@@ -32,11 +32,15 @@ object CandidateSearchEligibility {
 
 object SearchEligibilityPolicy {
   def job(current: JobSearchEligibility, retrieved: EmbeddingMeta, model: String, filter: JobSearchFilter): Boolean =
-    current.job.status == JobStatus.Open && current.metadata.exists(meta =>
+    jobLexical(current, filter) && current.metadata.exists(meta =>
       meta == retrieved && meta.model == model && meta.sourceHash == SourceHash.sha256(SearchableText.job(current.job))
-    ) && filter.city.forall(requested => current.job.location.city.contains(requested)) && filter.skills.subsetOf(
-      current.job.skills
-    ) &&
+    )
+
+  /** Every live job check except embedding freshness: the lexical fallback needs no embedding. */
+  def jobLexical(current: JobSearchEligibility, filter: JobSearchFilter): Boolean =
+    current.job.status == JobStatus.Open &&
+      filter.city.forall(requested => current.job.location.city.contains(requested)) &&
+      filter.skills.subsetOf(current.job.skills) &&
       filter.createdAfter.forall(after => !current.job.createdAt.isBefore(after))
 
   def candidate(
@@ -45,12 +49,19 @@ object SearchEligibilityPolicy {
       model: String,
       requested: ValidatedCandidateMatchFilters
   ): Boolean =
+    candidateLexical(current, requested) && current.profile.exists { profile =>
+      current.metadata.exists(meta =>
+        meta == retrieved && meta.model == model &&
+          meta.sourceHash == SourceHash.sha256(SearchableText.candidate(profile))
+      )
+    }
+
+  /** Every live candidate check (role, active account, profile, skills, consent-gated private filters) except embedding
+    * freshness: the lexical fallback needs no embedding.
+    */
+  def candidateLexical(current: CandidateSearchEligibility, requested: ValidatedCandidateMatchFilters): Boolean =
     current.role == UserRole.Candidate && current.accountStatus == AccountStatus.Active && current.profile.exists {
       profile =>
-        val fresh = current.metadata.exists(meta =>
-          meta == retrieved && meta.model == model &&
-            meta.sourceHash == SourceHash.sha256(SearchableText.candidate(profile))
-        )
         val skills = profile.skills.map(ValidatedCandidateMatchFilters.canonical)
         val publicMatch = requested.requiredSkills.forall(skills.contains)
         val privateMatch = !profile.recruiterSearchOptIn || (requested.countryCanonical
@@ -65,6 +76,6 @@ object SearchEligibilityPolicy {
                 .exists(city => ValidatedCandidateMatchFilters.canonical(city) == value)
             ) &&
           requested.availabilityStatus.forall(value => profile.availabilityStatus.contains(value)))
-        fresh && publicMatch && privateMatch
+        publicMatch && privateMatch
     }
 }

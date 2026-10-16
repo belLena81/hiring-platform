@@ -17,7 +17,7 @@ final class CostBudgetLimiter private (
 ) {
   import CostBudgetLimiter.*
 
-  def acquireNow(key: Key, cost: Int): Either[RateLimited, Unit] =
+  def acquireNow(key: Key, cost: Int): Either[RateLimited, Grant] =
     key match {
       case Key.Actor(id)       => actors.acquireNow(id, cost)
       case Key.Client(address) => clients.acquireNow(address, cost)
@@ -29,6 +29,7 @@ final class CostBudgetLimiter private (
 
 object CostBudgetLimiter {
   type RateLimited = FixedWindowRateLimiter.RateLimited
+  type Grant = FixedWindowRateLimiter.Grant
   type Limiter = CostBudgetLimiter
 
   enum Key {
@@ -57,7 +58,9 @@ object CostBudgetLimiter {
         ticker,
         normalize,
         config.overflowBuckets,
-        "cost-budget-client"
+        "cost-budget-client",
+        // With no resolvable address every such caller shares one bucket, so its numbers describe other callers.
+        shared = _.isEmpty
       )
     } yield new CostBudgetLimiter(actors, clients)
 

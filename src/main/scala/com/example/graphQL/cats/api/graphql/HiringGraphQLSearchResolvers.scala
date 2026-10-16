@@ -6,7 +6,8 @@ import cats.syntax.all.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLInputs.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLResolverSupport.*
-import com.example.graphQL.cats.service.search.{RankedCandidate, RankedJob}
+import com.example.graphQL.cats.service.UseCaseError
+import com.example.graphQL.cats.service.search.{DegradedSearch, SearchResults, SearchedCandidate, SearchedJob}
 import com.example.graphQL.cats.service.search.{JobFacetQuery, NearbyRadius, NearbyJobCursor, NearbyJobsQuery}
 import com.example.graphQL.cats.service.events.OperationalEventPayload.SearchKind
 import com.example.graphQL.cats.service.events.SearchFilterSnapshot
@@ -62,6 +63,11 @@ private[graphql] object HiringGraphQLSearchResolvers {
 
   def jobDiscoveryFacets(
       context: Context[RequestContext, Unit]
+  ): HiringGraphQLResult[Option[FacetsOutcome[com.example.graphQL.cats.service.search.JobDiscoveryFacets]]] =
+    facetsResult(jobDiscoveryFacetsBody(context), InputFieldPaths.jobDiscoveryFacets).map(Some(_))
+
+  private def jobDiscoveryFacetsBody(
+      context: Context[RequestContext, Unit]
   ): HiringGraphQLResult[com.example.graphQL.cats.service.search.JobDiscoveryFacets] =
     authenticated(context) { case (actor, hiring) =>
       val inputFilter = context.arg(jobFilterArgument)
@@ -82,7 +88,12 @@ private[graphql] object HiringGraphQLSearchResolvers {
       } yield facets
     }
 
-  def semanticJobSearch(context: Context[RequestContext, Unit]): HiringGraphQLResult[RankedJobResults] =
+  def semanticJobSearch(
+      context: Context[RequestContext, Unit]
+  ): HiringGraphQLResult[Option[SearchOutcome[RankedJobResults]]] =
+    searchResult(semanticJobSearchBody(context), InputFieldPaths.semanticJobSearch).map(Some(_))
+
+  private def semanticJobSearchBody(context: Context[RequestContext, Unit]): HiringGraphQLResult[RankedJobResults] =
     authenticatedSearch(context).flatMap { case (actor, hiring, service) =>
       for {
         filter <- inputResult(discoveryFilter(context.arg(jobFilterArgument)))
@@ -92,23 +103,30 @@ private[graphql] object HiringGraphQLSearchResolvers {
           service.semanticJobSearch(actor, context.arg(queryArgument), filter, size, searchId)
         )
         _ <- recordSearch(
+          context.ctx,
           hiring,
           actor.userId,
           SearchKind.SemanticJobSearch,
           searchId,
           filterSnapshot(filter),
-          results.headOption.map(_.meta.model)
-        )(results)(_.job.id.value.toString, _.score)
+          results.hits.headOption.flatMap(_.model)
+        )(results.hits)(_.job.id.value.toString, _.score)
       } yield rankedJobResults(results)
     }
 
-  def recommendedJobs(context: Context[RequestContext, Unit]): HiringGraphQLResult[RankedJobResults] =
+  def recommendedJobs(
+      context: Context[RequestContext, Unit]
+  ): HiringGraphQLResult[Option[SearchOutcome[RankedJobResults]]] =
+    searchResult(recommendedJobsBody(context), InputFieldPaths.recommendedJobs).map(Some(_))
+
+  private def recommendedJobsBody(context: Context[RequestContext, Unit]): HiringGraphQLResult[RankedJobResults] =
     authenticatedSearch(context).flatMap { case (actor, hiring, service) =>
       for {
         size <- inputResult(pageSize(context.arg(firstArgument)))
         searchId <- searchIdFor(hiring, context.arg(searchIdArgument).map(_.value))
         results <- raiseOnUseCaseError(service.recommendedJobs(actor, size, searchId))
         _ <- recordSearch(
+          context.ctx,
           hiring,
           actor.userId,
           SearchKind.RecommendedJobs,
@@ -116,10 +134,17 @@ private[graphql] object HiringGraphQLSearchResolvers {
           SearchFilterSnapshot.Unfiltered,
           results.headOption.map(_.meta.model)
         )(results)(_.job.id.value.toString, _.score)
-      } yield rankedJobResults(results)
+      } yield rankedJobResults(SearchResults(results.map(SearchedJob.from), None))
     }
 
-  def candidateMatches(context: Context[RequestContext, Unit]): HiringGraphQLResult[RankedCandidateResults] =
+  def candidateMatches(
+      context: Context[RequestContext, Unit]
+  ): HiringGraphQLResult[Option[SearchOutcome[RankedCandidateResults]]] =
+    searchResult(candidateMatchesBody(context), InputFieldPaths.candidateMatches).map(Some(_))
+
+  private def candidateMatchesBody(
+      context: Context[RequestContext, Unit]
+  ): HiringGraphQLResult[RankedCandidateResults] =
     authenticatedSearch(context).flatMap { case (actor, hiring, service) =>
       val jobId = context.arg(jobIdArgument)
       val matchFilter = context.arg(candidateMatchFilterArgument)
@@ -143,34 +168,37 @@ private[graphql] object HiringGraphQLSearchResolvers {
           )
         )
         _ <- recordSearch(
+          context.ctx,
           hiring,
           actor.userId,
           SearchKind.CandidateMatches,
           searchId,
           SearchFilterSnapshot.ForJob(jobId),
-          results.headOption.map(_.meta.model)
-        )(results)(_.candidate.id.value.toString, _.score)
+          results.hits.headOption.flatMap(_.model)
+        )(results.hits)(_.candidate.id.value.toString, _.score)
       } yield rankedCandidateResults(results)
     }
 
-  private def rankedJobResults(values: List[RankedJob]): RankedJobResults =
+  private def rankedJobResults(found: SearchResults[SearchedJob]): RankedJobResults =
     RankedJobResults(
-      values.map(value =>
+      found.hits.map(value =>
         RankedJobPayload(
           value.job,
           value.score,
           value.mode,
-          value.meta.model,
+          value.model,
           SearchId(value.searchId),
           value.matchedSkills,
           value.retrievalScore
         )
-      )
+      ),
+      found.degraded.isDefined,
+      found.degraded.map(degradedReasonCode)
     )
 
-  private def rankedCandidateResults(values: List[RankedCandidate]): RankedCandidateResults =
+  private def rankedCandidateResults(found: SearchResults[SearchedCandidate]): RankedCandidateResults =
     RankedCandidateResults(
-      values.map(value =>
+      found.hits.map(value =>
         RankedCandidatePayload(
           CandidateMatchCandidate(
             value.candidate.id,
@@ -179,11 +207,17 @@ private[graphql] object HiringGraphQLSearchResolvers {
           ),
           value.score,
           value.mode,
-          value.meta.model,
+          value.model,
           SearchId(value.searchId),
           value.matchedSkills,
           value.retrievalScore
         )
-      )
+      ),
+      found.degraded.isDefined,
+      found.degraded.map(degradedReasonCode)
     )
+
+  /** The code the degraded answer reports; only the two retrieval failures can degrade a search. */
+  private def degradedReasonCode(degraded: DegradedSearch): String =
+    GraphQLFailureCatalog.classify(UseCaseError.Search(degraded.reason)).code
 }

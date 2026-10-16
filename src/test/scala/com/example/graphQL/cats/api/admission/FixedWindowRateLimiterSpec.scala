@@ -31,8 +31,8 @@ final class FixedWindowRateLimiterSpec extends CatsEffectSuite {
       second <- budget.acquire("a", 40)
       third <- budget.acquire("a", 1)
     } yield {
-      assertEquals(first, Right(()))
-      assertEquals(second, Right(()))
+      assertEquals(first.map(_ => ()), Right(()))
+      assertEquals(second.map(_ => ()), Right(()))
       assertEquals(third.left.map(_.retryAfterSeconds), Left(60L))
     }
   }
@@ -47,7 +47,7 @@ final class FixedWindowRateLimiterSpec extends CatsEffectSuite {
       results <- List(0, -5).traverse(budget.acquire("a", _))
       refused <- budget.permit("a")
     } yield {
-      assertEquals(results, List(Right(()), Right(())))
+      assertEquals(results.map(_.map(_ => ())), List(Right(()), Right(())))
       assert(refused.isLeft)
     }
   }
@@ -61,7 +61,7 @@ final class FixedWindowRateLimiterSpec extends CatsEffectSuite {
       later <- (advance(1.second) *> budget.acquire("a", 10))
     } yield {
       assert(early.isLeft)
-      assertEquals(later, Right(()))
+      assertEquals(later.map(_ => ()), Right(()))
     }
   }
 
@@ -82,7 +82,7 @@ final class FixedWindowRateLimiterSpec extends CatsEffectSuite {
       other <- budget.acquire("b", 5)
     } yield {
       assert(exhausted.isLeft)
-      assertEquals(other, Right(()))
+      assertEquals(other.map(_ => ()), Right(()))
     }
   }
 
@@ -106,7 +106,7 @@ final class FixedWindowRateLimiterSpec extends CatsEffectSuite {
       _ <- List("a", "b").traverse(budget.acquire(_, 1))
       newcomer <- budget.acquire("newcomer", 1)
     } yield {
-      assertEquals(newcomer, Right(()))
+      assertEquals(newcomer.map(_ => ()), Right(()))
       assertEquals(budget.overflowCharges, 1L)
     }
   }
@@ -122,9 +122,9 @@ final class FixedWindowRateLimiterSpec extends CatsEffectSuite {
       _ <- advance(60.seconds)
       afterWindow <- budget.acquire("z", 5)
     } yield {
-      assertEquals((first, second), (Right(()), Right(())))
+      assertEquals((first.map(_ => ()), second.map(_ => ())), (Right(()), Right(())))
       assert(shared.isLeft, "the single overflow counter is shared by every unseen key")
-      assertEquals(afterWindow, Right(()))
+      assertEquals(afterWindow.map(_ => ()), Right(()))
     }
   }
 
@@ -137,8 +137,8 @@ final class FixedWindowRateLimiterSpec extends CatsEffectSuite {
       again <- budget.acquire("a", 1)
       other <- budget.acquire("b", 1)
     } yield {
-      assertEquals(again, Right(()))
-      assertEquals(other, Right(()))
+      assertEquals(again.map(_ => ()), Right(()))
+      assertEquals(other.map(_ => ()), Right(()))
     }
   }
 
@@ -173,7 +173,7 @@ final class FixedWindowRateLimiterSpec extends CatsEffectSuite {
     } yield {
       assert(refused.isLeft, "the shared allowance is spent: documents the limit of the overflow design")
       assert(tracked.isLeft)
-      assertEquals(afterWindow, Right(()))
+      assertEquals(afterWindow.map(_ => ()), Right(()))
     }
   }
 

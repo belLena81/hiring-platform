@@ -33,6 +33,19 @@ private[graphql] object InputFieldPaths {
   val updateMyProfile: Path = from(same("profile") ++ candidateProfile ++ recruiterProfile)
   val createJob: Path = from(same(jobContent*))
   val updateJob: Path = from(jobContent.map(name => name -> s"job.$name").toMap)
+  private val jobFilterPaths: Map[String, String] =
+    Map("city" -> "filter.city", "skills" -> "filter.skills", "createdAfter" -> "filter.createdAfter")
+  private val pagePaths: Map[String, String] = Map("first" -> "first", "pageSize" -> "first")
+  val semanticJobSearch: Path = from(same("query") ++ jobFilterPaths ++ pagePaths)
+  val recommendedJobs: Path = from(pagePaths)
+  val candidateMatches: Path = from(
+    same("query") ++ pagePaths ++ Map(
+      "availabilityStatus" -> "filter.availabilityStatus",
+      "requiredSkills" -> "filter.requiredSkills",
+      "residence" -> "filter.country"
+    )
+  )
+  val jobDiscoveryFacets: Path = from(same("query") ++ jobFilterPaths ++ Map("radius" -> "radiusKm"))
   val rejectApplication: Path = from(same("feedback"))
   val declineApplication: Path = from(same("reason"))
 }

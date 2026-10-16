@@ -106,7 +106,13 @@ class MongoDatabaseProbeSpec extends CatsEffectSuite {
         assert(captured.forall { case (event, requestId, fields) =>
           event == LogEvent.MongoProbeFailed && requestId == id &&
           fields.get(LogField.Reason).exists(Set("PROBE_TIMEOUT", "DATABASE_TIMEOUT", "DATABASE_NETWORK").contains) &&
-          fields.get(LogField.ErrorType).exists(LogFields.validPublic(LogField.ErrorType, _)) &&
+          // A deadline race yields either the probe timeout or the driver timeout; the production allow-list
+          // accepts both classes, so the test validates against it instead of the JDK-only default.
+          fields
+            .get(LogField.ErrorType)
+            .exists(
+              LogFields.validPublic(LogField.ErrorType, _, com.example.graphQL.cats.runtime.HiringLogValues.allowed)
+            ) &&
           fields.get(LogField.DurationMs).flatMap(_.toLongOption).exists(_ >= 0) &&
           fields.get(LogField.MongoHosts).contains(s"127.0.0.1:${socket.getLocalPort}") &&
           fields.get(LogField.MongoDatabase).contains("foundation")

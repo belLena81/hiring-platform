@@ -26,7 +26,9 @@ private[graphql] object HiringGraphQLJobResolvers {
         )((cursor, size) => JobPageRequest(None, cursor, size))(request =>
           for {
             values <- raiseOnUseCaseError(hiring.jobService.searchOpenJobs(actor, filter, request))
-            _ <- recordSearch(hiring, actor.userId, SearchKind.Jobs, searchId, filterSnapshot(filter))(values)(
+            _ <- recordSearch(context.ctx, hiring, actor.userId, SearchKind.Jobs, searchId, filterSnapshot(filter))(
+              values
+            )(
               _.id.value.toString,
               _ => 0d
             )

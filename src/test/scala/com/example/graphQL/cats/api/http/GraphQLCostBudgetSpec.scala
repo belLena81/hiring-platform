@@ -182,4 +182,70 @@ final class GraphQLCostBudgetSpec extends CatsEffectSuite {
       assertEquals(spent.status, Status.Ok, "the whole budget is still available after the refusals")
     }
   }
+
+  private def cost(body: Json): Option[Json] = body.hcursor.downField("extensions").downField("cost").focus
+
+  private def costOf(body: Json): (Option[Int], Option[Int], Option[Long], Option[Long]) = {
+    val c = body.hcursor.downField("extensions").downField("cost")
+    (
+      c.get[Int]("requested").toOption,
+      c.get[Int]("limit").toOption,
+      c.get[Long]("remaining").toOption,
+      c.get[Long]("resetsInSeconds").toOption
+    )
+  }
+
+  test("AIR-08.1 two charged queries report extensions.cost with remaining decreasing by the requested cost") {
+    for {
+      (http, _) <- build(tight)
+      first <- http(post(cheap, Some("alice"))).flatMap(_.as[Json])
+      second <- http(post(cheap, Some("alice"))).flatMap(_.as[Json])
+    } yield {
+      assertEquals(costOf(first), (Some(2), Some(9), Some(7L), Some(60L)), clue(first))
+      assertEquals(costOf(second), (Some(2), Some(9), Some(5L), Some(60L)), clue(second))
+    }
+  }
+
+  test("AIR-08.1 a request rejected before the budget is charged carries no cost object") {
+    for {
+      (http, _) <- build(tight)
+      pageSize <- http(post("{ jobs(first: -1) { edges { cursor } } }")).flatMap(_.as[Json])
+    } yield assertEquals(cost(pageSize), None, clue(pageSize))
+  }
+
+  test("AIR-08.2 the 429 body carries the cost object with remaining 0 and Retry-After is unchanged") {
+    for {
+      (http, _) <- build(tight)
+      _ <- http(post(spend, Some("alice")))
+      refused <- http(post(cheap, Some("alice")))
+      body <- refused.as[Json]
+    } yield {
+      assertEquals(refused.status, Status.TooManyRequests)
+      assertEquals(refused.headers.get(CIString("Retry-After")).map(_.head.value), Some("60"))
+      assertEquals(costOf(body), (Some(2), Some(9), Some(0L), Some(60L)), clue(body))
+      assertEquals(
+        body.hcursor.downField("errors").downArray.downField("extensions").get[Long]("retryAfter"),
+        Right(60L)
+      )
+    }
+  }
+
+  test("AIR-08.3 a caller charged to a shared overflow counter gets no cost object, on success or on 429") {
+    for {
+      (http, _) <- build(CostBudgetConfig(60, 9, 3, 3))
+      _ <- (1 to 3).toList.traverse(index =>
+        http(post(cheap, clientIp = Some(s"198.51.100.$index"))).flatMap(_.as[String])
+      )
+      admitted <- http(post(cheap, clientIp = Some("203.0.113.9")))
+      admittedBody <- admitted.as[Json]
+      refused <- http(post(spend, clientIp = Some("203.0.113.9")))
+      refusedBody <- refused.as[Json]
+    } yield {
+      assertEquals(admitted.status, Status.Ok)
+      assert(admittedBody.hcursor.downField("extensions").failed, clue(admittedBody))
+      assertEquals(refused.status, Status.TooManyRequests)
+      assert(refusedBody.hcursor.downField("extensions").failed, clue(refusedBody))
+      assertEquals(refused.headers.get(CIString("Retry-After")).map(_.head.value), Some("60"))
+    }
+  }
 }

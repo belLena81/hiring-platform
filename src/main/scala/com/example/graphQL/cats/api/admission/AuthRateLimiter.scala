@@ -1,6 +1,7 @@
 package com.example.graphQL.cats.api.admission
 
 import cats.effect.{IO, Resource}
+import cats.syntax.all.*
 import com.comcast.ip4s.{Cidr, IpAddress}
 import com.example.graphQL.cats.config.RateLimitConfig
 import com.github.benmanes.caffeine.cache.Ticker
@@ -9,7 +10,7 @@ import com.github.benmanes.caffeine.cache.Ticker
 final class AuthRateLimiter private (underlying: FixedWindowRateLimiter[AuthRateLimiter.Key]) {
   import AuthRateLimiter.*
 
-  def permit(key: Key): IO[Either[RateLimited, Unit]] = underlying.permit(key)
+  def permit(key: Key): IO[Either[RateLimited, Unit]] = underlying.permit(key).map(_.void)
 
   private[admission] def cleanUpAndSize: IO[Long] = underlying.cleanUpAndSize
 }

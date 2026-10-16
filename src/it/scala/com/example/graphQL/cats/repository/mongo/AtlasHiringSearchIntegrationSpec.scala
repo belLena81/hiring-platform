@@ -251,7 +251,7 @@ final class AtlasHiringSearchIntegrationSpec extends CatsEffectSuite {
             UUID.randomUUID()
           )
           .value
-        _ = assertEquals(validated.map(_.map(_.candidate.id).toSet), Right(expected))
+        _ = assertEquals(validated.map(_.hits.map(_.candidate.id).toSet), Right(expected))
         hits <- repo.searchJobs(query(job, false)).value
         _ = assertEquals(hits.map(_.map(_.id)), Right(List(job.id)))
         _ <- MongoAccessEvaluationSupport.command(
@@ -272,6 +272,84 @@ final class AtlasHiringSearchIntegrationSpec extends CatsEffectSuite {
         )
         _ <- observeClosureLag(repo, job)
       } yield ()
+    }
+  }
+
+  test("AIR-07.1 $search lexical fallback ranks open jobs and eligible candidates while the provider is down") {
+    live { (db, policy) =>
+      val lexicalQuery = LexicalSearchQuery(
+        "scala",
+        JobSearchFilter(None, Set.empty, None),
+        page,
+        UUID.randomUUID(),
+        ValidatedCandidateMatchFilters.from(filters).fold(errors => fail(errors.toString), identity)
+      )
+      def await[A](attempts: Int)(read: IO[Either[?, List[A]]])(done: List[A] => Boolean): IO[Unit] =
+        read.flatMap {
+          case Right(hits) if done(hits) => IO.unit
+          case _ if attempts > 0         => IO.sleep(500.millis) *> await(attempts - 1)(read)(done)
+          case other => IO.raiseError(new AssertionError(s"Atlas lexical ingestion did not complete: $other"))
+        }
+      for {
+        _ <- MongoHiringSetup.initialize(db, Some(indexes), Diagnostics.noop[IO])
+        seeded <- fixture(db)
+        (job, expected) = seeded
+        repo = repository(db, SearchFusionStrategy.ApplicationRrf, policy)
+        _ <- await(120)(repo.lexicalJobs(lexicalQuery).value)(_.exists(_.id == job.id))
+        _ <- await(120)(repo.lexicalCandidates(lexicalQuery).value)(hits => expected.subsetOf(hits.map(_.id).toSet))
+        providerDown = new EmbeddingService[IO] {
+          def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] =
+            IO.pure(Left(EmbeddingError.ProviderUnavailable))
+        }
+        service = new SemanticSearchService(
+          new MongoUserRepository(
+            db,
+            MongoRepositoryTestSupport.noTransaction,
+            MongoEmbeddingWorkEnqueuer.disabled,
+            Diagnostics.noop[IO]
+          ),
+          new MongoJobRepository(
+            db,
+            MongoRepositoryTestSupport.noTransaction,
+            MongoEmbeddingWorkEnqueuer.disabled,
+            Diagnostics.noop[IO]
+          ),
+          providerDown,
+          repo,
+          model
+        )
+        jobs <- service
+          .semanticJobSearch(
+            ActorContext(expected.head, UserRole.Candidate),
+            "scala",
+            JobSearchFilter(None, Set.empty, None),
+            page,
+            UUID.randomUUID()
+          )
+          .value
+        candidates <- service
+          .candidateMatches(
+            ActorContext(job.recruiterId, UserRole.Recruiter),
+            job.id,
+            Some("scala"),
+            filters,
+            page,
+            UUID.randomUUID()
+          )
+          .value
+      } yield {
+        val rankedJobs = jobs.fold(error => fail(error.toString), identity)
+        assertEquals(
+          rankedJobs.degraded,
+          Some(DegradedSearch(com.example.graphQL.cats.service.SearchError.ProviderUnavailable))
+        )
+        assertEquals(rankedJobs.hits.map(_.job.id), List(job.id))
+        assertEquals(rankedJobs.hits.map(_.mode), List(SearchMode.LEXICAL))
+        assertEquals(rankedJobs.hits.map(_.model), List(None))
+        val rankedCandidates = candidates.fold(error => fail(error.toString), identity)
+        assertEquals(rankedCandidates.hits.map(_.candidate.id).toSet, expected)
+        assertEquals(rankedCandidates.hits.map(_.mode).distinct, List(SearchMode.LEXICAL))
+      }
     }
   }
 

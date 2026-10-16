@@ -39,9 +39,69 @@ private[graphql] object HiringGraphQLResolverSupport {
       case Left(UseCaseError.ValidationFailed(errors)) => IO.pure(Right(validationError(errors, fieldPath)))
       case Left(error)                                 =>
         val failure = GraphQLFailureCatalog.classify(error)
-        if (failure.exceptional) IO.pure(Left(HiringGraphQLFailure.UseCase(error)))
+        if (failure.exceptional || GraphQLFailureCatalog.isAuthenticationFailure(error))
+          IO.pure(Left(HiringGraphQLFailure.UseCase(error)))
         else IO.pure(Right(DomainError(failure.code, failure.message)))
     })
+
+  /** A rate-limit refusal as data: the code and message come from the failure, and the delay is carried (whole seconds,
+    * clamped to `Int`) so the client knows when to retry.
+    */
+  def rateLimitedRefusal(failure: GraphQLFailure, retryAfterSeconds: Long): DomainError =
+    DomainError(failure.code, failure.message, Some(math.min(retryAfterSeconds, Int.MaxValue.toLong).toInt))
+
+  /** Mirrors `mutationResult` for the AI search roots: an unavailable search, an invalid input, a rate-limit refusal or
+    * a non-exceptional business refusal becomes data, so sibling fields survive; authentication, authorization,
+    * readiness and repository failures stay top-level and null only this field. Search roots decide data versus
+    * top-level from the failure's search kind first, so the embedding and provider failures that are exceptional for
+    * mutations are still data here. The kind comes from the failure catalog.
+    */
+  def searchResult[A](
+      value: HiringGraphQLResult[A],
+      fieldPath: InputFieldPaths.Path
+  ): HiringGraphQLResult[SearchOutcome[A]] =
+    EitherT(value.value.map {
+      case Right(result)                                   => Right(result)
+      case Left(HiringGraphQLFailure.RateLimited(seconds)) =>
+        Right(rateLimitedRefusal(GraphQLFailureCatalog.requestRateLimited, seconds))
+      case Left(failure) =>
+        searchRefusal(failure).flatMap { found =>
+          val refusal: Option[SearchUnavailable | ValidationError | DomainError] =
+            dataRefusal(found, fieldPath).orElse(
+              Option.when(!found.exceptional)(DomainError(found.code, found.message))
+            )
+          refusal.toRight(failure)
+        }
+    })
+
+  /** The facets root has no business-rule member, so only unavailability and invalid input become data. */
+  def facetsResult[A](
+      value: HiringGraphQLResult[A],
+      fieldPath: InputFieldPaths.Path
+  ): HiringGraphQLResult[FacetsOutcome[A]] =
+    EitherT(value.value.map {
+      case Right(result) => Right(result)
+      case Left(failure) => searchRefusal(failure).flatMap(dataRefusal(_, fieldPath).toRight(failure))
+    })
+
+  private def searchRefusal(failure: HiringGraphQLFailure): Either[HiringGraphQLFailure, GraphQLFailure] =
+    failure match {
+      case HiringGraphQLFailure.UseCase(error) if GraphQLFailureCatalog.isAuthenticationFailure(error) => Left(failure)
+      case HiringGraphQLFailure.UseCase(error) => Right(GraphQLFailureCatalog.classify(error))
+      case HiringGraphQLFailure.Input(error)   => Right(error)
+      case other                               => Left(other)
+    }
+
+  private def dataRefusal(
+      found: GraphQLFailure,
+      fieldPath: InputFieldPaths.Path
+  ): Option[SearchUnavailable | ValidationError] =
+    found.search match {
+      case SearchRefusal.Unavailable  => Some(SearchUnavailable(found.code, found.message, retryable = true))
+      case SearchRefusal.InvalidInput =>
+        Some(ValidationError(found.code, found.message, found.field.flatMap(fieldPath)))
+      case SearchRefusal.Other => None
+    }
 
   def idempotencyRequest(idempotencyKey: UUID, payload: Json): IdempotencyRequest =
     IdempotencyRequest.fromCanonicalInput(idempotencyKey, payload.printWith(CanonicalJsonPrinter))
@@ -80,7 +140,11 @@ private[graphql] object HiringGraphQLResolverSupport {
   def searchIdFor(hiring: HiringGraphQLServices, supplied: Option[UUID]): HiringGraphQLResult[UUID] =
     EitherT.liftF[IO, HiringGraphQLFailure, UUID](hiring.searchSessions.searchId(supplied))
 
+  /** Recording is best-effort: the caller already holds the results, so a failed recording is logged once and the
+    * results and `searchId` are still returned. Cancellation is not an error and still propagates; there is no retry.
+    */
   def recordSearch[A](
+      requestContext: RequestContext,
       hiring: HiringGraphQLServices,
       actorId: UserId,
       kind: OperationalEventPayload.SearchKind,
@@ -88,15 +152,24 @@ private[graphql] object HiringGraphQLResolverSupport {
       filter: SearchFilterSnapshot,
       model: Option[String] = None
   )(results: List[A])(idOf: A => String, scoreOf: A => Double): HiringGraphQLResult[Unit] =
-    raiseOnUseCaseError(
-      hiring.searchSessions.record(
-        actorId,
-        kind,
-        searchId,
-        filter,
-        model,
-        results.map(result => SearchSessionEntry(idOf(result), scoreOf(result)))
-      )
+    EitherT.liftF[IO, HiringGraphQLFailure, Unit](
+      hiring.searchSessions
+        .record(
+          actorId,
+          kind,
+          searchId,
+          filter,
+          model,
+          results.map(result => SearchSessionEntry(idOf(result), scoreOf(result)))
+        )
+        .value
+        .attempt
+        .flatMap {
+          case Right(Right(()))   => IO.unit
+          case Right(Left(error)) =>
+            requestContext.reportSearchRecordingFailure(kind, Right(GraphQLFailureCatalog.classify(error).code))
+          case Left(error) => requestContext.reportSearchRecordingFailure(kind, Left(error))
+        }
     )
 
   def authenticated[A](context: Context[RequestContext, Unit])(

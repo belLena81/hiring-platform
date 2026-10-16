@@ -2,6 +2,7 @@ package com.example.graphQL.cats.api.graphql
 
 import cats.data.{EitherT, NonEmptyList}
 import cats.effect.IO
+import cats.syntax.all.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLResolverSupport.*
 import com.example.graphQL.cats.domain.error.{DomainError as DomainFailure, DomainValidationError}
@@ -273,22 +274,44 @@ final class HiringGraphQLResolverSupportSpec extends CatsEffectSuite {
       Scenario(
         "missing embedding",
         UseCaseError.Search(SearchError.MissingEmbedding("job")),
-        GraphQLFailure("MISSING_EMBEDDING", "job embedding is missing", exceptional = true)
+        GraphQLFailure(
+          "MISSING_EMBEDDING",
+          "job embedding is missing",
+          exceptional = true,
+          search = SearchRefusal.Unavailable
+        )
       ),
       Scenario(
         "stale embedding",
         UseCaseError.Search(SearchError.StaleEmbedding("candidate")),
-        GraphQLFailure("STALE_EMBEDDING", "candidate embedding is stale", exceptional = true)
+        GraphQLFailure(
+          "STALE_EMBEDDING",
+          "candidate embedding is stale",
+          exceptional = true,
+          search = SearchRefusal.Unavailable
+        )
       ),
       Scenario(
         "large search input",
         UseCaseError.Search(SearchError.InputTooLarge("description", 2000)),
-        GraphQLFailure("INPUT_TOO_LARGE", "description must be at most 2000 characters", exceptional = true)
+        GraphQLFailure(
+          "INPUT_TOO_LARGE",
+          "description must be at most 2000 characters",
+          exceptional = true,
+          field = Some("description"),
+          search = SearchRefusal.InvalidInput
+        )
       ),
       Scenario(
         "several invalid search filters",
         UseCaseError.Search(SearchError.InvalidFilters(cats.data.NonEmptyList.of("city", "skills"))),
-        GraphQLFailure("INVALID_SEARCH_FILTER", "Invalid city, skills filters", exceptional = false)
+        GraphQLFailure(
+          "INVALID_SEARCH_FILTER",
+          "Invalid city, skills filters",
+          exceptional = false,
+          field = Some("city"),
+          search = SearchRefusal.InvalidInput
+        )
       ),
       Scenario(
         "invalid interview interval",
@@ -302,22 +325,44 @@ final class HiringGraphQLResolverSupportSpec extends CatsEffectSuite {
       Scenario(
         "provider unavailable",
         UseCaseError.Search(SearchError.ProviderUnavailable),
-        GraphQLFailure("PROVIDER_UNAVAILABLE", "Embedding provider unavailable", exceptional = true)
+        GraphQLFailure(
+          "PROVIDER_UNAVAILABLE",
+          "Embedding provider unavailable",
+          exceptional = true,
+          search = SearchRefusal.Unavailable
+        )
       ),
       Scenario(
         "vector search unavailable",
         UseCaseError.Search(SearchError.VectorSearchUnavailable),
-        GraphQLFailure("VECTOR_SEARCH_UNAVAILABLE", "Vector search unavailable", exceptional = true)
+        GraphQLFailure(
+          "VECTOR_SEARCH_UNAVAILABLE",
+          "Vector search unavailable",
+          exceptional = true,
+          search = SearchRefusal.Unavailable
+        )
       ),
       Scenario(
         "AC-10.1 blank field names its field",
         UseCaseError.ValidationFailed(NonEmptyList.one(DomainValidationError.BlankField("name"))),
-        GraphQLFailure("VALIDATION_FAILED", "name is required", exceptional = false, field = Some("name"))
+        GraphQLFailure(
+          "VALIDATION_FAILED",
+          "name is required",
+          exceptional = false,
+          field = Some("name"),
+          search = SearchRefusal.InvalidInput
+        )
       ),
       Scenario(
         "empty collection",
         UseCaseError.ValidationFailed(NonEmptyList.one(DomainValidationError.EmptyCollection("skills"))),
-        GraphQLFailure("VALIDATION_FAILED", "skills must not be empty", exceptional = false, field = Some("skills"))
+        GraphQLFailure(
+          "VALIDATION_FAILED",
+          "skills must not be empty",
+          exceptional = false,
+          field = Some("skills"),
+          search = SearchRefusal.InvalidInput
+        )
       ),
       Scenario(
         "invalid number",
@@ -326,7 +371,8 @@ final class HiringGraphQLResolverSupportSpec extends CatsEffectSuite {
           "VALIDATION_FAILED",
           "first must be between 1 and 100",
           exceptional = false,
-          field = Some("first")
+          field = Some("first"),
+          search = SearchRefusal.InvalidInput
         )
       ),
       Scenario(
@@ -336,7 +382,8 @@ final class HiringGraphQLResolverSupportSpec extends CatsEffectSuite {
           "VALIDATION_FAILED",
           "summary must be at most 500 characters",
           exceptional = false,
-          field = Some("summary")
+          field = Some("summary"),
+          search = SearchRefusal.InvalidInput
         )
       ),
       Scenario(
@@ -348,7 +395,8 @@ final class HiringGraphQLResolverSupportSpec extends CatsEffectSuite {
           "VALIDATION_FAILED",
           "description must be at most 1000 bytes",
           exceptional = false,
-          field = Some("description")
+          field = Some("description"),
+          search = SearchRefusal.InvalidInput
         )
       ),
       Scenario(
@@ -370,7 +418,8 @@ final class HiringGraphQLResolverSupportSpec extends CatsEffectSuite {
           "VALIDATION_FAILED",
           "name is required, password must be at least 12 bytes",
           exceptional = false,
-          field = Some("name")
+          field = Some("name"),
+          search = SearchRefusal.InvalidInput
         )
       ),
       Scenario(
@@ -380,7 +429,8 @@ final class HiringGraphQLResolverSupportSpec extends CatsEffectSuite {
           "VALIDATION_FAILED",
           "skills must contain at most 20 values",
           exceptional = false,
-          field = Some("skills")
+          field = Some("skills"),
+          search = SearchRefusal.InvalidInput
         )
       ),
       Scenario(
@@ -392,7 +442,8 @@ final class HiringGraphQLResolverSupportSpec extends CatsEffectSuite {
           "VALIDATION_FAILED",
           "name is required, skills must not be empty",
           exceptional = false,
-          field = Some("name")
+          field = Some("name"),
+          search = SearchRefusal.InvalidInput
         )
       )
     )
@@ -443,5 +494,70 @@ final class HiringGraphQLResolverSupportSpec extends CatsEffectSuite {
       .mutationResult(EitherT.leftT[IO, String](error))
       .value
       .map(result => assertEquals(result, Left(HiringGraphQLFailure.UseCase(error))))
+  }
+
+  private def searchRoot(failure: HiringGraphQLFailure) =
+    HiringGraphQLResolverSupport
+      .searchResult(EitherT.leftT[IO, Unit](failure), InputFieldPaths.semanticJobSearch)
+      .value
+
+  test("AIR-02.1 embedding and provider failures stay top-level for mutations but are data on search roots") {
+    val failures = List(
+      SearchError.MissingEmbedding("job"),
+      SearchError.StaleEmbedding("job"),
+      SearchError.ProviderUnavailable,
+      SearchError.VectorSearchUnavailable
+    ).map(UseCaseError.Search(_))
+    failures.traverse { error =>
+      for {
+        mutation <- HiringGraphQLResolverSupport.mutationResult(EitherT.leftT[IO, String](error)).value
+        search <- searchRoot(HiringGraphQLFailure.UseCase(error))
+      } yield {
+        assertEquals(mutation, Left(HiringGraphQLFailure.UseCase(error)))
+        assert(search.exists(_.isInstanceOf[SearchUnavailable]), clue(search))
+      }
+    }.void
+  }
+
+  test("AIR-02.1 an oversized search input is top-level for mutations and a ValidationError on search roots") {
+    val error = UseCaseError.Search(SearchError.InputTooLarge("query", 2048))
+    for {
+      mutation <- HiringGraphQLResolverSupport.mutationResult(EitherT.leftT[IO, String](error)).value
+      search <- searchRoot(HiringGraphQLFailure.UseCase(error))
+    } yield {
+      assertEquals(mutation, Left(HiringGraphQLFailure.UseCase(error)))
+      assertEquals(
+        search,
+        Right(ValidationError("INPUT_TOO_LARGE", "query must be at most 2048 characters", Some("query")))
+      )
+    }
+  }
+
+  test("AIR-02.1 a deleted-account authentication failure stays top-level on mutations and search roots") {
+    val error = UseCaseError.Account(AccountError.DeletedAccount)
+    for {
+      mutation <- HiringGraphQLResolverSupport.mutationResult(EitherT.leftT[IO, String](error)).value
+      search <- searchRoot(HiringGraphQLFailure.UseCase(error))
+      facets <- HiringGraphQLResolverSupport
+        .facetsResult(
+          EitherT.leftT[IO, Unit](HiringGraphQLFailure.UseCase(error): HiringGraphQLFailure),
+          InputFieldPaths.semanticJobSearch
+        )
+        .value
+    } yield {
+      assertEquals(mutation, Left(HiringGraphQLFailure.UseCase(error)))
+      assertEquals(search, Left(HiringGraphQLFailure.UseCase(error)))
+      assertEquals(facets, Left(HiringGraphQLFailure.UseCase(error)))
+    }
+  }
+
+  test("AIR-02.1 a rate-limited search is a DomainError that carries retryAfterSeconds") {
+    for {
+      limited <- searchRoot(HiringGraphQLFailure.RateLimited(7))
+      huge <- searchRoot(HiringGraphQLFailure.RateLimited(Long.MaxValue))
+    } yield {
+      assertEquals(limited, Right(DomainError("RATE_LIMITED", "Too many requests; retry later", Some(7))))
+      assertEquals(huge.map { case DomainError(_, _, seconds) => seconds; case _ => None }, Right(Some(Int.MaxValue)))
+    }
   }
 }

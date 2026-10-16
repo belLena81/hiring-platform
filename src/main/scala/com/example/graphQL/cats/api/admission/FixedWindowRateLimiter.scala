@@ -30,7 +30,8 @@ final class FixedWindowRateLimiter[K] private (
     seed: Int,
     label: String,
     ticker: Ticker,
-    normalize: K => K
+    normalize: K => K,
+    shared: K => Boolean
 ) {
   import FixedWindowRateLimiter.*
 
@@ -39,23 +40,31 @@ final class FixedWindowRateLimiter[K] private (
   private val overflowCount = new AtomicLong(0L)
   private val windowNanos = windowSeconds.toLong * NanosPerSecond
 
-  def permit(key: K): IO[Either[RateLimited, Unit]] = acquire(key, 1)
+  def permit(key: K): IO[Either[RateLimited, Grant]] = acquire(key, 1)
 
   /** Charges `cost` (at least 1) against the key's window. A refusal reports the time left in that window. */
-  def acquire(key: K, cost: Int): IO[Either[RateLimited, Unit]] = IO.delay(acquireNow(key, cost))
+  def acquire(key: K, cost: Int): IO[Either[RateLimited, Grant]] = IO.delay(acquireNow(key, cost))
 
   /** The same charge as a bounded in-memory step with no I/O, for synchronous framework hooks (Sangria reducers) that
-    * cannot sequence an `IO`. Everything else uses `acquire`.
+    * cannot sequence an `IO`. Everything else uses `acquire`. An admitted call returns a `Grant` computed from the
+    * caller's own bucket after the charge; a key charged to a shared overflow counter gets `Grant.Shared`, with no
+    * numbers, because they would describe other callers' consumption. A key the limiter was created to treat as
+    * `shared` (one bucket for callers that cannot be told apart) is charged normally but also gets `Grant.Shared`.
     */
-  def acquireNow(key: K, cost: Int): Either[RateLimited, Unit] = {
+  def acquireNow(key: K, cost: Int): Either[RateLimited, Grant] = {
     val weight = math.max(1, cost).toLong
     val normalized = normalize(key)
     val now = ticker.read()
     if (cache.estimatedSize() >= maxBuckets) sweepIfDue(now)
-    val bucket = Option(charge(normalized, weight, now, admitNew = cache.estimatedSize() < maxBuckets))
-      .getOrElse(chargeOverflow(overflow, normalized, weight, now))
-    if (bucket.hits <= attempts.toLong) Right(())
-    else Left(RateLimited(math.max(0L, bucket.expiresAtNanos - now).nanos))
+    val tracked = Option(charge(normalized, weight, now, admitNew = cache.estimatedSize() < maxBuckets))
+    val bucket = tracked.getOrElse(chargeOverflow(overflow, normalized, weight, now))
+    val remainingNanos = math.max(0L, bucket.expiresAtNanos - now)
+    val grant =
+      if (tracked.isDefined && !shared(key))
+        Grant.Tracked(attempts, math.max(0L, attempts.toLong - bucket.hits), secondsUp(remainingNanos))
+      else Grant.Shared
+    if (bucket.hits <= attempts.toLong) Right(grant)
+    else Left(RateLimited(remainingNanos.nanos, grant))
   }
 
   /** Charges a tracked bucket; `null` when the key is unseen and new buckets are not admitted. */
@@ -110,11 +119,24 @@ final class FixedWindowRateLimiter[K] private (
 }
 
 object FixedWindowRateLimiter {
-  final case class RateLimited(retryAfter: FiniteDuration) {
+
+  /** What an admitted or refused call may reveal about its allowance. `Tracked` comes from the caller's own bucket and
+    * is per process. `Shared` means the key was charged to an overflow counter, which reflects other callers, so it
+    * carries no numbers.
+    */
+  enum Grant {
+    case Tracked(limit: Int, remaining: Long, resetsInSeconds: Long)
+    case Shared
+  }
+
+  /** A refusal; `grant` is `Tracked` with `remaining = 0` for a caller's own bucket. */
+  final case class RateLimited(retryAfter: FiniteDuration, grant: Grant) {
 
     /** The remaining window rounded up to whole seconds, at least 1. */
-    def retryAfterSeconds: Long = math.max(1L, (retryAfter.toNanos + NanosPerSecond - 1L) / NanosPerSecond)
+    def retryAfterSeconds: Long = secondsUp(retryAfter.toNanos)
   }
+
+  private def secondsUp(nanos: Long): Long = math.max(1L, (nanos + NanosPerSecond - 1L) / NanosPerSecond)
 
   private[admission] final case class Bucket(hits: Long, expiresAtNanos: Long)
   private val NanosPerSecond = 1000000000L
@@ -134,7 +156,8 @@ object FixedWindowRateLimiter {
       ticker: Ticker,
       normalize: K => K,
       overflowBuckets: Int,
-      label: String
+      label: String,
+      shared: K => Boolean = (_: K) => false
   ): IO[FixedWindowRateLimiter[K]] =
     IO.delay(
       // Seeding is an effect: it happens at creation, never in the pure bucket arithmetic.
@@ -147,7 +170,8 @@ object FixedWindowRateLimiter {
         new SecureRandom().nextInt(),
         label,
         ticker,
-        normalize
+        normalize,
+        shared
       )
     )
 

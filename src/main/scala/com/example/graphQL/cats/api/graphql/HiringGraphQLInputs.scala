@@ -184,9 +184,10 @@ private[graphql] object HiringGraphQLInputs {
     }
   lazy val searchMode: EnumType[SearchMode] =
     describedEnum("SearchMode", "How a ranked result was found.", SearchMode.values.toList) {
-      case SearchMode.FILTER => "Structured filters only."
-      case SearchMode.VECTOR => "Semantic (embedding) similarity only."
-      case SearchMode.HYBRID => "Lexical and semantic results combined."
+      case SearchMode.FILTER  => "Structured filters only."
+      case SearchMode.VECTOR  => "Semantic (embedding) similarity only."
+      case SearchMode.HYBRID  => "Lexical and semantic results combined."
+      case SearchMode.LEXICAL => "Keyword relevance only: a degraded answer while semantic search is unavailable."
     }
   lazy val candidateAvailabilityStatus: EnumType[CandidateAvailabilityStatus] =
     describedEnum(

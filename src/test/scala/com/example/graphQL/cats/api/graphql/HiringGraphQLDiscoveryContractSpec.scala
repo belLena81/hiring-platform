@@ -57,19 +57,26 @@ final class HiringGraphQLDiscoveryContractSpec extends CatsEffectSuite {
   private def errorCode(result: Json): Either[io.circe.DecodingFailure, String] =
     result.hcursor.downField("errors").downArray.downField("extensions").get[String]("code")
 
+  /** The refusal code of a facets root: a typed outcome in data, else a top-level error. */
+  private def facetsRefusalCode(result: Json): Either[io.circe.DecodingFailure, String] =
+    result.hcursor.downField("data").downField("jobDiscoveryFacets").get[String]("code")
+
+  private def refusalCode(result: Json): Either[io.circe.DecodingFailure, String] =
+    errorCode(result).orElse(facetsRefusalCode(result))
+
   private def errorMessage(result: Json): Either[io.circe.DecodingFailure, String] =
     result.hcursor.downField("errors").downArray.get[String]("message")
 
   test("five expensive aliases through fragments reject before any discovery resolver runs") {
     val query = """query {
       ...DiscoveryRoots
-      fifth: jobDiscoveryFacets { truncated }
+      fifth: jobDiscoveryFacets { ... on JobDiscoveryFacets { truncated } ... on UserError { code } }
     }
     fragment DiscoveryRoots on Query {
-      first: jobDiscoveryFacets { truncated }
-      second: jobDiscoveryFacets { truncated }
-      third: jobDiscoveryFacets { truncated }
-      fourth: jobDiscoveryFacets { truncated }
+      first: jobDiscoveryFacets { ... on JobDiscoveryFacets { truncated } ... on UserError { code } }
+      second: jobDiscoveryFacets { ... on JobDiscoveryFacets { truncated } ... on UserError { code } }
+      third: jobDiscoveryFacets { ... on JobDiscoveryFacets { truncated } ... on UserError { code } }
+      fourth: jobDiscoveryFacets { ... on JobDiscoveryFacets { truncated } ... on UserError { code } }
     }"""
     JobDiscoveryTestSupport.fixture(List(candidate)).flatMap { fixture =>
       TestGraphQLSupport
@@ -85,9 +92,9 @@ final class HiringGraphQLDiscoveryContractSpec extends CatsEffectSuite {
 
   test("request context can lower the expensive root budget without running resolvers") {
     val query = """query {
-      first: jobDiscoveryFacets { truncated }
-      second: jobDiscoveryFacets { truncated }
-      third: jobDiscoveryFacets { truncated }
+      first: jobDiscoveryFacets { ... on JobDiscoveryFacets { truncated } ... on UserError { code } }
+      second: jobDiscoveryFacets { ... on JobDiscoveryFacets { truncated } ... on UserError { code } }
+      third: jobDiscoveryFacets { ... on JobDiscoveryFacets { truncated } ... on UserError { code } }
     }"""
     JobDiscoveryTestSupport.fixture(List(candidate)).flatMap { fixture =>
       RequestContextFactory.resource
@@ -113,10 +120,10 @@ final class HiringGraphQLDiscoveryContractSpec extends CatsEffectSuite {
 
   test("four expensive aliases remain allowed within depth and complexity limits") {
     val query = """query {
-      first: jobDiscoveryFacets { truncated }
-      second: jobDiscoveryFacets { truncated }
-      third: jobDiscoveryFacets { truncated }
-      fourth: jobDiscoveryFacets { truncated }
+      first: jobDiscoveryFacets { ... on JobDiscoveryFacets { truncated } ... on UserError { code } }
+      second: jobDiscoveryFacets { ... on JobDiscoveryFacets { truncated } ... on UserError { code } }
+      third: jobDiscoveryFacets { ... on JobDiscoveryFacets { truncated } ... on UserError { code } }
+      fourth: jobDiscoveryFacets { ... on JobDiscoveryFacets { truncated } ... on UserError { code } }
     }"""
     JobDiscoveryTestSupport.fixture(List(candidate)).flatMap { fixture =>
       execute(query, Json.obj(), fixture).flatMap { result =>
@@ -133,12 +140,12 @@ final class HiringGraphQLDiscoveryContractSpec extends CatsEffectSuite {
         edges { node { id location { coordinates { latitude longitude } } } distanceKm cursor }
         pageInfo { hasNextPage endCursor }
       }
-      jobDiscoveryFacets(filter: {skills: ["Scala"]}) {
+      jobDiscoveryFacets(filter: {skills: ["Scala"]}) { ... on JobDiscoveryFacets {
         skills { value count } countries { value count } cities { value count } remote { value count } truncated
-      }
-      nearbyFacets: jobDiscoveryFacets(center: {latitude: 35.1856, longitude: 33.3823}, radiusKm: 20) {
+      } ... on UserError { code } }
+      nearbyFacets: jobDiscoveryFacets(center: {latitude: 35.1856, longitude: 33.3823}, radiusKm: 20) { ... on JobDiscoveryFacets {
         skills { value count } truncated
-      }
+      } ... on UserError { code } }
     }"""
     val document = QueryParser.parse(query).fold(error => fail(error.getMessage), identity)
     assertEquals(
@@ -154,7 +161,7 @@ final class HiringGraphQLDiscoveryContractSpec extends CatsEffectSuite {
       nearbyJobs(center: {latitude: 35, longitude: 33}, radiusKm: 20, first: 1, filter: $filter) {
         edges { node { id } distanceKm cursor } pageInfo { hasNextPage endCursor }
       }
-      jobDiscoveryFacets(filter: $filter) { skills { value count } cities { value count } truncated }
+      jobDiscoveryFacets(filter: $filter) { ... on JobDiscoveryFacets { skills { value count } cities { value count } truncated } ... on UserError { code } }
     }"""
     val variables = Json.obj(
       "filter" -> Json.obj(
@@ -202,14 +209,14 @@ final class HiringGraphQLDiscoveryContractSpec extends CatsEffectSuite {
       "nearbyJobs(center: {latitude: 35, longitude: 33}, radiusKm: 20, first: 0) { pageInfo { hasNextPage } }" -> "VALIDATION_FAILED",
       "nearbyJobs(center: {latitude: 35, longitude: 33}, radiusKm: 20, first: -1) { pageInfo { hasNextPage } }" -> "VALIDATION_FAILED",
       "nearbyJobs(center: {latitude: 35, longitude: 33}, radiusKm: 20, first: 101) { pageInfo { hasNextPage } }" -> "VALIDATION_FAILED",
-      "jobDiscoveryFacets(center: {latitude: 35, longitude: 33}) { truncated }" -> "INVALID_FILTER",
-      "jobDiscoveryFacets(radiusKm: 20) { truncated }" -> "INVALID_FILTER",
-      "jobDiscoveryFacets(center: {latitude: 35, longitude: 33}, radiusKm: -1) { truncated }" -> "INVALID_SEARCH_FILTER"
+      "jobDiscoveryFacets(center: {latitude: 35, longitude: 33}) { ... on JobDiscoveryFacets { truncated } ... on UserError { code } }" -> "INVALID_FILTER",
+      "jobDiscoveryFacets(radiusKm: 20) { ... on JobDiscoveryFacets { truncated } ... on UserError { code } }" -> "INVALID_FILTER",
+      "jobDiscoveryFacets(center: {latitude: 35, longitude: 33}, radiusKm: -1) { ... on JobDiscoveryFacets { truncated } ... on UserError { code } }" -> "INVALID_SEARCH_FILTER"
     )
     JobDiscoveryTestSupport.fixture(List(candidate)).flatMap { fixture =>
       cases.traverse_ { case (field, code) =>
         execute(s"query { $field }", Json.obj(), fixture)
-          .map(result => assertEquals(errorCode(result), Right(code)))
+          .map(result => assertEquals(refusalCode(result), Right(code)))
       } *> fixture.calls.get.map(calls => assertEquals(calls, JobDiscoveryTestSupport.Calls()))
     }
   }
@@ -223,13 +230,13 @@ final class HiringGraphQLDiscoveryContractSpec extends CatsEffectSuite {
     )
     val operations = List(
       "nearbyJobs(center: {latitude: 35, longitude: 33}, radiusKm: 20, first: 1, filter: $filter) { pageInfo { hasNextPage } }",
-      "jobDiscoveryFacets(filter: $filter) { truncated }",
+      "jobDiscoveryFacets(filter: $filter) { ... on JobDiscoveryFacets { truncated } ... on UserError { code } }",
       "jobs(first: 1, filter: $filter) { searchId }"
     )
     JobDiscoveryTestSupport.fixture(List(candidate)).flatMap { fixture =>
       (invalidFilters, operations).tupled.traverse_ { case (filter, field) =>
         execute(s"query($$filter: JobFilter) { $field }", Json.obj("filter" -> filter), fixture)
-          .map(result => assertEquals(errorCode(result), Right("INVALID_SEARCH_FILTER")))
+          .map(result => assertEquals(refusalCode(result), Right("INVALID_SEARCH_FILTER")))
       } *> fixture.calls.get.map(calls => assertEquals(calls, JobDiscoveryTestSupport.Calls()))
     }
   }
@@ -267,7 +274,7 @@ final class HiringGraphQLDiscoveryContractSpec extends CatsEffectSuite {
   }
 
   test("executed discovery authorizes active candidates and singleton admin and denies restricted accounts") {
-    val operation = "query { jobDiscoveryFacets { truncated } }"
+    val operation = "query { jobDiscoveryFacets { ... on JobDiscoveryFacets { truncated } ... on UserError { code } } }"
     val active = List(candidate, ServiceFixtures.admin)
     val denied = List(ServiceFixtures.recruiter, candidate.copy(accountStatus = AccountStatus.Deleted))
     active.traverse_ { user =>
@@ -303,7 +310,7 @@ final class HiringGraphQLDiscoveryContractSpec extends CatsEffectSuite {
 
   test("HDQ-12.11 the SDL fixture declares the query argument, FacetCoverage and both coverage fields") {
     val sdl = scala.io.Source.fromResource("graphql/hiring.graphql").mkString
-    val facetsField = sdl.slice(sdl.indexOf("  jobDiscoveryFacets("), sdl.indexOf("): JobDiscoveryFacets!"))
+    val facetsField = sdl.slice(sdl.indexOf("  jobDiscoveryFacets("), sdl.indexOf("): JobDiscoveryFacetsResult"))
     List("query: String,", "filter: JobFilter,", "center: GeoPointInput,", "radiusKm: Float").foreach(argument =>
       assert(facetsField.contains(argument), argument)
     )
@@ -322,11 +329,16 @@ final class HiringGraphQLDiscoveryContractSpec extends CatsEffectSuite {
   }
 
   test("HDQ-12.11 and 12.12 facets execute with and without query and label coverage") {
-    val lexical = s"query($$q: String) { jobDiscoveryFacets(query: $$q) { $facetFields } }"
+    val lexical =
+      s"query($$q: String) { jobDiscoveryFacets(query: $$q) { ... on JobDiscoveryFacets { $facetFields } ... on UserError { code } } }"
     for {
       matcher <- JobDiscoveryTestSupport.matcher(lexicalScores)
       fixture <- JobDiscoveryTestSupport.fixture(List(candidate), lexicalJobs, Some(matcher), 3)
-      structured <- execute(s"query { jobDiscoveryFacets { $facetFields } }", Json.obj(), fixture)
+      structured <- execute(
+        s"query { jobDiscoveryFacets { ... on JobDiscoveryFacets { $facetFields } ... on UserError { code } } }",
+        Json.obj(),
+        fixture
+      )
       topped <- execute(lexical, Json.obj("q" -> Json.fromString("scala")), fixture)
       calls <- matcher.calls.get
     } yield {
@@ -343,7 +355,8 @@ final class HiringGraphQLDiscoveryContractSpec extends CatsEffectSuite {
   }
 
   test("HDQ-12.11 executed query validation, forbidden and unavailable errors use stable sanitized codes") {
-    val operation = s"query($$q: String) { jobDiscoveryFacets(query: $$q) { truncated } }"
+    val operation =
+      s"query($$q: String) { jobDiscoveryFacets(query: $$q) { ... on JobDiscoveryFacets { truncated } ... on UserError { code message } } }"
     def run(
         user: com.example.graphQL.cats.domain.model.User,
         text: String,
@@ -366,25 +379,25 @@ final class HiringGraphQLDiscoveryContractSpec extends CatsEffectSuite {
       forbidden <- run(ServiceFixtures.recruiter, "scala", JobDiscoveryTestSupport.matcher(lexicalScores))
       down <- run(candidate, "scala", JobDiscoveryTestSupport.matcher(lexicalScores, Left(RepositoryError.Unavailable)))
     } yield {
-      assertEquals(errorCode(blank._1), Right("INVALID_SEARCH_FILTER"))
-      assertEquals(errorCode(tooLarge._1), Right("INPUT_TOO_LARGE"))
+      assertEquals(facetsRefusalCode(blank._1), Right("INVALID_SEARCH_FILTER"))
+      assertEquals(facetsRefusalCode(tooLarge._1), Right("INPUT_TOO_LARGE"))
       assertEquals(errorCode(forbidden._1), Right("FORBIDDEN"))
       assertEquals(List(blank, tooLarge, forbidden).map(_._2), List(Nil, Nil, Nil))
-      assertEquals(errorCode(down._1), Right("FACETS_UNAVAILABLE"))
+      assertEquals(facetsRefusalCode(down._1), Right("FACETS_UNAVAILABLE"))
       assertEquals(
-        down._1.hcursor.downField("errors").downArray.downField("extensions").get[String]("reason"),
-        Right("SEARCH_UNAVAILABLE")
+        down._1.hcursor.downField("data").downField("jobDiscoveryFacets").get[String]("message"),
+        Right("Facets unavailable")
       )
-      assertEquals(errorMessage(down._1), Right("Facets unavailable"))
       assert(!down._1.noSpaces.contains("scala"), "query text must not echo in errors")
     }
   }
 
   test("HDQ-12.8 a lexical-query request without a configured matcher fails closed") {
-    val operation = "query { jobDiscoveryFacets(query: \"scala\") { truncated } }"
+    val operation =
+      "query { jobDiscoveryFacets(query: \"scala\") { ... on JobDiscoveryFacets { truncated } ... on UserError { code } } }"
     JobDiscoveryTestSupport.fixture(List(candidate), lexicalJobs).flatMap { fixture =>
       execute(operation, Json.obj(), fixture)
-        .map(result => assertEquals(errorCode(result), Right("FACETS_UNAVAILABLE")))
+        .map(result => assertEquals(facetsRefusalCode(result), Right("FACETS_UNAVAILABLE")))
     }
   }
 }

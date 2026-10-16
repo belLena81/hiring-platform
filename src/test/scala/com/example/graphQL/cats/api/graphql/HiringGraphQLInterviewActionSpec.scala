@@ -645,7 +645,9 @@ final class HiringGraphQLInterviewActionSpec extends CatsEffectSuite {
       .mkString("mutation { ", "\n", " }")
 
   private def limiter(attempts: Int): IO[UserId => IO[Either[InterviewActionRateLimiter.RateLimited, Unit]]] =
-    InterviewActionRateLimiter.create(RateLimitConfig(60, attempts, 100)).map(limiter => limiter.permit)
+    InterviewActionRateLimiter
+      .create(RateLimitConfig(60, attempts, 100))
+      .map(limiter => (id: UserId) => limiter.permit(id).map(_.map(_ => ())))
 
   test(
     "AC-03.2 AC-11.1 AC-11.2 DHW-34 aliased mutations each take an allowance unit; the surplus is a typed refusal with a retry hint"

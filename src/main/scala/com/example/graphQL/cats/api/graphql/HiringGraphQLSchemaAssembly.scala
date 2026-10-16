@@ -13,6 +13,7 @@ import com.example.graphQL.cats.api.graphql.HiringGraphQLReportingTypes.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLTypes.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLDsl.resultField
 import com.example.graphQL.cats.domain.model.ApplicationStatus
+import com.example.graphQL.cats.domain.pagination.PageSize
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.GraphQLFailure
 import sangria.execution.{QueryReducer, ExecutionPath}
 import sangria.ast
@@ -52,6 +53,14 @@ private[graphql] object HiringGraphQLSchemaAssembly {
     (_, args, child) =>
       if (args.arg(optionalFacetQueryArgument).isDefined) 100d + LexicalFacetPageEquivalent * (1d + child)
       else 100d + child
+  // Appended to the description of each expensive discovery root, so clients can price a query before sending it.
+  private val CostNote =
+    " Cost: 100 + first * (1 + cost of the selected subfields)"
+  private val ExpensiveRootCaps =
+    " Caps per request: total complexity at most " + MaxQueryComplexity.toInt + ", nesting depth at most " +
+      MaxQueryDepth + ", `first` between " + PageSize.Min + " and " + PageSize.Max +
+      ", and a configured maximum number of expensive discovery roots (default 4). The cost is charged to the " +
+      "caller's cost budget; the response reports it in `extensions.cost` when the caller has its own allowance."
   private val expensiveRoots =
     Set(
       "nearbyJobs",
@@ -168,9 +177,17 @@ private[graphql] object HiringGraphQLSchemaAssembly {
   private val costBudget = weightedComplexity { (complexity, context) =>
     // The charge is an in-memory step, so the reducer needs no Future interop; refusal goes through the same
     // framework throwable boundary as the other reducers.
+    val requested = budgetCost(complexity)
     context
-      .chargeCostBudget(budgetCost(complexity))
-      .fold(refused => throw context.effectAdapter.costBudgetRejected(refused.retryAfterSeconds), _ => context)
+      .chargeCostBudget(requested)
+      .fold(
+        refused =>
+          throw context.effectAdapter.costBudgetRejected(
+            refused.retryAfterSeconds,
+            CostReceipt.from(requested, refused.grant)
+          ),
+        _ => context
+      )
   }
   private def budgetCost(complexity: Double): Int =
     math.min(Int.MaxValue.toDouble, math.max(1d, math.ceil(complexity))).toInt
@@ -234,38 +251,42 @@ private[graphql] object HiringGraphQLSchemaAssembly {
       resultField(
         "nearbyJobs",
         nearbyJobsConnectionType,
-        "Open jobs within a radius of a point, nearest first. Each edge carries its distance.",
+        "Open jobs within a radius of a point, nearest first. Each edge carries its distance." + CostNote +
+          "." + ExpensiveRootCaps,
         nearbyCenterArgument :: radiusKmArgument :: jobFilterArgument :: firstArgument :: afterArgument :: Nil,
         complexity = Some(expensivePageComplexity)
       )(nearbyJobs),
       resultField(
         "jobDiscoveryFacets",
-        jobDiscoveryFacetsType,
-        "Facet counts over the open jobs that match the filter, an optional radius and an optional lexical query.",
+        OptionType(jobDiscoveryFacetsResultType),
+        "Facet counts over the open jobs that match the filter, an optional radius and an optional lexical query. " +
+          s"Cost: 100 + cost of the selected subfields, or 100 + ${LexicalFacetPageEquivalent.toInt} * (1 + cost of the " +
+          "selected subfields) when " +
+          "`query` is given." + ExpensiveRootCaps,
         optionalFacetQueryArgument :: jobFilterArgument :: optionalNearbyCenterArgument :: optionalRadiusKmArgument :: Nil,
         complexity = Some(facetComplexity)
       )(jobDiscoveryFacets),
       resultField(
         "semanticJobSearch",
-        rankedJobResultsType,
+        OptionType(semanticJobSearchResultType),
         "Open jobs ranked by relevance to a query. A bounded top-N list of at most `first` results: it has no " +
-          "pageInfo and cannot be paged.",
+          "pageInfo and cannot be paged." + CostNote + "." + ExpensiveRootCaps,
         queryArgument :: jobFilterArgument :: firstArgument :: searchIdArgument :: Nil,
         complexity = Some(expensivePageComplexity)
       )(semanticJobSearch),
       resultField(
         "recommendedJobs",
-        rankedJobResultsType,
+        OptionType(recommendedJobsResultType),
         "Open jobs ranked against the calling candidate's profile. A bounded top-N list of at most `first` results: " +
-          "it has no pageInfo and cannot be paged.",
+          "it has no pageInfo and cannot be paged." + CostNote + "." + ExpensiveRootCaps,
         firstArgument :: searchIdArgument :: Nil,
         complexity = Some(expensivePageComplexity)
       )(recommendedJobs),
       resultField(
         "candidateMatches",
-        rankedCandidateResultsType,
+        OptionType(candidateMatchesResultType),
         "Candidates ranked against a job the caller owns. A bounded top-N list of at most `first` results: it has " +
-          "no pageInfo and cannot be paged.",
+          "no pageInfo and cannot be paged." + CostNote + "." + ExpensiveRootCaps,
         jobIdArgument :: candidateSearchQueryArgument :: candidateMatchFilterArgument :: firstArgument :: searchIdArgument :: Nil,
         complexity = Some(expensivePageComplexity)
       )(candidateMatches),

@@ -1,7 +1,7 @@
 package com.example.graphQL.cats.api.graphql
 
 import cats.data.NonEmptyList
-import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.GraphQLFailure
+import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.{GraphQLFailure, SearchRefusal}
 import com.example.graphQL.cats.domain.error.{DomainError, DomainValidationError}
 import com.example.graphQL.cats.domain.workflow.InterviewWorkflowError
 import com.example.graphQL.cats.service.RepositoryError
@@ -20,7 +20,12 @@ private[graphql] object GraphQLFailureCatalog {
   private val GenericForbidden = "The caller may not perform this operation on this resource."
   private val GenericUnauthorized = "Authentication is required, or the credentials or account are no longer valid."
 
-  private enum FailureMetadata(val code: String, val exceptional: Boolean, val description: String) {
+  private enum FailureMetadata(
+      val code: String,
+      val exceptional: Boolean,
+      val description: String,
+      val search: SearchRefusal = SearchRefusal.Other
+  ) {
     case AuthenticationRequired
         extends FailureMetadata(
           "UNAUTHORIZED",
@@ -170,22 +175,58 @@ private[graphql] object GraphQLFailureCatalog {
         extends FailureMetadata(
           "MISSING_EMBEDDING",
           exceptional = true,
-          "A required embedding has not been computed yet."
+          "A required embedding has not been computed yet.",
+          SearchRefusal.Unavailable
         )
     case StaleEmbedding
-        extends FailureMetadata("STALE_EMBEDDING", exceptional = true, "A required embedding is out of date.")
+        extends FailureMetadata(
+          "STALE_EMBEDDING",
+          exceptional = true,
+          "A required embedding is out of date.",
+          SearchRefusal.Unavailable
+        )
     case InputTooLarge
-        extends FailureMetadata("INPUT_TOO_LARGE", exceptional = true, "An input text exceeds its maximum length.")
+        extends FailureMetadata(
+          "INPUT_TOO_LARGE",
+          exceptional = true,
+          "An input text exceeds its maximum length.",
+          SearchRefusal.InvalidInput
+        )
     case InvalidSearchFilter
-        extends FailureMetadata("INVALID_SEARCH_FILTER", exceptional = false, "A search filter value is invalid.")
+        extends FailureMetadata(
+          "INVALID_SEARCH_FILTER",
+          exceptional = false,
+          "A search filter value is invalid.",
+          SearchRefusal.InvalidInput
+        )
     case ProviderUnavailable
-        extends FailureMetadata("PROVIDER_UNAVAILABLE", exceptional = true, "The embedding provider is unavailable.")
+        extends FailureMetadata(
+          "PROVIDER_UNAVAILABLE",
+          exceptional = true,
+          "The embedding provider is unavailable.",
+          SearchRefusal.Unavailable
+        )
     case VectorSearchUnavailable
-        extends FailureMetadata("VECTOR_SEARCH_UNAVAILABLE", exceptional = true, "Semantic search is unavailable.")
+        extends FailureMetadata(
+          "VECTOR_SEARCH_UNAVAILABLE",
+          exceptional = true,
+          "Semantic search is unavailable.",
+          SearchRefusal.Unavailable
+        )
     case FacetsUnavailable
-        extends FailureMetadata("FACETS_UNAVAILABLE", exceptional = true, "Discovery facets are unavailable.")
+        extends FailureMetadata(
+          "FACETS_UNAVAILABLE",
+          exceptional = true,
+          "Discovery facets are unavailable.",
+          SearchRefusal.Unavailable
+        )
     case ValidationFailed
-        extends FailureMetadata("VALIDATION_FAILED", exceptional = false, "One or more input fields are invalid.")
+        extends FailureMetadata(
+          "VALIDATION_FAILED",
+          exceptional = false,
+          "One or more input fields are invalid.",
+          SearchRefusal.InvalidInput
+        )
     case AnalyticsUnavailable
         extends FailureMetadata("ANALYTICS_UNAVAILABLE", exceptional = true, "Analytics reports are unavailable.")
     case AnalyticsInvalidPeriod
@@ -213,7 +254,12 @@ private[graphql] object GraphQLFailureCatalog {
           "The cursor belongs to a different connection."
         )
     case InvalidFilter
-        extends FailureMetadata("INVALID_FILTER", exceptional = false, "The combination of arguments is inconsistent.")
+        extends FailureMetadata(
+          "INVALID_FILTER",
+          exceptional = false,
+          "The combination of arguments is inconsistent.",
+          SearchRefusal.InvalidInput
+        )
     case RateLimited
         extends FailureMetadata(
           "RATE_LIMITED",
@@ -302,6 +348,19 @@ private[graphql] object GraphQLFailureCatalog {
   /** An introspection operation refused while schema exposure is off; it names neither the schema nor its types. */
   def schemaExposureDisabled: GraphQLFailure =
     failure(FailureMetadata.SchemaExposureDisabled, "Schema introspection is not available")
+
+  /** A request refused by a per-caller allowance; it carries no limit, window or counter. */
+  def requestRateLimited: GraphQLFailure =
+    failure(FailureMetadata.RateLimited, "Too many requests; retry later")
+
+  /** Authentication failures stay top-level GraphQL errors on every root, including the non-exceptional deleted-account
+    * `UNAUTHORIZED`, so a client never reads them as a business outcome.
+    */
+  def isAuthenticationFailure(error: UseCaseError): Boolean =
+    error match {
+      case UseCaseError.Authentication(_) | UseCaseError.Account(AccountError.DeletedAccount) => true
+      case _                                                                                  => false
+    }
 
   /** A query refused because its caller's cost budget for the window is spent; it carries no budget or counter. */
   def costBudgetExhausted: GraphQLFailure =
@@ -427,7 +486,8 @@ private[graphql] object GraphQLFailureCatalog {
       case RepositoryError.Conflict         => failure(FailureMetadata.Conflict, "Conflict")
       case RepositoryError.InvalidEvent | RepositoryError.InvalidStoredData | RepositoryError.MissingStoredResult =>
         failure(FailureMetadata.RepositoryUnavailable, "Repository unavailable")
-      case RepositoryError.Unavailable => failure(FailureMetadata.RepositoryUnavailable, "Repository unavailable")
+      case RepositoryError.Unavailable | RepositoryError.Overloaded | RepositoryError.VectorSearchUnavailable =>
+        failure(FailureMetadata.RepositoryUnavailable, "Repository unavailable")
     }
 
   private def classifySearch(error: SearchError): GraphQLFailure =
@@ -436,11 +496,12 @@ private[graphql] object GraphQLFailureCatalog {
         failure(FailureMetadata.MissingEmbedding, s"$entity embedding is missing")
       case SearchError.StaleEmbedding(entity) => failure(FailureMetadata.StaleEmbedding, s"$entity embedding is stale")
       case SearchError.InputTooLarge(field, maximum) =>
-        failure(FailureMetadata.InputTooLarge, s"$field must be at most $maximum characters")
+        failure(FailureMetadata.InputTooLarge, s"$field must be at most $maximum characters").copy(field = Some(field))
       case SearchError.InvalidFilter(field) =>
-        failure(FailureMetadata.InvalidSearchFilter, s"Invalid $field filter")
+        failure(FailureMetadata.InvalidSearchFilter, s"Invalid $field filter").copy(field = Some(field))
       case SearchError.InvalidFilters(fields) =>
         failure(FailureMetadata.InvalidSearchFilter, s"Invalid ${fields.toList.mkString(", ")} filters")
+          .copy(field = Some(fields.head))
       case SearchError.ProviderUnavailable =>
         failure(FailureMetadata.ProviderUnavailable, "Embedding provider unavailable")
       case SearchError.VectorSearchUnavailable =>
@@ -450,7 +511,8 @@ private[graphql] object GraphQLFailureCatalog {
           FailureMetadata.FacetsUnavailable.code,
           "Facets unavailable",
           FailureMetadata.FacetsUnavailable.exceptional,
-          Some("SEARCH_UNAVAILABLE")
+          Some("SEARCH_UNAVAILABLE"),
+          search = FailureMetadata.FacetsUnavailable.search
         )
     }
 
@@ -490,5 +552,5 @@ private[graphql] object GraphQLFailureCatalog {
     }
 
   private def failure(metadata: FailureMetadata, message: String): GraphQLFailure =
-    GraphQLFailure(metadata.code, message, metadata.exceptional)
+    GraphQLFailure(metadata.code, message, metadata.exceptional, search = metadata.search)
 }

@@ -23,12 +23,13 @@ final class AuthRateLimiterSpec extends CatsEffectSuite {
       operation: AuthRateLimiter.Operation = AuthRateLimiter.Operation.Login
   ): AuthRateLimiter.Key =
     AuthRateLimiter.Key(Some(IpAddress.fromString(address).get), operation)
+  private val shared = com.example.graphQL.cats.api.admission.FixedWindowRateLimiter.Grant.Shared
   test("retry-after seconds round up and never return zero") {
-    assertEquals(AuthRateLimiter.RateLimited(Duration.Zero).retryAfterSeconds, 1L)
-    assertEquals(AuthRateLimiter.RateLimited(999.millis).retryAfterSeconds, 1L)
-    assertEquals(AuthRateLimiter.RateLimited(1.second).retryAfterSeconds, 1L)
-    assertEquals(AuthRateLimiter.RateLimited(1.second + 1.millis).retryAfterSeconds, 2L)
-    assertEquals(AuthRateLimiter.RateLimited(2500.millis).retryAfterSeconds, 3L)
+    assertEquals(AuthRateLimiter.RateLimited(Duration.Zero, shared).retryAfterSeconds, 1L)
+    assertEquals(AuthRateLimiter.RateLimited(999.millis, shared).retryAfterSeconds, 1L)
+    assertEquals(AuthRateLimiter.RateLimited(1.second, shared).retryAfterSeconds, 1L)
+    assertEquals(AuthRateLimiter.RateLimited(1.second + 1.millis, shared).retryAfterSeconds, 2L)
+    assertEquals(AuthRateLimiter.RateLimited(2500.millis, shared).retryAfterSeconds, 3L)
   }
   test("permits configured attempts and then returns a conservative retry window") {
     val config = RateLimitConfig(windowSeconds = 60, attempts = 2, maxBuckets = 2)
@@ -46,8 +47,8 @@ final class AuthRateLimiterSpec extends CatsEffectSuite {
       limiter <- AuthRateLimiter.create(config); first <- limiter.permit(key("2001:db8:1:2::1"));
       sameNetwork <- limiter.permit(key("2001:db8:1:2::2")); otherNetwork <- limiter.permit(key("2001:db8:1:3::1"))
     } yield {
-      assertEquals(first, Right(())); assertEquals(sameNetwork.left.map(_.retryAfterSeconds), Left(60L));
-      assertEquals(otherNetwork, Right(()))
+      assertEquals(first.map(_ => ()), Right(())); assertEquals(sameNetwork.left.map(_.retryAfterSeconds), Left(60L));
+      assertEquals(otherNetwork.map(_ => ()), Right(()))
     }
   }
   test("expired windows admit a new attempt") {
@@ -62,9 +63,9 @@ final class AuthRateLimiterSpec extends CatsEffectSuite {
       _ <- advance(100.millis)
       afterExpiry <- limiter.permit(key("203.0.113.1"))
     } yield {
-      assertEquals(first, Right(())); assertEquals(blocked.left.map(_.retryAfterSeconds), Left(1L))
+      assertEquals(first.map(_ => ()), Right(())); assertEquals(blocked.left.map(_.retryAfterSeconds), Left(1L))
       assertEquals(stillBlocked.left.map(_.retryAfterSeconds), Left(1L))
-      assertEquals(afterExpiry, Right(()))
+      assertEquals(afterExpiry.map(_ => ()), Right(()))
     }
   }
   test("frequently used buckets survive bounded eviction") {

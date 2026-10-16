@@ -22,12 +22,26 @@ query NearbyJobs($center: GeoPointInput!, $radiusKm: Float!, $filter: JobFilter,
 
 query SemanticJobs($query: String!, $filter: JobFilter, $first: Int!, $searchId: SearchID) {
   semanticJobSearch(query: $query, filter: $filter, first: $first, searchId: $searchId) {
-    results { searchId score searchMode model matchedSkills retrievalScore job { id title } }
+    ... on RankedJobResults {
+      degraded
+      degradedReason
+      results { searchId score searchMode model matchedSkills retrievalScore job { id title } }
+    }
+    ... on SearchUnavailable { code message retryable }
+    ... on ValidationError { code message field }
+    ... on DomainError { code message }
   }
 }
 
 query CandidateMatches($jobId: JobID!, $first: Int!) {
   candidateMatches(jobId: $jobId, first: $first) {
-    results { searchId score candidate { id name profile { skills experienceSummary } } }
+    ... on RankedCandidateResults {
+      degraded
+      degradedReason
+      results { searchId score candidate { id name profile { skills experienceSummary } } }
+    }
+    ... on SearchUnavailable { code message retryable }
+    ... on ValidationError { code message field }
+    ... on DomainError { code message }
   }
 }

@@ -4,6 +4,9 @@ import java.time.Instant
 
 enum SearchMode {
   case FILTER, VECTOR, HYBRID
+
+  /** Keyword relevance only: the degraded fallback when embedding or `$vectorSearch` is unavailable. */
+  case LEXICAL
 }
 
 final case class EmbeddingMeta(

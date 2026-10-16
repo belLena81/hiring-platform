@@ -1,22 +1,30 @@
 query StructuredFacets($filter: JobFilter) {
   jobDiscoveryFacets(filter: $filter) {
-    skills { value count }
-    countries { value count }
-    cities { value count }
-    remote { value count }
-    truncated
-    coverage
-    coverageLimit
+    ... on JobDiscoveryFacets {
+      skills { value count }
+      countries { value count }
+      cities { value count }
+      remote { value count }
+      truncated
+      coverage
+      coverageLimit
+    }
+    ... on SearchUnavailable { code message retryable }
+    ... on ValidationError { code message field }
   }
 }
 
 query LexicalQueryFacets($query: String, $filter: JobFilter, $center: GeoPointInput, $radiusKm: Float) {
   jobDiscoveryFacets(query: $query, filter: $filter, center: $center, radiusKm: $radiusKm) {
-    skills { value count }
-    cities { value count }
-    remote { value count }
-    truncated
-    coverage
-    coverageLimit
+    ... on JobDiscoveryFacets {
+      skills { value count }
+      cities { value count }
+      remote { value count }
+      truncated
+      coverage
+      coverageLimit
+    }
+    ... on SearchUnavailable { code message retryable }
+    ... on ValidationError { code message field }
   }
 }

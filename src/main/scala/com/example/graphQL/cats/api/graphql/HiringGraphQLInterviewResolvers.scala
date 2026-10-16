@@ -147,11 +147,7 @@ private[graphql] object HiringGraphQLInterviewResolvers {
       case Left(limited) =>
         val failure = GraphQLFailureCatalog.interviewActionRateLimited
         EitherT.rightT[IO, HiringGraphQLFailure](
-          DomainError(
-            failure.code,
-            failure.message,
-            Some(math.min(limited.retryAfterSeconds, Int.MaxValue.toLong).toInt)
-          ): MutationOutcome[InterviewWorkflow]
+          rateLimitedRefusal(failure, limited.retryAfterSeconds): MutationOutcome[InterviewWorkflow]
         )
       case Right(_) =>
         authenticated(context) { case (actor, hiring) =>
