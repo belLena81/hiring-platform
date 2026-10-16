@@ -102,6 +102,11 @@ trait SemanticSearchRepository[F[_]] {
   def lexicalCandidates(query: LexicalSearchQuery): RepositoryF[F, List[LexicalCandidateHit]]
 }
 
+/** Durable, idempotent record of the operational fact that a search session could not be recorded. */
+trait SearchRecordingFailureRepository[F[_]] {
+  def record(event: OperationalEventEnvelope): RepositoryF[F, Boolean]
+}
+
 trait SearchSessionRepository[F[_]] {
   def save(session: SearchSession, event: OperationalEventEnvelope): RepositoryF[F, Unit]
   def find(id: java.util.UUID): RepositoryF[F, Option[SearchSession]]

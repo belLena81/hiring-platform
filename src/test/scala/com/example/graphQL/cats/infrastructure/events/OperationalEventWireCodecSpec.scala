@@ -33,7 +33,7 @@ class OperationalEventWireCodecSpec extends FunSuite {
     assertEquals(Codec.decode(Json.Null), Left("MalformedEnvelope"))
   }
 
-  test("all nine fact types retain exactly seven envelope fields and round-trip") {
+  test("all ten fact types retain exactly seven envelope fields and round-trip") {
     val payloads = List(
       JobFact(JobKind.Created, JobSnapshot(jobId, List("Scala"), JobStatus.Open)),
       JobFact(JobKind.Updated, JobSnapshot(jobId, List("Scala"), JobStatus.Open)),
@@ -43,7 +43,8 @@ class OperationalEventWireCodecSpec extends FunSuite {
       CandidateHired(applicationId, actor.value, jobId, ApplicationStatus.Hired),
       SearchPerformed(searchId, SearchKind.Jobs, List(SearchSessionResult(jobId.toString, 1, 0.95))),
       JobViewed(Some(searchId), jobId, None, Some(1)),
-      SearchResultClicked(searchId, jobId, SearchKind.Jobs, 1)
+      SearchResultClicked(searchId, jobId, SearchKind.Jobs, 1),
+      SearchRecordingFailed(searchId, SearchKind.SemanticJobSearch, "UNAVAILABLE")
     )
     payloads.foreach { payload =>
       val event = envelope(payload)
@@ -56,6 +57,21 @@ class OperationalEventWireCodecSpec extends FunSuite {
           .encode(event)
           .flatMap(bytes => Codec.decode(bytes).left.map(_ => OperationalEventContractError.MalformedEnvelope)),
         Right(event)
+      )
+    }
+  }
+
+  test("AIR-04.3 a search recording failure carries only the search id, kind and a bounded failure code") {
+    val event = OperationalEvents
+      .searchRecordingFailed(eventId, searchId, SearchKind.Jobs, actor, "java.lang.RuntimeException", now)
+      .fold(error => fail(error.toString), identity)
+    assertEquals(payloadOf(event).asObject.map(_.keys.toSet), Some(Set("searchId", "searchKind", "failure")))
+    assertEquals(event.aggregateType, OperationalAggregateType.Search)
+    assertEquals(event.aggregateId, searchId.toString)
+    List("", "free text with spaces", "a" * 101, "query=secret").foreach { failure =>
+      assert(
+        OperationalEvents.searchRecordingFailed(eventId, searchId, SearchKind.Jobs, actor, failure, now).isLeft,
+        clue(failure)
       )
     }
   }

@@ -52,9 +52,23 @@ class OperationalEventWireContractSpec extends FunSuite {
       "CANDIDATE_HIRED" -> "Application",
       "SEARCH_PERFORMED" -> "Search",
       "JOB_VIEWED" -> "Search",
-      "SEARCH_RESULT_CLICKED" -> "Search"
+      "SEARCH_RESULT_CLICKED" -> "Search",
+      "SEARCH_RECORDING_FAILED" -> "Search"
     )
-    assertEquals(OperationalEventTransforms.validEvents(frame(kinds.map(event.tupled))).count(), 9L)
+    assertEquals(OperationalEventTransforms.validEvents(frame(kinds.map(event.tupled))).count(), 10L)
+  }
+
+  test("AIR-04.3 a search recording failure with free text or extra fields is malformed") {
+    val valid = parse(event("SEARCH_RECORDING_FAILED", "Search")).toOption.get
+    val payload = valid.hcursor.downField("payload").focus.get
+    val invalid = List(
+      payload.mapObject(_.add("failure", Json.fromString("query text with spaces"))),
+      payload.mapObject(_.add("failure", Json.Null)),
+      payload.mapObject(_.add("failure", Json.fromInt(123))),
+      payload.mapObject(_.add("query", Json.fromString("secret"))),
+      payload.mapObject(_.remove("searchKind"))
+    ).map(changed => valid.mapObject(_.add("payload", changed)).noSpaces)
+    assertEquals(OperationalEventTransforms.validEvents(frame(invalid)).count(), 0L)
   }
 
   test("unknown fields, missing per-event fields, invalid IDs and aggregate mismatches are malformed") {

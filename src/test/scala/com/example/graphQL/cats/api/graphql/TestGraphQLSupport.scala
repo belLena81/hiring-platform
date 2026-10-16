@@ -73,6 +73,10 @@ object TestGraphQLSupport {
   val searchSessions: SearchSessionRecording[IO] = SearchSessionRecording(
     new SearchSessionHandoff[IO] {
       def enqueue(session: SearchSession, event: OperationalEventEnvelope): IO[Unit] = IO.unit
+    },
+    new com.example.graphQL.cats.service.port.SearchRecordingFailureRepository[IO] {
+      def record(event: OperationalEventEnvelope) =
+        com.example.graphQL.cats.service.port.RepositoryF.at[IO].fromEither(Right(true))
     }
   )
 

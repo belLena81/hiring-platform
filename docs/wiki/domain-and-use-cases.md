@@ -152,7 +152,7 @@ Real calendar/email integrations and cancellation/rescheduling are deferred. Loc
 
 ## Operational events versus application history
 
-Application history answers “who changed this application and why?” Operational events support publication/analytics and cover `JOB_CREATED`, `JOB_UPDATED`, `JOB_CLOSED`, `JOB_VIEWED`, `SEARCH_PERFORMED`, `SEARCH_RESULT_CLICKED`, `APPLICATION_CREATED`, `APPLICATION_STATUS_CHANGED`, and `CANDIDATE_HIRED`.
+Application history answers “who changed this application and why?” Operational events support publication/analytics and cover `JOB_CREATED`, `JOB_UPDATED`, `JOB_CLOSED`, `JOB_VIEWED`, `SEARCH_PERFORMED`, `SEARCH_RESULT_CLICKED`, `SEARCH_RECORDING_FAILED`, `APPLICATION_CREATED`, `APPLICATION_STATUS_CHANGED`, and `CANDIDATE_HIRED`.
 
 The active `OperationalEventEnvelope` has exactly seven fields: eventId, eventType, occurredAt, aggregateType, aggregateId, actorId, payload. It is unversioned; aggregate ID is the Kafka partition key. The domain `ApplicationEvent` and operational envelope are different types with different consumers. The application stores current state plus history/outbox; it does not reconstruct the operational database exclusively by replaying an event stream.
 

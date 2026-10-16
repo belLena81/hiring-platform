@@ -333,7 +333,7 @@ object MongoHiringRuntime {
         CursorCodec.keyFromSecret(config.jwtAuth.hmacSecret, config.jwtAuth.cursorTtlSeconds),
         accountService,
         new OperationalTelemetryService(users, jobs, searchSessions, searchSessionWork, idempotent, clock),
-        SearchSessionRecording(searchSessionHandoff)(using cats.Monad[IO], clock, UUIDGen[IO]),
+        SearchSessionRecording(searchSessionHandoff, searchSessions)(using cats.Monad[IO], clock, UUIDGen[IO]),
         semanticSearch,
         AnalyticsReportingService(users, analyticsReports),
         Option.when(config.kafka.interview.enabled)(

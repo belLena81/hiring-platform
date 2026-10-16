@@ -167,10 +167,34 @@ private[graphql] object HiringGraphQLResolverSupport {
         .flatMap {
           case Right(Right(()))   => IO.unit
           case Right(Left(error)) =>
-            requestContext.reportSearchRecordingFailure(kind, Right(GraphQLFailureCatalog.classify(error).code))
-          case Left(error) => requestContext.reportSearchRecordingFailure(kind, Left(error))
+            reportFailure(
+              requestContext,
+              hiring,
+              actorId,
+              kind,
+              searchId,
+              Right(GraphQLFailureCatalog.classify(error).code)
+            )
+          case Left(error) => reportFailure(requestContext, hiring, actorId, kind, searchId, Left(error))
         }
     )
+
+  /** Logs the failed recording and publishes its operational event. Publishing is best-effort too: a failure to emit it
+    * is dropped (the log entry already exists) and never fails the search; cancellation still propagates.
+    */
+  private def reportFailure(
+      requestContext: RequestContext,
+      hiring: HiringGraphQLServices,
+      actorId: UserId,
+      kind: OperationalEventPayload.SearchKind,
+      searchId: UUID,
+      cause: Either[Throwable, String]
+  ): IO[Unit] =
+    requestContext.reportSearchRecordingFailure(kind, cause) *>
+      hiring.searchSessions
+        .recordFailure(actorId, kind, searchId, cause.fold(_.getClass.getName, identity))
+        .attempt
+        .void
 
   def authenticated[A](context: Context[RequestContext, Unit])(
       action: (ActorContext, HiringGraphQLServices) => HiringGraphQLResult[A]

@@ -124,6 +124,8 @@ object OperationalEventWireCodec {
   private given Decoder[OperationalEventPayload.JobViewed] = deriveDecoder
   private given Encoder[OperationalEventPayload.SearchResultClicked] = deriveEncoder
   private given Decoder[OperationalEventPayload.SearchResultClicked] = deriveDecoder
+  private given Encoder[OperationalEventPayload.SearchRecordingFailed] = deriveEncoder
+  private given Decoder[OperationalEventPayload.SearchRecordingFailed] = deriveDecoder
   private given Encoder[WireEnvelope] = deriveEncoder
   private given Decoder[WireEnvelope] = deriveDecoder
 
@@ -141,6 +143,8 @@ object OperationalEventWireCodec {
       summon[Encoder[OperationalEventPayload.JobViewed]].apply(value)
     case value: OperationalEventPayload.SearchResultClicked =>
       summon[Encoder[OperationalEventPayload.SearchResultClicked]].apply(value)
+    case value: OperationalEventPayload.SearchRecordingFailed =>
+      summon[Encoder[OperationalEventPayload.SearchRecordingFailed]].apply(value)
   }
 
   def json(value: OperationalEventEnvelope): Json =
@@ -259,5 +263,7 @@ object OperationalEventWireCodec {
         read[OperationalEventPayload.JobViewed](value, "searchId", "resultId", "searchKind", "rank")
       case OperationalEventType.SEARCH_RESULT_CLICKED =>
         read[OperationalEventPayload.SearchResultClicked](value, "searchId", "resultId", "searchKind", "rank")
+      case OperationalEventType.SEARCH_RECORDING_FAILED =>
+        read[OperationalEventPayload.SearchRecordingFailed](value, "searchId", "searchKind", "failure")
     }
 }

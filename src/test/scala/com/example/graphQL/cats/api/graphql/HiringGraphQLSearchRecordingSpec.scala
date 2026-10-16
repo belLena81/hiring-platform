@@ -74,7 +74,12 @@ final class HiringGraphQLSearchRecordingSpec extends CatsEffectSuite {
     ): UseCaseF[IO, SearchResults[SearchedCandidate]] = EitherT.rightT(SearchResults(Nil, None))
   }
 
-  private def recording(result: IO[Either[UseCaseError, Unit]]): SearchSessionRecording[IO] =
+  private type FailureRecord = (UserId, OperationalEventPayload.SearchKind, UUID, String)
+
+  private def recording(
+      result: IO[Either[UseCaseError, Unit]],
+      onFailure: FailureRecord => IO[Unit] = _ => IO.unit
+  ): SearchSessionRecording[IO] =
     new SearchSessionRecording[IO] {
       def searchId(clientSupplied: Option[UUID]): IO[UUID] = IO.pure(clientSupplied.getOrElse(RecordingSpecIds.search))
       def record(
@@ -85,6 +90,12 @@ final class HiringGraphQLSearchRecordingSpec extends CatsEffectSuite {
           model: Option[String],
           results: List[SearchSessionEntry]
       ): UseCaseF[IO, Unit] = EitherT(result)
+      def recordFailure(
+          actorId: UserId,
+          kind: OperationalEventPayload.SearchKind,
+          id: UUID,
+          failure: String
+      ): IO[Unit] = onFailure((actorId, kind, id, failure))
     }
 
   private object RecordingSpecIds { val search: UUID = searchId }
@@ -168,6 +179,69 @@ final class HiringGraphQLSearchRecordingSpec extends CatsEffectSuite {
       assertEquals(fields.get(LogField.SearchKind), Some("semanticJobSearch"))
       assert(!fields.values.exists(_.contains("boom")))
     }
+  }
+
+  test("AIR-04.3 a failed recording publishes one minimal failure event with the kind and error code only") {
+    for {
+      events <- Ref.of[IO, Vector[(LogEvent, Option[String], Map[LogField, String])]](Vector.empty)
+      published <- Ref.of[IO, Vector[FailureRecord]](Vector.empty)
+      json <- execute(
+        search,
+        recording(
+          IO.pure(Left(UseCaseError.Repository(RepositoryError.Unavailable))),
+          record => published.update(_ :+ record)
+        ),
+        events
+      )
+      recorded <- published.get
+    } yield {
+      assert(!json.hcursor.downField("errors").succeeded, clue(json))
+      assertEquals(
+        recorded,
+        Vector((candidate.id, OperationalEventPayload.SearchKind.SemanticJobSearch, searchId, "UNAVAILABLE"))
+      )
+      assert(!recorded.exists(_._4.contains(queryText)))
+    }
+  }
+
+  test("AIR-04.3 an unexpected recording exception publishes the exception class, not its message") {
+    for {
+      events <- Ref.of[IO, Vector[(LogEvent, Option[String], Map[LogField, String])]](Vector.empty)
+      published <- Ref.of[IO, Vector[FailureRecord]](Vector.empty)
+      _ <- execute(
+        search,
+        recording(IO.raiseError(new RuntimeException("boom " + job.id.value)), record => published.update(_ :+ record)),
+        events
+      )
+      recorded <- published.get
+    } yield assertEquals(recorded.map(_._4), Vector("java.lang.RuntimeException"))
+  }
+
+  test("AIR-04.3 a failing failure-event publication never fails the search") {
+    for {
+      events <- Ref.of[IO, Vector[(LogEvent, Option[String], Map[LogField, String])]](Vector.empty)
+      json <- execute(
+        search,
+        recording(
+          IO.pure(Left(UseCaseError.Repository(RepositoryError.Unavailable))),
+          _ => IO.raiseError(new IllegalStateException("outbox down"))
+        ),
+        events
+      )
+      entries <- logged(events)
+    } yield {
+      assert(!json.hcursor.downField("errors").succeeded, clue(json))
+      assertEquals(entries.size, 1)
+    }
+  }
+
+  test("AIR-04.3 a successful recording publishes no failure event") {
+    for {
+      events <- Ref.of[IO, Vector[(LogEvent, Option[String], Map[LogField, String])]](Vector.empty)
+      published <- Ref.of[IO, Vector[FailureRecord]](Vector.empty)
+      _ <- execute(search, recording(IO.pure(Right(())), record => published.update(_ :+ record)), events)
+      recorded <- published.get
+    } yield assertEquals(recorded, Vector.empty)
   }
 
   test("AIR-04.1 a successful recording logs nothing") {

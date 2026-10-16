@@ -7,10 +7,12 @@ import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.service.events.OperationalEventPayload.SearchKind
 import com.example.graphQL.cats.service.events.{
   OperationalEventEnvelope,
+  OperationalEventPayload,
   SearchFilterSnapshot,
   SearchSession,
   SearchSessionHandoff
 }
+import com.example.graphQL.cats.service.port.{RepositoryF, SearchRecordingFailureRepository}
 import munit.CatsEffectSuite
 
 import java.time.Instant
@@ -29,6 +31,9 @@ final class SearchSessionRecordingSpec extends CatsEffectSuite {
       new SearchSessionHandoff[IO] {
         def enqueue(session: SearchSession, event: OperationalEventEnvelope): IO[Unit] =
           sink.update(_ :+ (session -> event))
+      },
+      new SearchRecordingFailureRepository[IO] {
+        def record(event: OperationalEventEnvelope) = RepositoryF.at[IO].fromEither(Right(true))
       },
       FixedTestClock.at(now),
       generator
@@ -79,6 +84,32 @@ final class SearchSessionRecordingSpec extends CatsEffectSuite {
       assertEquals(
         SearchSessionRecording.eventId(supplied),
         UUID.nameUUIDFromBytes(s"search-performed:$supplied".getBytes("UTF-8"))
+      )
+    }
+  }
+
+  test("AIR-04.3 a recording failure is handed off as one deterministic event with the kind and failure code only") {
+    for {
+      stored <- Ref.of[IO, Vector[OperationalEventEnvelope]](Vector.empty)
+      service = SearchSessionRecording(
+        new SearchSessionHandoff[IO] { def enqueue(session: SearchSession, event: OperationalEventEnvelope) = IO.unit },
+        new SearchRecordingFailureRepository[IO] {
+          def record(event: OperationalEventEnvelope) =
+            RepositoryF.lift(stored.update(_ :+ event).as(true))
+        },
+        FixedTestClock.at(now),
+        generator
+      )
+      _ <- service.recordFailure(actorId, SearchKind.Jobs, supplied, "UNAVAILABLE")
+      events <- stored.get
+    } yield {
+      val event = events.head
+      assertEquals(event.eventId, SearchSessionRecording.failureEventId(supplied))
+      assertEquals(event.occurredAt, now)
+      assertEquals(event.actorId, actorId)
+      assertEquals(
+        event.payload,
+        OperationalEventPayload.SearchRecordingFailed(supplied, SearchKind.Jobs, "UNAVAILABLE")
       )
     }
   }

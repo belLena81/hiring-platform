@@ -242,6 +242,14 @@ object OperationalEventTransforms {
       aggregate("Search", payload("searchId")) && uuid(payload("resultId")) && payload("searchKind").isin(
         SearchKinds*
       ) && rank(payload("rank")) && numericPayloadField("$.payload.rank")
+    val recordingFailed = kind === lit(AnalyticsEventType.SearchRecordingFailed.wire) &&
+      payloadKeys("searchId", "searchKind", "failure") && aggregate("Search", payload("searchId")) &&
+      payload("searchKind").isin(
+        SearchKinds*
+      ) && // Read from the raw payload so the retained payload schema is unchanged.
+      get_json_object(col(Columns.RawValue), "$.payload").rlike(
+        "\"failure\"\\s*:\\s*\"[A-Za-z0-9_.$]{1,100}\"[,}]"
+      )
     get_json_object(col(Columns.RawValue), "$.occurredAt").rlike(InstantPattern) &&
     is_valid_utf8(col(Columns.RawValue)) && uuid(col(Columns.EventId)) && uuid(col(Columns.ActorId)) &&
     length(encode(col(Columns.RawValue), "UTF-8")) <= lit(MaxEnvelopeBytes) &&
@@ -255,7 +263,7 @@ object OperationalEventTransforms {
       "actorId",
       "payload"
     ) &&
-    (jobFact || created || changed || hired || searched || viewed || clicked)
+    (jobFact || created || changed || hired || searched || viewed || clicked || recordingFailed)
   }
 
   /** Event IDs are idempotency keys. Same bytes are duplicates; different bytes are conflicts. */

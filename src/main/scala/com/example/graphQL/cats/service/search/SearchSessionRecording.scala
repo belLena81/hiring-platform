@@ -14,6 +14,7 @@ import com.example.graphQL.cats.service.events.{
   SearchSessionHandoff,
   SearchSessionResult
 }
+import com.example.graphQL.cats.service.port.SearchRecordingFailureRepository
 import com.example.graphQL.cats.service.protocol.UseCaseF
 import com.example.graphQL.cats.service.{RepositoryError, UseCaseError}
 import com.example.graphQL.cats.shared.StableIds
@@ -37,6 +38,16 @@ trait SearchSessionRecording[F[_]] {
       model: Option[String],
       results: List[SearchSessionEntry]
   ): UseCaseF[F, Unit]
+
+  /** Publishes one minimal operational event for a search whose session could not be recorded. Best effort: the outcome
+    * never reaches the search response.
+    */
+  def recordFailure(
+      actorId: UserId,
+      kind: OperationalEventPayload.SearchKind,
+      searchId: UUID,
+      failure: String
+  ): F[Unit]
 }
 
 object SearchSessionRecording {
@@ -45,11 +56,18 @@ object SearchSessionRecording {
   def eventId(searchId: UUID): UUID =
     StableIds.uuid(s"search-performed:$searchId")
 
-  def apply[F[_]: Monad: Clock: UUIDGen](handoff: SearchSessionHandoff[F]): SearchSessionRecording[F] =
-    apply(handoff, Clock[F], UUIDGen[F])
+  def failureEventId(searchId: UUID): UUID =
+    StableIds.uuid(s"search-recording-failed:$searchId")
+
+  def apply[F[_]: Monad: Clock: UUIDGen](
+      handoff: SearchSessionHandoff[F],
+      failures: SearchRecordingFailureRepository[F]
+  ): SearchSessionRecording[F] =
+    apply(handoff, failures, Clock[F], UUIDGen[F])
 
   def apply[F[_]: Monad](
       handoff: SearchSessionHandoff[F],
+      failures: SearchRecordingFailureRepository[F],
       clock: Clock[F],
       uuids: UUIDGen[F]
   ): SearchSessionRecording[F] = new SearchSessionRecording[F] {
@@ -84,6 +102,18 @@ object SearchSessionRecording {
               .leftMap(_ => UseCaseError.Repository(RepositoryError.InvalidEvent))
           )
           .flatMap(event => EitherT.liftF[F, UseCaseError, Unit](handoff.enqueue(session, event)))
+      }
+
+    def recordFailure(
+        actorId: UserId,
+        kind: OperationalEventPayload.SearchKind,
+        searchId: UUID,
+        failure: String
+    ): F[Unit] =
+      clock.realTimeInstant.flatMap { now =>
+        OperationalEvents
+          .searchRecordingFailed(failureEventId(searchId), searchId, kind, actorId, failure, now)
+          .fold(_ => Monad[F].unit, event => failures.record(event).value.void)
       }
   }
 }

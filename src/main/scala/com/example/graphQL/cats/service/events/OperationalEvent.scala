@@ -8,7 +8,7 @@ import java.util.UUID
 
 enum OperationalEventType {
   case JOB_CREATED, JOB_UPDATED, JOB_CLOSED, JOB_VIEWED, SEARCH_PERFORMED, SEARCH_RESULT_CLICKED,
-    APPLICATION_CREATED, APPLICATION_STATUS_CHANGED, CANDIDATE_HIRED
+    SEARCH_RECORDING_FAILED, APPLICATION_CREATED, APPLICATION_STATUS_CHANGED, CANDIDATE_HIRED
 }
 
 enum OperationalAggregateType {
@@ -151,6 +151,23 @@ object OperationalEvents {
       occurredAt: Instant
   ): OperationalEventEnvelope =
     OperationalEventEnvelope.fromPayload(eventId, occurredAt, actorId, JobViewed(searchId, jobId.value, None, rank))
+
+  def searchRecordingFailed(
+      eventId: UUID,
+      searchId: UUID,
+      searchKind: SearchKind,
+      actorId: UserId,
+      failure: String,
+      occurredAt: Instant
+  ): Either[OperationalEventContractError, OperationalEventEnvelope] =
+    OperationalEventContract.validate(
+      OperationalEventEnvelope.fromPayload(
+        eventId,
+        occurredAt,
+        actorId,
+        SearchRecordingFailed(searchId, searchKind, failure)
+      )
+    )
 
   def searchResultClicked(
       eventId: UUID,

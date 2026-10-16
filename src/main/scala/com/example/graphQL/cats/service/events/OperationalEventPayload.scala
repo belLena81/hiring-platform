@@ -35,20 +35,26 @@ enum OperationalEventPayload {
   )
   case SearchResultClicked(searchId: UUID, resultId: UUID, searchKind: OperationalEventPayload.SearchKind, rank: Int)
 
+  /** A search whose session could not be recorded; `failure` is an error code or exception class, never request data.
+    */
+  case SearchRecordingFailed(searchId: UUID, searchKind: OperationalEventPayload.SearchKind, failure: String)
+
   def eventType: OperationalEventType = this match {
-    case JobFact(kind, _)       => kind.eventType
-    case _: ApplicationCreated  => OperationalEventType.APPLICATION_CREATED
-    case _: StatusChanged       => OperationalEventType.APPLICATION_STATUS_CHANGED
-    case _: CandidateHired      => OperationalEventType.CANDIDATE_HIRED
-    case _: SearchPerformed     => OperationalEventType.SEARCH_PERFORMED
-    case _: JobViewed           => OperationalEventType.JOB_VIEWED
-    case _: SearchResultClicked => OperationalEventType.SEARCH_RESULT_CLICKED
+    case JobFact(kind, _)         => kind.eventType
+    case _: ApplicationCreated    => OperationalEventType.APPLICATION_CREATED
+    case _: StatusChanged         => OperationalEventType.APPLICATION_STATUS_CHANGED
+    case _: CandidateHired        => OperationalEventType.CANDIDATE_HIRED
+    case _: SearchPerformed       => OperationalEventType.SEARCH_PERFORMED
+    case _: JobViewed             => OperationalEventType.JOB_VIEWED
+    case _: SearchResultClicked   => OperationalEventType.SEARCH_RESULT_CLICKED
+    case _: SearchRecordingFailed => OperationalEventType.SEARCH_RECORDING_FAILED
   }
 
   def aggregateType: OperationalAggregateType = this match {
     case _: JobFact                                                   => OperationalAggregateType.Job
     case _: ApplicationCreated | _: StatusChanged | _: CandidateHired => OperationalAggregateType.Application
-    case _: SearchPerformed | _: JobViewed | _: SearchResultClicked   => OperationalAggregateType.Search
+    case _: SearchPerformed | _: JobViewed | _: SearchResultClicked | _: SearchRecordingFailed =>
+      OperationalAggregateType.Search
   }
 
   /** The aggregate this fact belongs to; its string form is the envelope's `aggregateId` and partition key. */
@@ -60,6 +66,7 @@ enum OperationalEventPayload {
     case SearchPerformed(id, _, _)        => id
     case JobViewed(_, id, _, _)           => id
     case SearchResultClicked(id, _, _, _) => id
+    case SearchRecordingFailed(id, _, _)  => id
   }
 
   def subjectIds: Either[OperationalEventContractError, List[UUID]] = this match {

@@ -18,6 +18,7 @@ import com.example.graphQL.cats.service.port.{
   MutationWriteContext,
   OperationalEventOutboxRepository,
   RepositoryF,
+  SearchRecordingFailureRepository,
   SearchSessionRepository
 }
 import com.example.graphQL.cats.service.RepositoryError
@@ -35,7 +36,8 @@ final class MongoSearchSessionRepository(
     database: MongoDatabase[IO],
     transactionRunner: MongoTransactionRunner,
     diagnostics: Diagnostics[IO]
-) extends SearchSessionRepository[IO] {
+) extends SearchSessionRepository[IO]
+    with SearchRecordingFailureRepository[IO] {
   private val sessions = Mongo4catsCollections.documents(database, MongoCollections.SearchSessions)
   private val outbox = Mongo4catsCollections.documents(database, MongoCollections.EventOutbox)
 
@@ -75,7 +77,7 @@ final class MongoSearchSessionRepository(
           )
       )
 
-  def recordInteraction(event: OperationalEventEnvelope): RepositoryF[IO, Boolean] =
+  override def record(event: OperationalEventEnvelope): RepositoryF[IO, Boolean] =
     recordInteractionWithSession(event, None)
 
   override def recordInteraction(

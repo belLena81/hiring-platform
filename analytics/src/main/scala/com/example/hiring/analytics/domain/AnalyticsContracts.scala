@@ -106,6 +106,7 @@ enum AnalyticsEventType(val wire: String) {
   case JobViewed extends AnalyticsEventType("JOB_VIEWED")
   case SearchPerformed extends AnalyticsEventType("SEARCH_PERFORMED")
   case SearchResultClicked extends AnalyticsEventType("SEARCH_RESULT_CLICKED")
+  case SearchRecordingFailed extends AnalyticsEventType("SEARCH_RECORDING_FAILED")
   case ApplicationCreated extends AnalyticsEventType("APPLICATION_CREATED")
   case ApplicationStatusChanged extends AnalyticsEventType("APPLICATION_STATUS_CHANGED")
   case CandidateHired extends AnalyticsEventType("CANDIDATE_HIRED")

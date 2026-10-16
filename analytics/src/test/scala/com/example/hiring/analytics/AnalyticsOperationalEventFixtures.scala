@@ -108,6 +108,12 @@ object AnalyticsOperationalEventFixtures {
           "searchKind" -> field("searchKind", text("jobs")),
           "rank" -> field("rank", Json.fromInt(1))
         )
+      case "SEARCH_RECORDING_FAILED" =>
+        Json.obj(
+          "searchId" -> text(aggregateId),
+          "searchKind" -> field("searchKind", text("jobs")),
+          "failure" -> field("failure", text("UNAVAILABLE"))
+        )
       case _ => supplied
     }
     normalizeIdentifiers(result)

@@ -263,7 +263,10 @@ Ranked Jobs
 ```text
 SEARCH_PERFORMED
 SEARCH_RESULT_CLICKED
+SEARCH_RECORDING_FAILED
 ```
+
+`SEARCH_RECORDING_FAILED` is emitted only when a search ran but its session could not be recorded. It carries the search id, search kind and a bounded error code or exception class name, never query text or result ids; its publication is best-effort and never fails the search.
 
 Capture:
 

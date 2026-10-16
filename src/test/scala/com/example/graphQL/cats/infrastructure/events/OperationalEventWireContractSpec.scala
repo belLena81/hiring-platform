@@ -105,6 +105,10 @@ class OperationalEventWireContractSpec extends FunSuite {
     "SEARCH_RESULT_CLICKED" -> ok(
       OperationalEvents.searchResultClicked(eventId, searchId, jobId.toString, SearchKind.Jobs, actor, 2, now)
     ),
+    "SEARCH_RECORDING_FAILED" -> ok(
+      OperationalEvents
+        .searchRecordingFailed(eventId, searchId, SearchKind.SemanticJobSearch, actor, "UNAVAILABLE", now)
+    ),
     "APPLICATION_CREATED" -> OperationalEvents.applicationCreated(eventId, application, actor, now),
     "APPLICATION_STATUS_CHANGED null previousStatus" ->
       OperationalEvents.statusChanged(eventId, application, statusEvent(None, ApplicationStatus.Created)),
@@ -166,6 +170,11 @@ class OperationalEventWireContractSpec extends FunSuite {
       """{"searchId":"00000000-0000-0000-0000-000000000205","resultId":"00000000-0000-0000-0000-000000000204","searchKind":"jobs","rank":2}"""
     ),
     Golden(
+      "SEARCH_RECORDING_FAILED",
+      """{"eventId":"00000000-0000-0000-0000-000000000201","eventType":"SEARCH_RECORDING_FAILED","occurredAt":"2026-09-19T10:15:30Z","aggregateType":"Search","aggregateId":"00000000-0000-0000-0000-000000000205","actorId":"00000000-0000-0000-0000-000000000202","payload":{"searchId":"00000000-0000-0000-0000-000000000205","searchKind":"semanticJobSearch","failure":"UNAVAILABLE"}}""",
+      """{"searchId":"00000000-0000-0000-0000-000000000205","searchKind":"semanticJobSearch","failure":"UNAVAILABLE"}"""
+    ),
+    Golden(
       "APPLICATION_CREATED",
       """{"eventId":"00000000-0000-0000-0000-000000000201","eventType":"APPLICATION_CREATED","occurredAt":"2026-09-19T10:15:30Z","aggregateType":"Application","aggregateId":"00000000-0000-0000-0000-000000000203","actorId":"00000000-0000-0000-0000-000000000202","payload":{"applicationId":"00000000-0000-0000-0000-000000000203","candidateId":"00000000-0000-0000-0000-000000000202","jobId":"00000000-0000-0000-0000-000000000204","status":"Created"}}""",
       """{"applicationId":"00000000-0000-0000-0000-000000000203","candidateId":"00000000-0000-0000-0000-000000000202","jobId":"00000000-0000-0000-0000-000000000204","status":"Created"}"""
@@ -208,7 +217,7 @@ class OperationalEventWireContractSpec extends FunSuite {
     }
   }
 
-  test("all nine operational event types are covered") {
+  test("all ten operational event types are covered") {
     import com.example.graphQL.cats.service.events.OperationalEventType
     assertEquals(cases.map(_._2.eventType).toSet, OperationalEventType.values.toSet)
   }

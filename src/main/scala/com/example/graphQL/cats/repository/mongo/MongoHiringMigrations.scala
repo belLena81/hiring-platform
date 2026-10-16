@@ -350,7 +350,7 @@ private[mongo] object MongoHiringMigrations {
           OperationalEventType.CANDIDATE_HIRED =>
         OperationalAggregateType.Application
       case OperationalEventType.JOB_VIEWED | OperationalEventType.SEARCH_PERFORMED |
-          OperationalEventType.SEARCH_RESULT_CLICKED =>
+          OperationalEventType.SEARCH_RESULT_CLICKED | OperationalEventType.SEARCH_RECORDING_FAILED =>
         OperationalAggregateType.Search
     }
 

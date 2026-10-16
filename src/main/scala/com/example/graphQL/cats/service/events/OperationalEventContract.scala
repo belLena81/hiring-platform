@@ -49,8 +49,13 @@ object OperationalEventContract {
       results.forall(result => fullUuid(result.resultId).isRight && result.score.isFinite)
     case OperationalEventPayload.JobViewed(searchId, _, searchKind, rank) =>
       searchKind.isEmpty && searchId.isDefined == rank.isDefined && rank.forall(validRank)
-    case OperationalEventPayload.SearchResultClicked(_, _, _, rank) => validRank(rank)
+    case OperationalEventPayload.SearchResultClicked(_, _, _, rank)   => validRank(rank)
+    case OperationalEventPayload.SearchRecordingFailed(_, _, failure) => validFailureCode(failure)
   }
+
+  /** A bounded error code or exception class name: identifier characters only, so no request text can be carried. */
+  private def validFailureCode(failure: String): Boolean =
+    failure.matches("[A-Za-z0-9_.$]{1,100}")
 
   private def validRank(rank: Int): Boolean = rank >= 1 && rank <= FieldLimits.CollectionMaxValues
 }
