@@ -109,4 +109,19 @@ final class MongoLexicalFallbackSpec extends FunSuite {
     val live = repository.lexicalCandidateStages(query)(1).get("$match").toString
     List("role", "accountStatus", "profile.skillsCanonical").foreach(path => assert(live.contains(path), live))
   }
+
+  test("AIR-05.1 only a vector branch that failed next to an answering lexical branch allows a lexical-only answer") {
+    val answered: Either[RepositoryError, List[Int]] = Right(List(1))
+    def fuse(vectors: List[Either[RepositoryError, List[Int]]], lexical: Either[RepositoryError, List[Int]]) =
+      MongoSemanticSearchResult.fuseBranches(vectors, lexical)(_.flatten)
+    assertEquals(fuse(List(answered), answered), Right(List(1, 1)))
+    assertEquals(fuse(List(Left(RepositoryError.Unavailable)), answered), Left(RepositoryError.VectorSearchUnavailable))
+    assertEquals(
+      fuse(List(Left(RepositoryError.Unavailable)), Left(RepositoryError.Unavailable)),
+      Left(RepositoryError.Unavailable)
+    )
+    assertEquals(fuse(List(answered), Left(RepositoryError.Unavailable)), Left(RepositoryError.Unavailable))
+    assertEquals(fuse(List(Left(RepositoryError.Overloaded)), answered), Left(RepositoryError.Overloaded))
+    assertEquals(fuse(List(answered), Left(RepositoryError.Overloaded)), Left(RepositoryError.Overloaded))
+  }
 }
