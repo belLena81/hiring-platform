@@ -13,6 +13,25 @@ services:
       retries: 12
       start_period: 10s
 
+  # Opt-in Atlas-compatible MongoDB (mongot: $search, $vectorSearch, $rankFusion) for the Atlas-gated search specs.
+  # Start with: docker compose --profile atlas up -d --wait atlas-local. Correctness only; same image as compose.atlas-local.yaml.
+  atlas-local:
+    profiles: ["atlas"]
+    image: mongodb/mongodb-atlas-local:latest@sha256:3a8affee01fda1532d4083304bb6883f6fc0f1bf904c267d1785befa5391c58a
+    ports:
+      - "127.0.0.1:27018:27017"
+    tmpfs:
+      - /data/db:mode=1777
+      - /data/configdb:mode=1777
+      - /data/mongot:mode=1777
+    mem_limit: 3g
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.hello().isWritablePrimary ? quit(0) : quit(1)"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
   kafka:
     image: apache/kafka:3.9.2@sha256:05b4616e0702ef2729327705d54ad6b50ea70b271c4b730fabd2320789fb7b02
     environment:
