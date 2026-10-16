@@ -221,4 +221,19 @@ final class SearchSessionHandoffSpec extends CatsEffectSuite {
       )
     }
   }
+
+  test("ARR-07.1 every repository error is classified, and an overloaded store reads like an unavailable one") {
+    val runtime = "java.lang.RuntimeException"
+    assertEquals(SearchSessionHandoff.errorType(RepositoryError.Overloaded), runtime)
+    assertEquals(SearchSessionHandoff.errorType(RepositoryError.Unavailable), runtime)
+    assertEquals(SearchSessionHandoff.errorType(RepositoryError.VectorSearchUnavailable), runtime)
+    assertEquals(SearchSessionHandoff.errorType(RepositoryError.Conflict), "java.lang.IllegalStateException")
+    assertEquals(
+      RepositoryError.values
+        .map(SearchSessionHandoff.errorType)
+        .toSet
+        .subsetOf(Set(runtime, "java.lang.IllegalStateException")),
+      true
+    )
+  }
 }

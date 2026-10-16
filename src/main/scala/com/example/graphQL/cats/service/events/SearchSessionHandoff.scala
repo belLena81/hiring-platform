@@ -142,7 +142,7 @@ object SearchSessionHandoff {
         }
     }
 
-  private def errorType(error: RepositoryError): String =
+  private[events] def errorType(error: RepositoryError): String =
     error match {
       case RepositoryError.Unavailable | RepositoryError.Overloaded | RepositoryError.VectorSearchUnavailable |
           RepositoryError.InvalidStoredData | RepositoryError.MissingStoredResult =>
