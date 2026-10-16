@@ -353,6 +353,41 @@ final class AtlasHiringSearchIntegrationSpec extends CatsEffectSuite {
     }
   }
 
+  test("AIR-05 $search candidate lexical retrieval drops a stale index entry before the limit counts it") {
+    live { (db, policy) =>
+      val lexicalQuery = LexicalSearchQuery(
+        "scala",
+        JobSearchFilter(None, Set.empty, None),
+        page,
+        UUID.randomUUID(),
+        ValidatedCandidateMatchFilters.from(filters).fold(errors => fail(errors.toString), identity)
+      )
+      def await(attempts: Int)(done: List[UserId] => Boolean): IO[List[UserId]] =
+        repository(db, SearchFusionStrategy.ApplicationRrf, policy).lexicalCandidates(lexicalQuery).value.flatMap {
+          case Right(hits) if done(hits.map(_.id)) => IO.pure(hits.map(_.id))
+          case _ if attempts > 0                   => IO.sleep(500.millis) *> await(attempts - 1)(done)
+          case other => IO.raiseError(new AssertionError(s"Atlas lexical ingestion did not complete: $other"))
+        }
+      for {
+        _ <- MongoHiringSetup.initialize(db, Some(indexes), Diagnostics.noop[IO])
+        seeded <- fixture(db)
+        (_, expected) = seeded
+        _ <- await(120)(hits => expected.subsetOf(hits.toSet))
+        // The index still lists the candidate until it catches up; the live document is already ineligible.
+        stale = expected.head
+        users <- Mongo4catsCollections.documents(db, MongoCollections.Users)
+        _ <- users.updateOne(
+          com.mongodb.client.model.Filters.eq(MongoFields.Id, stale.value.toString),
+          com.mongodb.client.model.Updates.set(MongoFields.AccountStatus, AccountStatus.Deleted.toString)
+        )
+        remaining <- await(120)(hits => !hits.contains(stale))
+      } yield {
+        assert(!remaining.contains(stale), clue(remaining))
+        assertEquals(remaining.toSet, expected - stale)
+      }
+    }
+  }
+
   List(SearchFusionStrategy.MongoRankFusion, SearchFusionStrategy.MongoScoreFusion).foreach { strategy =>
     test(s"MVR-04.L explicit production $strategy capability gate") {
       live { (db, policy) =>
