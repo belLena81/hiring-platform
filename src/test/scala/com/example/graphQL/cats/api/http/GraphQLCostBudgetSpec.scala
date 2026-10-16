@@ -248,4 +248,27 @@ final class GraphQLCostBudgetSpec extends CatsEffectSuite {
       assertEquals(refused.headers.get(CIString("Retry-After")).map(_.head.value), Some("60"))
     }
   }
+
+  test("AIR-08.3 the cost receipt keeps the extensions keys a response already carries") {
+    val receipt = com.example.graphQL.cats.api.graphql.CostReceipt(8, 100, 92, 30)
+    val withExtensions = Json.obj("data" -> Json.Null, "extensions" -> Json.obj("tracing" -> Json.fromString("kept")))
+    val merged = com.example.graphQL.cats.api.graphql.HiringGraphQLSchema.withCost(Some(receipt))(withExtensions)
+    val extensions = merged.hcursor.downField("extensions")
+    assertEquals(extensions.get[String]("tracing"), Right("kept"))
+    assertEquals(extensions.downField("cost").get[Int]("requested"), Right(8))
+    assertEquals(extensions.downField("cost").get[Long]("resetsInSeconds"), Right(30L))
+    val plain = Json.obj("data" -> Json.Null)
+    assertEquals(
+      com.example.graphQL.cats.api.graphql.HiringGraphQLSchema.withCost(None)(withExtensions),
+      withExtensions
+    )
+    assert(
+      com.example.graphQL.cats.api.graphql.HiringGraphQLSchema
+        .withCost(Some(receipt))(plain)
+        .hcursor
+        .downField("extensions")
+        .downField("cost")
+        .succeeded
+    )
+  }
 }
