@@ -201,4 +201,18 @@ final class FixedWindowRateLimiterSpec extends CatsEffectSuite {
       assert(counts.values.forall(count => count > 50 && count < 170), counts.values.toList.sorted.toString)
     }
   }
+
+  test("AIR-08.3 a limiter created with a shared key mode charges that key normally but reveals no numbers") {
+    for {
+      budget <- FixedWindowRateLimiter
+        .create[String](60, 10, 10, Ticker.systemTicker(), identity, 4, "test", _ == "anon")
+      anonymous <- IO(budget.acquireNow("anon", 6))
+      refused <- IO(budget.acquireNow("anon", 6))
+      named <- IO(budget.acquireNow("named", 6))
+    } yield {
+      assertEquals(anonymous, Right(FixedWindowRateLimiter.Grant.Shared))
+      assertEquals(refused.left.map(_.grant), Left(FixedWindowRateLimiter.Grant.Shared))
+      assertEquals(named, Right(FixedWindowRateLimiter.Grant.Tracked(10, 4, 60)))
+    }
+  }
 }
