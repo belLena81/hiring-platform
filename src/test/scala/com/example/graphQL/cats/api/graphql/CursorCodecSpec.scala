@@ -7,7 +7,6 @@ import com.example.graphQL.cats.domain.model.UserCursor
 import com.example.graphQL.cats.domain.pagination.{ApplicationCursor, ApplicationEventCursor, JobCursor}
 import com.example.graphQL.cats.service.search.NearbyJobCursor
 import munit.CatsEffectSuite
-import pdi.jwt.{JwtAlgorithm, JwtCirce, JwtClaim}
 
 import java.nio.charset.StandardCharsets
 import java.time.Instant
@@ -21,7 +20,7 @@ final class CursorCodecSpec extends CatsEffectSuite {
   private val issuedAt = Instant.parse("2026-09-17T08:00:00Z")
   private val id = UUID.fromString("10000000-0000-0000-0000-000000000001")
 
-  test("all cursor types round-trip through expiring JWTs") {
+  test("all cursor types round-trip through signed opaque cursors") {
     assertEquals(
       CursorCodec.decode[JobCursor](CursorCodec.encode(JobCursor(issuedAt, JobId(id)), issuedAt), issuedAt),
       Right(JobCursor(issuedAt, JobId(id)))
@@ -63,22 +62,35 @@ final class CursorCodecSpec extends CatsEffectSuite {
       }
   }
 
-  test("cursor values are three-part JWTs carrying the signed keyset subject") {
+  test("a cursor is two url-safe segments: the keyset payload with its expiry, and its HMAC") {
     val encoded = CursorCodec.encode(JobCursor(issuedAt, JobId(id)), issuedAt)
     val parts = encoded.split("\\.", -1)
-    val claim = JwtCirce.parseClaim(new String(Base64.getUrlDecoder.decode(parts(1)), StandardCharsets.UTF_8))
 
-    assertEquals(parts.length, 3)
-    assertEquals(claim.subject, Some(s"j|$issuedAt|$id"))
-    assert(claim.issuer.nonEmpty)
-    assert(claim.audience.nonEmpty)
-    assertEquals(claim.issuedAt, Some(issuedAt.getEpochSecond))
-    assertEquals(claim.expiration, Some(issuedAt.plusSeconds(ttlSeconds).getEpochSecond))
+    assertEquals(parts.length, 2)
+    assert(encoded.matches("[A-Za-z0-9_.-]+"), encoded)
+    assertEquals(
+      new String(Base64.getUrlDecoder.decode(parts(0)), StandardCharsets.UTF_8),
+      s"j|$issuedAt|$id|${issuedAt.plusSeconds(ttlSeconds).getEpochSecond}"
+    )
+    assert(encoded.length < 200, encoded.length)
   }
 
-  test("expired cursors are rejected") {
+  test("the default lifetime outlasts a paused client") {
+    assertEquals(CursorCodec.DefaultTtlSeconds, 86400L)
+    val key = CursorCodec.keyFromSecret(secret)
+    assertEquals(key.ttlSeconds, 86400L)
+    val encoded = CursorCodec.encode(JobCursor(issuedAt, JobId(id)), issuedAt)(using summon, key)
+    assert(
+      CursorCodec
+        .decode[JobCursor](encoded, issuedAt.plusSeconds(3600))(using summon, key)
+        .isRight
+    )
+  }
+
+  test("expired cursors are rejected, and the last valid second is accepted") {
     val encoded = CursorCodec.encode(JobCursor(issuedAt, JobId(id)), issuedAt)
 
+    assert(CursorCodec.decode[JobCursor](encoded, issuedAt.plusSeconds(ttlSeconds)).isRight)
     assert(CursorCodec.decode[JobCursor](encoded, issuedAt.plusSeconds(ttlSeconds + 1)).isLeft)
   }
 
@@ -92,55 +104,27 @@ final class CursorCodecSpec extends CatsEffectSuite {
     assertEquals(CursorCodec.decode[JobCursor](event, issuedAt), Left(CursorCodec.CursorError.WrongKind("e")))
   }
 
-  test("malformed, legacy, and non-cursor JWTs do not decode") {
-    val legacy = encodeText(s"j|$issuedAt|$id|AAAAAAAAAAAAAAAAAAAAAA")
-    val accessLike = JwtCirce.encode(
-      JwtClaim()
-        .about(id.toString)
-        .by("hiring-platform-local")
-        .to("hiring-graphql-api")
-        .issuedAt(issuedAt.getEpochSecond)
-        .expiresAt(issuedAt.plusSeconds(ttlSeconds).getEpochSecond),
-      summon[CursorCodec.CursorKey].secretKey,
-      JwtAlgorithm.HS256
-    )
+  test("malformed, unsigned and foreign tokens do not decode") {
+    val unsigned = encodeSegment(s"j|$issuedAt|$id|${issuedAt.plusSeconds(ttlSeconds).getEpochSecond}")
+    val forged = unsigned + "." + encodeSegment("not the mac")
+    val jwtShaped = "e30.e30.e30"
 
-    assert(CursorCodec.decode[JobCursor]("not-base64", issuedAt).isLeft)
-    assert(CursorCodec.decode[JobCursor](legacy, issuedAt).isLeft)
-    assert(CursorCodec.decode[JobCursor](accessLike, issuedAt).isLeft)
+    List("", "not-base64", ".", "a.b.c", unsigned, forged, jwtShaped).foreach(token =>
+      assert(CursorCodec.decode[JobCursor](token, issuedAt).isLeft, token)
+    )
   }
 
-  test("payload, signature, issuer, and audience tampering do not decode") {
+  test("payload and signature tampering do not decode") {
     val encoded = CursorCodec.encode(JobCursor(issuedAt, JobId(id)), issuedAt)
     val parts = encoded.split("\\.", -1)
-    val changedPayload =
-      parts.updated(1, encodeSegment(s"""{"sub":"j|$issuedAt|${UUID.randomUUID()}"}""")).mkString(".")
-    val changedSignature = parts.updated(2, parts(2).reverse).mkString(".")
-    val wrongIssuer = JwtCirce.encode(
-      JwtClaim()
-        .about(s"j|$issuedAt|$id")
-        .by("wrong-issuer")
-        .to("hiring-graphql-api")
-        .issuedAt(issuedAt.getEpochSecond)
-        .expiresAt(issuedAt.plusSeconds(ttlSeconds).getEpochSecond),
-      summon[CursorCodec.CursorKey].secretKey,
-      JwtAlgorithm.HS256
-    )
-    val wrongAudience = JwtCirce.encode(
-      JwtClaim()
-        .about(s"j|$issuedAt|$id")
-        .by("hiring-platform-cursor")
-        .to("wrong-audience")
-        .issuedAt(issuedAt.getEpochSecond)
-        .expiresAt(issuedAt.plusSeconds(ttlSeconds).getEpochSecond),
-      summon[CursorCodec.CursorKey].secretKey,
-      JwtAlgorithm.HS256
-    )
+    val otherPayload =
+      encodeSegment(s"j|$issuedAt|${UUID.randomUUID()}|${issuedAt.plusSeconds(ttlSeconds).getEpochSecond}")
+    val longerLife = encodeSegment(s"j|$issuedAt|$id|${issuedAt.plusSeconds(ttlSeconds * 1000).getEpochSecond}")
 
-    assert(CursorCodec.decode[JobCursor](changedPayload, issuedAt).isLeft)
-    assert(CursorCodec.decode[JobCursor](changedSignature, issuedAt).isLeft)
-    assert(CursorCodec.decode[JobCursor](wrongIssuer, issuedAt).isLeft)
-    assert(CursorCodec.decode[JobCursor](wrongAudience, issuedAt).isLeft)
+    assert(CursorCodec.decode[JobCursor](s"$otherPayload.${parts(1)}", issuedAt).isLeft)
+    assert(CursorCodec.decode[JobCursor](s"$longerLife.${parts(1)}", issuedAt.plusSeconds(ttlSeconds + 1)).isLeft)
+    assert(CursorCodec.decode[JobCursor](s"${parts(0)}.${parts(1).reverse}", issuedAt).isLeft)
+    assert(CursorCodec.decode[JobCursor](s"${parts(0)}.", issuedAt).isLeft)
   }
 
   test("wrong signing keys are rejected") {
@@ -156,45 +140,8 @@ final class CursorCodecSpec extends CatsEffectSuite {
     )
   }
 
-  private def encodeText(value: String): String = encodeSegment(value)
-
   private def encodeSegment(value: String): String =
     Base64.getUrlEncoder.withoutPadding().encodeToString(value.getBytes(StandardCharsets.UTF_8))
-
-  test("connection cursors minted before the generic keyset model still decode byte-identically") {
-    // Known tokens: payload "j|<instant>|<uuid>" signed with the test key; must stay stable across refactors.
-    val legacyPayload = s"j|$issuedAt|$id"
-    val legacy = JwtCirce.encode(
-      JwtClaim()
-        .about(legacyPayload)
-        .by("hiring-platform-cursor")
-        .to("hiring-graphql-api")
-        .issuedAt(issuedAt.getEpochSecond)
-        .expiresAt(issuedAt.plusSeconds(ttlSeconds).getEpochSecond),
-      summon[CursorCodec.CursorKey].secretKey,
-      JwtAlgorithm.HS256
-    )
-    assertEquals(CursorCodec.encode(JobCursor(issuedAt, JobId(id)), issuedAt), legacy)
-    assertEquals(CursorCodec.decode[JobCursor](legacy, issuedAt), Right(JobCursor(issuedAt, JobId(id))))
-    List("a" -> "application", "e" -> "event", "u" -> "user").foreach { case (tag, _) =>
-      val token = JwtCirce.encode(
-        JwtClaim()
-          .about(s"$tag|$issuedAt|$id")
-          .by("hiring-platform-cursor")
-          .to("hiring-graphql-api")
-          .issuedAt(issuedAt.getEpochSecond)
-          .expiresAt(issuedAt.plusSeconds(ttlSeconds).getEpochSecond),
-        summon[CursorCodec.CursorKey].secretKey,
-        JwtAlgorithm.HS256
-      )
-      tag match {
-        case "a" => assertEquals(CursorCodec.encode(ApplicationCursor(issuedAt, ApplicationId(id)), issuedAt), token)
-        case "e" =>
-          assertEquals(CursorCodec.encode(ApplicationEventCursor(issuedAt, ApplicationEventId(id)), issuedAt), token)
-        case _ => assertEquals(CursorCodec.encode(UserCursor(issuedAt, UserId(id)), issuedAt), token)
-      }
-    }
-  }
 
   test("nearby cursors use the signed codec with their own kind and reject other connections") {
     val nearby = NearbyJobCursor(1.234567890123456d, JobId(id), "fingerprint")
@@ -206,26 +153,41 @@ final class CursorCodecSpec extends CatsEffectSuite {
     val nan = CursorCodec.encode(NearbyJobCursor(Double.NaN, JobId(id), "fingerprint"), issuedAt)
     assert(CursorCodec.decode[NearbyJobCursor](nan, issuedAt).exists(!_.hasValidDistance))
     assert(CursorCodec.decode[NearbyJobCursor](encoded, issuedAt.plusSeconds(ttlSeconds + 1)).isLeft)
-    val unsignedBase64 =
-      Base64.getUrlEncoder.withoutPadding.encodeToString(s"1.0|$id|fp".getBytes(StandardCharsets.UTF_8))
-    assert(CursorCodec.decode[NearbyJobCursor](unsignedBase64, issuedAt).isLeft)
-    List("n|NaN-text|" + id + "|fp", s"n|1.0|not-a-uuid|fp", "n|1.0").foreach { payload =>
-      val token = JwtCirce.encode(
-        JwtClaim()
-          .about(payload)
-          .by("hiring-platform-cursor")
-          .to("hiring-graphql-api")
-          .issuedAt(issuedAt.getEpochSecond)
-          .expiresAt(issuedAt.plusSeconds(ttlSeconds).getEpochSecond),
-        summon[CursorCodec.CursorKey].secretKey,
-        JwtAlgorithm.HS256
-      )
+  }
+
+  test("a correctly signed cursor with a malformed keyset is reported as malformed, never decoded") {
+    val expiry = issuedAt.plusSeconds(ttlSeconds).getEpochSecond
+    def signed(payload: String): String = {
+      val body = encodeSegment(s"$payload|$expiry")
+      body + "." + Base64.getUrlEncoder.withoutPadding().encodeToString(defaultKey.sign(body))
+    }
+    List(s"n|NaN-text|$id|fp", "n|1.0|not-a-uuid|fp", "n|1.0").foreach { payload =>
       assert(
         CursorCodec
-          .decode[NearbyJobCursor](token, issuedAt)
+          .decode[NearbyJobCursor](signed(payload), issuedAt)
           .left
-          .exists(_.isInstanceOf[CursorCodec.CursorError.Malformed])
+          .exists(_.isInstanceOf[CursorCodec.CursorError.Malformed]),
+        payload
       )
     }
+    assert(CursorCodec.decode[JobCursor](signed(s"j|not-a-time|$id"), issuedAt).isLeft)
+    assert(CursorCodec.decode[JobCursor](signed(s"x|$issuedAt|$id"), issuedAt).isLeft)
+  }
+
+  test("truncated cursors do not decode") {
+    val encoded = CursorCodec.encode(JobCursor(issuedAt, JobId(id)), issuedAt)
+    val dot = encoded.indexOf('.')
+    List(encoded.dropRight(5), encoded.take(dot), encoded.take(dot / 2), encoded.drop(dot), encoded.dropRight(1))
+      .foreach(token => assert(CursorCodec.decode[JobCursor](token, issuedAt).isLeft, token))
+  }
+
+  test("a scoped cursor round-trips with its scope and keeps its kind") {
+    val scoped = CursorCodec.Scoped("job-applications:x:any", ApplicationCursor(issuedAt, ApplicationId(id)))
+    val encoded = CursorCodec.encode(scoped, issuedAt)
+    assertEquals(CursorCodec.decode[CursorCodec.Scoped[ApplicationCursor]](encoded, issuedAt), Right(scoped))
+    assertEquals(
+      CursorCodec.decode[CursorCodec.Scoped[JobCursor]](encoded, issuedAt),
+      Left(CursorCodec.CursorError.WrongKind("a"))
+    )
   }
 }

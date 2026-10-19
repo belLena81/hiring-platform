@@ -260,7 +260,7 @@ final class HiringGraphQLSearchOutcomeSpec extends CatsEffectSuite {
       s"""query { sibling: accountDeletionStatus(receiptId: "00000000-0000-0000-0000-000000000001")
          |  semanticJobSearch(query: "scala", first: 5) {
          |    __typename
-         |    ... on RankedJobResults { degraded degradedReason results { searchMode model job { id } } }
+         |    ... on RankedJobResults { degradedReason model results { searchMode job { id } } }
          |    ... on UserError { code } } }""".stripMargin,
       candidateActor(candidate),
       new CountingEmbeddings(Left(EmbeddingError.ProviderUnavailable)),
@@ -270,11 +270,10 @@ final class HiringGraphQLSearchOutcomeSpec extends CatsEffectSuite {
       assertEquals(field(json, "sibling").focus.flatMap(_.asString), Some("NOT_FOUND"))
       val search = field(json, "semanticJobSearch")
       assertEquals(search.get[String]("__typename"), Right("RankedJobResults"))
-      assertEquals(search.get[Boolean]("degraded"), Right(true))
       assertEquals(search.get[String]("degradedReason"), Right("PROVIDER_UNAVAILABLE"))
+      assertEquals(search.downField("model").focus, Some(Json.Null))
       val hit = search.downField("results").downArray
       assertEquals(hit.get[String]("searchMode"), Right("LEXICAL"))
-      assertEquals(hit.downField("model").focus, Some(Json.Null))
       assertEquals(hit.downField("job").get[String]("id"), Right(freshJob.id.value.toString))
     }
   }
@@ -282,12 +281,11 @@ final class HiringGraphQLSearchOutcomeSpec extends CatsEffectSuite {
   test("AIR-05.1 a healthy search is not degraded") {
     run(
       s"""query { semanticJobSearch(query: "scala", first: 5) {
-         |  ... on RankedJobResults { degraded degradedReason } ... on UserError { code } } }""".stripMargin,
+         |  ... on RankedJobResults { degradedReason model } ... on UserError { code } } }""".stripMargin,
       candidateActor(candidate),
       new CountingEmbeddings(Right(vector))
     ).map { json =>
       val search = field(json, "semanticJobSearch")
-      assertEquals(search.get[Boolean]("degraded"), Right(false))
       assertEquals(search.downField("degradedReason").focus, Some(Json.Null))
     }
   }

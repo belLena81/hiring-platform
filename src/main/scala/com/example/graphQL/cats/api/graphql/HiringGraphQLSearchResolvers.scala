@@ -14,6 +14,7 @@ import com.example.graphQL.cats.service.events.SearchFilterSnapshot
 import com.example.graphQL.cats.domain.model.GeoPoint
 import com.example.graphQL.cats.service.search.CandidateMatchFilters
 import java.time.Instant
+import java.util.UUID
 import sangria.schema.Context
 
 private[graphql] object HiringGraphQLSearchResolvers {
@@ -37,16 +38,14 @@ private[graphql] object HiringGraphQLSearchResolvers {
           )
         )
       } yield {
-        val edges = values
-          .take(limit.value)
-          .map(value =>
-            NearbyJobEdge(
-              value.job,
-              value.distanceKm,
-              CursorCodec.encode(NearbyJobCursor(value.distanceKm, value.job.id, baseQuery.fingerprint), now)
-            )
+        val (edges, pageInfo) = pageOf(values, limit.value, context.arg(afterArgument).isDefined)(value =>
+          NearbyJobEdge(
+            value.job,
+            value.distanceKm,
+            CursorCodec.encode(NearbyJobCursor(value.distanceKm, value.job.id, baseQuery.fingerprint), now)
           )
-        NearbyJobsConnection(edges, PageInfo(values.size > limit.value, edges.lastOption.map(_.cursor)))
+        )(_.cursor)
+        NearbyJobsConnection(edges, pageInfo)
       }
     }
 
@@ -111,7 +110,7 @@ private[graphql] object HiringGraphQLSearchResolvers {
           filterSnapshot(filter),
           results.hits.headOption.flatMap(_.model)
         )(results.hits)(_.job.id.value.toString, _.score)
-      } yield rankedJobResults(results)
+      } yield rankedJobResults(results, searchId)
     }
 
   def recommendedJobs(
@@ -134,7 +133,7 @@ private[graphql] object HiringGraphQLSearchResolvers {
           SearchFilterSnapshot.Unfiltered,
           results.headOption.map(_.meta.model)
         )(results)(_.job.id.value.toString, _.score)
-      } yield rankedJobResults(SearchResults(results.map(SearchedJob.from), None))
+      } yield rankedJobResults(SearchResults(results.map(SearchedJob.from), None), searchId)
     }
 
   def candidateMatches(
@@ -176,27 +175,20 @@ private[graphql] object HiringGraphQLSearchResolvers {
           SearchFilterSnapshot.ForJob(jobId),
           results.hits.headOption.flatMap(_.model)
         )(results.hits)(_.candidate.id.value.toString, _.score)
-      } yield rankedCandidateResults(results)
+      } yield rankedCandidateResults(results, searchId)
     }
 
-  private def rankedJobResults(found: SearchResults[SearchedJob]): RankedJobResults =
+  private def rankedJobResults(found: SearchResults[SearchedJob], searchId: UUID): RankedJobResults =
     RankedJobResults(
       found.hits.map(value =>
-        RankedJobPayload(
-          value.job,
-          value.score,
-          value.mode,
-          value.model,
-          SearchId(value.searchId),
-          value.matchedSkills,
-          value.retrievalScore
-        )
+        RankedJobPayload(value.job, value.score, value.mode, value.matchedSkills, value.retrievalScore)
       ),
-      found.degraded.isDefined,
+      SearchId(searchId),
+      found.hits.headOption.flatMap(_.model),
       found.degraded.map(degradedReasonCode)
     )
 
-  private def rankedCandidateResults(found: SearchResults[SearchedCandidate]): RankedCandidateResults =
+  private def rankedCandidateResults(found: SearchResults[SearchedCandidate], searchId: UUID): RankedCandidateResults =
     RankedCandidateResults(
       found.hits.map(value =>
         RankedCandidatePayload(
@@ -207,13 +199,12 @@ private[graphql] object HiringGraphQLSearchResolvers {
           ),
           value.score,
           value.mode,
-          value.model,
-          SearchId(value.searchId),
           value.matchedSkills,
           value.retrievalScore
         )
       ),
-      found.degraded.isDefined,
+      SearchId(searchId),
+      found.hits.headOption.flatMap(_.model),
       found.degraded.map(degradedReasonCode)
     )
 

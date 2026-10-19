@@ -143,7 +143,7 @@ final class HiringGraphQLSearchRecordingSpec extends CatsEffectSuite {
 
   private val search =
     s"""query { semanticJobSearch(query: "$queryText", first: 5) {
-       |  ... on RankedJobResults { results { searchId job { id } } } ... on UserError { code } } }""".stripMargin
+       |  ... on RankedJobResults { searchId results { job { id } } } ... on UserError { code } } }""".stripMargin
 
   private def logged(events: Ref[IO, Vector[(LogEvent, Option[String], Map[LogField, String])]]) =
     events.get.map(_.filter(_._1 == LogEvent.SearchRecordingFailed))
@@ -155,9 +155,10 @@ final class HiringGraphQLSearchRecordingSpec extends CatsEffectSuite {
       entries <- logged(events)
     } yield {
       assert(!json.hcursor.downField("errors").succeeded, clue(json))
-      val first = json.hcursor.downField("data").downField("semanticJobSearch").downField("results").downArray
+      val found = json.hcursor.downField("data").downField("semanticJobSearch")
+      val first = found.downField("results").downArray
       assertEquals(first.downField("job").get[String]("id"), Right(job.id.value.toString))
-      assertEquals(first.get[String]("searchId"), Right(searchId.toString))
+      assertEquals(found.get[String]("searchId"), Right(searchId.toString))
       assertEquals(entries.size, 1)
       val (_, requestId, fields) = entries.head
       assertEquals(requestId, Some("req-1"))

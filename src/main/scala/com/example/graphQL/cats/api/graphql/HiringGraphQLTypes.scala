@@ -8,9 +8,13 @@ import com.example.graphQL.cats.api.graphql.HiringGraphQLDsl.{
   describedNames,
   facetsOutcomeUnion,
   outcomeUnion,
+  resultField,
   searchOutcomeUnion
 }
+import com.example.graphQL.cats.api.graphql.QueryAdmission.nestedConnectionComplexity
+import com.example.graphQL.cats.domain.workflow.{InterviewInterval, InterviewRescheduleProposal}
 import com.example.graphQL.cats.service.search.*
+import scala.reflect.ClassTag
 import sangria.schema.*
 import sangria.schema.Action.deferredAction
 
@@ -18,26 +22,45 @@ private[graphql] object HiringGraphQLTypes {
   private[graphql] def simple[T, V](name: String, tpe: OutputType[V])(get: T => V): Field[RequestContext, T] =
     Field(name, tpe, resolve = context => get(context.value))
 
+  lazy val timeSlotType: ObjectType[RequestContext, InterviewInterval] = ObjectType(
+    "TimeSlot",
+    "A span of time, from `startsAt` to `endsAt`.",
+    fields[RequestContext, InterviewInterval](
+      instantField("startsAt", _.startsAt),
+      instantField("endsAt", _.endsAt)
+    )
+  )
+  lazy val rescheduleProposalType: ObjectType[RequestContext, InterviewRescheduleProposal] = ObjectType(
+    "RescheduleProposal",
+    "Another time offered for an interview. Who proposed it is not exposed.",
+    fields[RequestContext, InterviewRescheduleProposal](
+      simple("slot", timeSlotType)(_.interval),
+      instantField("expiresAt", _.expiresAt)
+    )
+  )
   lazy val interviewWorkflowType
       : ObjectType[RequestContext, com.example.graphQL.cats.domain.workflow.InterviewWorkflow] = ObjectType(
     "InterviewWorkflow",
     fields[RequestContext, com.example.graphQL.cats.domain.workflow.InterviewWorkflow](
       simple("id", interviewWorkflowIdType)(_.id),
       simple("applicationId", applicationIdType)(_.applicationId),
-      simple("startsAt", instantType)(_.interval.startsAt),
-      simple("endsAt", instantType)(_.interval.endsAt),
+      resultField(
+        "application",
+        OptionType(applicationType),
+        "The application the interview belongs to, resolved with the same visibility as the application itself; null " +
+          "when the caller may not see it."
+      )(HiringGraphQLApplicationResolvers.workflowApplication),
+      simple("slot", timeSlotType)(_.interval),
       simple("revision", longType)(_.revision),
       simple("progress", interviewProgressType)(_.phase),
       simple("notifiedParticipants", ListType(interviewParticipantType))(_.notified.toList.sortBy(_.ordinal)),
       // The replacement interval held after the candidate accepted a proposal, until the swap settles.
-      simple("pendingStartsAt", OptionType(instantType))(_.pendingInterval.map(_.startsAt)),
-      simple("pendingEndsAt", OptionType(instantType))(_.pendingInterval.map(_.endsAt)),
+      simple("pending", OptionType(timeSlotType))(_.pendingInterval),
       simple("cancelledAt", OptionType(instantType))(_.cancelledAt),
       // The open reschedule proposal, if any. Who proposed it is not exposed.
-      simple("proposedStartsAt", OptionType(instantType))(_.proposal.map(_.interval.startsAt)),
-      simple("proposedEndsAt", OptionType(instantType))(_.proposal.map(_.interval.endsAt)),
-      simple("proposalExpiresAt", OptionType(instantType))(_.proposal.map(_.expiresAt)),
-      simple("rescheduleRequested", BooleanType)(_.rescheduleRequestedAt.nonEmpty)
+      simple("proposal", OptionType(rescheduleProposalType))(_.proposal),
+      // Present while the candidate's request for a different time is open.
+      simple("rescheduleRequestedAt", OptionType(instantType))(_.rescheduleRequestedAt)
     )
   )
   lazy val scheduleInterviewResultType = mutationResultType("ScheduleInterviewResult", interviewWorkflowType)
@@ -49,31 +72,28 @@ private[graphql] object HiringGraphQLTypes {
       "A stable, machine-readable error code; the same strings appear as extensions.code in top-level errors.",
       GraphQLFailureCatalog.errorCodes.map { case (code, description) => (code, code, description) }
     )
+
+  /** The fields every error shares, declared once: the interface and each error type take them from here. */
+  private def userErrorFields[A <: UserError](messageDescription: String): List[Field[RequestContext, A]] =
+    fields[RequestContext, A](
+      Field("code", errorCodeType, description = Some("The stable error code."), resolve = _.value.code),
+      Field("message", StringType, description = Some(messageDescription), resolve = _.value.message)
+    )
+  private val SanitizedMessage = "A sanitized, human-readable message."
   lazy val userErrorType: InterfaceType[RequestContext, UserError] = InterfaceType(
     "UserError",
-    "A refusal returned as data instead of a top-level error.",
-    fields[RequestContext, UserError](
-      Field("code", errorCodeType, description = Some("The stable error code."), resolve = _.value.code),
-      Field(
-        "message",
-        StringType,
-        description = Some("A sanitized, human-readable message."),
-        resolve = _.value.message
-      )
-    )
+    "A refusal returned as data instead of a top-level error. A client reads any mutation or search result with " +
+      "one fragment, `... on UserError { code message }`.",
+    userErrorFields[UserError](SanitizedMessage)
   )
   lazy val validationErrorType: ObjectType[RequestContext, ValidationError] = ObjectType(
     "ValidationError",
     "One or more input fields were invalid.",
     List(PossibleInterface[RequestContext, ValidationError](userErrorType)),
-    fields[RequestContext, ValidationError](
-      Field("code", errorCodeType, description = Some("The stable error code."), resolve = _.value.code),
-      Field(
-        "message",
-        StringType,
-        description = Some("All violated rules, joined into one message."),
-        resolve = _.value.message
-      ),
+    userErrorFields[ValidationError]("All violated rules, joined into one message.") ++ fields[
+      RequestContext,
+      ValidationError
+    ](
       Field(
         "field",
         OptionType(StringType),
@@ -89,14 +109,7 @@ private[graphql] object HiringGraphQLTypes {
     "SearchUnavailable",
     "A search that is valid and permitted but cannot be served right now; sibling fields are unaffected.",
     List(PossibleInterface[RequestContext, SearchUnavailable](userErrorType)),
-    fields[RequestContext, SearchUnavailable](
-      Field("code", errorCodeType, description = Some("The stable error code."), resolve = _.value.code),
-      Field(
-        "message",
-        StringType,
-        description = Some("A sanitized, human-readable message."),
-        resolve = _.value.message
-      ),
+    userErrorFields[SearchUnavailable](SanitizedMessage) ++ fields[RequestContext, SearchUnavailable](
       Field(
         "retryable",
         BooleanType,
@@ -109,14 +122,7 @@ private[graphql] object HiringGraphQLTypes {
     "DomainError",
     "A business rule or authorization refusal.",
     List(PossibleInterface[RequestContext, DomainError](userErrorType)),
-    fields[RequestContext, DomainError](
-      Field("code", errorCodeType, description = Some("The stable error code."), resolve = _.value.code),
-      Field(
-        "message",
-        StringType,
-        description = Some("A sanitized, human-readable message."),
-        resolve = _.value.message
-      ),
+    userErrorFields[DomainError](SanitizedMessage) ++ fields[RequestContext, DomainError](
       Field(
         "retryAfterSeconds",
         OptionType(IntType),
@@ -127,9 +133,12 @@ private[graphql] object HiringGraphQLTypes {
   )
   lazy val pageInfoType: ObjectType[RequestContext, PageInfo] = ObjectType(
     "PageInfo",
+    "Where a page sits in its list.",
     fields[RequestContext, PageInfo](
       simple("hasNextPage", BooleanType)(_.hasNextPage),
-      simple("endCursor", OptionType(StringType))(_.endCursor)
+      simple("hasPreviousPage", BooleanType)(_.hasPreviousPage),
+      simple("startCursor", OptionType(cursorType))(_.startCursor),
+      simple("endCursor", OptionType(cursorType))(_.endCursor)
     )
   )
   lazy val locationType: ObjectType[RequestContext, Location] = ObjectType(
@@ -148,21 +157,21 @@ private[graphql] object HiringGraphQLTypes {
       simple("longitude", FloatType)(_.longitude)
     )
   )
-  lazy val nearbyJobEdgeType: ObjectType[RequestContext, NearbyJobEdge] = ObjectType(
-    "NearbyJobEdge",
-    fields[RequestContext, NearbyJobEdge](
-      simple("node", jobType)(_.node),
-      simple("distanceKm", FloatType)(_.distanceKm),
-      simple("cursor", StringType)(_.cursor)
+  lazy val nearbyJobEdgeType: ObjectType[RequestContext, NearbyJobEdge] =
+    edgeObject[Job, NearbyJobEdge](
+      "NearbyJobEdge",
+      jobType,
+      _.node,
+      _.cursor,
+      List(simple("distanceKm", FloatType)(_.distanceKm))
     )
-  )
-  lazy val nearbyJobsConnectionType: ObjectType[RequestContext, NearbyJobsConnection] = ObjectType(
-    "NearbyJobsConnection",
-    fields[RequestContext, NearbyJobsConnection](
-      simple("edges", ListType(nearbyJobEdgeType))(_.edges),
-      simple("pageInfo", pageInfoType)(_.pageInfo)
+  lazy val nearbyJobsConnectionType: ObjectType[RequestContext, NearbyJobsConnection] =
+    connectionObject[NearbyJobsConnection, NearbyJobEdge](
+      "NearbyJobsConnection",
+      nearbyJobEdgeType,
+      _.edges,
+      _.pageInfo
     )
-  )
   lazy val jobFacetBucketType: ObjectType[RequestContext, com.example.graphQL.cats.service.search.JobFacetBucket] =
     ObjectType(
       "JobFacetBucket",
@@ -182,16 +191,12 @@ private[graphql] object HiringGraphQLTypes {
         simple("remote", ListType(jobFacetBucketType))(_.remote),
         simple("truncated", BooleanType)(_.truncated),
         Field(
-          "coverage",
-          facetCoverageType,
-          resolve = _.value.coverage match {
-            case FacetCoverage.AllMatches    => "ALL_MATCHES"
-            case FacetCoverage.TopMatches(_) => "TOP_MATCHES"
-          }
-        ),
-        Field(
           "coverageLimit",
           OptionType(IntType),
+          description = Some(
+            "Null when the counts cover every matching job; otherwise the counts cover only this many top-ranked " +
+              "matches and are not totals."
+          ),
           resolve = _.value.coverage match {
             case FacetCoverage.AllMatches        => None
             case FacetCoverage.TopMatches(limit) => Some(limit)
@@ -266,32 +271,42 @@ private[graphql] object HiringGraphQLTypes {
   )
   lazy val userType: ObjectType[RequestContext, User] = ObjectType(
     "User",
-    fields[RequestContext, User](
-      simple("id", userIdType)(_.id),
-      Field(
-        "email",
-        OptionType(StringType),
-        resolve = context =>
-          emailVisibilityFetcher
-            .deferOpt(context.value.id)
-            .map(_.flatMap(_ => context.value.email.map(_.value)))(using
-              context.ctx.effectAdapter.deferredExecutionContext
-            )
-      ),
-      simple("name", StringType)(_.name),
-      simple("role", userRole)(_.role),
-      simple("status", userStatus)(_.accountStatus),
-      Field(
-        "profile",
-        OptionType(userProfileType),
-        resolve = context =>
-          context.value.profile.map {
-            case UserProfile.Candidate(profile) => GraphQLUserProfile.Candidate(context.value.id, profile)
-            case UserProfile.Recruiter(profile) => GraphQLUserProfile.Recruiter(profile)
-          }
-      ),
-      instantField("createdAt", _.createdAt)
-    )
+    // Deferred: User, Job and Application reach each other through their connection fields.
+    () =>
+      fields[RequestContext, User](
+        simple("id", userIdType)(_.id),
+        Field(
+          "email",
+          OptionType(StringType),
+          resolve = context =>
+            emailVisibilityFetcher
+              .deferOpt(context.value.id)
+              .map(_.flatMap(_ => context.value.email.map(_.value)))(using
+                context.ctx.effectAdapter.deferredExecutionContext
+              )
+        ),
+        simple("name", StringType)(_.name),
+        simple("role", userRole)(_.role),
+        simple("status", userStatus)(_.accountStatus),
+        Field(
+          "profile",
+          OptionType(userProfileType),
+          resolve = context =>
+            context.value.profile.map {
+              case UserProfile.Candidate(profile) => GraphQLUserProfile.Candidate(context.value.id, profile)
+              case UserProfile.Recruiter(profile) => GraphQLUserProfile.Recruiter(profile)
+            }
+        ),
+        instantField("createdAt", _.createdAt),
+        resultField(
+          "applications",
+          OptionType(applicationConnectionType),
+          "A page of the user's applications, newest first. Only the calling candidate's own account has them (the " +
+            "same list as myApplications); null for any other user, so another account's applications are never read.",
+          firstArgument :: afterArgument :: applicationStatusArgument :: Nil,
+          complexity = Some(nestedConnectionComplexity)
+        )(HiringGraphQLApplicationResolvers.userApplications)
+      )
   )
   lazy val recruiterProfileType: ObjectType[RequestContext, RecruiterProfile] =
     ObjectType(
@@ -303,56 +318,76 @@ private[graphql] object HiringGraphQLTypes {
     )
   lazy val jobType: ObjectType[RequestContext, Job] = ObjectType(
     "Job",
-    fields[RequestContext, Job](
-      simple("id", jobIdType)(_.id),
-      simple("title", StringType)(_.title),
-      simple("description", StringType)(_.description),
-      simple("requirements", ListType(StringType))(_.requirements),
-      Field("skills", ListType(StringType), resolve = _.value.skills.toList.sorted),
-      simple("location", locationType)(_.location),
-      simple("status", jobStatus)(_.status),
-      instantField("createdAt", _.createdAt),
-      instantField("updatedAt", _.updatedAt),
-      Field(
-        "recruiter",
-        OptionType(userType),
-        resolve = context =>
-          usersFetcher
-            .deferOpt(
-              com.example.graphQL.cats.service.read.UserRelationKey
-                .JobRecruiter(context.value.id, context.value.recruiterId)
-            )
-            .map(_.map(_.value))(using context.ctx.effectAdapter.deferredExecutionContext)
+    // Deferred: User, Job and Application reach each other through their connection fields.
+    () =>
+      fields[RequestContext, Job](
+        simple("id", jobIdType)(_.id),
+        simple("title", StringType)(_.title),
+        simple("description", StringType)(_.description),
+        simple("requirements", ListType(StringType))(_.requirements),
+        Field("skills", ListType(StringType), resolve = _.value.skills.toList.sorted),
+        simple("location", locationType)(_.location),
+        simple("status", jobStatus)(_.status),
+        instantField("createdAt", _.createdAt),
+        instantField("updatedAt", _.updatedAt),
+        Field(
+          "recruiter",
+          OptionType(userType),
+          resolve = context =>
+            usersFetcher
+              .deferOpt(
+                com.example.graphQL.cats.service.read.UserRelationKey
+                  .JobRecruiter(context.value.id, context.value.recruiterId)
+              )
+              .map(_.map(_.value))(using context.ctx.effectAdapter.deferredExecutionContext)
+        ),
+        resultField(
+          "applications",
+          applicationConnectionType,
+          "A page of the applications to this job, newest first, optionally of one status. Only the owning recruiter " +
+            "and Admin may read them; anyone else is refused exactly as by jobApplications.",
+          firstArgument :: afterArgument :: applicationStatusArgument :: Nil,
+          complexity = Some(nestedConnectionComplexity)
+        )(HiringGraphQLApplicationResolvers.jobApplicationsOf)
       )
-    )
   )
   lazy val applicationType: ObjectType[RequestContext, Application] = ObjectType(
     "Application",
-    fields[RequestContext, Application](
-      simple("id", applicationIdType)(_.id),
-      simple("status", applicationStatus)(_.status),
-      instantField("createdAt", _.createdAt),
-      instantField("updatedAt", _.updatedAt),
-      Field(
-        "candidate",
-        OptionType(userType),
-        resolve = context =>
-          usersFetcher
-            .deferOpt(
-              com.example.graphQL.cats.service.read.UserRelationKey
-                .ApplicationCandidate(context.value.id, context.value.candidateId)
-            )
-            .map(_.map(_.value))(using context.ctx.effectAdapter.deferredExecutionContext)
-      ),
-      Field(
-        "job",
-        OptionType(jobType),
-        resolve = context =>
-          jobsFetcher
-            .deferOpt(com.example.graphQL.cats.service.read.JobRelationKey(context.value.id, context.value.jobId))
-            .map(_.map(_.value))(using context.ctx.effectAdapter.deferredExecutionContext)
+    // Deferred: User, Job and Application reach each other through their connection fields.
+    () =>
+      fields[RequestContext, Application](
+        simple("id", applicationIdType)(_.id),
+        simple("status", applicationStatus)(_.status),
+        instantField("createdAt", _.createdAt),
+        instantField("updatedAt", _.updatedAt),
+        Field(
+          "candidate",
+          OptionType(userType),
+          resolve = context =>
+            usersFetcher
+              .deferOpt(
+                com.example.graphQL.cats.service.read.UserRelationKey
+                  .ApplicationCandidate(context.value.id, context.value.candidateId)
+              )
+              .map(_.map(_.value))(using context.ctx.effectAdapter.deferredExecutionContext)
+        ),
+        Field(
+          "job",
+          OptionType(jobType),
+          resolve = context =>
+            jobsFetcher
+              .deferOpt(com.example.graphQL.cats.service.read.JobRelationKey(context.value.id, context.value.jobId))
+              .map(_.map(_.value))(using context.ctx.effectAdapter.deferredExecutionContext)
+        ),
+        resultField(
+          "events",
+          applicationEventConnectionType,
+          "A page of the append-only status history of this application, the same list and visibility as applicationHistory: " +
+            "to its candidate, the owning recruiter and Admin.",
+          firstArgument :: afterArgument :: Nil,
+          complexity = Some(nestedConnectionComplexity)
+        )(HiringGraphQLApplicationResolvers.applicationEventsOf)
       )
-    )
   )
   lazy val applicationEventType: ObjectType[RequestContext, ApplicationEvent] =
     ObjectType(
@@ -378,14 +413,14 @@ private[graphql] object HiringGraphQLTypes {
     connectionType("ApplicationConnection", applicationEdgeType)
   lazy val applicationEventConnectionType: ObjectType[RequestContext, Connection[ApplicationEvent]] =
     connectionType("ApplicationEventConnection", applicationEventEdgeType)
-  lazy val jobSearchConnectionType: ObjectType[RequestContext, JobSearchConnection] = ObjectType(
-    "JobSearchConnection",
-    fields[RequestContext, JobSearchConnection](
-      simple("edges", ListType(jobEdgeType))(_.connection.edges),
-      simple("pageInfo", pageInfoType)(_.connection.pageInfo),
-      simple("searchId", searchIdType)(_.searchId)
+  lazy val jobSearchConnectionType: ObjectType[RequestContext, JobSearchConnection] =
+    connectionObject[JobSearchConnection, Edge[Job]](
+      "JobSearchConnection",
+      jobEdgeType,
+      _.edges,
+      _.pageInfo,
+      List(simple("searchId", searchIdType)(_.searchId))
     )
-  )
   lazy val userEdgeType: ObjectType[RequestContext, Edge[User]] = edgeType("UserEdge", userType)
   lazy val userConnectionType: ObjectType[RequestContext, Connection[User]] =
     connectionType("UserConnection", userEdgeType)
@@ -410,66 +445,67 @@ private[graphql] object HiringGraphQLTypes {
       "InteractionSuccess",
       fields[RequestContext, InteractionSuccess](simple("eventId", uuidType)(_.eventId))
     )
-  lazy val rankedJobType: ObjectType[RequestContext, RankedJobPayload] = ObjectType(
-    "RankedJob",
-    fields[RequestContext, RankedJobPayload](
-      simple("job", jobType)(_.job),
+  private def scoredHitFields[A <: ScoredHit]: List[Field[RequestContext, A]] =
+    fields[RequestContext, A](
       simple("score", FloatType)(_.score),
       simple("searchMode", searchMode)(_.searchMode),
-      simple("model", OptionType(StringType))(_.model),
-      simple("searchId", searchIdType)(_.searchId),
       Field("matchedSkills", ListType(StringType), resolve = _.value.matchedSkills),
       simple("retrievalScore", OptionType(FloatType))(_.retrievalScore)
     )
+  lazy val scoredHitType: InterfaceType[RequestContext, ScoredHit] = InterfaceType(
+    "ScoredHit",
+    "What every ranked search hit carries, whatever it ranks.",
+    scoredHitFields[ScoredHit]
+  )
+  lazy val rankedJobType: ObjectType[RequestContext, RankedJobPayload] = ObjectType(
+    "RankedJob",
+    List(PossibleInterface[RequestContext, RankedJobPayload](scoredHitType)),
+    simple[RankedJobPayload, Job]("job", jobType)(_.job) :: scoredHitFields[RankedJobPayload]
   )
   lazy val rankedCandidateType: ObjectType[RequestContext, RankedCandidatePayload] =
     ObjectType(
       "RankedCandidate",
-      fields[RequestContext, RankedCandidatePayload](
-        simple("candidate", candidateMatchCandidateType)(_.candidate),
-        simple("score", FloatType)(_.score),
-        simple("searchMode", searchMode)(_.searchMode),
-        simple("model", OptionType(StringType))(_.model),
-        simple("searchId", searchIdType)(_.searchId),
-        Field("matchedSkills", ListType(StringType), resolve = _.value.matchedSkills),
-        simple("retrievalScore", OptionType(FloatType))(_.retrievalScore)
-      )
+      List(PossibleInterface[RequestContext, RankedCandidatePayload](scoredHitType)),
+      simple[RankedCandidatePayload, CandidateMatchCandidate]("candidate", candidateMatchCandidateType)(_.candidate) ::
+        scoredHitFields[RankedCandidatePayload]
     )
-  private def degradedField[A](get: A => Boolean): Field[RequestContext, A] =
-    Field(
-      "degraded",
-      BooleanType,
-      description = Some(
-        "True when the semantic ranking was unavailable and these are keyword (LEXICAL) results; their relevance is " +
-          "not comparable with normal results."
+  private def searchResultFields[A](
+      searchId: A => SearchId,
+      model: A => Option[String],
+      degradedReason: A => Option[String]
+  ): List[Field[RequestContext, A]] =
+    fields[RequestContext, A](
+      simple("searchId", searchIdType)(searchId),
+      Field(
+        "model",
+        OptionType(StringType),
+        description = Some("The embedding model that ranked the results; null for keyword (LEXICAL) results."),
+        resolve = context => model(context.value)
       ),
-      resolve = context => get(context.value)
-    )
-  private def degradedReasonField[A](get: A => Option[String]): Field[RequestContext, A] =
-    Field(
-      "degradedReason",
-      OptionType(errorCodeType),
-      description =
-        Some("Why the results are degraded (PROVIDER_UNAVAILABLE or VECTOR_SEARCH_UNAVAILABLE); null otherwise."),
-      resolve = context => get(context.value)
+      Field(
+        "degradedReason",
+        OptionType(errorCodeType),
+        description = Some(
+          "Set when the semantic ranking was unavailable and these are keyword (LEXICAL) results, whose relevance is " +
+            "not comparable with normal results: PROVIDER_UNAVAILABLE or VECTOR_SEARCH_UNAVAILABLE. Null otherwise."
+        ),
+        resolve = context => degradedReason(context.value)
+      )
     )
   lazy val rankedJobResultsType: ObjectType[RequestContext, RankedJobResults] =
     ObjectType(
       "RankedJobResults",
       fields[RequestContext, RankedJobResults](
-        simple("results", ListType(rankedJobType))(_.results),
-        degradedField(_.degraded),
-        degradedReasonField(_.degradedReason)
-      )
+        Field("results", ListType(rankedJobType), resolve = _.value.results)
+      ) ++
+        searchResultFields[RankedJobResults](_.searchId, _.model, _.degradedReason)
     )
   lazy val rankedCandidateResultsType: ObjectType[RequestContext, RankedCandidateResults] =
     ObjectType(
       "RankedCandidateResults",
       fields[RequestContext, RankedCandidateResults](
-        simple("results", ListType(rankedCandidateType))(_.results),
-        degradedField(_.degraded),
-        degradedReasonField(_.degradedReason)
-      )
+        Field("results", ListType(rankedCandidateType), resolve = _.value.results)
+      ) ++ searchResultFields[RankedCandidateResults](_.searchId, _.model, _.degradedReason)
     )
 
   lazy val createJobResultType: OutputType[MutationOutcome[Job]] = mutationResultType("CreateJobResult", jobType)
@@ -501,26 +537,46 @@ private[graphql] object HiringGraphQLTypes {
   lazy val recordSearchResultClickResultType: OutputType[MutationOutcome[InteractionSuccess]] =
     mutationResultType("RecordSearchResultClickResult", interactionSuccessType)
 
-  private def edgeType[A](name: String, nodeType: OutputType[A]): ObjectType[RequestContext, Edge[A]] =
+  /** An edge type: the `node`, the `cursor`, and any extra fields of this kind of edge. */
+  private def edgeObject[N, E: ClassTag](
+      name: String,
+      nodeType: OutputType[N],
+      node: E => N,
+      cursor: E => String,
+      extra: List[Field[RequestContext, E]] = Nil
+  ): ObjectType[RequestContext, E] =
     ObjectType(
       name,
-      fields[RequestContext, Edge[A]](
-        simple("node", nodeType)(_.node),
-        simple("cursor", StringType)(_.cursor)
-      )
+      fields[RequestContext, E](simple("node", nodeType)(node), simple("cursor", cursorType)(cursor)) ++ extra
     )
+
+  /** A connection type: `edges`, `pageInfo`, and any extra fields of this kind of list. Every list field is built here,
+    * so all of them page the same way.
+    */
+  private def connectionObject[C: ClassTag, E](
+      name: String,
+      edgeType: OutputType[E],
+      edges: C => List[E],
+      pageInfo: C => PageInfo,
+      extra: List[Field[RequestContext, C]] = Nil
+  ): ObjectType[RequestContext, C] =
+    ObjectType(
+      name,
+      fields[RequestContext, C](
+        simple("edges", ListType(edgeType))(edges),
+        simple("pageInfo", pageInfoType)(pageInfo)
+      ) ++
+        extra
+    )
+
+  private def edgeType[A](name: String, nodeType: OutputType[A]): ObjectType[RequestContext, Edge[A]] =
+    edgeObject[A, Edge[A]](name, nodeType, _.node, _.cursor)
 
   private def connectionType[A](
       name: String,
       edgeType: OutputType[Edge[A]]
   ): ObjectType[RequestContext, Connection[A]] =
-    ObjectType(
-      name,
-      fields[RequestContext, Connection[A]](
-        simple("edges", ListType(edgeType))(_.edges),
-        simple("pageInfo", pageInfoType)(_.pageInfo)
-      )
-    )
+    connectionObject[Connection[A], Edge[A]](name, edgeType, _.edges, _.pageInfo)
 
   private def searchResultType[A](
       name: String,

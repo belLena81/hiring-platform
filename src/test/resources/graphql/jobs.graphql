@@ -1,31 +1,32 @@
-query OpenJobs($filter: JobFilter, $first: Int!, $after: String, $searchId: SearchID) {
+query OpenJobs($filter: JobFilter, $first: Int!, $after: Cursor, $searchId: SearchID) {
   jobs(filter: $filter, first: $first, after: $after, searchId: $searchId) {
     searchId
     edges {
       cursor
       node { id title skills location { country city remote } status createdAt }
     }
-    pageInfo { hasNextPage endCursor }
+    pageInfo { hasNextPage hasPreviousPage startCursor endCursor }
   }
 }
 
-query NearbyJobs($center: GeoPointInput!, $radiusKm: Float!, $filter: JobFilter, $first: Int!, $after: String) {
+query NearbyJobs($center: GeoPointInput!, $radiusKm: Float!, $filter: JobFilter, $first: Int!, $after: Cursor) {
   nearbyJobs(center: $center, radiusKm: $radiusKm, filter: $filter, first: $first, after: $after) {
     edges {
       cursor
       distanceKm
       node { id title location { country city remote coordinates { latitude longitude } } }
     }
-    pageInfo { hasNextPage endCursor }
+    pageInfo { hasNextPage hasPreviousPage startCursor endCursor }
   }
 }
 
 query SemanticJobs($query: String!, $filter: JobFilter, $first: Int!, $searchId: SearchID) {
   semanticJobSearch(query: $query, filter: $filter, first: $first, searchId: $searchId) {
     ... on RankedJobResults {
-      degraded
+      searchId
+      model
       degradedReason
-      results { searchId score searchMode model matchedSkills retrievalScore job { id title } }
+      results { score searchMode matchedSkills retrievalScore job { id title } }
     }
     ... on SearchUnavailable { code message retryable }
     ... on ValidationError { code message field }
@@ -36,9 +37,10 @@ query SemanticJobs($query: String!, $filter: JobFilter, $first: Int!, $searchId:
 query CandidateMatches($jobId: JobID!, $first: Int!) {
   candidateMatches(jobId: $jobId, first: $first) {
     ... on RankedCandidateResults {
-      degraded
+      searchId
+      model
       degradedReason
-      results { searchId score candidate { id name profile { skills experienceSummary } } }
+      results { score searchMode candidate { id name profile { skills experienceSummary } } }
     }
     ... on SearchUnavailable { code message retryable }
     ... on ValidationError { code message field }

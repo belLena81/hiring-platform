@@ -1,10 +1,10 @@
-query ApplicationHistory($applicationId: ApplicationID!, $first: Int!, $after: String) {
+query ApplicationHistory($applicationId: ApplicationID!, $first: Int!, $after: Cursor) {
   applicationHistory(applicationId: $applicationId, first: $first, after: $after) {
     edges {
       cursor
       node { id previousStatus newStatus actorRole occurredAt feedback reason }
     }
-    pageInfo { hasNextPage endCursor }
+    pageInfo { hasNextPage hasPreviousPage startCursor endCursor }
   }
 }
 

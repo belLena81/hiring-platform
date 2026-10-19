@@ -238,6 +238,8 @@ Recommendation: **(a)**. It is the only option that keeps the existing authorita
   jobDiscoveryFacets(query: String, filter: JobFilter, center: GeoPointInput, radiusKm: Float): JobDiscoveryFacets!
   ```
 
+  > Superseded (graph access slice, 2026-10-19): the `FacetCoverage` enum and the `coverage` field below were removed; `coverageLimit` alone is the label (null = every match counted, a number = top matches only). Read `coverage = ALL_MATCHES` as `coverageLimit` null and `TOP_MATCHES` as `coverageLimit` set.
+
   `JobDiscoveryFacets` gains two additive fields; existing fields keep their meaning (`truncated` stays bucket truncation only):
 
   ```graphql

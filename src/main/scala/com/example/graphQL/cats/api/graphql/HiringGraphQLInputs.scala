@@ -1,7 +1,7 @@
 package com.example.graphQL.cats.api.graphql
 
 import cats.syntax.either.*
-import com.example.graphQL.cats.api.graphql.HiringGraphQLDsl.{describedEnum, describedNames}
+import com.example.graphQL.cats.api.graphql.HiringGraphQLDsl.describedEnum
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.*
 import com.example.graphQL.cats.domain.model.Identifiers.{
   ApplicationEventId,
@@ -135,6 +135,14 @@ private[graphql] object HiringGraphQLInputs {
       value => Parsing.parseUuid(value).toOption.map(SearchId.apply),
       _.value
     )
+  lazy val cursorType: ScalarType[String] =
+    stringScalar(
+      "Cursor",
+      "An opaque, signed position in a list. Pass the `endCursor` of a page as `after` to get the next page; do not " +
+        "parse, build or store it long term (it stops working after a limited time).",
+      value => Right(value),
+      identity
+    )
   lazy val deletionReceiptIdType: ScalarType[String] =
     stringScalar(
       "DeletionReceiptID",
@@ -235,16 +243,6 @@ private[graphql] object HiringGraphQLInputs {
       case InterviewParticipant.Candidate => "The candidate."
       case InterviewParticipant.Recruiter => "The recruiter."
     }
-  lazy val facetCoverageType: EnumType[String] =
-    describedNames(
-      "FacetCoverage",
-      "How much of the match set the facet counts cover.",
-      List(
-        ("ALL_MATCHES", "ALL_MATCHES", "Counts cover every match."),
-        ("TOP_MATCHES", "TOP_MATCHES", "Counts cover only the top matches; see coverageLimit.")
-      )
-    )
-
   // --- Interview inputs -------------------------------------------------------------------------------------------
 
   lazy val scheduleInterviewInputType: InputObjectType[ScheduleInterviewGraphQLInput] =
@@ -304,7 +302,7 @@ private[graphql] object HiringGraphQLInputs {
     Argument("applicationId", applicationIdType, "The application.")
   lazy val firstArgument: Argument[Int] = Argument("first", IntType, "The page size; between 1 and 100.")
   lazy val afterArgument: Argument[Option[String]] =
-    Argument("after", OptionInputType(StringType), "The cursor of the last item of the previous page.")
+    Argument("after", OptionInputType(cursorType), "The cursor of the last item of the previous page.")
   lazy val analyticsFromArgument: Argument[Instant] =
     Argument("from", instantType, "Start of the reporting period (inclusive).")
   lazy val analyticsToArgument: Argument[Instant] =

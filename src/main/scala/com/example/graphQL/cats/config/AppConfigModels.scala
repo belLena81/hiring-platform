@@ -294,7 +294,7 @@ final case class JwtAuthConfig(
     issuer: String,
     audience: String,
     accessTokenSeconds: Long = 900L,
-    cursorTtlSeconds: Long = 900L,
+    cursorTtlSeconds: Long = 86400L,
     receiptFingerprintSecret: Option[String] = None
 ) {
 
