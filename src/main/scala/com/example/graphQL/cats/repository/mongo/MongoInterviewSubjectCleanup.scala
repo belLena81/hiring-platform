@@ -93,13 +93,9 @@ final class MongoInterviewSubjectCleanup(
   private def hasAttributableData(subject: UserId, session: Option[ClientSession[IO]]): RepositoryF[IO, Boolean] =
     RepositoryF
       .lift(
-        MongoInterviewFields.EvidenceCollections
-          .traverse(name =>
-            MongoSessionOperations.findOne(
-              Mongo4catsCollections.documents(database, name),
-              session,
-              subjectFilter(subject.value.toString)
-            )
+        subjectTargets(subject.value.toString)
+          .traverse((name, predicate) =>
+            MongoSessionOperations.findOne(Mongo4catsCollections.documents(database, name), session, predicate)
           )
           .map(_.exists(_.nonEmpty))
       )
@@ -277,17 +273,30 @@ final class MongoInterviewSubjectCleanup(
     purgeData(subject.value.toString)
   }
 
-  private def subjectFilter(subject: String): MongoFilter = MongoFilter.or(
-    MongoFilter.eq("initiatedBy", subject),
-    MongoFilter.eq("candidateId", subject),
-    MongoFilter.eq("recruiterId", subject),
-    MongoFilter.eq("recipientId", subject),
-    MongoFilter.eq("subjectIds", subject),
-    MongoFilter.eq("participants", subject),
-    // Request receipts retain their initiating subject in this existing intrinsic identity after workflow TTL.
-    MongoFilter.and(
-      MongoFilter.gte(MongoFields.Id, s"request:$subject:"),
-      MongoFilter.lt(MongoFields.Id, s"request:$subject;")
+  /** One indexed predicate per collection that names a subject; every stored shape has a single writer.
+    *   - workflows: a subject is the workflow's candidate or recruiter (the initiator is that recruiter or the
+    *     undeletable Admin), served by the existing `candidateId` and `recruiterId` indexes. Request receipts keep the
+    *     initiating subject in their `request:<subject>:` `_id`, served by the primary key. They remain after the
+    *     workflow's TTL.
+    *   - reservations: `participants` holds both parties, the prefix of the participants index.
+    *   - notification receipts: `recipientId`, the prefix of the recipient index.
+    *   - inbox: only hiring receipts name subjects, via the partial hiring-receipt index. Other inbox rows and every
+    *     command row are reached through `workflowId`.
+    */
+  private def subjectTargets(subject: String): List[(String, MongoFilter)] = List(
+    MongoCollections.InterviewWorkflows -> MongoFilter.or(
+      MongoFilter.eq(MongoFields.CandidateId, subject),
+      MongoFilter.eq(MongoFields.RecruiterId, subject),
+      MongoFilter.and(
+        MongoFilter.gte(MongoFields.Id, s"request:$subject:"),
+        MongoFilter.lt(MongoFields.Id, s"request:$subject;")
+      )
+    ),
+    MongoCollections.InterviewCalendarReservations -> MongoFilter.eq("participants", subject),
+    MongoCollections.InterviewNotificationReceipts -> MongoFilter.eq("recipientId", subject),
+    MongoCollections.InterviewWorkflowInbox -> MongoFilter.and(
+      MongoFilter.eq(MongoInterviewFields.DocumentTypeField, MongoInterviewFields.HiringReceiptType),
+      MongoFilter.eq(MongoFields.SubjectIds, subject)
     )
   )
 
@@ -300,7 +309,7 @@ final class MongoInterviewSubjectCleanup(
     * again. Live holds are confirm-cancelled before any local evidence of them is removed.
     */
   private def purgeData(subject: String): RepositoryF[IO, Unit] = {
-    val subjectPredicate = subjectFilter(subject)
+    val targets = subjectTargets(subject)
     def deleteLinked(ids: List[String]): IO[Unit] = {
       // Retain unselected attribution until its linked children have been purged.
       val byWorkflow = MongoFilter.in("workflowId", ids)
@@ -326,16 +335,15 @@ final class MongoInterviewSubjectCleanup(
     def batch: RepositoryF[IO, Unit] =
       RepositoryF
         .lift(
-          List(
-            MongoCollections.InterviewWorkflows,
-            MongoCollections.InterviewCalendarReservations,
-            MongoCollections.InterviewNotificationReceipts
-          ).traverse(name =>
-            Mongo4catsCollections
-              .documents(database, name)
-              .flatMap(_.find(subjectPredicate.bson).limit(128).all)
-              .map(_.toList)
-          ).map(_.flatten)
+          targets
+            .filterNot((name, _) => name == MongoCollections.InterviewWorkflowInbox)
+            .traverse((name, predicate) =>
+              Mongo4catsCollections
+                .documents(database, name)
+                .flatMap(_.find(predicate.bson).limit(128).all)
+                .map(_.toList)
+            )
+            .map(_.flatten)
         )
         .flatMap { found =>
           val ids = found
@@ -349,14 +357,11 @@ final class MongoInterviewSubjectCleanup(
           else releaseLiveHolds(ids) *> RepositoryF.lift(deleteLinked(ids)) *> batch
         }
     batch *> RepositoryF.lift(
-      List(
-        MongoCollections.InterviewWorkflowCommands,
-        MongoCollections.InterviewWorkflowInbox,
-        MongoCollections.InterviewCalendarReservations,
-        MongoCollections.InterviewNotificationReceipts
-      )
-        .traverse_(name =>
-          Mongo4catsCollections.documents(database, name).flatMap(_.deleteMany(subjectPredicate.bson)).void
+      // The loop above ended with no workflow left; orphan reservations, receipts and hiring receipts remain.
+      targets
+        .filterNot((name, _) => name == MongoCollections.InterviewWorkflows)
+        .traverse_((name, predicate) =>
+          Mongo4catsCollections.documents(database, name).flatMap(_.deleteMany(predicate.bson)).void
         ) *>
         Mongo4catsCollections
           .documents(database, MongoCollections.InterviewCalendarParticipantLocks)

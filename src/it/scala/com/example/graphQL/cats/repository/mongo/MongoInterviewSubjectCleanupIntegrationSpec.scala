@@ -803,7 +803,10 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
             .append("recipientId", subject.value.toString)
         case CleanupAttribution.Workflow =>
           MongoCollections.InterviewWorkflows -> new Document("_id", id)
+            .append("documentType", "workflow")
             .append("candidateId", subject.value.toString)
+            .append("recruiterId", UUID.randomUUID().toString)
+            .append("subjectIds", java.util.List.of(subject.value.toString))
       }
       val children = List(
         MongoCollections.InterviewWorkflowCommands -> new Document("_id", s"$id:command")
@@ -844,6 +847,33 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
         )
         preserved <- cleanupCounts(fixture.database)
         _ <- seedCleanupData(fixture.database, subject, ids, Set(CleanupAttribution.RequestReceipt))
+        _ <- cleanup.enqueue(subject, Instant.now(), None).value.flatMap(result => IO(assert(result.isRight)))
+        _ <- List.fill(4)(()).traverse_(_ => step(cleanup, passed = true))
+        complete <- cleanup.complete(subject)
+        remaining <- cleanupCounts(fixture.database)
+      } yield {
+        assert(complete)
+        assertEquals(remaining, preserved)
+      }
+    }
+  }
+
+  test("MSC-02.1 a workflow alone attributes its linked children to the subject and preserves another subject") {
+    mongoResource.use { fixture =>
+      val subject = UserId(UUID.randomUUID())
+      val other = UserId(UUID.randomUUID())
+      val ids = Vector.fill(137)(UUID.randomUUID().toString)
+      val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
+      for {
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
+        _ <- seedCleanupData(
+          fixture.database,
+          other,
+          Vector(UUID.randomUUID().toString),
+          Set(CleanupAttribution.Workflow)
+        )
+        preserved <- cleanupCounts(fixture.database)
+        _ <- seedCleanupData(fixture.database, subject, ids, Set(CleanupAttribution.Workflow))
         _ <- cleanup.enqueue(subject, Instant.now(), None).value.flatMap(result => IO(assert(result.isRight)))
         _ <- List.fill(4)(()).traverse_(_ => step(cleanup, passed = true))
         complete <- cleanup.complete(subject)

@@ -7,6 +7,9 @@ private[mongo] object MongoInterviewFields {
   val WorkflowIdField = "workflowId"
   val RevisionField = "revision"
   val DocumentTypeField = "documentType"
+
+  /** `documentType` of the inbox receipt that records the committed hiring status of one workflow. */
+  val HiringReceiptType = "hiringReceipt"
   val RequestFingerprintField = "requestFingerprint"
   val RequestWorkflowField = "requestWorkflowId"
   val MessageIdField = "messageId"

@@ -57,6 +57,15 @@ private[mongo] object MongoHiringIndexSetup {
     new IndexOptions().name(InterviewWorkflowRequestReceipt).sparse(true)
   )
 
+  /** Erasure finds a subject's hiring receipts here, including receipts whose workflow already expired. */
+  val interviewHiringReceiptSubjectsIndex: IndexSpec = IndexSpec(
+    MongoCollections.InterviewWorkflowInbox,
+    Indexes.ascending(MongoFields.SubjectIds),
+    new IndexOptions()
+      .name(InterviewWorkflowInboxHiringSubjects)
+      .partialFilterExpression(Filters.eq(MongoFields.DocumentType, MongoInterviewFields.HiringReceiptType))
+  )
+
   private val indexSpecs: List[IndexSpec] = List(
     IndexSpec(
       MongoCollections.InterviewSubjectCleanup,
@@ -281,11 +290,6 @@ private[mongo] object MongoHiringIndexSetup {
     ),
     IndexSpec(
       MongoCollections.ConsumerReceipts,
-      Indexes.ascending(MongoFields.ConsumerGroup, MongoFields.EventId),
-      new IndexOptions().name(ConsumerReceiptsId).unique(true)
-    ),
-    IndexSpec(
-      MongoCollections.ConsumerReceipts,
       Indexes.ascending(MongoFields.ExpiresAt),
       new IndexOptions().name(ConsumerReceiptsExpiry).expireAfter(0L, TimeUnit.SECONDS)
     ),
@@ -352,6 +356,7 @@ private[mongo] object MongoHiringIndexSetup {
     ),
     interviewCommandDueIndex,
     interviewRequestReceiptIndex,
+    interviewHiringReceiptSubjectsIndex,
     IndexSpec(
       MongoCollections.InterviewWorkflowCommands,
       Indexes.ascending("commandState", "claimUntil", MongoFields.Id),

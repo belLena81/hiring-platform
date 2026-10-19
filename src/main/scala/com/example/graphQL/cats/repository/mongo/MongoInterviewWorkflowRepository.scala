@@ -20,7 +20,6 @@ import com.example.graphQL.cats.service.events.OperationalEvents
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.RepositoryError
 import mongo4cats.client.ClientSession
-import org.bson.Document
 
 import java.time.Instant
 import java.util.UUID
@@ -180,11 +179,7 @@ final class MongoInterviewWorkflowRepository(
                 _ <- insert(
                   session,
                   inbox,
-                  new Document(MongoFields.Id, receiptId)
-                    .append(WorkflowIdField, workflow.id.value.toString)
-                    .append("candidateId", workflow.candidateId.value.toString)
-                    .append("recruiterId", workflow.recruiterId.value.toString)
-                    .append(MongoFields.OccurredAt, now.toDate)
+                  hiringReceiptDocument(receiptId, workflow.id, workflow.candidateId, workflow.recruiterId, now)
                 )
                 next <- RepositoryF
                   .at[IO]

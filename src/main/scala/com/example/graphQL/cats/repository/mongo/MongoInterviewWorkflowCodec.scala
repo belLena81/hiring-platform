@@ -76,6 +76,20 @@ private[mongo] object MongoInterviewWorkflowCodec {
       .append(RevisionField, revision)
       .append(MongoFields.OccurredAt, at.toDate)
 
+  /** The hiring receipt names its subjects so erasure finds it without the workflow, which may have expired. */
+  def hiringReceiptDocument(
+      id: String,
+      workflowId: InterviewWorkflowId,
+      candidateId: UserId,
+      recruiterId: UserId,
+      at: Instant
+  ): Document =
+    new Document(MongoFields.Id, id)
+      .append(DocumentTypeField, HiringReceiptType)
+      .append(WorkflowIdField, workflowId.value.toString)
+      .append(MongoFields.SubjectIds, List(candidateId.value.toString, recruiterId.value.toString).distinct.asJava)
+      .append(MongoFields.OccurredAt, at.toDate)
+
   def commandDocument(record: InterviewWorkflowCommandRecord): Document =
     commandEnvelope(
       record.workflowId,
