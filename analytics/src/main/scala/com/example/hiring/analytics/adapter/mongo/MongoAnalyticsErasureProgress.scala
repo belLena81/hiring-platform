@@ -6,12 +6,12 @@ import com.example.hiring.analytics.errors.AnalyticsErrorTranslation.translating
 import com.example.hiring.analytics.service.erasure.*
 
 import cats.data.EitherT
-import cats.effect.{Async, Clock, Resource}
+import cats.effect.{Async, Clock, Ref, Resource}
 import cats.syntax.all.*
 import mongo4cats.client.MongoClient
 import mongo4cats.collection.MongoCollection
 import mongo4cats.database.MongoDatabase
-import com.mongodb.client.model.{Filters, Projections, Updates}
+import com.mongodb.client.model.{Filters, IndexOptions, Indexes, Projections, Updates}
 import com.mongodb.client.model.{ReplaceOneModel, ReplaceOptions, WriteModel}
 
 import java.time.Instant
@@ -23,6 +23,7 @@ final class MongoAnalyticsErasureProgress[F[_]: Async] private (
     client: MongoClient[F],
     requests: MongoCollection[F, AnalyticsMongoRecords.ErasureRequest],
     deltaEvidence: MongoCollection[F, AnalyticsMongoRecords.DeltaFileEvidence],
+    evidenceIndexed: Ref[F, Boolean],
     streams: MongoPublisherStream
 ) extends MongoAnalyticsErasureStoreSupport[F](streams)
     with ErasureProgress[F] {
@@ -56,6 +57,17 @@ final class MongoAnalyticsErasureProgress[F[_]: Async] private (
         ).map(toErasureUpdate)
       }
 
+  /** Repeatable provisioning of the request lookup index, performed once per process before evidence is touched. A
+    * failure is not remembered, so the next call retries.
+    */
+  private def ensureEvidenceIndex: F[Unit] =
+    evidenceIndexed.get.flatMap { done =>
+      if (done) Async[F].unit
+      else
+        mongo(MongoAnalyticsErasureProgress.ensureRequestIndex(deltaEvidence, streams))
+          *> evidenceIndexed.set(true)
+    }
+
   /** Stores exact pre-purge Delta file identities before the rewrite can invalidate them. */
 
   def persistDeltaFiles(claim: ErasureClaim, files: Vector[String], now: Instant): F[ErasureUpdate] =
@@ -75,7 +87,7 @@ final class MongoAnalyticsErasureProgress[F[_]: Async] private (
         ): WriteModel[AnalyticsMongoRecords.DeltaFileEvidence]
       }.asJava
 
-      mongo {
+      ensureEvidenceIndex *> mongo {
         client.startSession.use { session =>
           streams
             .transaction(session) {
@@ -100,7 +112,7 @@ final class MongoAnalyticsErasureProgress[F[_]: Async] private (
     }
 
   def readDeltaFiles(requestId: AccountSubjectId): F[Vector[String]] =
-    mongo {
+    ensureEvidenceIndex *> mongo {
       streams
         .stream(capacity =>
           deltaEvidence
@@ -244,6 +256,24 @@ final class MongoAnalyticsErasureProgress[F[_]: Async] private (
 }
 
 object MongoAnalyticsErasureProgress {
+
+  /** The analytics build alone writes and reads this collection, so it owns the request lookup index. */
+  val DeltaEvidenceRequestIndex = "analytics_erasure_delta_files_request_v1"
+
+  /** Idempotent index provisioning; call outside any transaction. */
+  def ensureRequestIndex[F[_]: Async](
+      evidence: MongoCollection[F, AnalyticsMongoRecords.DeltaFileEvidence],
+      streams: MongoPublisherStream
+  ): F[Unit] =
+    streams
+      .one(
+        evidence.underlying.createIndex(
+          Indexes.ascending(AnalyticsCollections.Fields.RequestId),
+          new IndexOptions().name(DeltaEvidenceRequestIndex)
+        )
+      )
+      .void
+
   def resource[F[_]: Async](
       client: MongoClient[F],
       database: MongoDatabase[F],
@@ -263,5 +293,6 @@ object MongoAnalyticsErasureProgress {
           AnalyticsMongoRecords.deltaFileEvidenceRegistry
         )
       )
-    } yield new MongoAnalyticsErasureProgress(client, requests, deltaEvidence, streams)
+      indexed <- Resource.eval(Ref.of[F, Boolean](false))
+    } yield new MongoAnalyticsErasureProgress(client, requests, deltaEvidence, indexed, streams)
 }
