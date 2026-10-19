@@ -155,17 +155,7 @@ final class MongoInterviewWorkflowRepository(
                   )
                 (updated, change) = transition
                 _ <- touchJobOwner(session, updated.jobId.value.toString, workflow.recruiterId)
-                _ <- participantsOf(workflow).distinct.traverse_(id =>
-                  guardWrite(
-                    users,
-                    session,
-                    MongoFilter.and(
-                      MongoFilter.eq(MongoFields.Id, id.value.toString),
-                      MongoFilter.eq(MongoFields.AccountStatus, "Active")
-                    ),
-                    MongoUpdate.inc(MongoFields.Version, 1L)
-                  )
-                )
+                _ <- fenceParticipants(session, workflow)
                 _ <- writeApplicationStatus(session, workflow.applicationId, change.previousStatus, updated)
                 eventId = StableIds.uuid(s"${workflow.id.value}:status")
                 statusEvent = ApplicationEvent(

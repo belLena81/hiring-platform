@@ -139,7 +139,7 @@
 
 | ID | Criterion | Implementation and test paths | Verification | Actual outcome |
 |---|---|---|---|---|
-| MSC-01 (01.1–01.5) | Content revision and fences are separate | Not implemented | Integration tests; update ARR-03.1/03.2 (`ApplicationSubmissionRaceIntegrationSpec`) and DHW-16 (`InterviewCancellationCommitIntegrationSpec`) | Not run |
+| MSC-01 (01.1–01.5) | Content revision and fences are separate | Implemented under `src/main/scala/.../repository/mongo/`: `MongoJobContentUpdate`, `MongoSubjectFence`, `MongoJobAdmissionFenceMigrations` (021), `jobValidator` V2, submission guard and `touchJobOwner` `$inc admissionFence`, embedding writes without `$inc version`. Closure now serializes with submissions through write-conflict retry on the job document (the submission `$inc admissionFence` and the closure `$inc version` write the same document), not through a version mismatch. Tests: `MongoJobContentUpdateSpec` (including a codec-versus-update drift guard), `ContentRevisionFenceIntegrationSpec` (01.4 also asserts the embedding_work requeue) (01.1, 01.2, 01.3, 01.4), `InterviewLifecycleAccountDeletionIntegrationSpec` (01.5), `MongoHiringSetupStateIntegrationSpec` (MSC-10.1 for 021); updated ARR-03.1/03.2, DHW-16 (Admin fence), `MongoEmbeddingWorkIntegrationSpec`, `MongoInterviewWorkflowRepositoryIntegrationSpec`, `MongoJobSubmissionIntegrationSpec` | `sbt test` 1518 passed; full `scripts/run-local-tests.sh test`: 342 total, 0 failed, 326 passed, 16 skipped (Atlas and scaling specs that do not run on the local stack). Rerun by independent QA on the final state with the same counts | PASS: Code Reviewer, Security Engineer (static) and QA |
 | MSC-02 (02.1–02.3) | Erasure and evidence reads use indexes | Not implemented | Explain integration tests, purge completeness | Not run |
 | MSC-03 (03.1) | Redundant receipt index removed | Not implemented | Migration integration test | Not run |
 | MSC-04 (04.1) | Absent values omitted | Not implemented | Codec unit tests, migration integration test | Not run |
@@ -148,7 +148,7 @@
 | MSC-07 (07.1) | Shared-name contract | Not implemented | `sbt test` in both builds | Not run |
 | MSC-08 (08.1) | Case-insensitive job filters | Gated (D-10) | Discovery integration tests plus Atlas Local MVR-04.L/09.L | Not run |
 | MSC-09 (09.1) | float32 vectors | Gated (D-10) | Atlas Local MVR-07.L/09.L, storage comparison | Not run |
-| MSC-10 (10.1) | Idempotent upgrade | Not implemented | Setup state integration test (`MongoHiringSetupStateIntegrationSpec` pattern) | Not run |
+| MSC-10 (10.1) | Idempotent upgrade | 021 covered (`MongoHiringSetupStateIntegrationSpec`: validator V2 accepts absent and non-negative long, rejects negative and int, restart writes nothing to the ledger, a 020-only database upgrades). 022–026 not implemented | Setup state integration test | 021 passed; 022–026 not run |
 | MSC-11 (11.1) | Standard and docs | [mongodb-design.md](../mongodb-design.md#modeling-standard), `.claude/skills/data-engineer/SKILL.md` | Independent review | Not run |
 
 ## Performance and cost
@@ -181,8 +181,16 @@ Reviews:
 
 ## Checkpoint and review
 
-- **Completed:** none yet. Spec drafted; findings and decisions recorded.
-- **Next action:** add the modeling standard and fix doc drift (MSC-11), then start MSC-01.
-- Code Reviewer: pending.
-- Security Engineer: pending.
-- Final QA: pending.
+- **Completed:** MSC-01 (F-A, D-01) implemented and passing locally: job admission fence, content-only `version`/`updatedAt`, targeted job content updates, embedding writes that never advance `version`, subject fence for interview and admin authorization paths, migration 021. Docs updated (schema evolution, domain language, mongodb-design, use cases UC04, ARCHITECTURE, wiki).
+- **Implementation notes:**
+  - The submission guard no longer has a `lt(admissionFence, Long.MaxValue)` filter: `$lt` does not match a missing field, so it would reject every first submission. `$inc` on a maxed Int64 fails in MongoDB.
+  - Migration 021 audits only `admissionFence` values, not whole documents, so a legacy job with an invalid point still fails at its own geo-point proof (006) with its own typed error.
+  - No startup proof compared the jobs validator exactly before 021, so no successor handling was needed; 021's proof compares the current V2 validator, which startup installs every time.
+  - Existing tests that asserted the old increments were updated to the new contract: publication authorization and interview scheduling no longer stale an in-flight embedding (the embedding completes in one pass), and the first submission leaves the snapshot revision at 0.
+  - MSC-01.4 asserts the rejection, that no vector was written, and that the `embedding_work` row was re-queued after the edit.
+  - MSC-01.1 asserts that at least one submission was accepted (`accepted >= 1`) and that `admissionFence` equals the accepted count. Contention can make transaction retries run out for some of the 16 concurrent submissions, which then return Conflict. The property under test is that the edit succeeds whatever the accepted count is.
+- **Open follow-up:** the unused `revision` of `JobSubmissionSnapshot` and its projection in `MongoJobSubmissionSnapshotCodec` remain; removing it changes the domain model, ports and fixtures, outside the MSC-01 write paths.
+- **Next action:** MSC-02 (erasure index) after review of MSC-01; migrations 022–026 remain one owner at a time.
+- Code Reviewer: MSC-01 PASS (follow-ups applied); MSC-11 PASS; MSC-02.3 PASS on condition of the follow-ups in progress; MSC-07 FAIL (fix in progress).
+- Security Engineer: MSC-01 PASS (static; low findings applied or recorded); MSC-02.3 PASS (static).
+- Final QA: MSC-01 PASS (unit 1518 passed; integration 342 total, 0 failed). The other slices are pending.

@@ -72,7 +72,8 @@ private[mongo] object MongoHiringPersistenceCodecs {
       updatedAt: Date,
       closedAt: Option[Date],
       embedding: Option[List[Double]],
-      embeddingMeta: Option[StoredEmbeddingMeta]
+      embeddingMeta: Option[StoredEmbeddingMeta],
+      admissionFence: Option[Long] = None
   )
 
   final case class StoredApplication(

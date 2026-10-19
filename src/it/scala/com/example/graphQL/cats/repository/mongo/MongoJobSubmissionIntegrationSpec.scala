@@ -163,7 +163,7 @@ final class MongoJobSubmissionIntegrationSpec extends MongoIntegrationSuite {
             MutationWriteContext.directWrite
           )
           .value
-        // The first submission advanced the job revision, so a duplicate is attempted against the fresh snapshot.
+        // The first submission advanced only the admission fence; the duplicate is attempted against a fresh snapshot.
         fresh <- readSnapshot
         duplicate <- repository
           .createForOpenJobWithEvents(fresh, application, event, Nil, candidateActor, MutationWriteContext.directWrite)
@@ -188,7 +188,7 @@ final class MongoJobSubmissionIntegrationSpec extends MongoIntegrationSuite {
       } yield {
         assertEquals(first, Right(()))
         assertEquals(duplicate, Left(RepositoryError.DuplicateApplication))
-        assertEquals(afterDuplicate.map(_.map(_.revision)), Right(Some(1L)))
+        assertEquals(afterDuplicate.map(_.map(_.revision)), Right(Some(0L)))
         assertEquals(closed, Left(RepositoryError.Conflict))
         assertEquals(count, 1L)
         assertEquals(history, 1L)

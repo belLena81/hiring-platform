@@ -315,7 +315,8 @@ private[mongo] object MongoHiringCodecs {
     MongoFields.UpdatedAt,
     MongoFields.ClosedAt,
     MongoFields.Embedding,
-    MongoFields.EmbeddingMeta
+    MongoFields.EmbeddingMeta,
+    MongoFields.AdmissionFence
   )
   private val ApplicationFields = Set(
     MongoFields.Id,

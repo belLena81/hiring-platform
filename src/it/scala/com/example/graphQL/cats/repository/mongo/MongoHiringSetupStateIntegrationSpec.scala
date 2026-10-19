@@ -46,7 +46,8 @@ final class MongoHiringSetupStateIntegrationSpec extends MongoIntegrationSuite {
     "017_interview_ledger_collections",
     "018_interview_cancellation_reschedule",
     "019_interview_request_receipt_index",
-    "020_recruiter_job_closure_work"
+    "020_recruiter_job_closure_work",
+    "021_job_admission_fence"
   )
 
   /** Records schema-changing commands, which the shared access fixture deliberately ignores. */
@@ -160,6 +161,53 @@ final class MongoHiringSetupStateIntegrationSpec extends MongoIntegrationSuite {
     }
   }
 
+  test(
+    "MSC-10.1 migration 021 admits the job admission fence, rejects malformed values and writes nothing on restart"
+  ) {
+    mongoResource.use { fixture =>
+      recording(fixture).use { case (database, commands) =>
+        def job(id: String, fence: Option[AnyRef]) = {
+          val base = new Document(MongoFields.Id, id).append(MongoFields.Version, Long.box(0L))
+          fence.foreach(value => base.append(MongoFields.AdmissionFence, value))
+          base
+        }
+        for {
+          _ <- MongoHiringSetup.initialize(database, Diagnostics.noop[IO])
+          jobs <- Mongo4catsCollections.documents(database, MongoCollections.Jobs)
+          absent <- jobs.insertOne(job("fence-absent", None)).attempt
+          valid <- jobs.insertOne(job("fence-valid", Some(Long.box(5L)))).attempt
+          negative <- jobs.insertOne(job("fence-negative", Some(Long.box(-1L)))).attempt
+          narrow <- jobs.insertOne(job("fence-int", Some(Int.box(1)))).attempt
+          ledgerBefore <- ledgerRows(database)
+          _ <- commands.clear
+          _ <- MongoHiringSetup.initialize(database, Diagnostics.noop[IO])
+          restart <- commands.snapshot
+          ledgerAfter <- ledgerRows(database)
+          // An environment that completed 020 only: the jobs validator is the earlier one and 021 has no proof.
+          setup <- MongoHiringSetup.setupDatabase(database)
+          _ <- setup.runCommand(new Document("collMod", MongoCollections.Jobs).append("validator", new Document()))
+          ledger <- Mongo4catsCollections.documents(database, MongoCollections.HiringMigrationLedger)
+          _ <- ledger.deleteOne(Filters.eq(MongoFields.Id, MigrationIds.JobAdmissionFence.value))
+          _ <- MongoHiringSetup.initialize(database, Diagnostics.noop[IO])
+          upgraded <- ledgerRows(database)
+          installed <- MongoHiringValidators.validatorMatches(
+            setup,
+            MongoCollections.Jobs,
+            MongoHiringValidators.jobValidator
+          )
+        } yield {
+          assert(absent.isRight && valid.isRight, clue((absent, valid)))
+          assert(negative.isLeft && narrow.isLeft, clue((negative, narrow)))
+          assert(ledgerWrites(restart).isEmpty, clue(ledgerWrites(restart)))
+          assertEquals(ledgerAfter, ledgerBefore)
+          assertEquals(upgraded.map(_.getString(MongoFields.Id)), ExpectedLedgerIds)
+          assert(upgraded.forall(_.getString(MongoFields.State) == "Complete"))
+          assert(installed)
+        }
+      }
+    }
+  }
+
   test("two processes starting the same fresh database converge on one completed shape") {
     mongoResource.use { fixture =>
       recording(fixture).use { case (database, _) =>
@@ -241,7 +289,7 @@ final class MongoHiringSetupStateIntegrationSpec extends MongoIntegrationSuite {
             ) *> MongoHiringSetup.initialize(database, Diagnostics.noop[IO]).attempt
           ledgerAfterCorrupt <- ledgerRows(database)
         } yield {
-          assertEquals(ledgerAfterDrift.size, 20)
+          assertEquals(ledgerAfterDrift.size, 21)
           assert(ledgerAfterDrift.forall(_.getString(MongoFields.State) == "Complete"))
           assertEquals(ledgerAfterDrift, ledgerBefore)
           val revisions = ledgerAfterCorrupt.find(_.getString(MongoFields.Id) == MigrationIds.UserJobRevisions.value)

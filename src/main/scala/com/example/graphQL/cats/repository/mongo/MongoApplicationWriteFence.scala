@@ -6,7 +6,7 @@ import com.example.graphQL.cats.domain.model.Identifiers.JobId
 import com.example.graphQL.cats.domain.model.UserRole
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.port.*
-import com.mongodb.client.model.{Projections, UpdateOptions}
+import com.mongodb.client.model.Projections
 import mongo4cats.client.ClientSession
 import mongo4cats.database.MongoDatabase
 
@@ -22,7 +22,7 @@ import mongo4cats.database.MongoDatabase
 private[mongo] final class MongoApplicationWriteFence(database: MongoDatabase[IO]) {
   private def users = Mongo4catsCollections.documents(database, MongoCollections.Users)
   private def jobs = Mongo4catsCollections.documents(database, MongoCollections.Jobs)
-  private def subjectFences = Mongo4catsCollections.documents(database, MongoCollections.OutboxSubjectFences)
+  private val subjectFence = new MongoSubjectFence(database)
 
   /** Submission: the actor must be an active Candidate and, when the job exists, its recruiter must be an active
     * account. A deleted recruiter's jobs stay open until their follow-up closure completes, and a candidate must not be
@@ -97,17 +97,7 @@ private[mongo] final class MongoApplicationWriteFence(database: MongoDatabase[IO
   }
 
   private def bumpFence(session: Option[ClientSession[IO]], actor: ApplicationWriteActor): RepositoryF[IO, Unit] =
-    RepositoryF
-      .lift(
-        MongoSessionOperations.updateOne(
-          subjectFences,
-          session,
-          MongoFilter.eq(MongoFields.Id, actor.id.value.toString),
-          MongoUpdate.inc(MongoFields.FencingVersion, 1L),
-          new UpdateOptions().upsert(true)
-        )
-      )
-      .void
+    subjectFence.bump(session, actor.id.value.toString)
 
   private def requireOwnership(
       session: Option[ClientSession[IO]],

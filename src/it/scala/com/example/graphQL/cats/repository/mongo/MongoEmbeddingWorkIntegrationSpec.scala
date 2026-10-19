@@ -129,7 +129,9 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
     }
   }
 
-  test("in-flight embeddings recover after real interview scheduling fences candidate and job revisions") {
+  test(
+    "MSC-01.3 in-flight embeddings complete after real interview scheduling, which advances fences but no content revision"
+  ) {
     List(false, true).traverse_ { candidateWork =>
       mongoResource.use { fixture =>
         val at = Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MILLIS)
@@ -232,8 +234,8 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
                   .flatMap(IO.fromOption(_)(new AssertionError("Missing candidate")))
                 fencedJob <- successful(jobs.findVersioned(application.jobId))
                   .flatMap(IO.fromOption(_)(new AssertionError("Missing job")))
-                _ = assert(fencedUser.version > beforeUser.version)
-                _ = assert(fencedJob.version > beforeJob.version)
+                _ = assertEquals(fencedUser.version, beforeUser.version)
+                _ = assertEquals(fencedJob.version, beforeJob.version)
                 _ <- release.complete(())
                 _ <- awaitAbsent(fixture.database, key)
               } yield ()
@@ -242,7 +244,8 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
           user <- successful(users.find(candidateId)).flatMap(IO.fromOption(_)(new AssertionError("Missing candidate")))
           job <- successful(jobs.find(application.jobId)).flatMap(IO.fromOption(_)(new AssertionError("Missing job")))
         } yield {
-          assertEquals(count, 2)
+          // The scheduling fences changed no content, so the in-flight embedding was stored without a second pass.
+          assertEquals(count, 1)
           val source =
             if (candidateWork) user.candidateProfile.map(SearchableText.candidate) else Some(SearchableText.job(job))
           val metadata = if (candidateWork) user.embedding.map(_.meta) else job.embedding.map(_.meta)

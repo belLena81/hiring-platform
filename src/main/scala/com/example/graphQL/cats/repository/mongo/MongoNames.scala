@@ -201,6 +201,7 @@ private[mongo] object MongoFields {
   val ReceiptId = "receiptId"
   val RequestedAt = "requestedAt"
   val FencingVersion = "fencingVersion"
+  val AdmissionFence = "admissionFence"
   val NextRevision = "nextRevision"
   val EventId = "eventId"
   val Partition = "partition"

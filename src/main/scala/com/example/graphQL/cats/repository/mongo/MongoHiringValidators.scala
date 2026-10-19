@@ -208,6 +208,7 @@ private[mongo] object MongoHiringValidators {
         .append(
           "properties",
           new Document(MongoFields.Version, new Document("bsonType", "long").append("minimum", 0L))
+            .append(MongoFields.AdmissionFence, MongoValidatorSchemas.nonNegativeLong)
             .append(MongoFields.Location, location)
         )
     )

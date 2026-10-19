@@ -9,7 +9,6 @@ import com.example.graphQL.cats.domain.workflow.*
 import com.example.graphQL.cats.service.Diagnostics
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.RepositoryError
-import com.mongodb.client.model.UpdateOptions
 import com.mongodb.client.result.UpdateResult
 import mongo4cats.client.ClientSession
 import mongo4cats.database.MongoDatabase
@@ -48,6 +47,7 @@ final class MongoInterviewWorkflowStore(
   val users = collection(MongoCollections.Users)
   val outbox = collection(MongoCollections.EventOutbox)
   val subjectFences = collection(MongoCollections.OutboxSubjectFences)
+  private val subjectFence = new MongoSubjectFence(database)
 
   private[mongo] def guardWrite(
       collection: IO[MongoSessionOperations.Documents],
@@ -72,28 +72,7 @@ final class MongoInterviewWorkflowStore(
   private[mongo] def fenceSubjects(session: Option[ClientSession[IO]], subjects: List[UserId]): RepositoryF[IO, Unit] =
     subjects.distinct
       .sortBy(_.value.toString)
-      .traverse_(id =>
-        guardWrite(
-          users,
-          session,
-          MongoFilter.and(
-            MongoFilter.eq(MongoFields.Id, id.value.toString),
-            MongoFilter.eq(MongoFields.AccountStatus, "Active")
-          ),
-          MongoUpdate.inc(MongoFields.Version, 1L)
-        ) *>
-          RepositoryF
-            .lift(
-              MongoSessionOperations.updateOne(
-                subjectFences,
-                session,
-                MongoFilter.eq(MongoFields.Id, id.value.toString),
-                MongoUpdate.inc(MongoFields.FencingVersion, 1L),
-                new UpdateOptions().upsert(true)
-              )
-            )
-            .void
-      )
+      .traverse_(id => subjectFence.requireActiveAndBump(session, id.value.toString, Nil, RepositoryError.Conflict))
 
   private[mongo] def fenceExecution(
       session: Option[ClientSession[IO]],
@@ -188,7 +167,9 @@ final class MongoInterviewWorkflowStore(
       MongoUpdate.inc("providerFence", 1L)
     )
 
-  /** Bumps the owning recruiter's job revision, which fails when the job is not theirs. */
+  /** Advances the owning recruiter's job admission fence (not its content revision), which fails when the job is not
+    * theirs. The write modifies the job document, so it conflicts with a concurrent close or submission.
+    */
   private[mongo] def touchJobOwner(
       session: Option[ClientSession[IO]],
       jobId: String,
@@ -201,7 +182,7 @@ final class MongoInterviewWorkflowStore(
         MongoFilter.eq(MongoFields.Id, jobId),
         MongoFilter.eq(MongoFields.RecruiterId, recruiterId.value.toString)
       ),
-      MongoUpdate.inc(MongoFields.Version, 1L)
+      MongoUpdate.inc(MongoFields.AdmissionFence, 1L)
     )
 
   private[mongo] def writeApplicationStatus(
