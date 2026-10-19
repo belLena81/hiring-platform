@@ -314,24 +314,45 @@ The default rule is:
 ```javascript
 {
   _id: UUID,
+  version: Long(0),                 // concurrency revision, incremented by account writes (including embedding writes, deletion and interview subject fencing); not an API or embedding version
 
-  role: "Candidate",
+  role: "Candidate",                // stored Scala enum name: "Candidate" | "Recruiter" | "Admin"
+  accountStatus: "Active",          // "Active" | "Deleted"
 
   name: "Alice Smith",
-  email: "alice@example.com",
+  nameCanonical: "alice smith",     // NFKC, trimmed, lower-cased (AccountName.canonical); unique
+  email: "alice@example.com",       // absent on Deleted accounts
+  emailCanonical: "alice@example.com", // sparse unique; absent on Deleted accounts
 
-  profile: {
-    skills: ["Scala", "Cats Effect", "MongoDB"],
+  profile: {                        // Candidate shape; a Recruiter profile carries organizationName and jobTitle instead
+    kind: "Candidate",
+    skills: ["Cats Effect", "MongoDB", "Scala"],       // stored sorted
+    skillsCanonical: ["cats effect", "mongodb", "scala"], // canonical sidecar used by search filters
     experienceSummary: "...",
-    resumeRef: "..."
+    resumeRef: "...",
+    currentResidence: {             // optional; canonical sidecars for filters
+      country: "Ukraine",
+      countryCanonical: "ukraine",
+      city: "Kyiv",
+      cityCanonical: "kyiv"
+    },
+    availabilityStatus: "AVAILABLE_NOW",
+    recruiterSearchOptIn: true
   },
 
-  embedding: [...],
+  embedding: [...],                 // optional candidate vector; removed on account deletion
+  embeddingMeta: {                  // present with embedding
+    model: "...",
+    sourceHash: "...",
+    updatedAt: ISODate(...)
+  },
 
   createdAt: ISODate(...),
-  updatedAt: ISODate(...)
+  updatedAt: ISODate(...)           // absent until the first update of the account
 }
 ```
+
+A Deleted account keeps a tombstone (`accountStatus`, `deletedAt`, a tombstone `name` and `nameCanonical`); its email, password hash, profile and embedding fields are removed.
 
 Recruiters and candidates share one collection.
 
@@ -355,10 +376,12 @@ Benefits:
 Indexes:
 
 ```javascript
-{ emailCanonical: 1 } UNIQUE SPARSE
-{ nameCanonical: 1 } UNIQUE
-{ role: 1, accountStatus: 1, createdAt: -1, _id: -1 }
-{ adminSingletonKey: 1 } UNIQUE WHERE role = "Admin"
+{ emailCanonical: 1 } UNIQUE SPARSE                          // users_emailCanonical_unique
+{ nameCanonical: 1 } UNIQUE                                  // users_nameCanonical_unique
+{ accountStatus: 1, createdAt: -1, _id: -1 }                 // users_accountStatus_created_id
+{ role: 1, accountStatus: 1, createdAt: -1, _id: -1 }        // users_role_accountStatus_created_id
+{ adminSingletonKey: 1 } UNIQUE WHERE role = "Admin"         // users_adminSingleton_unique
+{ "embeddingMeta.model": 1, role: 1 }                        // users_embedding_meta_filters
 ```
 
 Do not create indexes for fields merely because they exist.
@@ -370,6 +393,7 @@ Do not create indexes for fields merely because they exist.
 ```javascript
 {
   _id: UUID,
+  version: Long(0),                 // concurrency revision, incremented by job writes (including application submissions and embedding writes)
 
   recruiterId: UUID,
 
@@ -382,24 +406,34 @@ Do not create indexes for fields merely because they exist.
     "Functional programming"
   ],
 
-  skills: [
-    "Scala",
+  skills: [                         // stored sorted
     "Cats Effect",
-    "MongoDB"
+    "MongoDB",
+    "Scala"
   ],
 
   location: {
     country: "Ukraine",
-    city: "Kyiv",
-    remote: true
+    city: "Kyiv",                   // optional
+    remote: true,
+    point: {                        // optional GeoJSON Point, [longitude, latitude]
+      type: "Point",
+      coordinates: [30.52, 50.45]
+    }
   },
 
-  status: "Open",
+  status: "Open",                   // stored Scala enum name: "Draft" | "Open" | "Closed"
 
   createdAt: ISODate(...),
   updatedAt: ISODate(...),
+  closedAt: ISODate(...),           // optional
 
-  embedding: [...]
+  embedding: [...],                 // optional job vector
+  embeddingMeta: {                  // present with embedding
+    model: "...",
+    sourceHash: "...",
+    updatedAt: ISODate(...)
+  }
 }
 ```
 
@@ -472,6 +506,18 @@ Index:
 }
 ```
 
+Complete job index set (`MongoHiringIndexSetup`):
+
+```javascript
+{ recruiterId: 1, status: 1, createdAt: -1, _id: -1 }                     // jobs_recruiter_status_created_id
+{ recruiterId: 1, createdAt: -1, _id: -1 }                                // jobs_recruiter_created_id
+{ createdAt: -1, _id: -1 }                                                // jobs_created_id
+{ status: 1, createdAt: -1, _id: -1 }                                     // jobs_open_created_id
+{ status: 1, "location.city": 1, createdAt: -1, _id: -1 }                 // jobs_open_city_created_id
+{ "location.point": "2dsphere" }                                          // jobs_location_point_2dsphere
+{ "embeddingMeta.model": 1, status: 1, "location.city": 1, recruiterId: 1 } // jobs_embedding_meta_filters
+```
+
 Avoid building separate indexes such as:
 
 ```javascript
@@ -502,8 +548,6 @@ Do not embed applications inside either user or job documents.
   jobId: UUID,
 
   status: "Interview",
-
-  feedback: null,
 
   createdAt: ISODate(...),
   updatedAt: ISODate(...)
@@ -574,6 +618,16 @@ Index:
 }
 ```
 
+Complete application index set (`MongoHiringIndexSetup`):
+
+```javascript
+{ candidateId: 1, jobId: 1 } UNIQUE                 // applications_candidate_job_unique
+{ candidateId: 1, status: 1, createdAt: -1, _id: -1 } // applications_candidate_status_created_id
+{ candidateId: 1, createdAt: -1, _id: -1 }          // applications_candidate_created_id
+{ jobId: 1, status: 1, createdAt: -1, _id: -1 }     // applications_job_status_created_id
+{ jobId: 1, createdAt: -1, _id: -1 }                // applications_job_created_id
+```
+
 ---
 
 ## Recruiter reviewing a job
@@ -639,16 +693,16 @@ Document:
   newStatus: "Interview",
 
   actorId: "<user-uuid>",
-  actorRole: "RECRUITER",   // optional; absent on events stored before the role was recorded. Not exposed by GraphQL as an identifier.
+  actorRole: "Recruiter",   // stored Scala enum name; optional, absent on events stored before the role was recorded. Not exposed by GraphQL as an identifier.
 
-  reason: null,
-  feedback: null,
+  // feedback and reason are present only when supplied.
+  // previousStatus is absent on the initial CREATED event.
 
   occurredAt: ISODate(...)
 }
 ```
 
-Index:
+Index (`application_events_application_created_id`):
 
 ```javascript
 {

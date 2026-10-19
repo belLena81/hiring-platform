@@ -4,6 +4,101 @@
 
 See the [current collection inventory](wiki/mongodb-and-analytics.md) for every operational and analytics MongoDB collection, relationships, indexes, retention and use-case links.
 
+## Modeling standard
+
+Every new or changed collection, field, index, validator and query follows this standard. A deviation is allowed only with a recorded bound and revisit trigger, either in the owning spec or under [accepted deviations](#accepted-deviations). The data-engineer role applies it as a checklist; Code Reviewer checks it on every persistence change.
+
+The standard is derived from the MongoDB manual's [data-modeling guidance](https://www.mongodb.com/docs/manual/data-modeling/) (best practices, design patterns, anti-patterns, schema validation), and from three books: *MongoDB in Action* 3rd ed. (MiA), *Mastering MongoDB 4.x* (MM4) and *Practical MongoDB Aggregations* (PMA). The [schema consolidation spec](specs/hiring-mongo-schema-consolidation.md) records the review findings and decisions. Some existing code does not yet meet the standard; it is tracked there as open findings F-A to F-Doc. Do not copy those patterns, for example `users.version` bumps used as a fence, embedding writes that advance `version`, `null` placeholders, or the duplicated outbox `payload`.
+
+### 1. Shape from access patterns
+
+- **Start from the use case, then the shape.** Before shaping a collection, list each query and write: use case, filter including authorization predicates, sort, projection, frequency and cardinality (MiA §5.1).
+- **Embed only what belongs to the parent.** Embed values the parent owns that are bounded, read together and written together: profile, location, embedding metadata, search results capped at 100.
+- **Reference what grows or stands alone.** Use a reference for an entity with its own lifecycle, or for anything that grows without a fixed bound. Applications, application events and workflow evidence never become arrays on users or jobs (unbounded-array anti-pattern; MM4 p96-98).
+- **Copy data only with an owner for staleness.** Denormalize (Extended Reference, Computed) only when there is a measured read benefit and a named update path. Immutable or temporal copies are acceptable. A copy that must stay fresh needs the same transaction, or a repair job with a staleness bound.
+- **Keep documents lean.**
+  - Large or rarely read fields (vectors, raw envelopes) are excluded from list and hydration projections.
+  - Updates use targeted `$set`/`$unset`/`$inc` and never rewrite fields they did not change. In particular, a content edit must not rewrite a vector.
+  - Single documents must stay far below 16 MB. A capped array states its cap in the code and in the validator.
+- **Polymorphic collections need a discriminator.** Every document carries `documentType`, and the validator has one `oneOf` branch per type (MiA p108).
+
+### 2. One meaning per field
+
+- **`version` is the content revision.** It advances only when user-visible content of a user or job changes, and optimistic edits compare against it.
+- **Conflict fences are separate.** Fields or documents that exist only to make concurrent transactions conflict are kept apart from `version`: for example `outbox_subject_fences.fencingVersion`, or a per-aggregate admission fence.
+- **Derived data never advances the revision.** Embeddings and other derived values may be guarded by the revision but must not advance it. Otherwise background work makes user edits fail.
+- **Coordination counters are not schema versions.** Workflow revisions, claim tokens and generations coordinate concurrency and say nothing about the schema.
+
+### 3. Types and encoding
+
+- **IDs:** UUIDs are stored as canonical lower-case strings. Composite keys are deterministic strings documented next to their writer. Do not mix `_id` types within a collection.
+- **Time:** instants are BSON Date in UTC, millisecond precision. Never store them as strings. TTL fields are Dates.
+- **Enums** are stored as their Scala case names and listed in the validator `enum`.
+- **Numbers:**
+  - Revisions, counters and offsets are Int64.
+  - Small attempt counts and constant markers are Int32.
+  - Money would be Decimal128.
+  - Vectors use the smallest faithful type.
+  - One BSON type per field, always (MM4 p84-85).
+- **Absent values are omitted, never stored as `null`.** Readers treat absence as `None`; codecs use `createCodecProviderIgnoreNone`. Required timestamps such as `createdAt` and `updatedAt` are written on insert.
+- **Store each fact once.** Do not keep both a parsed and a serialized copy of the same payload. Query fields may be lifted next to an opaque payload only when a query filters on them.
+- **Normalize canonically.** Case-insensitive equality uses a canonical sidecar written by the domain normalizer (`*Canonical`), the same way for every collection that is filtered on that concept.
+- **Naming:** fields are camelCase, collections and indexes snake_case, and index names describe their keys. New lease or claim fields reuse the shared names `leaseOwner`, `leaseToken`, `leaseUntil`.
+
+### 4. Indexes
+
+- **Every query has an index or a documented bound.** Each read or delete the code issues is either backed by an index (explain shows `IXSCAN`; keys ≈ documents ≈ returned), or listed with its bound and revisit trigger.
+- **Each `$or` branch needs its own index;** otherwise the whole query falls back to a collection scan (MiA p174). Prefer one indexed predicate per collection over a generic `$or`.
+- **Order compound keys by the ESR rule:** equality, then sort, then range (MiA p154-156). Paged lists end with `(createdAt, _id)` for deterministic keyset paging.
+- **Avoid redundant indexes.** Do not add an index whose key is already guaranteed by `_id`, or that is a prefix of another index. Drop indexes nothing uses, and record the evidence.
+- **Use partial indexes for lifecycle subsets** (active state, a document type) rather than sparse ones. A query must imply the partial filter to use the index.
+- **Expire transient data with TTL.** Receipts, sessions, retention evidence and terminal work use TTL on an `expiresAt`/`retentionExpiresAt` Date. Rows kept without TTL are listed with their bound.
+- **Every new index carries a cost record:** explain output plus index size and write p95 on the same workload (local ceilings: write p95 +10%, index storage +25%).
+
+### 5. Validation and evolution
+
+- **Every application-owned collection has a strict `$jsonSchema` validator** (`validationLevel: strict`, `validationAction: error`). Use `additionalProperties: false` where the shape is closed. Startup verifies exact definitions and fails closed on drift.
+- **Schema changes are ledgered migration steps.** Each step is restartable and batched, with a checkpoint and a read-only completion proof ([schema evolution](schema-evolution.md)). Never edit an applied step. When a validator gains a successor, completed proofs that compare validators accept the documented successor.
+- **No per-document `schemaVersion` before MVP.** One active shape is kept by migrations plus validators.
+- **Every migration step documents:** stop-writer preconditions, backfill bounds, restart behavior, forward-only recovery and post-verification.
+
+### 6. Transactions and consistency
+
+- Prefer single-document atomicity by modeling. Use a transaction only when an invariant spans documents: status plus history plus outbox, admission, deletion fences.
+- Keep transactions short and indexed: at most about 1,000 documents, every operation selective.
+- Use atomic operators (`$inc`, conditional filters) instead of read-modify-write.
+- A write-conflict fence must actually modify the fenced document (an `$inc`, not a no-op `$set`); otherwise it creates no conflict.
+- Enforce uniqueness in the store with unique or partial-unique indexes, never by a preflight read.
+
+### 7. Aggregation
+
+- `$match` and `$sort` go first so that they use indexes. Put `$limit` right after `$sort`.
+- Use `$set`/`$unset` rather than a wide `$project`.
+- In `$lookup`, join on an indexed foreign field and trim the joined fields in a sub-pipeline.
+- Avoid `$unwind` followed by `$group` on `_id`; use array operators instead (PMA ch3).
+- Frequent `$lookup` is a signal to reconsider embedding or an Extended Reference.
+
+### Accepted deviations
+
+These are recorded with their reasons in [the consolidation spec](specs/hiring-mongo-schema-consolidation.md#decisions):
+
+- **String UUIDs instead of BinData subtype 4.** The strings appear in composite IDs, Atlas filters, Kafka and Delta.
+- **No `schemaVersion` field.**
+- **Polymorphic interview collections are kept.**
+- **Unindexed reads that are bounded:**
+  - the `recruiter_job_closure_work` claim/peek (see [durable work age](#durable-work-age-for-readiness));
+  - the Admin embedding coverage scan, which pages over `_id` by design;
+  - the Admin analytics `repairRequired` inspection: the limit is bounded and rows expire after 31 days.
+- **No TTL on these rows:**
+  - Failed outbox and embedding-work rows;
+  - Active producer registrations;
+  - participant locks.
+- **Historic identity shapes:**
+  - the generation-0 reservation `_id`;
+  - the random `mutation_receipts` `_id`;
+  - the ObjectId `event_quarantine` `_id`;
+  - the lease and claim field names in existing interview collections.
+
 ## Candidate residence and interview deletion integrity
 
 [Current local corrections](specs/candidate-discovery-and-interview-integrity.md) retain bounded workflow attribution until linked commands/inbox/provider records are deleted. Each batch deletes only selected workflow identities. Migration `016_candidate_residence_integrity` audits the existing residence shape without modifying user data or aggregate revisions; installed validation requires display and canonical city fields together. Completed proof and validator drift fail closed. Stop incompatible writers before cutover and explicitly repair malformed data before rerunning startup.
@@ -75,9 +170,9 @@ Before deploying this schema, stop every older application binary. Older profile
 
 Profile writes validate the same residence limits and enum values. Legacy absent consent decodes as false. The migration is forward-only; application rollback is not a data rollback. Older index names are not a second active read path. Retire an obsolete index only after verifying that no current consumers use it and independently reviewing the change.
 
-## Planned vector search optimization
+## Vector search optimization
 
-Phase 8 establishes the retrieval baseline; Phase 9 evaluates human relevance; Phase 10 adopts justified discovery improvements. These requirements are planned, not measured gains or changes to the current search contract.
+Phase 8 establishes the retrieval baseline; Phase 9 evaluates human relevance; Phase 10 adopts justified discovery improvements. Phase 8 is in progress: plain-MongoDB criteria MVR-01 to MVR-03 pass, while Atlas Local (`.L`) gates are pending and cloud (`.C`) gates are deferred. The requirements below are not measured gains or changes to the current search contract.
 
 Detailed query, index, stale-result and verification requirements belong to [MongoDB access and vector retrieval optimization](specs/mongodb-vector-retrieval-optimization.md). Proposed geospatial/facet contracts belong to [hiring discovery and search quality](specs/hiring-discovery-search-quality.md); durable workflow inbox/state/outbox transactions belong to [durable hiring workflows](specs/durable-hiring-workflows.md). Operational collection/index changes retain restartable migration and verification obligations; pre-MVP API/analytics contract changes follow the separate single-active-shape policy.
 

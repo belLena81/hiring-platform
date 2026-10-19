@@ -421,13 +421,19 @@ UNIQUE(candidateId, jobId)
 
 ### Writes
 
-```text
-applications INSERT
+One Mongo transaction, shared with the mutation receipt context (`ApplicationService.submitApplication` via `idempotent.executeFor`; `MongoApplicationRepository.createForOpenJobWithEvents`), in this order:
 
-application_events INSERT
+```text
+outbox_subject_fences  upsert, $inc fencingVersion (actor fence; also checks an active
+                       Candidate and an active recruiter of the job; MongoApplicationWriteFence)
+jobs                   guard: _id matches and status is Open; $set updatedAt, $inc version
+                       (the observed revision is not matched)
+applications           INSERT (candidate/job unique index)
+application_events     INSERT (initial CREATED event)
+event_outbox           INSERT (APPLICATION_CREATED)
 ```
 
-These belong to one logical transaction.
+These belong to one logical transaction. A failed job guard, a duplicate application or a failed fence rolls the whole transaction back.
 
 ### Events
 
