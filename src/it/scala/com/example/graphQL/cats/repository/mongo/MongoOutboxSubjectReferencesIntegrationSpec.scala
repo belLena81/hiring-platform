@@ -275,6 +275,10 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
                     .append("role", "Candidate")
                     .append("accountStatus", "Deleted")
                     .append("version", 0L)
+                    .append("name", s"deleted-${deletedUser.value}")
+                    .append("nameCanonical", s"deleted-${deletedUser.value}")
+                    .append("createdAt", java.util.Date.from(now))
+                    .append("updatedAt", java.util.Date.from(now))
                 )
             )
             workerMissing <- erasures.workerReady(now).value

@@ -11,7 +11,6 @@ import com.example.graphQL.cats.service.RepositoryError
 import org.bson.Document
 
 import java.util.UUID
-import scala.jdk.CollectionConverters.*
 
 /** Durable notification receipts: each delivery is recorded once, fenced against the workflow phase. */
 final class MongoInterviewNotificationLedger(store: MongoInterviewWorkflowStore)
@@ -90,7 +89,6 @@ final class MongoInterviewNotificationLedger(store: MongoInterviewWorkflowStore)
     new Document(MongoFields.Id, value.idempotencyKey)
       .append(WorkflowIdField, value.workflowId.value.toString)
       .append("recipientId", value.recipientId.value.toString)
-      .append(MongoFields.SubjectIds, List(value.recipientId.value.toString).asJava)
       .append("participant", value.participant.toString)
       .append("kind", value.kind.toString)
       .append("deliveredAt", value.deliveredAt.toDate)

@@ -65,14 +65,30 @@ class MongoSharedNamespaceContractSpec extends munit.FunSuite {
       "HiddenAt" -> MongoFields.HiddenAt,
       "CompletedAt" -> MongoFields.CompletedAt,
       "AsOf" -> MongoFields.AsOf,
+      "SubjectId" -> MongoFields.SubjectId,
       "Kind" -> MongoFields.Kind,
+      "TransactionalId" -> MongoFields.TransactionalId,
+      "FencedAt" -> MongoFields.FencedAt,
       "ProducerRegistry" -> MongoFields.ProducerRegistry
     )
-    // Main persists these producer registration fields as inline literals (no MongoFields constant yet), so
-    // only the fixture and the analytics constants pin them until main names them.
-    val literalInMain = Set("SubjectId", "TransactionalId", "FencedAt")
-    assertEquals(actual, strings("fields").removedAll(literalInMain))
-    assertEquals(strings("fields").keySet.intersect(literalInMain), literalInMain)
+    assertEquals(actual, strings("fields"))
+  }
+
+  test("MSC-07.1 producer registration kind and state values match the contract") {
+    val values = contract.hcursor.downField("values")
+    def named(name: String): Map[String, String] =
+      values.downField(name).as[Map[String, String]].toOption.get
+    assertEquals(
+      Map(
+        "operational" -> ProducerRegistrationValues.Operational,
+        "interview" -> ProducerRegistrationValues.Interview
+      ),
+      named("producerRegistrationKinds")
+    )
+    assertEquals(
+      Map("active" -> ProducerRegistrationValues.Active, "fenced" -> ProducerRegistrationValues.Fenced),
+      named("producerRegistrationStates")
+    )
   }
 
   test("MSC-07.1 shared ledger migration ids match the contract") {

@@ -744,7 +744,7 @@ final class InterviewLifecycleAccountDeletionIntegrationSpec extends MongoIntegr
           .append("reservedAt", java.util.Date.from(at))
       for {
         _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
-        _ <- MongoRepositoryTestSupport.insertOne(
+        _ <- MongoRepositoryTestSupport.insertUnvalidated(
           fixture.database,
           MongoCollections.InterviewWorkflows,
           new org.bson.Document(MongoFields.Id, workflowId.toString)

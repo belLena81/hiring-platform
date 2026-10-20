@@ -568,6 +568,7 @@ private[mongo] object MongoHiringCodecs {
           )
       },
       value.createdAt.toDate,
+      value.createdAt.toDate,
       value.accountStatus.toString,
       value.deletedAt.map(Date.from),
       Option.when(value.role == UserRole.Admin && value.adminSingleton)("singleton-admin"),

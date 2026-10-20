@@ -8,6 +8,15 @@ private[mongo] object MongoInterviewFields {
   val RevisionField = "revision"
   val DocumentTypeField = "documentType"
 
+  /** The stored `documentType` values: `interview_workflows` holds workflows and request receipts, the inbox holds
+    * inbox receipts, hiring receipts and quarantine markers, and the command queue holds commands.
+    */
+  val WorkflowType = "workflow"
+  val RequestReceiptType = "requestReceipt"
+  val InboxReceiptType = "inboxReceipt"
+  val QuarantineType = "quarantine"
+  val CommandType = "command"
+
   /** `documentType` of the inbox receipt that records the committed hiring status of one workflow. */
   val HiringReceiptType = "hiringReceipt"
   val RequestFingerprintField = "requestFingerprint"

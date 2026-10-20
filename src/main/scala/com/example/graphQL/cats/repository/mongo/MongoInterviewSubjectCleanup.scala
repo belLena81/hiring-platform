@@ -56,7 +56,7 @@ final class MongoInterviewSubjectCleanup(
   /** Called within account deletion after its permanent subject fence is marked deleted. */
   def enqueue(subject: UserId, now: Instant, session: Option[ClientSession[IO]]): RepositoryF[IO, Unit] =
     for {
-      ids <- MongoProducerRegistrations.batch(database, subject.value.toString, "Interview")
+      ids <- MongoProducerRegistrations.batch(database, subject.value.toString, ProducerRegistrationValues.Interview)
       attributable <- hasAttributableData(subject, session)
       _ <-
         if (!attributable && ids.isEmpty) ().pure[[A] =>> RepositoryF[IO, A]]
@@ -82,12 +82,18 @@ final class MongoInterviewSubjectCleanup(
 
   override def producerBatch(subject: UserId): RepositoryF[IO, Vector[String]] =
     guard("interviewCleanup.producerBatch") {
-      MongoProducerRegistrations.batch(database, subject.value.toString, "Interview")
+      MongoProducerRegistrations.batch(database, subject.value.toString, ProducerRegistrationValues.Interview)
     }
 
   override def markProducersFenced(subject: UserId, ids: Vector[String], now: Instant): RepositoryF[IO, Unit] =
     guard("interviewCleanup.markProducersFenced") {
-      MongoProducerRegistrations.markFenced(database, subject.value.toString, "Interview", ids, now)
+      MongoProducerRegistrations.markFenced(
+        database,
+        subject.value.toString,
+        ProducerRegistrationValues.Interview,
+        ids,
+        now
+      )
     }
 
   private def hasAttributableData(subject: UserId, session: Option[ClientSession[IO]]): RepositoryF[IO, Boolean] =

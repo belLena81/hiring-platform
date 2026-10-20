@@ -348,7 +348,7 @@ The default rule is:
   },
 
   createdAt: ISODate(...),
-  updatedAt: ISODate(...)           // absent until the first update of the account
+  updatedAt: ISODate(...)           // written on insert (= createdAt), then at each update of the account
 }
 ```
 

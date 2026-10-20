@@ -57,7 +57,7 @@ The standard is derived from the MongoDB manual's [data-modeling guidance](https
 
 ### 5. Validation and evolution
 
-- **Every application-owned collection has a strict `$jsonSchema` validator** (`validationLevel: strict`, `validationAction: error`). Use `additionalProperties: false` where the shape is closed. Startup verifies exact definitions and fails closed on drift.
+- **Every application-owned collection has a strict `$jsonSchema` validator** (`validationLevel: strict`, `validationAction: error`). Use `additionalProperties: false` where the shape is closed. Startup verifies exact definitions and fails closed on drift. Migration `025_operational_collection_validators` installed them on every operational collection that lacked one; the validator text is in `MongoOperationalValidators` and `MongoHiringValidators`.
 - **Schema changes are ledgered migration steps.** Each step is restartable and batched, with a checkpoint and a read-only completion proof ([schema evolution](schema-evolution.md)). Never edit an applied step. When a validator gains a successor, completed proofs that compare validators accept the documented successor.
 - **No per-document `schemaVersion` before MVP.** One active shape is kept by migrations plus validators.
 - **Every migration step documents:** stop-writer preconditions, backfill bounds, restart behavior, forward-only recovery and post-verification.
@@ -89,6 +89,7 @@ These are recorded with their reasons in [the consolidation spec](specs/hiring-m
   - the `recruiter_job_closure_work` claim/peek (see [durable work age](#durable-work-age-for-readiness));
   - the Admin embedding coverage scan, which pages over `_id` by design;
   - the Admin analytics `repairRequired` inspection: the limit is bounded and rows expire after 31 days.
+- **Migration 024 completed proof reads one document per repaired target on every start** (outbox, search sessions, search-session work, inbox, workflows, notification receipts, users; `find` of the pending predicate with `limit(1)` and no supporting index). Bound: collection size; every one but `users` expires by TTL or retention. Revisit when `users` exceeds 1 million rows or startup is measurably slower; then trust the ledger plus the migration 025 validators (they reject the same regressions for users, search sessions, inbox and notification receipts) instead.
 - **Migration 022 completed proof scans the interview inbox on every start** (`find` without `documentType`, `limit(1)`). Bound: inbox size, which is the rows of active plus retained workflows (finished workflows expire by TTL; rows of unfinished workflows carry none). Revisit when the inbox exceeds 1 million rows or startup is measurably slower; then trust the ledger plus the partial index instead.
 - **No TTL on these rows:**
   - Failed outbox and embedding-work rows;

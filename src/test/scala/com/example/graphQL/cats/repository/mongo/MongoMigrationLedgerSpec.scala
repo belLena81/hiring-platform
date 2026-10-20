@@ -84,7 +84,9 @@ final class MongoMigrationLedgerSpec extends FunSuite {
       "020_recruiter_job_closure_work",
       "021_job_admission_fence",
       "022_interview_subject_attribution",
-      "023_consumer_receipt_identity"
+      "023_consumer_receipt_identity",
+      "024_optional_field_absence",
+      "025_operational_collection_validators"
     )
     val actual = List(
       MigrationIds.UserJobRevisions,
@@ -109,7 +111,9 @@ final class MongoMigrationLedgerSpec extends FunSuite {
       MigrationIds.RecruiterJobClosureWork,
       MigrationIds.JobAdmissionFence,
       MigrationIds.InterviewSubjectAttribution,
-      MigrationIds.ConsumerReceiptIdentity
+      MigrationIds.ConsumerReceiptIdentity,
+      MigrationIds.OptionalFieldAbsence,
+      MigrationIds.OperationalCollectionValidators
     ).map(_.value)
     assertEquals(actual, expected)
     assertEquals(MongoDeletedAccountEmbeddingMigrations.MigrationId, MigrationIds.DeletedAccountEmbeddings.value)
@@ -123,6 +127,11 @@ final class MongoMigrationLedgerSpec extends FunSuite {
     assertEquals(MongoInterviewRequestReceiptMigrations.MigrationId, MigrationIds.InterviewRequestReceiptIndex.value)
     assertEquals(MongoRecruiterJobClosureMigrations.MigrationId, MigrationIds.RecruiterJobClosureWork.value)
     assertEquals(MongoJobAdmissionFenceMigrations.MigrationId, MigrationIds.JobAdmissionFence.value)
+    assertEquals(MongoOptionalFieldAbsenceMigrations.MigrationId, MigrationIds.OptionalFieldAbsence.value)
+    assertEquals(
+      MongoOperationalCollectionValidatorMigrations.MigrationId,
+      MigrationIds.OperationalCollectionValidators.value
+    )
     assertEquals(
       MongoInterviewSubjectAttributionMigrations.MigrationId,
       MigrationIds.InterviewSubjectAttribution.value

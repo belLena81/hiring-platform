@@ -133,7 +133,7 @@ final class InterviewCancellationMigrationIntegrationSpec extends MongoIntegrati
       val wf = UUID.randomUUID().toString
       def insert(value: Document) =
         MongoRepositoryTestSupport
-          .insertOne(fixture.database, MongoCollections.InterviewCalendarReservations, value)
+          .insertUnvalidated(fixture.database, MongoCollections.InterviewCalendarReservations, value)
           .attempt
       for {
         _ <- initialize(fixture.database)
@@ -164,7 +164,7 @@ final class InterviewCancellationMigrationIntegrationSpec extends MongoIntegrati
         restart <- initialize(fixture.database).attempt
         _ <- collection.dropIndex("workflow_only")
         _ <- deleteLedgerRow(fixture.database)
-        _ <- MongoRepositoryTestSupport.insertOne(
+        _ <- MongoRepositoryTestSupport.insertUnvalidated(
           fixture.database,
           MongoCollections.InterviewWorkflows,
           new Document("_id", UUID.randomUUID().toString)

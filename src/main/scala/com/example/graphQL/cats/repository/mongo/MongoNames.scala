@@ -170,6 +170,7 @@ private[mongo] object MongoFields {
   val Results = "results"
   val ResultId = "resultId"
   val Score = "score"
+  val Rank = "rank"
   val ExpiresAt = "expiresAt"
   val Session = "session"
   val Event = "event"
@@ -246,4 +247,15 @@ private[mongo] object MongoFields {
   val ProducerRegistry = "producerRegistry"
   val InterviewTransactionalIds = "interviewTransactionalIds"
   val RetrievalScore = "retrievalScore"
+  val SubjectId = "subjectId"
+  val TransactionalId = "transactionalId"
+  val FencedAt = "fencedAt"
+}
+
+/** Stored `kind` and `state` values of a producer registration row, shared with the analytics build. */
+private[mongo] object ProducerRegistrationValues {
+  val Operational = "Operational"
+  val Interview = "Interview"
+  val Active = "Active"
+  val Fenced = "Fenced"
 }

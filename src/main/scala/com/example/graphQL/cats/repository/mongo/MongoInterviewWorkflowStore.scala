@@ -114,7 +114,7 @@ final class MongoInterviewWorkflowStore(
         session,
         MongoFilter.and(
           (MongoFilter.eq(MongoFields.Id, next.id.value.toString) ::
-            MongoFilter.eq(DocumentTypeField, "workflow") ::
+            MongoFilter.eq(DocumentTypeField, WorkflowType) ::
             MongoFilter.eq(RevisionField, expectedRevision) :: extraFilters)*
         ),
         MongoUpdate.combine(
@@ -266,7 +266,7 @@ final class MongoInterviewWorkflowStore(
           workflows,
           session,
           MongoFilter.and(
-            (MongoFilter.eq(MongoFields.Id, id.value.toString) :: MongoFilter.eq(DocumentTypeField, "workflow") ::
+            (MongoFilter.eq(MongoFields.Id, id.value.toString) :: MongoFilter.eq(DocumentTypeField, WorkflowType) ::
               visibleTo)*
           )
         )

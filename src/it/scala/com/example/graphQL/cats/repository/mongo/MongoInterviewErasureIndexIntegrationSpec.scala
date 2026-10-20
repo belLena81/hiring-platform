@@ -12,7 +12,7 @@ import com.example.graphQL.cats.service.events.{
   OperationalEventPayload,
   OperationalEventType
 }
-import com.mongodb.client.model.{Filters, IndexOptions, Indexes}
+import com.mongodb.client.model.{Filters, IndexOptions, Indexes, InsertManyOptions}
 import io.circe.Json
 import io.circe.parser.parse
 import java.time.Instant
@@ -43,7 +43,13 @@ final class MongoInterviewErasureIndexIntegrationSpec extends MongoIntegrationSu
       name: String,
       rows: List[Document]
   ): IO[Unit] =
-    IO.whenA(rows.nonEmpty)(Mongo4catsCollections.documents(database, name).flatMap(_.insertMany(rows)).void)
+    // Partial fixture rows: the purge is under test, not the stored shape the validators enforce.
+    IO.whenA(rows.nonEmpty)(
+      Mongo4catsCollections
+        .documents(database, name)
+        .flatMap(_.insertMany(rows, new InsertManyOptions().bypassDocumentValidation(true)))
+        .void
+    )
 
   private def count(database: mongo4cats.database.MongoDatabase[IO], name: String, filter: org.bson.conversions.Bson) =
     MongoRepositoryTestSupport.count(database, name, filter)
@@ -56,14 +62,16 @@ final class MongoInterviewErasureIndexIntegrationSpec extends MongoIntegrationSu
     def per(f: UUID => Document): List[Document] = workflows.map(f)
     Map(
       MongoCollections.InterviewWorkflows -> (per(id =>
-        new Document(MongoFields.Id, id.toString)
-          .append("documentType", "workflow")
-          .append("candidateId", subject.value.toString)
-          .append("recruiterId", recruiter(id).value.toString)
-          .append(
-            MongoFields.SubjectIds,
-            List(subject.value.toString, recruiter(id).value.toString).asJava
+        MongoInterviewWorkflowCodec.workflowDocument(
+          com.example.graphQL.cats.domain.InterviewLifecycleFixtures.completed.copy(
+            id = InterviewWorkflowId(id),
+            applicationId = com.example.graphQL.cats.domain.model.Identifiers.ApplicationId(UUID.randomUUID()),
+            idempotencyKey = UUID.randomUUID(),
+            candidateId = subject,
+            recruiterId = recruiter(id),
+            initiatedBy = recruiter(id)
           )
+        )
       ) ++ per(id =>
         MongoInterviewWorkflowCodec.requestReceiptDocument(
           MongoInterviewWorkflowCodec.requestReceiptId(subject, id),
@@ -106,12 +114,15 @@ final class MongoInterviewErasureIndexIntegrationSpec extends MongoIntegrationSu
           .append("participants", List(subject.value.toString, recruiter(id).value.toString).asJava)
           .append("startsAt", Date.from(now.plusSeconds(3600)))
           .append("endsAt", Date.from(now.plusSeconds(7200)))
+          .append("reservedAt", Date.from(now))
       ),
       MongoCollections.InterviewNotificationReceipts -> per(id =>
         new Document(MongoFields.Id, s"$id:notify:Candidate")
           .append("workflowId", id.toString)
           .append("recipientId", subject.value.toString)
-          .append(MongoFields.SubjectIds, List(subject.value.toString).asJava)
+          .append("participant", "Candidate")
+          .append("kind", "Scheduled")
+          .append("deliveredAt", Date.from(now))
       )
     )
   }
@@ -434,7 +445,11 @@ final class MongoInterviewErasureIndexIntegrationSpec extends MongoIntegrationSu
       val bob = UUID.randomUUID().toString
       for {
         _ <- setup(database)
-        _ <- insertMany(database, MongoCollections.InterviewWorkflowInbox, List(legacyReceipt("0-late", ana, bob)))
+        _ <- insertMany(
+          database,
+          MongoCollections.InterviewWorkflowInbox,
+          List(legacyReceipt("00000000-0000-0000-0000-00000000000a", ana, bob))
+        )
         _ <- dropLedger(database, MigrationIds.InterviewSubjectAttribution)
         handle <- MongoHiringSetup.setupDatabase(database)
         _ <- MongoMigrationLedger.markRunning(handle, MigrationIds.InterviewSubjectAttribution)
@@ -450,6 +465,7 @@ final class MongoInterviewErasureIndexIntegrationSpec extends MongoIntegrationSu
     }
   }
 
+  /** Receipts written by an earlier binary keep a UUID workflow identity; `id` only has to sort as intended. */
   private def legacyReceipt(id: String, candidate: String, recruiter: String): Document =
     new Document(MongoFields.Id, s"$id:hiring")
       .append("workflowId", id)
@@ -555,7 +571,11 @@ final class MongoInterviewErasureIndexIntegrationSpec extends MongoIntegrationSu
         repaired <- setup(database).attempt
         done <- ledgerRow(database, MigrationIds.InterviewSubjectAttribution)
         // An earlier binary writes one more legacy receipt after completion; the next start repairs it.
-        _ <- insertMany(database, MongoCollections.InterviewWorkflowInbox, List(legacyReceipt("late", ana, bob)))
+        _ <- insertMany(
+          database,
+          MongoCollections.InterviewWorkflowInbox,
+          List(legacyReceipt("ffffffff-ffff-ffff-ffff-ffffffffffff", ana, bob))
+        )
         _ <- setup(database)
         late <- unattributed(database)
       } yield {

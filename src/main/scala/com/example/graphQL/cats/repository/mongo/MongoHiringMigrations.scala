@@ -99,6 +99,8 @@ private[mongo] object MongoHiringMigrations {
           run(MongoJobAdmissionFenceMigrations.step),
           run(MongoInterviewSubjectAttributionMigrations.step),
           run(MongoConsumerReceiptIdentityMigrations.step),
+          run(MongoOptionalFieldAbsenceMigrations.step),
+          run(MongoOperationalCollectionValidatorMigrations.step),
           createAccountRegistry(database)
         ).sequence_
       }

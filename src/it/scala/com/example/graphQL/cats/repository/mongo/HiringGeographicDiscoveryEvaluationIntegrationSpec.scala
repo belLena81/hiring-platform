@@ -199,15 +199,23 @@ final class HiringGeographicDiscoveryEvaluationIntegrationSpec extends MongoInte
           userCollection <- MongoRepositoryTestSupport.collection(fixture.database, MongoCollections.Users)
           _ <- userCollection.updateOne(
             Filters.eq("_id", candidates.head.id.value.toString),
-            Updates.set("accountStatus", AccountStatus.Deleted.toString)
+            Updates.combine(
+              Updates.set("accountStatus", AccountStatus.Deleted.toString),
+              Updates.unset("email"),
+              Updates.unset("emailCanonical"),
+              Updates.unset("passwordHash"),
+              Updates.unset("profile"),
+              Updates.unset("embedding"),
+              Updates.unset("embeddingMeta")
+            )
           )
           deletedDenied <- service
             .nearbyJobs(ActorContext(candidates.head.id, candidates.head.role), queries.head, 20)
             .value
           _ = assert(deletedDenied.isLeft)
-          _ <- userCollection.updateOne(
+          _ <- userCollection.replaceOne(
             Filters.eq("_id", candidates.head.id.value.toString),
-            Updates.set("accountStatus", AccountStatus.Active.toString)
+            MongoHiringCodecs.user(candidates.head)
           )
           rows <- List(1, 8).traverse { concurrency =>
             for {

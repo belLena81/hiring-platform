@@ -426,9 +426,17 @@ final class MongoInterviewLifecycleStore(store: MongoInterviewWorkflowStore) {
     case InterviewLifecycleOrigin.Internal(cause) =>
       insert(
         session,
-        inbox,
-        inboxDocument(s"${current.id.value}:${cause.receiptIdentity}", current.id, cause.receiptIdentity, revision, now)
-          .append("auditActorId", cause.auditActor.map(_.value.toString).orNull)
+        inbox, {
+          val receipt =
+            inboxDocument(
+              s"${current.id.value}:${cause.receiptIdentity}",
+              current.id,
+              cause.receiptIdentity,
+              revision,
+              now
+            )
+          cause.auditActor.fold(receipt)(actor => receipt.append("auditActorId", actor.value.toString))
+        }
       )
   }
 

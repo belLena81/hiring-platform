@@ -415,8 +415,12 @@ final class MongoInterviewWorkflowRepository(
                       _ <- insert(
                         session,
                         inbox,
-                        inboxDocument(inboxId, workflow.id, inboxMessageId, workflow.revision, occurredAt)
-                          .append("auditActorId", cause.auditActor.map(_.value.toString).orNull)
+                        cause.auditActor.fold(
+                          inboxDocument(inboxId, workflow.id, inboxMessageId, workflow.revision, occurredAt)
+                        )(actor =>
+                          inboxDocument(inboxId, workflow.id, inboxMessageId, workflow.revision, occurredAt)
+                            .append("auditActorId", actor.value.toString)
+                        )
                       )
                       _ <-
                         if (cause.resetsAttempts)

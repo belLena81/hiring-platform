@@ -368,7 +368,7 @@ private[mongo] object MongoHiringIndexSetup {
       new IndexOptions()
         .name(InterviewWorkflowInboxIdentity)
         .unique(true)
-        .partialFilterExpression(Filters.eq(MongoFields.DocumentType, "inboxReceipt"))
+        .partialFilterExpression(Filters.eq(MongoFields.DocumentType, MongoInterviewFields.InboxReceiptType))
     ),
     IndexSpec(
       MongoCollections.InterviewCalendarReservations,

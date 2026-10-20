@@ -465,7 +465,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
       val at = Instant.now()
       for {
         _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
-        _ <- MongoRepositoryTestSupport.insertOne(
+        _ <- MongoRepositoryTestSupport.insertUnvalidated(
           fixture.database,
           MongoCollections.InterviewWorkflows,
           new Document("_id", workflowId)
@@ -473,7 +473,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
             .append("candidateId", subject.value.toString)
             .append("recruiterId", other)
         )
-        _ <- MongoRepositoryTestSupport.insertOne(
+        _ <- MongoRepositoryTestSupport.insertUnvalidated(
           fixture.database,
           MongoCollections.InterviewCalendarReservations,
           new Document("_id", workflowId)
@@ -483,7 +483,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
             .append("startsAt", Date.from(at.plusSeconds(10)))
             .append("endsAt", Date.from(at.plusSeconds(20)))
         )
-        _ <- MongoRepositoryTestSupport.insertOne(
+        _ <- MongoRepositoryTestSupport.insertUnvalidated(
           fixture.database,
           MongoCollections.InterviewNotificationReceipts,
           new Document("_id", workflowId + ":notify:Recruiter")
@@ -544,7 +544,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
       val at = Instant.now()
       for {
         _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
-        _ <- MongoRepositoryTestSupport.insertOne(
+        _ <- MongoRepositoryTestSupport.insertUnvalidated(
           fixture.database,
           MongoCollections.InterviewCalendarReservations,
           new Document("_id", id)
@@ -730,7 +730,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
       val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
       for {
         _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
-        _ <- MongoRepositoryTestSupport.insertOne(
+        _ <- MongoRepositoryTestSupport.insertUnvalidated(
           fixture.database,
           MongoCollections.InterviewWorkflows,
           new Document("_id", s"request:${subject.value}:${UUID.randomUUID()}")
@@ -823,7 +823,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
           .append("workflowId", id)
       )
       (sources ++ children).traverse_ { case (name, row) =>
-        MongoRepositoryTestSupport.insertOne(database, name, row)
+        MongoRepositoryTestSupport.insertUnvalidated(database, name, row)
       }
     }
   }
@@ -907,7 +907,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
         _ <- seedCleanupData(fixture.database, subject, notificationOnly, Set(CleanupAttribution.NotificationReceipt))
         _ <- seedCleanupData(fixture.database, subject, Vector(shared), CleanupAttribution.values.toSet)
         // The surviving participant's receipt is attributable through the reservation, not its own recipient.
-        _ <- MongoRepositoryTestSupport.insertOne(
+        _ <- MongoRepositoryTestSupport.insertUnvalidated(
           fixture.database,
           MongoCollections.InterviewNotificationReceipts,
           new Document("_id", s"$firstCalendar:notify:Recruiter")
