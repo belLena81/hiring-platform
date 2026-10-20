@@ -2,7 +2,7 @@ package com.example.graphQL.cats.service.application
 
 import cats.effect.{IO, Ref}
 import com.example.graphQL.cats.domain.model.ApplicationStatus
-import com.example.graphQL.cats.domain.model.Identifiers.UserId
+import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, UserId}
 import com.example.graphQL.cats.domain.workflow.*
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.RepositoryError
@@ -56,6 +56,20 @@ private[cats] final class InMemoryInterviewWorkflowRepository(
 
   override def findForAdmin(workflowId: InterviewWorkflowId) =
     RepositoryF.lift(store.get.map(_.workflows.get(workflowId)))
+
+  override def findByApplication(applicationId: ApplicationId, access: InterviewWorkflowAccess) =
+    RepositoryF.lift(
+      store.get.map(
+        _.workflows.values.find(workflow =>
+          workflow.applicationId == applicationId &&
+            visible(
+              workflow,
+              InterviewLifecycleOrigin
+                .Actor(access, UUID.randomUUID(), MutationReceiptFingerprint.fromCanonicalInput(""))
+            )
+        )
+      )
+    )
 
   override def applyLifecycle(
       workflowId: InterviewWorkflowId,

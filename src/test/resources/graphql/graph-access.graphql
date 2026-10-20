@@ -54,6 +54,13 @@ query InterviewWorkflowApplication($workflowId: InterviewWorkflowID!) {
   }
 }
 
+query MyApplicationsWithInterview($first: Int!) {
+  myApplications(first: $first) {
+    edges { node { id status interview { id progress slot { startsAt endsAt } } } }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+
 mutation ErrorFragmentAcrossMutations($publish: JobActionInput!, $create: CreateJobInput!) {
   publishJob(input: $publish) {
     ... on Job { id }

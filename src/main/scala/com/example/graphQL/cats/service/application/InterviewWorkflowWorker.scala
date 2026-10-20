@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.service.application
 
-import cats.{Applicative, MonadThrow}
+import cats.MonadThrow
 import cats.effect.{Resource, Temporal}
 import cats.syntax.all.*
 import com.example.graphQL.cats.service.port.*
@@ -43,10 +43,7 @@ private[application] final class InterviewWorkerReporter[F[_]: MonadThrow](diagn
     diagnostics.emit(LogEvent.MongoRepositoryFailed, fields = Map(LogField.SpanName -> operation))
 
   def observe[A](operation: RepositoryF[F, A], name: String): F[Option[A]] =
-    operation.value.flatMap {
-      case Right(value) => Applicative[F].pure(Some(value))
-      case Left(_)      => report(name).as(None)
-    }
+    operation.map(_.some).valueOrF(_ => report(name).as(none[A]))
 
   /** `true` when the repository accepted the call; a failure is reported and answers `false`. */
   def succeeded(operation: RepositoryF[F, ?], name: String): F[Boolean] = observe(operation, name).map(_.isDefined)

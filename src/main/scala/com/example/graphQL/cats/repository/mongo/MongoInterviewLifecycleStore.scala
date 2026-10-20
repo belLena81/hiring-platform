@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.repository.mongo.MongoF.asRepository
 import com.example.graphQL.cats.shared.StableIds
 import cats.data.EitherT
 import cats.effect.IO
@@ -54,28 +55,26 @@ final class MongoInterviewLifecycleStore(store: MongoInterviewWorkflowStore) {
               )
             )
             .orConflict
-            .flatMap(document => RepositoryF.at[IO].fromEither(decodeReservation(document)))
+            .flatMap(document => MongoF.fromEither(decodeReservation(document)))
         for {
           _ <- fenceExecution(session, workflow.id, Some(execution))
           existing <- RepositoryF.lift(
             MongoSessionOperations.findById(inbox, session, receiptId)
           )
           _ <-
-            if (existing.nonEmpty) ().pure[[A] =>> RepositoryF[IO, A]]
+            if (existing.nonEmpty) ().asRepository
             else
               for {
                 current <- loadWorkflow(workflow.id, session).orConflict
-                pending <- RepositoryF.at[IO].fromEither(workflow.pendingInterval.toRight(RepositoryError.Conflict))
-                _ <- RepositoryF
-                  .at[IO]
-                  .fromEither(
-                    Either.cond(
-                      current == workflow && workflow.phase == InterviewWorkflowPhase.RescheduleSwapPending &&
-                        now.isBefore(InterviewCalendarFence.swapDeadline(workflow)),
-                      (),
-                      RepositoryError.Conflict
-                    )
+                pending <- MongoF.fromEither(workflow.pendingInterval.toRight(RepositoryError.Conflict))
+                _ <- MongoF.fromEither(
+                  Either.cond(
+                    current == workflow && workflow.phase == InterviewWorkflowPhase.RescheduleSwapPending &&
+                      now.isBefore(InterviewCalendarFence.swapDeadline(workflow)),
+                    (),
+                    RepositoryError.Conflict
                   )
+                )
                 _ <- fenceParticipants(session, workflow)
                 _ <- RepositoryF
                   .lift(
@@ -91,9 +90,7 @@ final class MongoInterviewLifecycleStore(store: MongoInterviewWorkflowStore) {
                   .orConflict
                 _ <- held(workflow.generation)
                 replacement <- held(workflow.replacementGeneration)
-                _ <- RepositoryF
-                  .at[IO]
-                  .fromEither(Either.cond(replacement.interval == pending, (), RepositoryError.Conflict))
+                _ <- MongoF.fromEither(Either.cond(replacement.interval == pending, (), RepositoryError.Conflict))
                 _ <- insert(
                   session,
                   inbox,
@@ -120,7 +117,7 @@ final class MongoInterviewLifecycleStore(store: MongoInterviewWorkflowStore) {
   ): RepositoryF[IO, InterviewLifecycleOutcome] =
     if (InterviewActorPolicy.admits(origin.actor, event))
       applyAdmittedLifecycle(workflowId, expectedRevision, event, origin, now, availableAt)
-    else RepositoryF.at[IO].raise(RepositoryError.InvalidEvent)
+    else MongoF.raise(RepositoryError.InvalidEvent)
 
   private def applyAdmittedLifecycle(
       workflowId: InterviewWorkflowId,
@@ -134,13 +131,13 @@ final class MongoInterviewLifecycleStore(store: MongoInterviewWorkflowStore) {
       transactionRunner
         .run { session =>
           lifecycleReplay(session, workflowId, origin).flatMap {
-            case Some(replayed) => replayed.pure[[A] =>> RepositoryF[IO, A]]
+            case Some(replayed) => replayed.asRepository
             case None           =>
               loadWorkflow(workflowId, session, participantPredicate(origin)).flatMap {
-                case None          => InterviewLifecycleOutcome.NotVisible.pure[[A] =>> RepositoryF[IO, A]]
+                case None          => InterviewLifecycleOutcome.NotVisible.asRepository
                 case Some(current) =>
                   InterviewLifecyclePolicy.decide(current, expectedRevision, event) match {
-                    case Left(error)     => InterviewLifecycleOutcome.Rejected(error).pure[[A] =>> RepositoryF[IO, A]]
+                    case Left(error)     => InterviewLifecycleOutcome.Rejected(error).asRepository
                     case Right(decision) => commitLifecycle(session, current, decision, event, origin, now, availableAt)
                   }
               }
@@ -169,19 +166,17 @@ final class MongoInterviewLifecycleStore(store: MongoInterviewWorkflowStore) {
         RepositoryF
           .lift(MongoSessionOperations.findById(workflows, session, requestReceiptId(access.actorId, requestKey)))
           .flatMap {
-            case None           => none[InterviewLifecycleOutcome].pure[[A] =>> RepositoryF[IO, A]]
+            case None           => none[InterviewLifecycleOutcome].asRepository
             case Some(document) =>
-              RepositoryF.at[IO].fromEither(decodeReceipt(document)).flatMap {
+              MongoF.fromEither(decodeReceipt(document)).flatMap {
                 case (id, existing) if id == workflowId && existing == fingerprint.value => stored(id)
-                case _ => RepositoryF.at[IO].raise(RepositoryError.Conflict)
+                case _ => MongoF.raise(RepositoryError.Conflict)
               }
           }
       case InterviewLifecycleOrigin.Internal(cause) =>
         RepositoryF
           .lift(MongoSessionOperations.findById(inbox, session, s"${workflowId.value}:${cause.receiptIdentity}"))
-          .flatMap(found =>
-            if (found.isEmpty) none[InterviewLifecycleOutcome].pure[[A] =>> RepositoryF[IO, A]] else stored(workflowId)
-          )
+          .flatMap(found => if (found.isEmpty) none[InterviewLifecycleOutcome].asRepository else stored(workflowId))
     }
   }
 
@@ -219,7 +214,7 @@ final class MongoInterviewLifecycleStore(store: MongoInterviewWorkflowStore) {
       case InterviewLifecycleOrigin.Internal(_) => Left(RepositoryError.InvalidEvent)
     }
     for {
-      access <- RepositoryF.at[IO].fromEither(authorized)
+      access <- MongoF.fromEither(authorized)
       document <- RepositoryF
         .lift(
           MongoSessionOperations.findOne(
@@ -249,11 +244,9 @@ final class MongoInterviewLifecycleStore(store: MongoInterviewWorkflowStore) {
         case Left(_) =>
           Left[InterviewLifecycleOutcome, CancellationWrite](
             InterviewLifecycleOutcome.ApplicationNotInterview(application.status)
-          )
-            .pure[[A] =>> RepositoryF[IO, A]]
+          ).asRepository
         case Right((updated, change)) =>
-          RepositoryF
-            .at[IO]
+          MongoF
             .fromEither(
               ApplicationEvent
                 .validate(
@@ -314,7 +307,7 @@ final class MongoInterviewLifecycleStore(store: MongoInterviewWorkflowStore) {
       case InterviewLifecycleEvent.Propose(_, _, _, _, _) | InterviewLifecycleEvent.AcceptProposal(_) |
           InterviewLifecycleEvent.RequestReschedule(_) =>
         requireInterviewApplication(session, current)
-      case _ => Right[InterviewLifecycleOutcome, Option[CancellationWrite]](None).pure[[A] =>> RepositoryF[IO, A]]
+      case _ => Right[InterviewLifecycleOutcome, Option[CancellationWrite]](None).asRepository
     }
     // Only Admin repair resets the retry budget, and Admin repair is the only event allowed to.
     val resetsAttempts = origin match {
@@ -322,23 +315,21 @@ final class MongoInterviewLifecycleStore(store: MongoInterviewWorkflowStore) {
       case _                                        => false
     }
     cancellation.flatMap {
-      case Left(outcome)                                 => outcome.pure[[A] =>> RepositoryF[IO, A]]
+      case Left(outcome)                                 => outcome.asRepository
       case Right(_) if next.revision == current.revision =>
         // A no-op (the request flag is already set) writes nothing: no receipt and no retention refresh. Writing a
         // receipt per fresh key would let one actor grow storage and trigger updates without bound; repeating the
         // request is idempotent without one.
-        (InterviewLifecycleOutcome.Duplicate(current): InterviewLifecycleOutcome).pure[[A] =>> RepositoryF[IO, A]]
+        (InterviewLifecycleOutcome.Duplicate(current): InterviewLifecycleOutcome).asRepository
       case Right(write) =>
         val actor = origin match {
           case InterviewLifecycleOrigin.Actor(access, _, _) => List(access.actorId)
           case InterviewLifecycleOrigin.Internal(_)         => Nil
         }
         for {
-          _ <- RepositoryF
-            .at[IO]
-            .fromEither(
-              Either.cond((event == InterviewLifecycleEvent.Repair) == resetsAttempts, (), RepositoryError.InvalidEvent)
-            )
+          _ <- MongoF.fromEither(
+            Either.cond((event == InterviewLifecycleEvent.Repair) == resetsAttempts, (), RepositoryError.InvalidEvent)
+          )
           _ <- fenceParticipants(session, current, actor)
           _ <- reviseWorkflow(
             session,
@@ -352,7 +343,7 @@ final class MongoInterviewLifecycleStore(store: MongoInterviewWorkflowStore) {
           ).subflatMap(MongoRepositorySupport.matchedOne(_))
           _ <- write.traverse_(applyCancellation(session, current, origin, _))
           _ <- recordLifecycleReceipt(session, current, next.revision, origin, now)
-          _ <- if (resetsAttempts) supersedeGatingCommands(session, current) else ().pure[[A] =>> RepositoryF[IO, A]]
+          _ <- if (resetsAttempts) supersedeGatingCommands(session, current) else ().asRepository
           _ <- insertCommands(session, current.id, next.revision, decision.commands) { command =>
             val dueAt = command match {
               case InterviewLifecycleCommand.ExpireProposal(at) => Some(at)
@@ -374,7 +365,7 @@ final class MongoInterviewLifecycleStore(store: MongoInterviewWorkflowStore) {
               retainCompleted(session, next, now)
             // An open proposal, cancellation or reschedule is live work: its evidence must not expire.
             else if (current.phase == InterviewWorkflowPhase.Completed) releaseRetention(session, next)
-            else ().pure[[A] =>> RepositoryF[IO, A]]
+            else ().asRepository
         } yield InterviewLifecycleOutcome.Applied(next)
     }
   }
@@ -441,7 +432,7 @@ final class MongoInterviewLifecycleStore(store: MongoInterviewWorkflowStore) {
     val ownerGuard = origin match {
       case InterviewLifecycleOrigin.Actor(access, _, _) if access.role == UserRole.Recruiter =>
         touchJobOwner(session, write.application.jobId.value.toString, access.actorId)
-      case _ => ().pure[[A] =>> RepositoryF[IO, A]]
+      case _ => ().asRepository
     }
     ownerGuard *>
       writeApplicationStatus(session, current.applicationId, write.previousStatus, write.application) *>

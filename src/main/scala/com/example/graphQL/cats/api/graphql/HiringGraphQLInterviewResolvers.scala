@@ -5,9 +5,11 @@ import cats.effect.IO
 import com.example.graphQL.cats.api.graphql.HiringGraphQLInputs.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLResolverSupport.*
+import com.example.graphQL.cats.domain.model.Application
 import com.example.graphQL.cats.domain.workflow.{InterviewWorkflow, InterviewWorkflowId}
-import com.example.graphQL.cats.service.{ActorContext, AvailabilityError, RepositoryError, UseCaseError}
-import com.example.graphQL.cats.service.application.{InterviewActionError, InterviewActionF, InterviewSchedulingService}
+import com.example.graphQL.cats.service.{ActorContext, AvailabilityError, UseCaseError}
+import com.example.graphQL.cats.service.application.InterviewSchedulingService
+import com.example.graphQL.cats.service.protocol.UseCaseF
 import sangria.schema.Context
 
 private[graphql] object HiringGraphQLInterviewResolvers {
@@ -46,6 +48,16 @@ private[graphql] object HiringGraphQLInterviewResolvers {
           case Left(error) => Left(HiringGraphQLFailure.UseCase(error))
         })
       )
+    }
+
+  /** `Application.interview`: the workflow of the application being resolved, for its participants and Admin; a
+    * workflow the caller may not see and an application without one are both null.
+    */
+  def applicationInterview(
+      context: Context[RequestContext, Application]
+  ): HiringGraphQLResult[Option[InterviewWorkflow]] =
+    authenticated(context) { case (actor, hiring) =>
+      available(hiring).flatMap(service => raiseOnUseCaseError(service.inspectForApplication(actor, context.value.id)))
     }
 
   def repairInterviewWorkflow(
@@ -127,7 +139,7 @@ private[graphql] object HiringGraphQLInterviewResolvers {
     input.workflowId
 
   private def interviewAction(context: Context[RequestContext, Unit])(
-      run: (InterviewSchedulingService[IO], ActorContext, InterviewActionGraphQLInput) => InterviewActionF[
+      run: (InterviewSchedulingService[IO], ActorContext, InterviewActionGraphQLInput) => UseCaseF[
         IO,
         InterviewWorkflow
       ]
@@ -141,7 +153,7 @@ private[graphql] object HiringGraphQLInterviewResolvers {
     * own unit. The actor handed to the service is the authenticated viewer, never anything from the input.
     */
   private def interviewActionOutcome(context: Context[RequestContext, Unit])(
-      run: (InterviewSchedulingService[IO], ActorContext) => InterviewActionF[IO, InterviewWorkflow]
+      run: (InterviewSchedulingService[IO], ActorContext) => UseCaseF[IO, InterviewWorkflow]
   ): HiringGraphQLResult[MutationOutcome[InterviewWorkflow]] =
     context.ctx.takeInterviewActionAllowance.flatMap {
       case Left(limited) =>
@@ -151,25 +163,7 @@ private[graphql] object HiringGraphQLInterviewResolvers {
         )
       case Right(_) =>
         authenticated(context) { case (actor, hiring) =>
-          available(hiring).flatMap(service => outcome(run(service, actor)))
+          available(hiring).flatMap(service => mutationResult(run(service, actor), authorizationRefusalAsData = true))
         }
     }
-
-  private def outcome(
-      value: InterviewActionF[IO, InterviewWorkflow]
-  ): HiringGraphQLResult[MutationOutcome[InterviewWorkflow]] =
-    EitherT(value.value.flatMap {
-      case Right(workflow) => IO.pure(Right(workflow))
-      case Left(InterviewActionError.UseCase(error)) if GraphQLFailureCatalog.isAuthorizationRefusal(error) =>
-        val failure = GraphQLFailureCatalog.classify(error)
-        IO.pure(Right(DomainError(failure.code, failure.message)))
-      case Left(InterviewActionError.UseCase(error))  => mutationResult(EitherT.leftT(error)).value
-      case Left(InterviewActionError.Workflow(error)) =>
-        val failure = GraphQLFailureCatalog.classifyInterviewRule(error)
-        IO.pure(
-          if (failure.exceptional)
-            Left(HiringGraphQLFailure.UseCase(UseCaseError.Repository(RepositoryError.Unavailable)))
-          else Right(DomainError(failure.code, failure.message))
-        )
-    })
 }

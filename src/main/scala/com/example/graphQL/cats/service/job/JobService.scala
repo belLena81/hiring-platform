@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.service.job
 
+import com.example.graphQL.cats.service.events.OperationalEventFailure.*
 import cats.data.EitherT
 import cats.MonadThrow
 import cats.effect.Clock
@@ -16,7 +17,6 @@ import com.example.graphQL.cats.service.port.{
   UserRepository,
   Versioned
 }
-import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.{Job, JobStatus, Location, UserRole}
@@ -297,7 +297,7 @@ final class JobService[F[_]: MonadThrow](
       .fromEither[F](
         OperationalEvents
           .jobEvent(kind, eventId(job, kind, occurredAt), job, actorId, occurredAt)
-          .leftMap(_ => UseCaseError.Repository(RepositoryError.InvalidEvent))
+          .leftMap(_.asUseCaseError)
       )
       .flatMap(event => notifyAfterCommit(UseCaseF.repository(write(List(event)))))
 

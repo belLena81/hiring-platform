@@ -30,18 +30,26 @@ private[graphql] object HiringGraphQLResolverSupport {
   def inputResult[A](value: Either[GraphQLFailure, A]): HiringGraphQLResult[A] =
     EitherT.fromEither[IO](value.leftMap(HiringGraphQLFailure.Input(_)))
 
+  /** The one place that decides whether a failed mutation is data (a typed `DomainError` or `ValidationError` payload,
+    * so sibling aliases survive) or a top-level GraphQL error. The catalog's failure metadata decides: a
+    * non-exceptional failure is data; an exceptional one, and every authentication failure, is top-level. Interview
+    * actions also report a role or ownership refusal as data (`authorizationRefusalAsData`), so one refused alias does
+    * not discard the results of the others in a batched request.
+    */
   def mutationResult[A](
       value: UseCaseF[IO, A],
-      fieldPath: InputFieldPaths.Path = InputFieldPaths.none
+      fieldPath: InputFieldPaths.Path = InputFieldPaths.none,
+      authorizationRefusalAsData: Boolean = false
   ): HiringGraphQLResult[MutationOutcome[A]] =
-    EitherT(value.value.flatMap {
-      case Right(result)                               => IO.pure(Right(result))
-      case Left(UseCaseError.ValidationFailed(errors)) => IO.pure(Right(validationError(errors, fieldPath)))
+    EitherT(value.value.map {
+      case Right(result)                               => Right(result)
+      case Left(UseCaseError.ValidationFailed(errors)) => Right(validationError(errors, fieldPath))
       case Left(error)                                 =>
         val failure = GraphQLFailureCatalog.classify(error)
-        if (failure.exceptional || GraphQLFailureCatalog.isAuthenticationFailure(error))
-          IO.pure(Left(HiringGraphQLFailure.UseCase(error)))
-        else IO.pure(Right(DomainError(failure.code, failure.message)))
+        val refusedAsData = authorizationRefusalAsData && GraphQLFailureCatalog.isAuthorizationRefusal(error)
+        if ((failure.exceptional && !refusedAsData) || GraphQLFailureCatalog.isAuthenticationFailure(error))
+          Left(HiringGraphQLFailure.UseCase(error))
+        else Right(DomainError(failure.code, failure.message))
     })
 
   /** A rate-limit refusal as data: the code and message come from the failure, and the delay is carried (whole seconds,

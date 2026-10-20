@@ -446,6 +446,81 @@ final class HiringGraphQLGraphAccessSpec extends CatsEffectSuite {
     }
   }
 
+  private val interviewOfApplications =
+    "query { myApplications(first: 10) { edges { node { id interview { id progress applicationId } } } } }"
+  private def interviewOfJobApplications =
+    s"""query { jobApplications(jobId: "${jobId.value}", first: 10) { edges { node { id interview { id } } } } }"""
+
+  private def interviewIds(cursor: ACursor): Map[String, Option[String]] =
+    cursor
+      .downField("edges")
+      .values
+      .toList
+      .flatten
+      .map(_.hcursor.downField("node"))
+      .map(node => node.get[String]("id").toOption.get -> node.downField("interview").get[String]("id").toOption)
+      .toMap
+
+  test("AC-07.12 Application.interview shows the workflow to its candidate, the owning recruiter and Admin") {
+    for {
+      e <- env()
+      asAna <- execute(e, interviewOfApplications, ana).map(ok)
+      asRita <- execute(e, interviewOfJobApplications, rita).map(ok)
+      asRoot <- execute(e, interviewOfJobApplications, root).map(ok)
+    } yield {
+      List(asAna, asRita, asRoot).foreach(json => assert(errorCodes(json).isEmpty, clue(json)))
+      val expected = Some(workflowId.value.toString)
+      assertEquals(interviewIds(data(asAna).downField("myApplications"))(idOf(anaApplication)), expected)
+      assertEquals(interviewIds(data(asRita).downField("jobApplications"))(idOf(anaApplication)), expected)
+      assertEquals(interviewIds(data(asRoot).downField("jobApplications"))(idOf(anaApplication)), expected)
+    }
+  }
+
+  test("AC-07.12 an application without an interview, and one of another participant, resolve interview to null") {
+    for {
+      e <- env()
+      asBen <- execute(e, interviewOfApplications, ben).map(ok)
+      asRita <- execute(e, interviewOfJobApplications, rita).map(ok)
+    } yield {
+      assertEquals(interviewIds(data(asBen).downField("myApplications")), Map(idOf(benApplication) -> None))
+      val byApplication = interviewIds(data(asRita).downField("jobApplications"))
+      assertEquals(byApplication(idOf(benApplication)), None)
+      assertEquals(byApplication(idOf(carlaApplication)), None)
+    }
+  }
+
+  test("AC-07.12 the participant predicate is enforced by the service, not only by the parent field") {
+    for {
+      e <- env()
+      service = e.services.interviewScheduling.get
+      asAna <- service.inspectForApplication(ana, anaApplication).value
+      asRita <- service.inspectForApplication(rita, anaApplication).value
+      asRoot <- service.inspectForApplication(root, anaApplication).value
+      // Another candidate, a recruiter who is not on the workflow, and a stranger asking for an unknown application.
+      asBen <- service.inspectForApplication(ben, anaApplication).value
+      asRob <- service.inspectForApplication(rob, anaApplication).value
+      unknown <- service.inspectForApplication(ana, ApplicationId(uuid(9999))).value
+      misassigned <- env(interviewRecruiter = otherRecruiterId)
+      asOwner <- misassigned.services.interviewScheduling.get.inspectForApplication(rita, anaApplication).value
+    } yield {
+      List(asAna, asRita, asRoot).foreach(found => assertEquals(found.map(_.map(_.id)), Right(Some(workflowId))))
+      List(asBen, asRob, unknown, asOwner).foreach(found => assertEquals(found, Right(None)))
+    }
+  }
+
+  test("AC-07.12 an unauthenticated caller reaches no application and so no interview") {
+    for {
+      e <- env()
+      json <- TestGraphQLSupport
+        .context(None, e.services)
+        .use(TestGraphQLSupport.parseAndExecute(GraphQLRequest(interviewOfApplications, Json.obj(), None), _))
+        .map(ok)
+    } yield {
+      assertEquals(errorCodes(json), List("UNAUTHORIZED"), clue(json))
+      assert(!json.noSpaces.contains(workflowId.value.toString), clue(json))
+    }
+  }
+
   test("AC-07.7 nested connections page with the shared cursor and report where the page sits") {
     for {
       e <- env()
@@ -593,6 +668,19 @@ final class HiringGraphQLGraphAccessSpec extends CatsEffectSuite {
     } yield {
       assert(fits.exists(json => errorCodes(json).isEmpty), clue(fits))
       assertEquals(over, Left(HiringGraphQLSchema.Failure.InvalidQuery))
+    }
+  }
+
+  test("AC-07.12 Application.interview is priced like the other per-parent reads") {
+    def nested(selection: String) =
+      s"query { myJobs(first: 99) { edges { node { applications(first: 1) { edges { node { $selection } } } } } } }"
+    for {
+      e <- env()
+      plain <- execute(e, nested("id"), rita)
+      withInterview <- execute(e, nested("id interview { id }"), rita)
+    } yield {
+      assert(plain.exists(json => errorCodes(json).isEmpty), clue(plain))
+      assertEquals(withInterview, Left(HiringGraphQLSchema.Failure.InvalidQuery))
     }
   }
 

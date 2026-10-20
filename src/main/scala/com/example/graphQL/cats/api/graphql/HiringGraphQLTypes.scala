@@ -11,7 +11,7 @@ import com.example.graphQL.cats.api.graphql.HiringGraphQLDsl.{
   resultField,
   searchOutcomeUnion
 }
-import com.example.graphQL.cats.api.graphql.QueryAdmission.nestedConnectionComplexity
+import com.example.graphQL.cats.api.graphql.QueryAdmission.{nestedConnectionComplexity, nestedFieldComplexity}
 import com.example.graphQL.cats.domain.workflow.{InterviewInterval, InterviewRescheduleProposal}
 import com.example.graphQL.cats.service.search.*
 import scala.reflect.ClassTag
@@ -386,7 +386,14 @@ private[graphql] object HiringGraphQLTypes {
             "to its candidate, the owning recruiter and Admin.",
           firstArgument :: afterArgument :: Nil,
           complexity = Some(nestedConnectionComplexity)
-        )(HiringGraphQLApplicationResolvers.applicationEventsOf)
+        )(HiringGraphQLApplicationResolvers.applicationEventsOf),
+        resultField(
+          "interview",
+          OptionType(interviewWorkflowType),
+          "The interview workflow of this application, as `interviewWorkflow(workflowId)` shows it: to its candidate, " +
+            "the owning recruiter and Admin. Null when the application has no interview or the caller may not see it.",
+          complexity = Some(nestedFieldComplexity)
+        )(HiringGraphQLInterviewResolvers.applicationInterview)
       )
   )
   lazy val applicationEventType: ObjectType[RequestContext, ApplicationEvent] =

@@ -8,7 +8,9 @@ import com.example.graphQL.cats.api.graphql.HiringGraphQLResolverSupport.*
 import com.example.graphQL.cats.domain.error.{DomainError as DomainFailure, DomainValidationError}
 import com.example.graphQL.cats.domain.model.{ApplicationStatus, JobStatus, UserRole}
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId}
-import com.example.graphQL.cats.service.port.{MutationReceiptFingerprint}
+import com.example.graphQL.cats.domain.workflow.InterviewWorkflowError
+import com.example.graphQL.cats.service.port.{MutationReceiptFingerprint, RepositoryF}
+import com.example.graphQL.cats.service.protocol.UseCaseF
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.{
   AccountError,
@@ -494,6 +496,56 @@ final class HiringGraphQLResolverSupportSpec extends CatsEffectSuite {
       .mutationResult(EitherT.leftT[IO, String](error))
       .value
       .map(result => assertEquals(result, Left(HiringGraphQLFailure.UseCase(error))))
+  }
+
+  test(
+    "AC-06.1 a revoked authority is FORBIDDEN on mutations and a hand-built Repository(AuthorityRevoked) classifies alike"
+  ) {
+    val translated = UseCaseF.translate(RepositoryError.AuthorityRevoked)
+    val handBuilt = UseCaseError.Repository(RepositoryError.AuthorityRevoked)
+    assertEquals(GraphQLFailureCatalog.classify(translated).code, "FORBIDDEN")
+    assertEquals(GraphQLFailureCatalog.classify(handBuilt), GraphQLFailureCatalog.classify(translated))
+    HiringGraphQLResolverSupport
+      .mutationResult(UseCaseF.repository(RepositoryF.at[IO].raise[String](RepositoryError.AuthorityRevoked)))
+      .value
+      .map(result => assertEquals(result, Left(HiringGraphQLFailure.UseCase(translated))))
+  }
+
+  test("AC-06.7 only interview actions report a role refusal as data; every mutation keeps other refusals top-level") {
+    val forbidden = UseCaseError.Domain(DomainFailure.Forbidden)
+    val unavailable = UseCaseError.Repository(RepositoryError.Unavailable)
+    for {
+      plain <- HiringGraphQLResolverSupport.mutationResult(EitherT.leftT[IO, String](forbidden)).value
+      action <- HiringGraphQLResolverSupport
+        .mutationResult(EitherT.leftT[IO, String](forbidden), authorizationRefusalAsData = true)
+        .value
+      stillTopLevel <- HiringGraphQLResolverSupport
+        .mutationResult(EitherT.leftT[IO, String](unavailable), authorizationRefusalAsData = true)
+        .value
+    } yield {
+      assertEquals(plain, Left(HiringGraphQLFailure.UseCase(forbidden)))
+      assertEquals(action, Right(DomainError("FORBIDDEN", "Forbidden")))
+      assertEquals(stillTopLevel, Left(HiringGraphQLFailure.UseCase(unavailable)))
+    }
+  }
+
+  test("AC-06.7 interview business refusals are data and an exceptional interview rule is a top-level UNAVAILABLE") {
+    val refusal = UseCaseError.InterviewRule(InterviewWorkflowError.StaleRevision)
+    val exceptional = UseCaseError.InterviewRule(InterviewWorkflowError.ProposalTtlOutOfRange)
+    for {
+      data <- HiringGraphQLResolverSupport
+        .mutationResult(EitherT.leftT[IO, String](refusal), authorizationRefusalAsData = true)
+        .value
+      top <- HiringGraphQLResolverSupport
+        .mutationResult(EitherT.leftT[IO, String](exceptional), authorizationRefusalAsData = true)
+        .value
+    } yield {
+      assertEquals(data, Right(DomainError("STALE_REVISION", "Stale revision")))
+      assertEquals(top, Left(HiringGraphQLFailure.UseCase(exceptional)))
+      // The catalog metadata, not a resolver-local match, decides: the code a client sees is UNAVAILABLE.
+      assertEquals(GraphQLFailureCatalog.classify(exceptional).code, "UNAVAILABLE")
+      assert(GraphQLFailureCatalog.classify(exceptional).exceptional)
+    }
   }
 
   private def searchRoot(failure: HiringGraphQLFailure) =

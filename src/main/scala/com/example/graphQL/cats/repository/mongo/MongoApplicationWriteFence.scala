@@ -33,7 +33,7 @@ private[mongo] final class MongoApplicationWriteFence(database: MongoDatabase[IO
       actor: ApplicationWriteActor,
       jobId: JobId
   ): RepositoryF[IO, Unit] =
-    if (actor.role != UserRole.Candidate) RepositoryF.at[IO].raise(RepositoryError.AuthorityRevoked)
+    if (actor.role != UserRole.Candidate) MongoF.raise(RepositoryError.AuthorityRevoked)
     else requireActive(session, actor) *> bumpFence(session, actor) *> requireJobRecruiterActive(session, jobId)
 
   private def requireJobRecruiterActive(session: Option[ClientSession[IO]], jobId: JobId): RepositoryF[IO, Unit] =
@@ -47,10 +47,10 @@ private[mongo] final class MongoApplicationWriteFence(database: MongoDatabase[IO
         )
       )
       .flatMap {
-        case None      => RepositoryF.at[IO].pure(())
+        case None      => MongoF.pure(())
         case Some(job) =>
           Option(job.getString(MongoFields.RecruiterId)).fold[RepositoryF[IO, Unit]](
-            RepositoryF.at[IO].raise(RepositoryError.InvalidStoredData)
+            MongoF.raise(RepositoryError.InvalidStoredData)
           ) { recruiterId =>
             RepositoryF
               .lift(
@@ -74,7 +74,7 @@ private[mongo] final class MongoApplicationWriteFence(database: MongoDatabase[IO
       actor: ApplicationWriteActor,
       jobId: JobId
   ): RepositoryF[IO, Unit] = actor.role match {
-    case UserRole.Candidate => RepositoryF.at[IO].raise(RepositoryError.AuthorityRevoked)
+    case UserRole.Candidate => MongoF.raise(RepositoryError.AuthorityRevoked)
     case UserRole.Admin     => requireActive(session, actor) *> bumpFence(session, actor)
     case UserRole.Recruiter =>
       requireActive(session, actor) *> bumpFence(session, actor) *> requireOwnership(session, actor, jobId)

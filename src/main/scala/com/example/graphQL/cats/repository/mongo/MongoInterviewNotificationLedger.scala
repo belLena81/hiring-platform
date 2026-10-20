@@ -29,29 +29,25 @@ final class MongoInterviewNotificationLedger(store: MongoInterviewWorkflowStore)
           loadWorkflow(receipt.workflowId, session).orConflict.flatMap(workflow =>
             for {
               _ <- fenceParticipants(session, workflow)
-              _ <- RepositoryF
-                .at[IO]
-                .fromEither(
-                  Either.cond(
-                    InterviewNotificationFence.permits(receipt.kind, workflow.phase),
-                    (),
-                    RepositoryError.Conflict
-                  )
+              _ <- MongoF.fromEither(
+                Either.cond(
+                  InterviewNotificationFence.permits(receipt.kind, workflow.phase),
+                  (),
+                  RepositoryError.Conflict
                 )
+              )
               _ <- bumpProviderFence(session, workflow.id, workflow.phase)
               receiptExists <- RepositoryF.lift(
                 MongoSessionOperations.findById(inbox, session, s"${workflow.id.value}:hiring")
               )
               // Only the scheduling notification requires the hiring commit; later kinds follow other durable events.
-              _ <- RepositoryF
-                .at[IO]
-                .fromEither(
-                  Either.cond(
-                    receipt.kind != InterviewNotificationKind.Scheduled || receiptExists.nonEmpty,
-                    (),
-                    RepositoryError.Conflict
-                  )
+              _ <- MongoF.fromEither(
+                Either.cond(
+                  receipt.kind != InterviewNotificationKind.Scheduled || receiptExists.nonEmpty,
+                  (),
+                  RepositoryError.Conflict
                 )
+              )
             } yield ()
           ) *>
           RepositoryF
@@ -60,11 +56,9 @@ final class MongoInterviewNotificationLedger(store: MongoInterviewWorkflowStore)
             )
             .flatMap {
               case Some(document) =>
-                RepositoryF
-                  .at[IO]
-                  .fromEither(decodeNotification(document).flatMap { existing =>
-                    Either.cond(sameNotification(existing, receipt), existing, RepositoryError.Conflict)
-                  })
+                MongoF.fromEither(decodeNotification(document).flatMap { existing =>
+                  Either.cond(sameNotification(existing, receipt), existing, RepositoryError.Conflict)
+                })
               case None =>
                 RepositoryF
                   .lift(MongoSessionOperations.insertOne(notificationReceipts, session, notificationDocument(receipt)))
@@ -82,7 +76,7 @@ final class MongoInterviewNotificationLedger(store: MongoInterviewWorkflowStore)
           .lift(
             MongoSessionOperations.findById(notificationReceipts, None, idempotencyKey)
           )
-          .flatMap(_.traverse(document => RepositoryF.at[IO].fromEither(decodeNotification(document))))
+          .flatMap(_.traverse(document => MongoF.fromEither(decodeNotification(document))))
       }
       .leftMap(_ => InterviewProviderError.Unavailable)
 

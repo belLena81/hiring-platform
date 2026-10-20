@@ -500,8 +500,7 @@ private[mongo] object MongoOperationalEventInsertion {
   def insertSequence(events: List[OperationalEventEnvelope], now: Instant)(
       write: Document => RepositoryF[IO, Unit]
   ): RepositoryF[IO, Unit] =
-    RepositoryF
-      .at[IO]
+    MongoF
       .fromEither(
         events.traverse { event =>
           com.example.graphQL.cats.infrastructure.events.OperationalEventWireCodec
@@ -514,8 +513,25 @@ private[mongo] object MongoOperationalEventInsertion {
 }
 
 private[mongo] object MongoStoredDocumentDecoding {
+
+  extension [A](decoded: ValidatedNel[MongoHiringCodecs.StoredDocumentError, A]) {
+
+    /** The one place where a decode failure becomes the repository's `InvalidStoredData`. Accumulation is internal to
+      * the codec (`ValidatedNel` keeps every `StoredDocumentError` until here, so none is dropped by an earlier
+      * `.head`); the detail is deliberately not surfaced past this point. The read fails closed, and neither the error,
+      * the field names nor any stored text is logged or returned.
+      */
+    def toStored: Either[RepositoryError, A] = decoded.toEither.leftMap(_ => RepositoryError.InvalidStoredData)
+  }
+
+  extension [A](decoded: Either[MongoHiringCodecs.StoredDocumentError, A]) {
+
+    /** The same collapse for a single field read. */
+    def toStored: Either[RepositoryError, A] = decoded.leftMap(_ => RepositoryError.InvalidStoredData)
+  }
+
   def repository[A](decoded: ValidatedNel[MongoHiringCodecs.StoredDocumentError, A]): Either[RepositoryError, A] =
-    decoded.toEither.leftMap(_ => RepositoryError.InvalidStoredData)
+    decoded.toStored
 
   def optional[A](
       decoded: ValidatedNel[MongoHiringCodecs.StoredDocumentError, Option[A]]

@@ -2,6 +2,7 @@ package com.example.graphQL.cats.repository.mongo
 
 import cats.syntax.all.*
 import com.example.graphQL.cats.repository.mongo.MongoHiringCodecs.StoredDocumentError
+import com.example.graphQL.cats.repository.mongo.MongoStoredDocumentDecoding.toStored
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.shared.Parsing
 import org.bson.Document
@@ -49,7 +50,7 @@ private[mongo] object MongoDocumentFields {
     }
 
   /** Collapses field detail where the caller only reports an unreadable stored document. */
-  def toRepository[A](read: Read[A]): Either[RepositoryError, A] = read.leftMap(_ => RepositoryError.InvalidStoredData)
+  def toRepository[A](read: Read[A]): Either[RepositoryError, A] = read.toStored
 
   def requiredString(document: Document, field: String): Read[String] =
     required(document, field) { case value: String => value }

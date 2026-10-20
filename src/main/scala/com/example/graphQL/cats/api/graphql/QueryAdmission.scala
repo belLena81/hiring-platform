@@ -27,6 +27,9 @@ private[graphql] object QueryAdmission {
   val NestedListBaseComplexity = 5d
   val nestedConnectionComplexity: (RequestContext, Args, Double) => Double =
     (_, args, child) => NestedListBaseComplexity + args.arg(firstArgument).max(0) * child
+  // A single nested object (`Application.interview`) is also one authorized read per parent, so it carries the same base.
+  val nestedFieldComplexity: (RequestContext, Args, Double) => Double =
+    (_, _, child) => NestedListBaseComplexity + child
   val expensivePageComplexity: (RequestContext, Args, Double) => Double =
     (_, args, child) => 100d + args.arg(firstArgument).max(0) * (1d + child)
   // A lexical-query facet request runs `$search` plus an aggregation, so it costs at least a semanticJobSearch page.

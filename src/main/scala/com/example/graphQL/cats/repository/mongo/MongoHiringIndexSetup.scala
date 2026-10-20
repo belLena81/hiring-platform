@@ -350,6 +350,17 @@ private[mongo] object MongoHiringIndexSetup {
       Indexes.ascending(MongoFields.RecruiterId, MongoFields.Id),
       new IndexOptions().name(InterviewWorkflowRecruiter)
     ),
+    // One workflow per application, enforced by the store: an application enters `Interview` once and never leaves it
+    // for another scheduling. Request receipts carry no `applicationId` and are excluded by the partial filter.
+    // `findByApplication` reads through this index.
+    IndexSpec(
+      MongoCollections.InterviewWorkflows,
+      Indexes.ascending("applicationId"),
+      new IndexOptions()
+        .name(InterviewWorkflowApplication)
+        .unique(true)
+        .partialFilterExpression(Filters.eq(MongoFields.DocumentType, "workflow"))
+    ),
     interviewCommandDueIndex,
     interviewRequestReceiptIndex,
     IndexSpec(

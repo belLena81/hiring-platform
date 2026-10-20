@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.repository.mongo.MongoStoredDocumentDecoding.toStored
 import com.example.graphQL.cats.service.resilience.CircuitBreaker
 
 import cats.effect.IO
@@ -32,8 +33,7 @@ final class MongoSearchSessionWorkRepository(
   private val processing = MongoFilter.eq(MongoFields.State, SearchSessionWorkState.Processing.toString)
 
   override def enqueue(value: PendingSearchSessionWork, now: Instant): RepositoryF[IO, Unit] =
-    RepositoryF
-      .at[IO]
+    MongoF
       .fromEither(
         OperationalEventWireCodec.validate(value.event).leftMap(_ => RepositoryError.InvalidEvent).flatMap { _ =>
           Either.cond(
@@ -77,13 +77,11 @@ final class MongoSearchSessionWorkRepository(
           )
           .flatMap {
             case Some(document) =>
-              RepositoryF
-                .at[IO]
-                .fromEither(
-                  MongoStoredDocumentDecoding
-                    .repository(MongoHiringCodecs.readSearchSession(document))
-                    .map(session => Some(SearchSessionLookup.Materialized(session)))
-                )
+              MongoF.fromEither(
+                MongoStoredDocumentDecoding
+                  .repository(MongoHiringCodecs.readSearchSession(document))
+                  .map(session => Some(SearchSessionLookup.Materialized(session)))
+              )
             case None =>
               RepositoryF
                 .lift(
@@ -102,7 +100,7 @@ final class MongoSearchSessionWorkRepository(
                   case Some(document) =>
                     MongoSearchSessionWorkCodecs
                       .readState(document)
-                      .leftMap(_ => RepositoryError.InvalidStoredData)
+                      .toStored
                       .map {
                         case SearchSessionWorkState.Failed => Some(SearchSessionLookup.Failed)
                         case _                             => Some(SearchSessionLookup.Pending)
@@ -131,11 +129,9 @@ final class MongoSearchSessionWorkRepository(
             MongoLeaseQueue.leaseStamp(SearchSessionWorkState.Processing.toString, workerId, token, leaseUntil, now),
             Sorts.ascending(MongoFields.AvailableAt, MongoFields.CreatedAt, MongoFields.Id)
           )(document =>
-            RepositoryF
-              .at[IO]
-              .fromEither(
-                MongoSearchSessionWorkCodecs.readClaim(document).leftMap(_ => RepositoryError.InvalidStoredData)
-              )
+            MongoF.fromEither(
+              MongoSearchSessionWorkCodecs.readClaim(document).toStored
+            )
           )
         }
     }

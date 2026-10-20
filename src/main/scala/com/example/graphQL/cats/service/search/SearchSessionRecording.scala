@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.service.search
 
+import com.example.graphQL.cats.service.events.OperationalEventFailure.*
 import cats.data.EitherT
 import cats.Monad
 import cats.effect.kernel.Clock
@@ -16,7 +17,7 @@ import com.example.graphQL.cats.service.events.{
 }
 import com.example.graphQL.cats.service.port.SearchRecordingFailureRepository
 import com.example.graphQL.cats.service.protocol.UseCaseF
-import com.example.graphQL.cats.service.{RepositoryError, UseCaseError}
+import com.example.graphQL.cats.service.UseCaseError
 import com.example.graphQL.cats.shared.StableIds
 import java.util.UUID
 import scala.concurrent.duration.*
@@ -99,7 +100,7 @@ object SearchSessionRecording {
           .fromEither[F](
             OperationalEvents
               .searchPerformed(eventId(searchId), session)
-              .leftMap(_ => UseCaseError.Repository(RepositoryError.InvalidEvent))
+              .leftMap(_.asUseCaseError)
           )
           .flatMap(event => EitherT.liftF[F, UseCaseError, Unit](handoff.enqueue(session, event)))
       }

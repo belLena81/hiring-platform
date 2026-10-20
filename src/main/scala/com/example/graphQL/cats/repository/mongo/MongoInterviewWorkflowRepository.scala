@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.repository.mongo.MongoF.asRepository
 import com.example.graphQL.cats.service.resilience.CircuitBreaker
 
 import com.example.graphQL.cats.shared.StableIds
@@ -10,7 +11,7 @@ import mongo4cats.client.MongoClient
 import mongo4cats.database.MongoDatabase
 import scala.concurrent.duration.*
 import cats.syntax.all.*
-import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, UserId}
+import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, UserId}
 import com.example.graphQL.cats.domain.model.{ApplicationEvent, ApplicationStatus, UserRole}
 import com.example.graphQL.cats.domain.policy.ApplicationLifecycle
 import com.example.graphQL.cats.domain.workflow.*
@@ -68,9 +69,9 @@ final class MongoInterviewWorkflowRepository(
       fingerprint: MutationReceiptFingerprint
   ): RepositoryF[IO, Option[InterviewWorkflow]] =
     requestReceipt(requestReceiptId(actorId, requestKey), None).flatMap {
-      case None => none[InterviewWorkflow].pure[[A] =>> RepositoryF[IO, A]]
+      case None                                                  => none[InterviewWorkflow].asRepository
       case Some((id, existing)) if existing == fingerprint.value => loadWorkflow(id, None)
-      case Some(_)                                               => RepositoryF.at[IO].raise(RepositoryError.Conflict)
+      case Some(_)                                               => MongoF.raise(RepositoryError.Conflict)
     }
 
   override def hasHiringReceipt(workflowId: InterviewWorkflowId): RepositoryF[IO, Boolean] =
@@ -90,29 +91,25 @@ final class MongoInterviewWorkflowRepository(
           _ <- fenceExecution(session, workflow.id, execution)
           existing <- RepositoryF.lift(MongoSessionOperations.findById(inbox, session, receiptId))
           _ <-
-            if (existing.nonEmpty) ().pure[[A] =>> RepositoryF[IO, A]]
+            if (existing.nonEmpty) ().asRepository
             else
               for {
                 committedAt <- RepositoryF.lift(clock.realTimeInstant)
-                _ <- RepositoryF
-                  .at[IO]
-                  .fromEither(
-                    Either.cond(
-                      now.isBefore(workflow.preCommitDeadline) && committedAt.isBefore(workflow.preCommitDeadline),
-                      (),
-                      RepositoryError.Conflict
-                    )
+                _ <- MongoF.fromEither(
+                  Either.cond(
+                    now.isBefore(workflow.preCommitDeadline) && committedAt.isBefore(workflow.preCommitDeadline),
+                    (),
+                    RepositoryError.Conflict
                   )
+                )
                 current <- loadWorkflow(workflow.id, session)
-                _ <- RepositoryF
-                  .at[IO]
-                  .fromEither(
-                    Either.cond(
-                      current.contains(workflow) && workflow.phase == InterviewWorkflowPhase.StatusCommitPending,
-                      (),
-                      RepositoryError.Conflict
-                    )
+                _ <- MongoF.fromEither(
+                  Either.cond(
+                    current.contains(workflow) && workflow.phase == InterviewWorkflowPhase.StatusCommitPending,
+                    (),
+                    RepositoryError.Conflict
                   )
+                )
                 reserved <- RepositoryF.lift(
                   MongoSessionOperations.findOne(
                     reservations,
@@ -123,7 +120,7 @@ final class MongoInterviewWorkflowRepository(
                     )
                   )
                 )
-                _ <- RepositoryF.at[IO].fromEither(Either.cond(reserved.nonEmpty, (), RepositoryError.Conflict))
+                _ <- MongoF.fromEither(Either.cond(reserved.nonEmpty, (), RepositoryError.Conflict))
                 application <- RepositoryF
                   .lift(
                     MongoSessionOperations.findOne(
@@ -138,21 +135,19 @@ final class MongoInterviewWorkflowRepository(
                   )
                   .orConflict
                 decoded <- readApplication(application)
-                transition <- RepositoryF
-                  .at[IO]
-                  .fromEither(
-                    ApplicationLifecycle
-                      .changeStatus(
-                        ApplicationStatus.Interview,
-                        workflow.initiatedBy,
-                        workflow.initiatedByRole,
-                        now,
-                        None,
-                        None
-                      )
-                      .run(decoded)
-                      .leftMap(_ => RepositoryError.Conflict)
-                  )
+                transition <- MongoF.fromEither(
+                  ApplicationLifecycle
+                    .changeStatus(
+                      ApplicationStatus.Interview,
+                      workflow.initiatedBy,
+                      workflow.initiatedByRole,
+                      now,
+                      None,
+                      None
+                    )
+                    .run(decoded)
+                    .leftMap(_ => RepositoryError.Conflict)
+                )
                 (updated, change) = transition
                 _ <- touchJobOwner(session, updated.jobId.value.toString, workflow.recruiterId)
                 _ <- participantsOf(workflow).distinct.traverse_(id =>
@@ -196,13 +191,11 @@ final class MongoInterviewWorkflowRepository(
                     .append("recruiterId", workflow.recruiterId.value.toString)
                     .append(MongoFields.OccurredAt, now.toDate)
                 )
-                next <- RepositoryF
-                  .at[IO]
-                  .fromEither(
-                    InterviewWorkflow
-                      .decide(workflow, workflow.revision, InterviewWorkflowEvent.StatusCommitted)
-                      .leftMap(_ => RepositoryError.Conflict)
-                  )
+                next <- MongoF.fromEither(
+                  InterviewWorkflow
+                    .decide(workflow, workflow.revision, InterviewWorkflowEvent.StatusCommitted)
+                    .leftMap(_ => RepositoryError.Conflict)
+                )
                 _ <- reviseWorkflow(session, workflow.revision, next.workflow).subflatMap(
                   MongoRepositorySupport.matchedOne(_)
                 )
@@ -226,12 +219,10 @@ final class MongoInterviewWorkflowRepository(
       .flatMap {
         case Some(receipt) =>
           // A repeated request returns the workflow as it is now, not the failed state the caller still holds.
-          RepositoryF
-            .at[IO]
-            .fromEither(
-              int64(receipt, RevisionField)
-                .flatMap(revision => Either.cond(revision == expectedRevision + 1L, (), RepositoryError.Conflict))
-            ) *> loadWorkflow(workflow.id, None).orConflict
+          MongoF.fromEither(
+            int64(receipt, RevisionField)
+              .flatMap(revision => Either.cond(revision == expectedRevision + 1L, (), RepositoryError.Conflict))
+          ) *> loadWorkflow(workflow.id, None).orConflict
         case None if workflow.repairOrigin.nonEmpty =>
           // A cancel or reschedule step exhausted its retries: resume that step by lookup, keeping the audit trail.
           lifecycle
@@ -244,14 +235,13 @@ final class MongoInterviewWorkflowRepository(
               None
             )
             .flatMap {
-              case InterviewLifecycleOutcome.Applied(next)       => next.pure[[A] =>> RepositoryF[IO, A]]
-              case InterviewLifecycleOutcome.Duplicate(existing) => existing.pure[[A] =>> RepositoryF[IO, A]]
-              case _                                             => RepositoryF.at[IO].raise(RepositoryError.Conflict)
+              case InterviewLifecycleOutcome.Applied(next)       => next.asRepository
+              case InterviewLifecycleOutcome.Duplicate(existing) => existing.asRepository
+              case _                                             => MongoF.raise(RepositoryError.Conflict)
             }
         case None =>
           hasHiringReceipt(workflow.id).flatMap { committed =>
-            RepositoryF
-              .at[IO]
+            MongoF
               .fromEither(
                 InterviewWorkflowPolicy
                   .repair(workflow, expectedRevision, committed)
@@ -260,10 +250,10 @@ final class MongoInterviewWorkflowRepository(
               .flatMap { case InterviewWorkflowDecision(next, emitted) =>
                 advance(next, expectedRevision, InterviewAdvanceCause.AdminRepair(requestKey, actorId), emitted, now)
                   .flatMap {
-                    case InterviewWorkflowAdvanceResult.Applied             => next.pure[[A] =>> RepositoryF[IO, A]]
-                    case InterviewWorkflowAdvanceResult.Duplicate(existing) => existing.pure[[A] =>> RepositoryF[IO, A]]
+                    case InterviewWorkflowAdvanceResult.Applied             => next.asRepository
+                    case InterviewWorkflowAdvanceResult.Duplicate(existing) => existing.asRepository
                     case InterviewWorkflowAdvanceResult.StaleRevision       =>
-                      RepositoryF.at[IO].raise(RepositoryError.Conflict)
+                      MongoF.raise(RepositoryError.Conflict)
                   }
               }
           }
@@ -277,13 +267,13 @@ final class MongoInterviewWorkflowRepository(
       createdAt: Instant
   ): RepositoryF[IO, InterviewWorkflowAdvanceResult] =
     findRequest(workflow.initiatedBy, requestKey, fingerprint).flatMap {
-      case Some(existing) => InterviewWorkflowAdvanceResult.Duplicate(existing).pure[[A] =>> RepositoryF[IO, A]]
+      case Some(existing) => InterviewWorkflowAdvanceResult.Duplicate(existing).asRepository
       case None           =>
         if (
           workflow.revision != 0L || workflow.phase != InterviewWorkflowPhase.ReservationPending ||
           initialCommand != InterviewWorkflow.initialCommand(workflow)
         )
-          RepositoryF.at[IO].raise(RepositoryError.InvalidEvent)
+          MongoF.raise(RepositoryError.InvalidEvent)
         else createValid(workflow, initialCommand, requestKey, fingerprint, createdAt)
     }
 
@@ -310,7 +300,7 @@ final class MongoInterviewWorkflowRepository(
         session: Option[ClientSession[IO]]
     ): Option[RepositoryF[IO, InterviewWorkflowAdvanceResult]] =
       receipt.map { case (existingWorkflowId, existingFingerprint) =>
-        if (existingFingerprint != fingerprint.value) RepositoryF.at[IO].raise(RepositoryError.Conflict)
+        if (existingFingerprint != fingerprint.value) MongoF.raise(RepositoryError.Conflict)
         else
           loadWorkflow(existingWorkflowId, session)
             .subflatMap(
@@ -336,9 +326,9 @@ final class MongoInterviewWorkflowRepository(
                 )
               )
               .orConflict
-            jobId <- RepositoryF.at[IO].fromEither(string(application, MongoFields.JobId))
+            jobId <- MongoF.fromEither(string(application, MongoFields.JobId))
             transactionNow <- RepositoryF.lift(clock.realTimeInstant)
-            observedUpdatedAt <- RepositoryF.at[IO].fromEither(instant(application, MongoFields.UpdatedAt))
+            observedUpdatedAt <- MongoF.fromEither(instant(application, MongoFields.UpdatedAt))
             acceptanceUpdatedAt =
               if (transactionNow.toEpochMilli > observedUpdatedAt.toEpochMilli) transactionNow
               else observedUpdatedAt.plusMillis(1L)
@@ -362,7 +352,7 @@ final class MongoInterviewWorkflowRepository(
     // A concurrent identical request commits its receipt first; its stored result is this request's result.
     val resolved = write.recoverWith { case RepositoryError.Conflict =>
       requestReceipt(receiptId, None).flatMap(
-        duplicateOf(_, None).getOrElse(RepositoryF.at[IO].raise(RepositoryError.Conflict))
+        duplicateOf(_, None).getOrElse(MongoF.raise(RepositoryError.Conflict))
       )
     }
     MongoRepositorySupport.repositoryGuard(diagnostics, "interviewWorkflow.create")(resolved)
@@ -373,7 +363,7 @@ final class MongoInterviewWorkflowRepository(
       access: InterviewWorkflowAccess
   ): RepositoryF[IO, Option[InterviewWorkflow]] =
     access.role match {
-      case UserRole.Admin => none[InterviewWorkflow].pure[[A] =>> RepositoryF[IO, A]]
+      case UserRole.Admin => none[InterviewWorkflow].asRepository
       case role           =>
         val ownerField = if (role == UserRole.Candidate) "candidateId" else "recruiterId"
         MongoRepositorySupport.repositoryGuard(diagnostics, "interviewWorkflow.findForActor")(
@@ -385,6 +375,20 @@ final class MongoInterviewWorkflowRepository(
     MongoRepositorySupport.repositoryGuard(diagnostics, "interviewWorkflow.findForAdmin")(
       loadWorkflow(workflowId, None)
     )
+
+  override def findByApplication(
+      applicationId: ApplicationId,
+      access: InterviewWorkflowAccess
+  ): RepositoryF[IO, Option[InterviewWorkflow]] = {
+    val participant = access.role match {
+      case UserRole.Admin     => Nil
+      case UserRole.Candidate => List(MongoFilter.eq("candidateId", access.actorId.value.toString))
+      case UserRole.Recruiter => List(MongoFilter.eq("recruiterId", access.actorId.value.toString))
+    }
+    MongoRepositorySupport.repositoryGuard(diagnostics, "interviewWorkflow.findByApplication")(
+      store.loadWorkflowByApplication(applicationId, participant)
+    )
+  }
 
   override def advance(
       workflow: InterviewWorkflow,
@@ -399,7 +403,7 @@ final class MongoInterviewWorkflowRepository(
       inboxMessageId.isEmpty || inboxMessageId.length > 256 || expectedRevision == Long.MaxValue ||
       workflow.revision != expectedRevision + 1L
     )
-      RepositoryF.at[IO].raise(RepositoryError.InvalidEvent)
+      MongoF.raise(RepositoryError.InvalidEvent)
     else {
       val inboxId = s"${workflow.id.value}:$inboxMessageId"
       MongoRepositorySupport.repositoryGuard(diagnostics, "interviewWorkflow.advance") {
@@ -451,7 +455,7 @@ final class MongoInterviewWorkflowRepository(
                               )
                             )
                             .void
-                        else ().pure[[A] =>> RepositoryF[IO, A]]
+                        else ().asRepository
                       _ <- insertCommands(session, workflow.id, workflow.revision, emittedCommands)(command =>
                         (
                           command match {
@@ -466,9 +470,9 @@ final class MongoInterviewWorkflowRepository(
                       _ <-
                         if (workflow.phase == InterviewWorkflowPhase.Completed)
                           retainCompleted(session, workflow, occurredAt)
-                        else ().pure[[A] =>> RepositoryF[IO, A]]
+                        else ().asRepository
                     } yield InterviewWorkflowAdvanceResult.Applied
-                  case _ => InterviewWorkflowAdvanceResult.StaleRevision.pure[[A] =>> RepositoryF[IO, A]]
+                  case _ => InterviewWorkflowAdvanceResult.StaleRevision.asRepository
                 }
             }
           } yield result
@@ -483,7 +487,7 @@ final class MongoInterviewWorkflowRepository(
   ): RepositoryF[IO, Option[(InterviewWorkflowId, String)]] =
     RepositoryF
       .lift(MongoSessionOperations.findById(workflows, session, receiptId))
-      .flatMap(_.traverse(document => RepositoryF.at[IO].fromEither(decodeReceipt(document))))
+      .flatMap(_.traverse(document => MongoF.fromEither(decodeReceipt(document))))
 }
 
 object MongoInterviewWorkflowRepository {

@@ -77,7 +77,7 @@ final class UserAccountService[F[_]: MonadThrow](
         issued <- token(user, now)
         _ <- accounts.createAccount(user, hash, now, context).leftMap {
           case RepositoryError.Conflict => UseCaseError.Account(AccountError.NameTaken)
-          case error                    => UseCaseError.Repository(error)
+          case error                    => UseCaseF.translate(error)
         }
       } yield issued).semiflatTap(_ => embeddingWork.wakeAfterCommit(diagnostics))
 

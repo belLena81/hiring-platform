@@ -45,7 +45,7 @@ final class MongoApplicationRepository private (
       page: ApplicationPageRequest
   ): RepositoryF[IO, List[Application]] = {
     import MongoAuthorizedReadQueries.*
-    if (scope.role != UserRole.Candidate) RepositoryF.at[IO].pure(Nil)
+    if (scope.role != UserRole.Candidate) MongoF.pure(Nil)
     else {
       // Match, sort and limit run on the indexed applications collection before the actor check, so the
       // applications_candidate_* index orders the page; a failed actor check still yields an empty page.
@@ -159,7 +159,7 @@ final class MongoApplicationRepository private (
       result <- RepositoryF.lift(
         MongoSessionOperations.replaceOne(collection, session, filter, MongoHiringCodecs.application(application))
       )
-      _ <- RepositoryF.at[IO].fromEither(MongoRepositorySupport.matchedOne(result))
+      _ <- MongoF.fromEither(MongoRepositorySupport.matchedOne(result))
       _ <- MongoRepositorySupport.repositoryGuard(diagnostics, "applications.insertStatusEvent") {
         RepositoryF.lift(MongoApplicationEventInsertion.insert(events, session, event)).void
       }(MongoErrors.duplicateAs(RepositoryError.Conflict))
@@ -222,7 +222,7 @@ final class MongoApplicationRepository private (
     )
     val guard = MongoSessionOperations.updateOne(jobs, session, guardFilter, update)
     RepositoryF.lift(guard).flatMap { result =>
-      RepositoryF.at[IO].fromEither(MongoRepositorySupport.matchedOne(result)) *>
+      MongoF.fromEither(MongoRepositorySupport.matchedOne(result)) *>
         insertApplicationAndEvent(session, application, initialEvent, operationalEvents)
     }
 

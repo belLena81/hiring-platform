@@ -1,7 +1,7 @@
 package com.example.graphQL.cats.service.application
 
 import cats.effect.IO
-import com.example.graphQL.cats.domain.model.Identifiers.UserId
+import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, UserId}
 import com.example.graphQL.cats.domain.workflow.*
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.RepositoryError
@@ -83,6 +83,8 @@ private[cats] class TestInterviewWorkflowRepository extends InterviewWorkflowRep
   override def findForActor(workflowId: InterviewWorkflowId, access: InterviewWorkflowAccess) =
     unexpected[Option[InterviewWorkflow]]
   override def findForAdmin(workflowId: InterviewWorkflowId) = unexpected[Option[InterviewWorkflow]]
+  override def findByApplication(applicationId: ApplicationId, access: InterviewWorkflowAccess) =
+    unexpected[Option[InterviewWorkflow]]
   override def advance(
       workflow: InterviewWorkflow,
       expectedRevision: Long,

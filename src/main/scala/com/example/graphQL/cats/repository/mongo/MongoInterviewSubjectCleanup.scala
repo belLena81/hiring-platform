@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.repository.mongo.MongoF.asRepository
 import cats.effect.{Clock, IO}
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
@@ -59,7 +60,7 @@ final class MongoInterviewSubjectCleanup(
       ids <- MongoProducerRegistrations.batch(database, subject.value.toString, "Interview")
       attributable <- hasAttributableData(subject, session)
       _ <-
-        if (!attributable && ids.isEmpty) ().pure[[A] =>> RepositoryF[IO, A]]
+        if (!attributable && ids.isEmpty) ().asRepository
         else
           RepositoryF
             .lift(
@@ -104,7 +105,7 @@ final class MongoInterviewSubjectCleanup(
           .map(_.exists(_.nonEmpty))
       )
       .flatMap {
-        case true  => RepositoryF.at[IO].pure(true)
+        case true  => MongoF.pure(true)
         case false =>
           RepositoryF
             .lift(
@@ -122,7 +123,7 @@ final class MongoInterviewSubjectCleanup(
   ) {
     RepositoryF
       .lift(MongoSessionOperations.findById(queue, None, subject.value.toString))
-      .flatMap(_.traverse(row => RepositoryF.at[IO].fromEither(MongoInterviewCleanupCodec.decodeCurrent(row, topics))))
+      .flatMap(_.traverse(row => MongoF.fromEither(MongoInterviewCleanupCodec.decodeCurrent(row, topics))))
   }
 
   /** Malformed evidence cannot certify public deletion completion. */
@@ -142,7 +143,7 @@ final class MongoInterviewSubjectCleanup(
   ): RepositoryF[IO, InterviewCleanupPage] = guard("interviewCleanup.pending") {
     import MongoInterviewCleanupSweepCodec.*
     val sweep = cursor match {
-      case Some(value) => RepositoryF.at[IO].fromEither(decode(value).map(Some(_)))
+      case Some(value) => MongoF.fromEither(decode(value).map(Some(_)))
       case None        =>
         RepositoryF
           .lift(
@@ -151,11 +152,11 @@ final class MongoInterviewSubjectCleanup(
             )
           )
           .flatMap(
-            _.traverse(row => RepositoryF.at[IO].fromEither(identity(row).map(id => Sweep(None, id, observedAt))))
+            _.traverse(row => MongoF.fromEither(identity(row).map(id => Sweep(None, id, observedAt))))
           )
     }
     sweep.flatMap {
-      case None          => RepositoryF.at[IO].pure(InterviewCleanupPage(Vector.empty, None))
+      case None          => MongoF.pure(InterviewCleanupPage(Vector.empty, None))
       case Some(current) =>
         RepositoryF
           .lift(
@@ -175,13 +176,11 @@ final class MongoInterviewSubjectCleanup(
                     }
                   )
                   .map(_.flatten)
-            RepositoryF
-              .at[IO]
-              .fromEither(
-                next.map(token =>
-                  InterviewCleanupPage(selected.map(MongoInterviewCleanupCodec.decodeCurrent(_, topics)), token)
-                )
+            MongoF.fromEither(
+              next.map(token =>
+                InterviewCleanupPage(selected.map(MongoInterviewCleanupCodec.decodeCurrent(_, topics)), token)
               )
+            )
           }
     }
   }
@@ -202,19 +201,13 @@ final class MongoInterviewSubjectCleanup(
         case _                                                                               => false
       }
       for {
-        _ <- RepositoryF
-          .at[IO]
-          .fromEither(
-            InterviewSubjectCleanup.validate(expected, topics).leftMap(_ => RepositoryError.InvalidStoredData)
-          )
-        _ <- RepositoryF
-          .at[IO]
-          .fromEither(
-            InterviewSubjectCleanup.validate(next, topics).leftMap(_ => RepositoryError.InvalidStoredData)
-          )
-        _ <- RepositoryF
-          .at[IO]
-          .fromEither(Either.cond(immutableInputs && forward, (), RepositoryError.InvalidStoredData))
+        _ <- MongoF.fromEither(
+          InterviewSubjectCleanup.validate(expected, topics).leftMap(_ => RepositoryError.InvalidStoredData)
+        )
+        _ <- MongoF.fromEither(
+          InterviewSubjectCleanup.validate(next, topics).leftMap(_ => RepositoryError.InvalidStoredData)
+        )
+        _ <- MongoF.fromEither(Either.cond(immutableInputs && forward, (), RepositoryError.InvalidStoredData))
         result <- RepositoryF
           .lift(
             MongoSessionOperations.updateOne(
@@ -345,7 +338,7 @@ final class MongoInterviewSubjectCleanup(
                 .orElse(Option(row.getString("_id")))
             )
             .distinct
-          if (ids.isEmpty) ().pure[[A] =>> RepositoryF[IO, A]]
+          if (ids.isEmpty) ().asRepository
           else releaseLiveHolds(ids) *> RepositoryF.lift(deleteLinked(ids)) *> batch
         }
     batch *> RepositoryF.lift(
@@ -405,7 +398,7 @@ final class MongoInterviewSubjectCleanup(
     } yield InterviewLiveHold(workflowId, reserveKey, cancelKey)
 
   private def releaseHold(row: Document): RepositoryF[IO, Unit] =
-    liveHold(row).fold(().pure[[A] =>> RepositoryF[IO, A]]) { hold =>
+    liveHold(row).fold(().asRepository) { hold =>
       RepositoryF
         .lift(clock.realTimeInstant)
         .flatMap { now =>

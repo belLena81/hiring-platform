@@ -1,5 +1,7 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.repository.mongo.MongoF.asRepository
+import com.example.graphQL.cats.repository.mongo.MongoStoredDocumentDecoding.toStored
 import com.example.graphQL.cats.service.resilience.CircuitBreaker
 
 import cats.data.NonEmptyList
@@ -59,7 +61,7 @@ final class MongoSearchSessionRepository(
             result.flatMap(value =>
               if (Option(value.getUpsertedId).nonEmpty)
                 MongoOperationalEventInsertion.insert(outbox, active, List(event), session.occurredAt, diagnostics)
-              else ().pure[[A] =>> RepositoryF[IO, A]]
+              else ().asRepository
             )
           }
       )(MongoErrors.duplicateAsConflict)
@@ -90,8 +92,7 @@ final class MongoSearchSessionRepository(
       event: OperationalEventEnvelope,
       session: Option[ClientSession[IO]]
   ): RepositoryF[IO, Boolean] =
-    val insert = RepositoryF
-      .at[IO]
+    val insert = MongoF
       .fromEither(MongoHiringCodecs.outboxRecord(event, event.occurredAt).leftMap(_ => RepositoryError.InvalidEvent))
       .flatMap(document => RepositoryF.lift(MongoSessionOperations.insertOne(outbox, session, document).as(true)))
     MongoRepositorySupport
@@ -110,7 +111,7 @@ final class MongoSearchSessionRepository(
                   case _                                            => Left(RepositoryError.Conflict)
                 }
             )
-        case error => RepositoryF.at[IO].raise(error)
+        case error => MongoF.raise(error)
       }
 
   private def sameEvent(document: Document, event: OperationalEventEnvelope): Boolean =
@@ -233,17 +234,17 @@ final class MongoOperationalEventOutboxRepository(
           case row :: tail =>
             claimOne(workerId, transactionalId, now, leaseUntil, row.getString("_id"))
               .leftFlatMap {
-                case RepositoryError.Conflict => RepositoryF.at[IO].pure(None)
-                case error                    => RepositoryF.at[IO].raise(error)
+                case RepositoryError.Conflict => MongoF.pure(None)
+                case error                    => MongoF.raise(error)
               }
               .flatMap(value => scan(tail, values ++ value.toList, Some(row)))
           case Nil => last.traverse_(checkpoint).as(values)
         }
     for {
       current <- RepositoryF.lift(MongoSessionOperations.findOne(cursors, None, MongoFilter.eq("_id", workerId)))
-      after <- RepositoryF.at[IO].fromEither(current.traverse(cursorFilter))
+      after <- MongoF.fromEither(current.traverse(cursorFilter))
       found <- page(after)
-      rows <- if (found.isEmpty && after.nonEmpty) page(None) else RepositoryF.at[IO].pure(found)
+      rows <- if (found.isEmpty && after.nonEmpty) page(None) else MongoF.pure(found)
       result <- scan(rows, Nil, None)
     } yield result
   }
@@ -342,7 +343,7 @@ final class MongoOperationalEventOutboxRepository(
                   .subflatMap(result =>
                     Either.cond(result.getMatchedCount == subjectIds.size.toLong, (), RepositoryError.Conflict)
                   )
-              case false => RepositoryF.at[IO].raise(RepositoryError.Conflict)
+              case false => MongoF.raise(RepositoryError.Conflict)
             }
           }
       )
@@ -357,7 +358,7 @@ final class MongoOperationalEventOutboxRepository(
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "outbox.claimOne")(transactionRunner.run { session =>
         claimOneInSession(session, workerId, now, leaseUntil, eventId).flatMap {
-          case None        => RepositoryF.at[IO].pure(None)
+          case None        => MongoF.pure(None)
           case Some(claim) =>
             subjectIsDeleted(session, claim).flatMap {
               case true  => suppressDeletedClaim(session, claim, now).as(None)
@@ -389,8 +390,7 @@ final class MongoOperationalEventOutboxRepository(
               Sorts.ascending(MongoFields.AvailableAt, MongoFields.OccurredAt, MongoFields.Id)
             ) { document =>
               // Keep attributable control evidence even when the immutable event cannot be interpreted.
-              RepositoryF
-                .at[IO]
+              MongoF
                 .fromEither(
                   (
                     requiredSubjectIds(document),
@@ -398,11 +398,11 @@ final class MongoOperationalEventOutboxRepository(
                     MongoDocumentFields.requiredInt(document, MongoFields.Attempts, min = 0)
                   )
                     .mapN((_, _, _) => ())
-                    .leftMap(_ => RepositoryError.InvalidStoredData)
+                    .toStored
                 )
                 .flatMap { _ =>
                   readClaimed(document) match {
-                    case Right(claim) => RepositoryF.at[IO].pure(Some(claim))
+                    case Right(claim) => MongoF.pure(Some(claim))
                     case Left(_)      => failInvalidClaim(session, eventId, token, now).as(None)
                   }
                 }
@@ -745,7 +745,7 @@ object MongoSearchSessionRepository {
 
 private[mongo] object MongoOutboxSubjectLeases {
   def acquire(subjectIds: List[String])(acquireOne: String => RepositoryF[IO, Unit]): RepositoryF[IO, Unit] =
-    if (subjectIds.isEmpty) RepositoryF.at[IO].raise(RepositoryError.InvalidStoredData)
+    if (subjectIds.isEmpty) MongoF.raise(RepositoryError.InvalidStoredData)
     else subjectIds.sorted.traverse_(acquireOne)
 }
 

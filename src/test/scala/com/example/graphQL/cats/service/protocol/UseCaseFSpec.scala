@@ -3,7 +3,7 @@ package com.example.graphQL.cats.service.protocol
 import cats.Id
 import cats.effect.IO
 import com.example.graphQL.cats.domain.error.DomainError
-import com.example.graphQL.cats.service.{RepositoryError, UseCaseError}
+import com.example.graphQL.cats.service.{RepositoryError, SearchError, UseCaseError}
 import com.example.graphQL.cats.service.port.{RepositoryF}
 import munit.CatsEffectSuite
 
@@ -35,6 +35,29 @@ final class UseCaseFSpec extends CatsEffectSuite {
       Left(UseCaseError.Repository(RepositoryError.Conflict))
     )
     assertEquals(UseCaseF.repositoryFromFEither[Id, Int](Right(2)).value, Right(2))
+  }
+
+  test(
+    "AC-06.1 translate is the one total repository-to-use-case mapping and revoked authority is never a repository error"
+  ) {
+    val translated = RepositoryError.values.toList.map(error => error -> UseCaseF.translate(error))
+    val byError = translated.toMap
+    assertEquals(translated.size, RepositoryError.values.length)
+    assertEquals(
+      byError(RepositoryError.AuthorityRevoked),
+      UseCaseError.Domain(DomainError.Forbidden)
+    )
+    assertEquals(
+      byError(RepositoryError.VectorSearchUnavailable),
+      UseCaseError.Search(SearchError.VectorSearchUnavailable)
+    )
+    // Every other failure is kept as it is and classified once at the API boundary.
+    translated
+      .filterNot { case (error, _) =>
+        error == RepositoryError.AuthorityRevoked || error == RepositoryError.VectorSearchUnavailable
+      }
+      .foreach { case (error, result) => assertEquals(result, UseCaseError.Repository(error)) }
+    assert(!translated.map(_._2).contains(UseCaseError.Repository(RepositoryError.AuthorityRevoked)))
   }
 
   test("EPS-03.1 the helpers keep the same mapping at IO") {

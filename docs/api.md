@@ -45,8 +45,9 @@ The graph can be walked from a parent to its related lists in one request. Every
 | `Application.events(first, after)` | `applicationHistory` | the application's Candidate, the owning Recruiter and Admin |
 | `User.applications(first, after, status)` | `myApplications` | only the calling Candidate's own account; null for any other user (nothing is read), so `candidate { applications }` under a job is always null |
 | `InterviewWorkflow.application` | the application itself | whoever may view the application; otherwise null |
+| `Application.interview` | `interviewWorkflow` for the application | the workflow's candidate, its recruiter and Admin; null when the application has no interview or the caller does not take part in it |
 
-`Application.interview` is not available: no existing use case finds a workflow by application, and adding one belongs to a service slice (see the graph access spec). Use `interviewWorkflow(workflowId)`.
+`Application.interview` reads the workflow through `InterviewSchedulingService.inspectForApplication`, which carries the participant predicate (candidate, recruiter or Admin) into the indexed `applicationId` query; an application of someone else and an application without an interview are both null, so the field reveals neither. It does not see an application the caller cannot reach in the first place.
 
 Nested connections are charged like root ones, plus a base per parent: a nested list field costs 5 plus `first` times the cost of its selection (a root list costs 1 plus that product), so `myJobs(first: 100) { applications(first: 100) }` exceeds the complexity limit and is rejected before execution, and `first` outside 1 to 100 is refused at every nesting level. Related users and jobs (`candidate`, `job`, `recruiter`) are still loaded in batches per request; the per-parent lists are one authorized read per parent (an N+1 by design until keyed list ports exist), priced by the base of 5 per parent: with the cheapest selection about 99 parents fit in the 1000-unit limit, and aliases or fragments repeating a nested list are each charged.
 

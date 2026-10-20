@@ -68,7 +68,7 @@ final class MongoMutationReceiptRepository(
               pending <- RepositoryF.lift(inProgress(key, fingerprint, now, expiresAt))
               _ <- insert(session, pending)
               outcome <- write(MongoMutationWriteContext(session)).recoverWith { error =>
-                RepositoryF.lift(remove(session, key)).flatMap(_ => RepositoryF.at[IO].raise(error))
+                RepositoryF.lift(remove(session, key)).flatMap(_ => MongoF.raise(error))
               }
               result <- outcome match {
                 case MutationWriteOutcome.Rejected(error) =>
@@ -79,18 +79,16 @@ final class MongoMutationReceiptRepository(
               }
             } yield result
           case Some(receipt) if receipt.fingerprint != fingerprint =>
-            RepositoryF.at[IO].pure(MutationReceiptExecution.FingerprintMismatch)
+            MongoF.pure(MutationReceiptExecution.FingerprintMismatch)
           case Some(receipt) if receipt.state == MutationReceiptState.InProgress =>
-            RepositoryF.at[IO].pure(MutationReceiptExecution.InProgress)
+            MongoF.pure(MutationReceiptExecution.InProgress)
           case Some(receipt) =>
             // A completed receipt without its rehydration key is corrupt; do not repeat the write.
-            RepositoryF
-              .at[IO]
-              .fromEither(
-                receipt.entity
-                  .toRight(RepositoryError.InvalidStoredData)
-                  .map(MutationReceiptExecution.Replay.apply)
-              )
+            MongoF.fromEither(
+              receipt.entity
+                .toRight(RepositoryError.InvalidStoredData)
+                .map(MutationReceiptExecution.Replay.apply)
+            )
         }
         /*
          * The preceding branches keep receipt insertion, the caller write, and completion in the same

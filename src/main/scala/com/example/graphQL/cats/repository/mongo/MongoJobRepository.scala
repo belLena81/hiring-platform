@@ -79,7 +79,7 @@ final class MongoJobRepository(
   override def relatedJobs(scope: HiringReadScope, keys: List[JobRelationKey]): RepositoryF[IO, List[RelatedJob]] = {
     import MongoAuthorizedReadQueries.*
     val requested = keys.distinct
-    if (requested.isEmpty) RepositoryF.at[IO].pure(Nil)
+    if (requested.isEmpty) MongoF.pure(Nil)
     else {
       val pipeline = List(
         matching(
@@ -217,11 +217,11 @@ final class MongoJobRepository(
       maxTime: Option[scala.concurrent.duration.FiniteDuration]
   ): RepositoryF[IO, List[Document]] =
     discoveryPolicy match {
-      case None         => RepositoryF.at[IO].raise(RepositoryError.Unavailable)
+      case None         => MongoF.raise(RepositoryError.Unavailable)
       case Some(policy) =>
         import scala.jdk.CollectionConverters.*
         val allowed = scope.role == UserRole.Candidate || scope.role == UserRole.Admin
-        if (!allowed) RepositoryF.at[IO].raise(RepositoryError.AuthorityRevoked)
+        if (!allowed) MongoF.raise(RepositoryError.AuthorityRevoked)
         else {
           val pipeline = MongoJobRepository.authorizedDiscoveryPipeline(scope, jobsPipeline)
           RepositoryF
@@ -329,9 +329,7 @@ final class MongoJobRepository(
       session: Option[ClientSession[IO]]
   ): RepositoryF[IO, Versioned[Job]] =
     for {
-      nextVersion <- RepositoryF
-        .at[IO]
-        .fromEither(Versioned.nextVersion(expected.version).toRight(RepositoryError.Conflict))
+      nextVersion <- MongoF.fromEither(Versioned.nextVersion(expected.version).toRight(RepositoryError.Conflict))
       result <- RepositoryF.lift(
         MongoSessionOperations.replaceOne(
           collection,
@@ -343,7 +341,7 @@ final class MongoJobRepository(
           MongoHiringCodecs.job(replacement, nextVersion)
         )
       )
-      _ <- RepositoryF.at[IO].fromEither(MongoRepositorySupport.matchedOne(result))
+      _ <- MongoF.fromEither(MongoRepositorySupport.matchedOne(result))
       _ <- embeddingWork.enqueue(session, EmbeddingWorkKey(EmbeddingWorkKind.Job, replacement.id.value.toString), now)
       _ <- MongoOperationalEventInsertion.insert(outbox, session, events, now, diagnostics)
     } yield Versioned(replacement, nextVersion)

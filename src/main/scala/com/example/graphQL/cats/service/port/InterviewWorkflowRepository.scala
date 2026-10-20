@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.service.port
 
-import com.example.graphQL.cats.domain.model.Identifiers.UserId
+import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, UserId}
 import com.example.graphQL.cats.domain.model.{ApplicationStatus, UserRole}
 import com.example.graphQL.cats.domain.workflow.{
   InterviewAdvanceCause,
@@ -160,6 +160,16 @@ trait InterviewWorkflowRepository[F[_]] {
   ): RepositoryF[F, Option[InterviewWorkflow]]
 
   def findForAdmin(workflowId: InterviewWorkflowId): RepositoryF[F, Option[InterviewWorkflow]]
+
+  /** The interview workflow of an application, scoped to the participant: the candidate or recruiter named on the
+    * workflow, or any workflow for Admin. The predicate is part of the query, so a workflow the actor does not take
+    * part in is absent, never filtered afterwards. Reads the indexed `applicationId`; an application has at most one
+    * workflow: scheduling moves it out of `Accepted` once, and a unique index enforces it.
+    */
+  def findByApplication(
+      applicationId: ApplicationId,
+      access: InterviewWorkflowAccess
+  ): RepositoryF[F, Option[InterviewWorkflow]]
 
   def advance(
       workflow: InterviewWorkflow,

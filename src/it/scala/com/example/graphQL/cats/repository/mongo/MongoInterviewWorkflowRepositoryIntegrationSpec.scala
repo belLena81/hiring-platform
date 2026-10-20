@@ -147,6 +147,81 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
     }
   }
 
+  test("AC-07.12 the workflow of an application is found through the applicationId index, scoped to its participants") {
+    mongoResource.use { fixture =>
+      val workflowRepository = MongoInterviewWorkflowRepository(
+        fixture.database,
+        MongoTransactionRunner.sessions(fixture.client, RepositoryError.Conflict, diagnostics = Diagnostics.noop[IO]),
+        Diagnostics.noop[IO]
+      )
+      val candidate = UserId(UUID.randomUUID())
+      val recruiter = UserId(UUID.randomUUID())
+      val value = workflow(UUID.randomUUID(), UUID.randomUUID(), candidate, recruiter)
+      val application = value.applicationId
+      def find(id: UserId, role: UserRole) =
+        success(workflowRepository.findByApplication(application, InterviewWorkflowAccess(id, role)))
+      for {
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
+        _ <- seedSubjects(fixture.database, value)
+        _ <- success(
+          workflowRepository.create(
+            value,
+            InterviewWorkflow.initialCommand(value),
+            UUID.randomUUID(),
+            MutationReceiptFingerprint.fromCanonicalInput("schedule:application:interval"),
+            now
+          )
+        )
+        asCandidate <- find(candidate, UserRole.Candidate)
+        asRecruiter <- find(recruiter, UserRole.Recruiter)
+        asAdmin <- find(UserId(UUID.randomUUID()), UserRole.Admin)
+        otherCandidate <- find(UserId(UUID.randomUUID()), UserRole.Candidate)
+        otherRecruiter <- find(UserId(UUID.randomUUID()), UserRole.Recruiter)
+        // A candidate id presented as a recruiter, and the reverse, are not participants either.
+        candidateAsRecruiter <- find(candidate, UserRole.Recruiter)
+        recruiterAsCandidate <- find(recruiter, UserRole.Candidate)
+        unknown <- success(
+          workflowRepository.findByApplication(
+            ApplicationId(UUID.randomUUID()),
+            InterviewWorkflowAccess(candidate, UserRole.Candidate)
+          )
+        )
+        // The store, not the service, keeps one workflow per application.
+        second = value.copy(id = InterviewWorkflowId(UUID.randomUUID()))
+        duplicate <- MongoRepositoryTestSupport
+          .insertOne(
+            fixture.database,
+            MongoCollections.InterviewWorkflows,
+            MongoInterviewWorkflowCodec.workflowDocument(second)
+          )
+          .attempt
+        explained <- MongoAccessEvaluationSupport.command(
+          fixture.database,
+          new org.bson.Document(
+            "explain",
+            new org.bson.Document("find", MongoCollections.InterviewWorkflows)
+              .append(
+                "filter",
+                new org.bson.Document("applicationId", application.value.toString)
+                  .append("documentType", "workflow")
+                  .append("candidateId", candidate.value.toString)
+              )
+          ).append("verbosity", "executionStats")
+        )
+      } yield {
+        List(asCandidate, asRecruiter, asAdmin).foreach(found => assertEquals(found.map(_.id), Some(value.id)))
+        List(otherCandidate, otherRecruiter, candidateAsRecruiter, recruiterAsCandidate, unknown).foreach(found =>
+          assertEquals(found, None)
+        )
+        assert(duplicate.isLeft, clue(duplicate))
+        val plan = explained.toJson
+        assert(plan.contains("IXSCAN"), clue(plan))
+        assert(plan.contains(MongoIndexNames.InterviewWorkflowApplication), clue(plan))
+        assert(!plan.contains("COLLSCAN"), clue(plan))
+      }
+    }
+  }
+
   test("workflow create and advance are atomic, replayable, and guarded by revision and inbox identity") {
     mongoResource.use { fixture =>
       val workflowRepository = MongoInterviewWorkflowRepository(

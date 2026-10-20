@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import cats.data.{Validated, ValidatedNel}
 import cats.syntax.all.*
 import com.example.graphQL.cats.service.port.{
   ClaimedSearchSessionWork,
@@ -32,25 +33,31 @@ private[mongo] object MongoSearchSessionWorkCodecs {
     )
   }
 
-  def readWork(document: Document): Either[StoredDocumentError, PendingSearchSessionWork] =
-    for {
-      sessionDocument <- MongoDocumentFields.requiredDocument(document, MongoFields.Session)
-      session <- MongoHiringCodecs.readSearchSession(sessionDocument).toEither.leftMap(_.head)
-      eventDocument <- MongoDocumentFields.requiredDocument(document, MongoFields.Event)
-      event <- MongoHiringCodecs.readOperationalEvent(eventDocument).toEither.leftMap(_.head)
-      _ <- Either.cond(
+  /** Every problem of the stored session and of the stored event is reported, not just the first. */
+  def readWork(document: Document): ValidatedNel[StoredDocumentError, PendingSearchSessionWork] =
+    (
+      MongoDocumentFields
+        .requiredDocument(document, MongoFields.Session)
+        .toValidatedNel
+        .andThen(MongoHiringCodecs.readSearchSession),
+      MongoDocumentFields
+        .requiredDocument(document, MongoFields.Event)
+        .toValidatedNel
+        .andThen(MongoHiringCodecs.readOperationalEvent)
+    ).tupled.andThen { case (session, event) =>
+      Validated.condNel(
         session.query.isEmpty && PendingSearchSessionWork(session, event).addressesSession,
-        (),
+        PendingSearchSessionWork(session, event),
         StoredDocumentError.InconsistentDocument
       )
-    } yield PendingSearchSessionWork(session, event)
+    }
 
-  def readClaim(document: Document): Either[StoredDocumentError, ClaimedSearchSessionWork] =
-    for {
-      work <- readWork(document)
-      attempts <- MongoDocumentFields.requiredInt32(document, MongoFields.Attempts)
-      leaseToken <- MongoDocumentFields.requiredString(document, MongoFields.LeaseToken)
-    } yield ClaimedSearchSessionWork(work, attempts, leaseToken)
+  def readClaim(document: Document): ValidatedNel[StoredDocumentError, ClaimedSearchSessionWork] =
+    (
+      readWork(document),
+      MongoDocumentFields.requiredInt32(document, MongoFields.Attempts).toValidatedNel,
+      MongoDocumentFields.requiredString(document, MongoFields.LeaseToken).toValidatedNel
+    ).mapN(ClaimedSearchSessionWork.apply)
 
   def readState(document: Document): Either[StoredDocumentError, SearchSessionWorkState] =
     MongoDocumentFields.requiredEnum(document, MongoFields.State)(

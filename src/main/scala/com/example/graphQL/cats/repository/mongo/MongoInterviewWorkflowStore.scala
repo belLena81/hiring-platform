@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.repository.mongo.MongoF.asRepository
 import cats.effect.std.UUIDGen
 import cats.effect.{Clock, IO}
 import cats.syntax.all.*
@@ -100,8 +101,8 @@ final class MongoInterviewWorkflowStore(
       workflowId: InterviewWorkflowId,
       execution: Option[ClaimedInterviewWorkflowCommand]
   ): RepositoryF[IO, Unit] = execution match {
-    case None                                                 => ().pure[[A] =>> RepositoryF[IO, A]]
-    case Some(claim) if claim.record.workflowId != workflowId => RepositoryF.at[IO].raise(RepositoryError.Conflict)
+    case None                                                 => ().asRepository
+    case Some(claim) if claim.record.workflowId != workflowId => MongoF.raise(RepositoryError.Conflict)
     case Some(claim)                                          =>
       RepositoryF
         .lift(clock.realTimeInstant)
@@ -224,7 +225,7 @@ final class MongoInterviewWorkflowStore(
     )
 
   private[mongo] def readApplication(document: Document): RepositoryF[IO, Application] =
-    RepositoryF.at[IO].fromEither(MongoStoredDocumentDecoding.repository(MongoHiringCodecs.readApplication(document)))
+    MongoF.fromEither(MongoStoredDocumentDecoding.repository(MongoHiringCodecs.readApplication(document)))
 
   private def retention(
       session: Option[ClientSession[IO]],
@@ -273,6 +274,24 @@ final class MongoInterviewWorkflowStore(
   ): RepositoryF[IO, Unit] =
     RepositoryF.lift(MongoSessionOperations.insertOne(collection, session, document)).void
 
+  /** The workflow of one application through the indexed `applicationId`, narrowed to the participant. */
+  private[mongo] def loadWorkflowByApplication(
+      applicationId: ApplicationId,
+      visibleTo: List[MongoFilter]
+  ): RepositoryF[IO, Option[InterviewWorkflow]] =
+    RepositoryF
+      .lift(
+        MongoSessionOperations.findOne(
+          workflows,
+          None,
+          MongoFilter.and(
+            (MongoFilter.eq("applicationId", applicationId.value.toString) ::
+              MongoFilter.eq(DocumentTypeField, "workflow") :: visibleTo)*
+          )
+        )
+      )
+      .flatMap(_.traverse(document => MongoF.fromEither(decodeWorkflow(document))))
+
   /** The workflow with this identity that also satisfies `visibleTo`, the acting role's ownership predicate. */
   private[mongo] def loadWorkflow(
       id: InterviewWorkflowId,
@@ -290,5 +309,5 @@ final class MongoInterviewWorkflowStore(
           )
         )
       )
-      .flatMap(_.traverse(document => RepositoryF.at[IO].fromEither(decodeWorkflow(document))))
+      .flatMap(_.traverse(document => MongoF.fromEither(decodeWorkflow(document))))
 }

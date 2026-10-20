@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.repository.mongo.MongoStoredDocumentDecoding.toStored
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.{UserId, parse as parseIdentifier}
@@ -56,7 +57,7 @@ private[mongo] object MongoSearchEligibilityCodecs {
   def job(document: Document): Either[RepositoryError, JobSearchEligibility] = {
     val source = new Document(document)
     source.remove(MongoFields.EmbeddingMeta)
-    (MongoHiringCodecs.readJob(source).toEither.leftMap(_ => RepositoryError.InvalidStoredData), metadata(document))
+    (MongoHiringCodecs.readJob(source).toStored, metadata(document))
       .mapN(JobSearchEligibility.apply)
   }
 

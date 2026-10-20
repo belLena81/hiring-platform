@@ -46,20 +46,28 @@ object EmbeddingWorkRepair extends IOApp {
                   diagnostics = Diagnostics.noop
                 )
                 code <- generation.fold(
-                  repository.inspectForAdmin(key, admin, transactions).value.flatMap {
-                    case Right(Some(status)) =>
-                      IO.println(
-                        s"generation=${status.generation} state=${status.state} attempts=${status.attempts} failure=${status.failure}"
-                      ).as(ExitCode.Success)
-                    case Right(None) => IO.println("No durable work").as(ExitCode.Success)
-                    case Left(_)     => IO.println("Inspection denied or unavailable").as(ExitCode.Error)
-                  }
+                  repository
+                    .inspectForAdmin(key, admin, transactions)
+                    .foldF(
+                      _ => IO.println("Inspection denied or unavailable").as(ExitCode.Error),
+                      {
+                        case Some(status) =>
+                          IO.println(
+                            s"generation=${status.generation} state=${status.state} attempts=${status.attempts} failure=${status.failure}"
+                          ).as(ExitCode.Success)
+                        case None => IO.println("No durable work").as(ExitCode.Success)
+                      }
+                    )
                 )(expected =>
-                  repository.repairFailed(key, expected, admin, now, transactions).value.flatMap {
-                    case Right(true)  => IO.println("Failed work queued with a new generation").as(ExitCode.Success)
-                    case Right(false) => IO.println("No matching failed generation").as(ExitCode.Error)
-                    case Left(_)      => IO.println("Repair denied or unavailable").as(ExitCode.Error)
-                  }
+                  repository
+                    .repairFailed(key, expected, admin, now, transactions)
+                    .foldF(
+                      _ => IO.println("Repair denied or unavailable").as(ExitCode.Error),
+                      {
+                        case true  => IO.println("Failed work queued with a new generation").as(ExitCode.Success)
+                        case false => IO.println("No matching failed generation").as(ExitCode.Error)
+                      }
+                    )
                 )
               } yield code
             }

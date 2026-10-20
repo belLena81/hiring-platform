@@ -96,6 +96,20 @@ final class InterviewSchedulingService[F[_]](using F: Monad[F], clock: Clock[F],
   def inspect(actor: ActorContext, id: InterviewWorkflowId): UseCaseF[F, InterviewWorkflow] =
     authorization.resolve(actor).flatMap(visibleTo(_, id))
 
+  /** The interview workflow of an application as its participant sees it: the candidate and the recruiter named on the
+    * workflow, and Admin. The participant predicate travels into the query, so an application of someone else, or one
+    * without a workflow, is simply `None`; the caller learns nothing about which of the two it was.
+    */
+  def inspectForApplication(
+      actor: ActorContext,
+      applicationId: ApplicationId
+  ): UseCaseF[F, Option[InterviewWorkflow]] =
+    authorization
+      .resolve(actor)
+      .flatMap(user =>
+        UseCaseF.repository(workflows.findByApplication(applicationId, InterviewWorkflowAccess(user.id, user.role)))
+      )
+
   /** Admin sees every workflow; others only those they participate in, and a hidden one is simply not found. */
   private def visibleTo(user: ActorRecord, id: InterviewWorkflowId): UseCaseF[F, InterviewWorkflow] =
     UseCaseF
@@ -126,7 +140,7 @@ final class InterviewSchedulingService[F[_]](using F: Monad[F], clock: Clock[F],
       id: InterviewWorkflowId,
       expectedRevision: Long,
       idempotencyKey: UUID
-  ): InterviewActionF[F, InterviewWorkflow] =
+  ): UseCaseF[F, InterviewWorkflow] =
     act(actor, id, expectedRevision, idempotencyKey, InterviewAction.Cancel, "") { (user, now) =>
       InterviewLifecycleEvent.Cancel(InterviewCancellationInitiator.of(user.role), now)
     }
@@ -137,7 +151,7 @@ final class InterviewSchedulingService[F[_]](using F: Monad[F], clock: Clock[F],
       id: InterviewWorkflowId,
       expectedRevision: Long,
       idempotencyKey: UUID
-  ): InterviewActionF[F, InterviewWorkflow] =
+  ): UseCaseF[F, InterviewWorkflow] =
     act(actor, id, expectedRevision, idempotencyKey, InterviewAction.RequestReschedule, "") { (_, now) =>
       InterviewLifecycleEvent.RequestReschedule(now)
     }
@@ -147,7 +161,7 @@ final class InterviewSchedulingService[F[_]](using F: Monad[F], clock: Clock[F],
       id: InterviewWorkflowId,
       expectedRevision: Long,
       idempotencyKey: UUID
-  ): InterviewActionF[F, InterviewWorkflow] =
+  ): UseCaseF[F, InterviewWorkflow] =
     act(actor, id, expectedRevision, idempotencyKey, InterviewAction.DismissRequest, "") { (_, _) =>
       InterviewLifecycleEvent.DismissRescheduleRequest
     }
@@ -160,7 +174,7 @@ final class InterviewSchedulingService[F[_]](using F: Monad[F], clock: Clock[F],
       startsAt: Instant,
       endsAt: Instant,
       idempotencyKey: UUID
-  ): InterviewActionF[F, InterviewWorkflow] = {
+  ): UseCaseF[F, InterviewWorkflow] = {
     val canonicalStart = InterviewInterval.canonical(startsAt)
     val canonicalEnd = InterviewInterval.canonical(endsAt)
     act(actor, id, expectedRevision, idempotencyKey, InterviewAction.Propose, s"$canonicalStart|$canonicalEnd") {
@@ -173,7 +187,7 @@ final class InterviewSchedulingService[F[_]](using F: Monad[F], clock: Clock[F],
       id: InterviewWorkflowId,
       expectedRevision: Long,
       idempotencyKey: UUID
-  ): InterviewActionF[F, InterviewWorkflow] =
+  ): UseCaseF[F, InterviewWorkflow] =
     act(actor, id, expectedRevision, idempotencyKey, InterviewAction.Withdraw, "") { (_, now) =>
       InterviewLifecycleEvent.WithdrawProposal(now)
     }
@@ -184,7 +198,7 @@ final class InterviewSchedulingService[F[_]](using F: Monad[F], clock: Clock[F],
       id: InterviewWorkflowId,
       expectedRevision: Long,
       idempotencyKey: UUID
-  ): InterviewActionF[F, InterviewWorkflow] =
+  ): UseCaseF[F, InterviewWorkflow] =
     act(actor, id, expectedRevision, idempotencyKey, InterviewAction.Accept, "") { (_, now) =>
       InterviewLifecycleEvent.AcceptProposal(now)
     }
@@ -194,7 +208,7 @@ final class InterviewSchedulingService[F[_]](using F: Monad[F], clock: Clock[F],
       id: InterviewWorkflowId,
       expectedRevision: Long,
       idempotencyKey: UUID
-  ): InterviewActionF[F, InterviewWorkflow] =
+  ): UseCaseF[F, InterviewWorkflow] =
     act(actor, id, expectedRevision, idempotencyKey, InterviewAction.Decline, "") { (_, now) =>
       InterviewLifecycleEvent.DeclineProposal(now)
     }
@@ -221,9 +235,6 @@ final class InterviewSchedulingService[F[_]](using F: Monad[F], clock: Clock[F],
       repaired <- UseCaseF.repository(workflows.repairNotifications(id, idempotencyKey, now, admin.id))
     } yield repaired
 
-  private def useCase[A](value: UseCaseF[F, A]): InterviewActionF[F, A] =
-    value.leftMap(InterviewActionError.UseCase.apply)
-
   /** The one path of every action: resolve the trusted actor, hide workflows the actor does not participate in, deny
     * roles the action is not for, then hand the decision to the guarded repository write, which carries the participant
     * predicate, the revision and the idempotent request receipt into the transaction.
@@ -237,17 +248,13 @@ final class InterviewSchedulingService[F[_]](using F: Monad[F], clock: Clock[F],
       canonicalInput: String
   )(
       event: (ActorRecord, Instant) => InterviewLifecycleEvent
-  ): InterviewActionF[F, InterviewWorkflow] =
+  ): UseCaseF[F, InterviewWorkflow] =
     for {
-      user <- useCase(authorization.resolve(actor))
-      _ <- useCase(visibleTo(user, id))
-      now <- EitherT.liftF[F, InterviewActionError, Instant](currentTime)
+      user <- authorization.resolve(actor)
+      _ <- visibleTo(user, id)
+      now <- EitherT.liftF[F, UseCaseError, Instant](currentTime)
       decided = event(user, now)
-      _ <- EitherT.cond[F](
-        InterviewActorPolicy.permits(user.role, user.id, decided),
-        (),
-        InterviewActionError.UseCase(UseCaseError.Domain(DomainError.Forbidden))
-      )
+      _ <- UseCaseF.forbidUnless[F](InterviewActorPolicy.permits(user.role, user.id, decided))
       origin = InterviewLifecycleOrigin.Actor(
         InterviewWorkflowAccess(user.id, user.role),
         idempotencyKey,
@@ -255,29 +262,24 @@ final class InterviewSchedulingService[F[_]](using F: Monad[F], clock: Clock[F],
           s"${action.name}|${id.value}|$expectedRevision|$canonicalInput"
         )
       )
-      outcome <- useCase(
-        UseCaseF.repository(workflows.applyLifecycle(id, expectedRevision, decided, origin, now, None))
-      )
+      outcome <- UseCaseF.repository(workflows.applyLifecycle(id, expectedRevision, decided, origin, now, None))
       workflow <- EitherT.fromEither[F](outcomeToWorkflow(action, outcome))
     } yield workflow
 
   private def outcomeToWorkflow(
       action: InterviewAction,
       outcome: InterviewLifecycleOutcome
-  ): Either[InterviewActionError, InterviewWorkflow] = outcome match {
+  ): Either[UseCaseError, InterviewWorkflow] = outcome match {
     case InterviewLifecycleOutcome.Applied(workflow)   => Right(workflow)
     case InterviewLifecycleOutcome.Duplicate(workflow) => Right(workflow)
-    case InterviewLifecycleOutcome.Rejected(error)     => Left(InterviewActionError.Workflow(error))
-    case InterviewLifecycleOutcome.NotVisible          =>
-      Left(InterviewActionError.UseCase(UseCaseError.Domain(DomainError.NotFound("interviewWorkflow"))))
+    case InterviewLifecycleOutcome.Rejected(error)     => Left(UseCaseError.InterviewRule(error))
+    case InterviewLifecycleOutcome.NotVisible => Left(UseCaseError.Domain(DomainError.NotFound("interviewWorkflow")))
     case InterviewLifecycleOutcome.ApplicationNotInterview(status) =>
       Left(
-        InterviewActionError.UseCase(
-          UseCaseError.Domain(
-            DomainError.InvalidStatusTransition(
-              status,
-              if (action == InterviewAction.Cancel) ApplicationStatus.Rejected else ApplicationStatus.Interview
-            )
+        UseCaseError.Domain(
+          DomainError.InvalidStatusTransition(
+            status,
+            if (action == InterviewAction.Cancel) ApplicationStatus.Rejected else ApplicationStatus.Interview
           )
         )
       )

@@ -573,7 +573,7 @@ final class HiringGraphQLInterviewActionSpec extends CatsEffectSuite {
   )
 
   rules.foreach { case (label, workflow, action, clock, status, expectedRevision, expected) =>
-    test(s"DHW-19 $label is the sanitized code $expected and changes nothing") {
+    test(s"AC-06.7 DHW-19 $label is the sanitized code $expected and changes nothing") {
       val actor = action match {
         case Action.Propose | Action.Withdraw | Action.Dismiss => recruiterActor
         case _                                                 => candidateActor
@@ -594,7 +594,7 @@ final class HiringGraphQLInterviewActionSpec extends CatsEffectSuite {
     }
   }
 
-  test("DHW-19 an interval that ends before it starts, or equals the current one, is a typed outcome") {
+  test("AC-06.7 DHW-19 an interval that ends before it starts, or equals the current one, is a typed outcome") {
     arranged(completed).flatMap { a =>
       for {
         reversed <- act(

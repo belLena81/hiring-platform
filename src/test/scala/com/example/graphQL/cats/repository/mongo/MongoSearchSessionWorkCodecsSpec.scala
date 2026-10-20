@@ -1,5 +1,8 @@
 package com.example.graphQL.cats.repository.mongo
 
+import cats.data.NonEmptyList
+import com.example.graphQL.cats.repository.mongo.MongoStoredDocumentDecoding.toStored
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.events.OperationalEventPayload.SearchKind
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.service.port.PendingSearchSessionWork
@@ -43,10 +46,11 @@ class MongoSearchSessionWorkCodecsSpec extends FunSuite {
     )
 
     assert(!stored.toJson.contains("private candidate query"))
-    assertEquals(MongoSearchSessionWorkCodecs.readWork(stored).map(_.session.query), Right(None))
+    assertEquals(MongoSearchSessionWorkCodecs.readWork(stored).toEither.map(_.session.query), Right(None))
     assertEquals(
       MongoSearchSessionWorkCodecs
         .readWork(stored)
+        .toEither
         .map(event => OperationalEventWireCodec.payloadJson(event.event.payload).hcursor.get[Option[String]]("query")),
       Right(Right(None))
     )
@@ -77,8 +81,8 @@ class MongoSearchSessionWorkCodecsSpec extends FunSuite {
     stored.put(MongoFields.LeaseToken, "lease-token")
 
     assertEquals(
-      MongoSearchSessionWorkCodecs.readClaim(stored),
-      Left(MongoHiringCodecs.StoredDocumentError.InvalidField(MongoFields.Attempts))
+      MongoSearchSessionWorkCodecs.readClaim(stored).toEither,
+      Left(NonEmptyList.one(MongoHiringCodecs.StoredDocumentError.InvalidField(MongoFields.Attempts)))
     )
   }
 
@@ -101,8 +105,42 @@ class MongoSearchSessionWorkCodecsSpec extends FunSuite {
     assert(!invalid.addressesSession)
     val stored = MongoSearchSessionWorkCodecs.work(invalid, now)
     assertEquals(
-      MongoSearchSessionWorkCodecs.readWork(stored),
-      Left(MongoHiringCodecs.StoredDocumentError.InconsistentDocument)
+      MongoSearchSessionWorkCodecs.readWork(stored).toEither,
+      Left(NonEmptyList.one(MongoHiringCodecs.StoredDocumentError.InconsistentDocument))
+    )
+  }
+
+  test("AC-06.3 a work document with a corrupt session and a corrupt event reports the problems of both") {
+    val session = SearchSession(
+      searchId,
+      actorId,
+      SearchKind.Jobs,
+      None,
+      SearchFilterSnapshot.Unfiltered,
+      None,
+      Nil,
+      now,
+      now.plusSeconds(3600)
+    )
+    val event =
+      OperationalEvents.searchPerformed(UUID.randomUUID(), session).fold(error => fail(error.toString), identity)
+    def stored = MongoSearchSessionWorkCodecs.work(PendingSearchSessionWork(session, event), now)
+    def errors(document: org.bson.Document) =
+      MongoSearchSessionWorkCodecs.readWork(document).toEither.swap.toOption.get
+
+    val badSession = stored
+    badSession.put(MongoFields.Session, new org.bson.Document())
+    val badEvent = stored
+    badEvent.put(MongoFields.Event, new org.bson.Document())
+    val both = stored
+    both.put(MongoFields.Session, new org.bson.Document())
+    both.put(MongoFields.Event, new org.bson.Document())
+
+    assert(errors(badSession).size > 0 && errors(badEvent).size > 0)
+    assertEquals(errors(both).size, errors(badSession).size + errors(badEvent).size)
+    assertEquals(
+      MongoSearchSessionWorkCodecs.readWork(both).toStored,
+      Left(RepositoryError.InvalidStoredData)
     )
   }
 }

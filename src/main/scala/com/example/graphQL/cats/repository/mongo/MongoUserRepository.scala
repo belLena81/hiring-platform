@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.repository.mongo.MongoF.asRepository
 import com.example.graphQL.cats.service.resilience.CircuitBreaker
 
 import cats.data.EitherT
@@ -33,7 +34,7 @@ final class MongoUserRepository(
   private val closurePages = new MongoRecruiterJobClosurePages(database, diagnostics, jobClosurePageSize)
 
   def insert(user: User): RepositoryF[IO, Unit] =
-    if (!user.roleProfileIsValid) RepositoryF.at[IO].raise(RepositoryError.Conflict)
+    if (!user.roleProfileIsValid) MongoF.raise(RepositoryError.Conflict)
     else
       MongoRepositorySupport
         .repositoryGuard(diagnostics, "MongoUserRepository.insert")(
@@ -86,7 +87,7 @@ final class MongoUserRepository(
         access: List[Document],
         matches: (K, Document) => Boolean
     ): RepositoryF[IO, List[RelatedUser]] =
-      if (requested.isEmpty) RepositoryF.at[IO].pure(Nil)
+      if (requested.isEmpty) MongoF.pure(Nil)
       else {
         val pipeline = List(matching(Filters.or(requested.map(predicate)*))) ++ actor(scope) ++ access ++ List(
           lookup(
@@ -226,9 +227,9 @@ final class MongoUserRepository(
     )
     for {
       state <- RepositoryF.lift(MongoSessionOperations.findOne(registry, session, stateFilter))
-      _ <- RepositoryF.at[IO].fromEither(state.toRight(RepositoryError.Conflict))
+      _ <- MongoF.fromEither(state.toRight(RepositoryError.Conflict))
       existing <- RepositoryF.lift(MongoSessionOperations.findOne(collection, session, MongoFilter.and()))
-      _ <- RepositoryF.at[IO].fromEither(Either.cond(existing.isEmpty, (), RepositoryError.Conflict))
+      _ <- MongoF.fromEither(Either.cond(existing.isEmpty, (), RepositoryError.Conflict))
       _ <- RepositoryF.lift(
         MongoSessionOperations.insertOne(collection, session, MongoHiringCodecs.userWithPassword(user, passwordHash))
       )
@@ -252,7 +253,7 @@ final class MongoUserRepository(
       session: Option[ClientSession[IO]]
   ): RepositoryF[IO, Unit] =
     if (!user.roleProfileIsValid || user.role == UserRole.Admin)
-      RepositoryF.at[IO].raise(RepositoryError.Conflict)
+      MongoF.raise(RepositoryError.Conflict)
     else
       {
         val stateFilter = MongoFilter.and(
@@ -261,7 +262,7 @@ final class MongoUserRepository(
         )
         for {
           state <- RepositoryF.lift(MongoSessionOperations.findOne(registry, session, stateFilter))
-          _ <- RepositoryF.at[IO].fromEither(state.toRight(RepositoryError.Conflict))
+          _ <- MongoF.fromEither(state.toRight(RepositoryError.Conflict))
           _ <- RepositoryF.lift(
             MongoSessionOperations
               .insertOne(collection, session, MongoHiringCodecs.userWithPassword(user, passwordHash))
@@ -273,7 +274,7 @@ final class MongoUserRepository(
                 EmbeddingWorkKey(EmbeddingWorkKind.CandidateProfile, user.id.value.toString),
                 now
               )
-            else ().pure[[A] =>> RepositoryF[IO, A]]
+            else ().asRepository
           }
         } yield ()
       }.pipe(effect =>
@@ -487,7 +488,7 @@ final class MongoUserRepository(
       session: Option[ClientSession[IO]]
   ): RepositoryF[IO, Unit] =
     closurePages.closePage(userId, now, session).flatMap { page =>
-      if (page.remains) closurePages.enqueue(userId, now, session) else RepositoryF.at[IO].pure(())
+      if (page.remains) closurePages.enqueue(userId, now, session) else MongoF.pure(())
     }
 }
 

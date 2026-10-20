@@ -62,6 +62,9 @@ type Application {
 
     "The cursor of the last item of the previous page."
     after: Cursor): ApplicationEventConnection!
+
+  "The interview workflow of this application, as `interviewWorkflow(workflowId)` shows it: to its candidate, the owning recruiter and Admin. Null when the application has no interview or the caller may not see it."
+  interview: InterviewWorkflow
 }
 
 "A status change of an application that needs no further data."

@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.service.events
 
+import com.example.graphQL.cats.service.events.OperationalEventFailure.*
 import cats.data.EitherT
 import cats.Monad
 import cats.effect.Clock
@@ -15,7 +16,6 @@ import com.example.graphQL.cats.service.port.{
   SearchSessionWorkRepository,
   UserRepository
 }
-import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
 import com.example.graphQL.cats.service.auth.ActorAuthorization
 import com.example.graphQL.cats.service.mutation.Idempotent
@@ -87,7 +87,7 @@ final class OperationalTelemetryService[F[_]: Monad](
               verified._1,
               now
             )
-            .leftMap(_ => UseCaseError.Repository(RepositoryError.InvalidEvent))
+            .leftMap(_.asUseCaseError)
         )
         _ <- UseCaseF.repository(searchSessions.recordInteraction(event, context))
       } yield ()
