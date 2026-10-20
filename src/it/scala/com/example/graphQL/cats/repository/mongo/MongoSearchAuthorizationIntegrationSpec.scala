@@ -84,7 +84,8 @@ final class MongoSearchAuthorizationIntegrationSpec extends MongoIntegrationSuit
               db,
               MongoCollections.Users,
               MongoHiringCodecs.user(
-                if (mutation == "actor") recruiter.copy(accountStatus = AccountStatus.Deleted, profile = None)
+                if (mutation == "actor")
+                  recruiter.copy(accountStatus = AccountStatus.Deleted, profile = None, email = None)
                 else recruiter
               )
             )
@@ -98,7 +99,9 @@ final class MongoSearchAuthorizationIntegrationSpec extends MongoIntegrationSuit
         _ <- replace(
           db,
           MongoCollections.Users,
-          MongoHiringCodecs.user(candidateUser.copy(accountStatus = AccountStatus.Deleted, profile = None))
+          MongoHiringCodecs.user(
+            candidateUser.copy(accountStatus = AccountStatus.Deleted, profile = None, email = None, embedding = None)
+          )
         )
         deniedJobs <- search.authorizedJobEligibility(candidateScope, List(queryJob.id), None).value
         _ = assertEquals(deniedJobs, Right(Nil))

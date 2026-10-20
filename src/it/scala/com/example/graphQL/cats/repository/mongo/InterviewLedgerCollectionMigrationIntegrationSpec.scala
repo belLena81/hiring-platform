@@ -87,17 +87,17 @@ final class InterviewLedgerCollectionMigrationIntegrationSpec extends MongoInteg
       val (reservations, locks, receipts) = (newNames(0), newNames(1), newNames(2))
       for {
         _ <- initialize(fixture.database)
-        _ <- MongoRepositoryTestSupport.insertOne(
+        _ <- MongoRepositoryTestSupport.insertUnvalidated(
           fixture.database,
           reservations,
           reservation("00000000-0000-0000-0000-000000000001")
         )
-        _ <- MongoRepositoryTestSupport.insertOne(
+        _ <- MongoRepositoryTestSupport.insertUnvalidated(
           fixture.database,
           locks,
           new Document("_id", "participant").append("fence", Long.box(3L))
         )
-        _ <- MongoRepositoryTestSupport.insertOne(fixture.database, receipts, new Document("_id", "receipt-1"))
+        _ <- MongoRepositoryTestSupport.insertUnvalidated(fixture.database, receipts, new Document("_id", "receipt-1"))
         before <- newNames.traverse(documents(fixture.database, _))
         _ <- downgrade(fixture.database)
         legacyOnly <- present(fixture.database, newNames ++ oldNames)
@@ -124,7 +124,7 @@ final class InterviewLedgerCollectionMigrationIntegrationSpec extends MongoInteg
       val oldReservations = oldNames.head
       for {
         _ <- initialize(fixture.database)
-        _ <- MongoRepositoryTestSupport.insertOne(
+        _ <- MongoRepositoryTestSupport.insertUnvalidated(
           fixture.database,
           newNames.head,
           reservation("00000000-0000-0000-0000-000000000002")
@@ -148,7 +148,11 @@ final class InterviewLedgerCollectionMigrationIntegrationSpec extends MongoInteg
     mongoResource.use { fixture =>
       for {
         _ <- initialize(fixture.database)
-        _ <- MongoRepositoryTestSupport.insertOne(fixture.database, newNames(2), new Document("_id", "receipt-2"))
+        _ <- MongoRepositoryTestSupport.insertUnvalidated(
+          fixture.database,
+          newNames(2),
+          new Document("_id", "receipt-2")
+        )
         _ <- downgrade(fixture.database)
         // The first ledger was already renamed when the previous process stopped.
         _ <- MongoRepositoryTestSupport
@@ -159,7 +163,7 @@ final class InterviewLedgerCollectionMigrationIntegrationSpec extends MongoInteg
           .flatMap(
             _.renameCollection(mongo4cats.models.collection.MongoNamespace(fixture.database.name, newNames.head))
           )
-        _ <- MongoRepositoryTestSupport.insertOne(
+        _ <- MongoRepositoryTestSupport.insertUnvalidated(
           fixture.database,
           MongoCollections.HiringMigrationLedger,
           new Document(MongoFields.Id, ledgerId).append("version", Long.box(1L)).append("state", "Running")
@@ -180,7 +184,7 @@ final class InterviewLedgerCollectionMigrationIntegrationSpec extends MongoInteg
     mongoResource.use { fixture =>
       for {
         _ <- initialize(fixture.database)
-        _ <- MongoRepositoryTestSupport.insertOne(
+        _ <- MongoRepositoryTestSupport.insertUnvalidated(
           fixture.database,
           newNames.head,
           reservation("00000000-0000-0000-0000-000000000003")

@@ -76,22 +76,16 @@ final class MongoEmbeddingWorkRepository(
   private def authorizeAdmin(
       adminId: com.example.graphQL.cats.domain.model.Identifiers.UserId,
       session: Option[ClientSession[IO]]
-  ): RepositoryF[IO, Unit] = RepositoryF
-    .lift(
-      MongoSessionOperations.updateOne(
-        Mongo4catsCollections.documents(database, MongoCollections.Users),
-        session,
-        MongoFilter.and(
-          MongoFilter.eq(MongoFields.Id, adminId.value.toString),
-          MongoFilter.eq(MongoFields.Role, "Admin"),
-          MongoFilter.eq(MongoFields.AccountStatus, "Active"),
-          MongoFilter.eq(MongoFields.AdminSingletonKey, "singleton-admin"),
-          MongoFilter.lt(MongoFields.Version, Long.MaxValue)
-        ),
-        MongoUpdate.inc(MongoFields.Version, 1L)
-      )
+  ): RepositoryF[IO, Unit] =
+    new MongoSubjectFence(database).requireActiveAndBump(
+      session,
+      adminId.value.toString,
+      List(
+        MongoFilter.eq(MongoFields.Role, "Admin"),
+        MongoFilter.eq(MongoFields.AdminSingletonKey, "singleton-admin")
+      ),
+      RepositoryError.AuthorityRevoked
     )
-    .subflatMap(MongoRepositorySupport.matchedOne(_, RepositoryError.AuthorityRevoked))
 
   /** Maintenance capability: the trusted Admin and failed generation are checked in the same transaction. A
     * changed/repaired generation is never overwritten. No provider calls occur here.

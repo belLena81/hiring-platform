@@ -522,6 +522,11 @@ final class InterviewCancellationCommitIntegrationSpec extends MongoIntegrationS
     }
   }
 
+  private def fenceOf(document: Option[org.bson.Document]): Long =
+    document
+      .flatMap(value => Option(value.get(MongoFields.FencingVersion)))
+      .fold(0L)(_.asInstanceOf[Number].longValue())
+
   private def seedAdmin(a: Arrangement): IO[UserId] = {
     val id = UserId(UUID.randomUUID())
     MongoRepositoryTestSupport
@@ -540,12 +545,14 @@ final class InterviewCancellationCommitIntegrationSpec extends MongoIntegrationS
       for {
         admin <- seedAdmin(a)
         versionBefore <- a.stored(MongoCollections.Users, admin.value.toString).map(_.map(_.get(MongoFields.Version)))
+        fenceBefore <- a.stored(MongoCollections.OutboxSubjectFences, admin.value.toString).map(fenceOf)
         result <- apply(
           a,
           InterviewLifecycleEvent.Cancel(InterviewCancellationInitiator.Admin, now),
           actor(UserRole.Admin, admin)
         )
         versionAfter <- a.stored(MongoCollections.Users, admin.value.toString).map(_.map(_.get(MongoFields.Version)))
+        fenceAfter <- a.stored(MongoCollections.OutboxSubjectFences, admin.value.toString).map(fenceOf)
         history <- MongoRepositoryTestSupport.findOne(
           a.fixture.database,
           MongoCollections.ApplicationEvents,
@@ -555,7 +562,9 @@ final class InterviewCancellationCommitIntegrationSpec extends MongoIntegrationS
         applied(result)
         assertEquals(history.map(_.getString("feedback")), Some("Interview cancelled by an administrator."))
         assertEquals(history.map(_.getString("actorId")), Some(admin.value.toString))
-        assertNotEquals(versionAfter, versionBefore)
+        // The fence document advances; the content revision of the user does not.
+        assertEquals(fenceAfter, fenceBefore + 1L)
+        assertEquals(versionAfter, versionBefore)
       }
     }
   }

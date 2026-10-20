@@ -227,17 +227,17 @@ final class MongoAnalyticsErasureQueue[F[_]: Async: UUIDGen] private (
 
   /** Each returned batch is durably retired only after broker-confirmed fencing. */
   def transactionalIds(requestId: AccountSubjectId): F[Vector[String]] = mongo {
-    requests.find(Filters.eq("_id", requestId.value)).first.flatMap {
+    requests.find(Filters.eq(AnalyticsCollections.Fields.Id, requestId.value)).first.flatMap {
       case Some(request) if request.fencingVersion.contains(1) && request.producerRegistry.contains(true) =>
         registrations
           .find(
             Filters.and(
-              Filters.eq("subjectId", requestId.value),
-              Filters.eq("kind", "Operational"),
-              Filters.eq("state", "Active")
+              Filters.eq(AnalyticsCollections.Fields.SubjectId, requestId.value),
+              Filters.eq(AnalyticsCollections.Fields.Kind, AnalyticsCollections.ProducerRegistration.OperationalKind),
+              Filters.eq(AnalyticsCollections.Fields.State, AnalyticsCollections.ProducerRegistration.ActiveState)
             )
           )
-          .sort(Sorts.ascending("_id"))
+          .sort(Sorts.ascending(AnalyticsCollections.Fields.Id))
           .limit(64)
           .all
           .map(_.toVector.map(_.transactionalId))
@@ -252,13 +252,13 @@ final class MongoAnalyticsErasureQueue[F[_]: Async: UUIDGen] private (
         registrations
           .updateMany(
             Filters.and(
-              Filters.eq("subjectId", requestId.value),
-              Filters.eq("kind", "Operational"),
-              Filters.in("transactionalId", ids.asJava)
+              Filters.eq(AnalyticsCollections.Fields.SubjectId, requestId.value),
+              Filters.eq(AnalyticsCollections.Fields.Kind, AnalyticsCollections.ProducerRegistration.OperationalKind),
+              Filters.in(AnalyticsCollections.Fields.TransactionalId, ids.asJava)
             ),
             Updates.combine(
-              Updates.set("state", "Fenced"),
-              Updates.set("fencedAt", Date.from(now)),
+              Updates.set(AnalyticsCollections.Fields.State, AnalyticsCollections.ProducerRegistration.FencedState),
+              Updates.set(AnalyticsCollections.Fields.FencedAt, Date.from(now)),
               Updates.set(AnalyticsCollections.Fields.ExpiresAt, Date.from(now.plusSeconds(8.days.toSeconds)))
             )
           )
@@ -379,15 +379,20 @@ final class MongoAnalyticsErasureQueue[F[_]: Async: UUIDGen] private (
   }
 
   private def registryMigrationValidation: F[Unit] =
-    ledger.find(Filters.eq("_id", "012_attributable_producer_registrations")).first.flatMap { marker =>
-      Either
-        .cond(
-          marker.exists(value => value.state.contains("Complete") && value.version.contains(1L)),
-          (),
-          AnalyticsError.InvalidConfiguration("producer registration migration is incomplete")
-        )
-        .liftTo[F]
-    }
+    ledger
+      .find(
+        Filters.eq(AnalyticsCollections.Fields.Id, AnalyticsCollections.MigrationIds.AttributableProducerRegistrations)
+      )
+      .first
+      .flatMap { marker =>
+        Either
+          .cond(
+            marker.exists(value => value.state.contains("Complete") && value.version.contains(1L)),
+            (),
+            AnalyticsError.InvalidConfiguration("producer registration migration is incomplete")
+          )
+          .liftTo[F]
+      }
 
   private def migrationValidation(ledger: MongoCollection[F, AnalyticsMongoRecords.MigrationEntry]): F[Unit] = {
     ledger

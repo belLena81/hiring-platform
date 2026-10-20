@@ -676,6 +676,55 @@ final class InterviewLifecycleAccountDeletionIntegrationSpec extends MongoIntegr
   }
 
   test(
+    "MSC-01.5 an interview commit racing a participant deletion precedes it or fails, and never advances users.version"
+  ) {
+    def usersVersion(s: InterviewLifecycleScenario, id: UserId): IO[Option[AnyRef]] =
+      MongoRepositoryTestSupport
+        .findOne(s.fixture.database, MongoCollections.Users, Filters.eq(MongoFields.Id, id.value.toString))
+        .map(_.map(_.get(MongoFields.Version)))
+    (1 to 5).toList.traverse_ { _ =>
+      scenario { s =>
+        for {
+          recruiterBefore <- usersVersion(s, s.workflow.recruiterId)
+          candidateBefore <- usersVersion(s, s.workflow.candidateId)
+          (deletion, outcome) <- (
+            delete(s, s.workflow.candidateId),
+            s.apply(
+              InterviewLifecycleEvent.Cancel(InterviewCancellationInitiator.Recruiter, now),
+              s.actor(UserRole.Recruiter, s.workflow.recruiterId, input = "cancel-fence-race"),
+              0L,
+              now
+            )
+          ).parTupled
+          recruiterAfter <- usersVersion(s, s.workflow.recruiterId)
+          candidateAfter <- usersVersion(s, s.workflow.candidateId)
+          history <- s.count(
+            MongoCollections.ApplicationEvents,
+            Filters.eq("applicationId", s.workflow.applicationId.value.toString)
+          )
+          status <- s.applicationStatus
+        } yield {
+          assertEquals(deletion, ()) // `delete` fails the test unless the deletion result is Right
+          outcome match {
+            case Right(InterviewLifecycleOutcome.Applied(_)) =>
+              // The commit preceded the deletion: its history exists and the application was rejected.
+              assertEquals((history, status), (1L, Some("Rejected")))
+            case other =>
+              // Fenced out (Conflict, AuthorityRevoked or not visible): nothing was committed for the participant.
+              assertEquals((history, status), (0L, Some("Interview")), clue(other))
+          }
+          // Only the deletion wrote the candidate's content revision (one increment); the interview wrote none.
+          assertEquals(recruiterAfter, recruiterBefore)
+          assertEquals(
+            candidateAfter.map(_.asInstanceOf[Number].longValue()),
+            candidateBefore.map(_.asInstanceOf[Number].longValue() + 1L)
+          )
+        }
+      }
+    }
+  }
+
+  test(
     "DHW-30 (query plan) the live-hold lookup of a purge is served by the reservation identity index, not by a collection scan"
   ) {
     mongoResource.use { fixture =>
@@ -695,7 +744,7 @@ final class InterviewLifecycleAccountDeletionIntegrationSpec extends MongoIntegr
           .append("reservedAt", java.util.Date.from(at))
       for {
         _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
-        _ <- MongoRepositoryTestSupport.insertOne(
+        _ <- MongoRepositoryTestSupport.insertUnvalidated(
           fixture.database,
           MongoCollections.InterviewWorkflows,
           new org.bson.Document(MongoFields.Id, workflowId.toString)

@@ -103,7 +103,24 @@ private[mongo] object MongoHiringValidators {
   def createOutboxValidator(database: SetupDatabase): IO[Unit] =
     database.runCommand(strictValidation(MongoCollections.EventOutbox, outboxValidator)).void
 
-  def userValidator: Document = {
+  /** The users validator `016_candidate_residence_integrity` completed against; kept so its proof still holds until the
+    * documented successor is installed.
+    */
+  def userValidatorV1: Document = userSchema(successor = false)
+
+  /** The current users validator: typed identity and date fields, and no personal data on a Deleted account. */
+  def userValidator: Document = userSchema(successor = true)
+
+  private val deletedAccountPersonalFields: List[String] = List(
+    MongoFields.Email,
+    MongoFields.EmailCanonical,
+    MongoFields.PasswordHash,
+    MongoFields.Profile,
+    MongoFields.Embedding,
+    MongoFields.EmbeddingMeta
+  )
+
+  private def userSchema(successor: Boolean): Document = {
     def active(role: String, required: String) = new Document("required", List(required).asJava).append(
       "properties",
       new Document()
@@ -159,23 +176,50 @@ private[mongo] object MongoHiringValidators {
     admin
       .get("properties", classOf[Document])
       .append(MongoFields.AdminSingletonKey, new Document("enum", List("singleton-admin").asJava))
+    val deletedProperties = new Document(
+      "properties",
+      new Document(MongoFields.AccountStatus, new Document("enum", List("Deleted").asJava))
+    )
+    val deleted =
+      if (successor)
+        deletedProperties.append(
+          "not",
+          new Document(
+            "anyOf",
+            deletedAccountPersonalFields.map(field => new Document("required", List(field).asJava)).asJava
+          )
+        )
+      else deletedProperties
+    val required =
+      if (successor)
+        List(
+          MongoFields.Role,
+          MongoFields.AccountStatus,
+          MongoFields.Version,
+          MongoFields.Name,
+          MongoFields.NameCanonical,
+          MongoFields.CreatedAt,
+          MongoFields.UpdatedAt
+        )
+      else List(MongoFields.Role, MongoFields.AccountStatus, MongoFields.Version)
+    val topProperties = new Document(MongoFields.Version, new Document("bsonType", "long").append("minimum", 0L))
+    if (successor)
+      List(
+        MongoFields.Name -> new Document("bsonType", "string"),
+        MongoFields.NameCanonical -> new Document("bsonType", "string"),
+        MongoFields.Email -> new Document("bsonType", "string"),
+        MongoFields.EmailCanonical -> new Document("bsonType", "string"),
+        MongoFields.PasswordHash -> new Document("bsonType", "string"),
+        MongoFields.CreatedAt -> MongoValidatorSchemas.date,
+        MongoFields.UpdatedAt -> MongoValidatorSchemas.date,
+        MongoFields.DeletedAt -> MongoValidatorSchemas.date
+      ).foreach { case (field, schema) => topProperties.append(field, schema) }
     new Document(
       "$jsonSchema",
       new Document("bsonType", "object")
-        .append("required", List(MongoFields.Role, MongoFields.AccountStatus, MongoFields.Version).asJava)
-        .append("properties", new Document(MongoFields.Version, new Document("bsonType", "long").append("minimum", 0L)))
-        .append(
-          "oneOf",
-          List(
-            candidate,
-            active("Recruiter", MongoFields.Profile),
-            admin,
-            new Document(
-              "properties",
-              new Document(MongoFields.AccountStatus, new Document("enum", List("Deleted").asJava))
-            )
-          ).asJava
-        )
+        .append("required", required.asJava)
+        .append("properties", topProperties)
+        .append("oneOf", List(candidate, active("Recruiter", MongoFields.Profile), admin, deleted).asJava)
     )
   }
 
@@ -208,6 +252,7 @@ private[mongo] object MongoHiringValidators {
         .append(
           "properties",
           new Document(MongoFields.Version, new Document("bsonType", "long").append("minimum", 0L))
+            .append(MongoFields.AdmissionFence, MongoValidatorSchemas.nonNegativeLong)
             .append(MongoFields.Location, location)
         )
     )

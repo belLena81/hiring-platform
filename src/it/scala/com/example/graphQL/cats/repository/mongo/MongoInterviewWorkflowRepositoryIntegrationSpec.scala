@@ -76,7 +76,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
     )
   }
 
-  test("actual publication authorization fences an in-flight candidate embedding write") {
+  test("MSC-01.3 actual publication authorization does not stale an in-flight candidate embedding write") {
     mongoResource.use { fixture =>
       val candidate = UserId(UUID.randomUUID())
       val recruiter = UserId(UUID.randomUUID())
@@ -140,8 +140,9 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         )
         updated <- users.updateEmbedding(fresh, embedding).value
       } yield {
-        assertEquals(stale, Left(RepositoryError.Conflict))
-        assert(fresh.version > observed.version)
+        // Authorization fences the subject through its fence document; the content revision is untouched.
+        assertEquals(stale, Right(()))
+        assertEquals(fresh.version, observed.version)
         assertEquals(updated, Right(()))
       }
     }

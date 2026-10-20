@@ -14,7 +14,7 @@ The existing lifecycle StateT and interview state/command ADTs remain the decisi
 
 Producer attribution lives in `producer_registrations`, with bounded cleanup pages and broker-confirmed fencing checkpoints. Active registrations have no TTL. Normal generation retirement requires stopping that generation and fencing its canonical transactional ID before marking registrations fenced. Closing a producer is insufficient evidence.
 
-Embedding values must prove the configured model identity before document persistence or query retrieval; an absent provider model retains the configured fallback. Application submission uses an immutable ID/status/revision snapshot with the existing transactional version/status write guard. Workflow publication shares one Resource-owned loop: successful full bounded passes yield and continue immediately, while idle/deferred passes sleep for validated `kafka.interview.publication-poll-interval-ms` (100–60000 ms, default 1000). Individual producer transactions remain serialized. [Search/publication reliability](docs/specs/hiring-search-publication-reliability.md) separates measured local adoption from external acceptance.
+Embedding values must prove the configured model identity before document persistence or query retrieval; an absent provider model retains the configured fallback. Application submission uses an immutable ID/status/revision snapshot with a transactional status guard that advances `jobs.admissionFence` (not the content revision). Workflow publication shares one Resource-owned loop: successful full bounded passes yield and continue immediately, while idle/deferred passes sleep for validated `kafka.interview.publication-poll-interval-ms` (100–60000 ms, default 1000). Individual producer transactions remain serialized. [Search/publication reliability](docs/specs/hiring-search-publication-reliability.md) separates measured local adoption from external acceptance.
 
 Operational event payload ADTs contain only the analytical facts required by current consumers; their strict wire validation retains the seven-field envelope. Outbox lists validate before insertion, receipt deduplication uses Mongo's unique insert, and publication renews at the start of each bounded four-claim wave. Kafka owns transaction serialization and fencing. Operational facts use event time and permit out-of-order publication; interview revisions and inbox receipts govern workflow ordering. Cleanup integrity is established by migration 015 and exact native-validator verification, with explicit bounded maintenance audits and an active-state partial index. Temporary test namespaces use a guarded reusable local stack; durable proof resources stay separate. [Event and test reliability](docs/specs/hiring-event-and-test-reliability.md) tracks the local checks and external acceptance gates.
 
@@ -314,7 +314,7 @@ The default rule is:
 ```javascript
 {
   _id: UUID,
-  version: Long(0),                 // concurrency revision, incremented by account writes (including embedding writes, deletion and interview subject fencing); not an API or embedding version
+  version: Long(0),                 // content revision, incremented by profile changes and deletion only (not by embedding writes or fences); not an API or embedding version
 
   role: "Candidate",                // stored Scala enum name: "Candidate" | "Recruiter" | "Admin"
   accountStatus: "Active",          // "Active" | "Deleted"
@@ -348,7 +348,7 @@ The default rule is:
   },
 
   createdAt: ISODate(...),
-  updatedAt: ISODate(...)           // absent until the first update of the account
+  updatedAt: ISODate(...)           // written on insert (= createdAt), then at each update of the account
 }
 ```
 
@@ -393,7 +393,8 @@ Do not create indexes for fields merely because they exist.
 ```javascript
 {
   _id: UUID,
-  version: Long(0),                 // concurrency revision, incremented by job writes (including application submissions and embedding writes)
+  version: Long(0),                 // content revision, incremented by job edits, status changes and closure only (not by submissions or embedding writes)
+  admissionFence: Long(0),          // optional (absent = 0), internal conflict fence; $inc by application submission and interview scheduling
 
   recruiterId: UUID,
 

@@ -19,15 +19,11 @@ private[mongo] object MongoInterviewWorkflowCodec {
 
   def workflowDocument(value: InterviewWorkflow): Document = {
     val base = new Document(MongoFields.Id, value.id.value.toString)
-      .append(DocumentTypeField, "workflow")
+      .append(DocumentTypeField, WorkflowType)
       .append("applicationId", value.applicationId.value.toString)
       .append("initiatedBy", value.initiatedBy.value.toString)
       .append("candidateId", value.candidateId.value.toString)
       .append("recruiterId", value.recruiterId.value.toString)
-      .append(
-        MongoFields.SubjectIds,
-        List(value.candidateId.value.toString, value.recruiterId.value.toString).distinct.asJava
-      )
       .append(StartField, value.interval.startsAt.toDate)
       .append(EndField, value.interval.endsAt.toDate)
       .append("preCommitDeadline", value.preCommitDeadline.toDate)
@@ -48,7 +44,7 @@ private[mongo] object MongoInterviewWorkflowCodec {
       createdAt: Instant
   ): Document =
     new Document(MongoFields.Id, receiptId)
-      .append(DocumentTypeField, "requestReceipt")
+      .append(DocumentTypeField, RequestReceiptType)
       .append(RequestWorkflowField, workflowId.value.toString)
       .append(RequestFingerprintField, fingerprint.value)
       .append(MongoFields.CreatedAt, createdAt.toDate)
@@ -70,10 +66,24 @@ private[mongo] object MongoInterviewWorkflowCodec {
       at: Instant
   ): Document =
     new Document(MongoFields.Id, id)
-      .append(DocumentTypeField, "inboxReceipt")
+      .append(DocumentTypeField, InboxReceiptType)
       .append(WorkflowIdField, workflowId.value.toString)
       .append(MessageIdField, messageId)
       .append(RevisionField, revision)
+      .append(MongoFields.OccurredAt, at.toDate)
+
+  /** The hiring receipt names its subjects so erasure finds it without the workflow, which may have expired. */
+  def hiringReceiptDocument(
+      id: String,
+      workflowId: InterviewWorkflowId,
+      candidateId: UserId,
+      recruiterId: UserId,
+      at: Instant
+  ): Document =
+    new Document(MongoFields.Id, id)
+      .append(DocumentTypeField, HiringReceiptType)
+      .append(WorkflowIdField, workflowId.value.toString)
+      .append(MongoFields.SubjectIds, List(candidateId.value.toString, recruiterId.value.toString).distinct.asJava)
       .append(MongoFields.OccurredAt, at.toDate)
 
   def commandDocument(record: InterviewWorkflowCommandRecord): Document =
@@ -104,7 +114,7 @@ private[mongo] object MongoInterviewWorkflowCodec {
       occurredAt: Instant
   ): Document =
     new Document(MongoFields.Id, commandId(workflowId, stepId))
-      .append(DocumentTypeField, "command")
+      .append(DocumentTypeField, CommandType)
       .append(WorkflowIdField, workflowId.value.toString)
       .append(StepIdField, stepId)
       .append(RevisionField, revision)

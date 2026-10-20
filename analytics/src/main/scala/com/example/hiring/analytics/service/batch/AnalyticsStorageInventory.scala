@@ -6,8 +6,10 @@ enum AnalyticsStoragePrivacy {
   case RawSubjects, PseudonymousSubjects, SuppressedAggregates, SanitizedControl
 }
 
+/** `RequestCompletion` rows live until their erasure request completes and are deleted in its completion transaction.
+  */
 enum AnalyticsStorageRetention {
-  case Bronze, Quarantine, Silver, LateFacts, PublishedSnapshot, DeletionMarker
+  case Bronze, Quarantine, Silver, LateFacts, PublishedSnapshot, DeletionMarker, RequestCompletion
   case RecoveryProgress, PublicationReceipt, ReplayRecovery, Permanent, ProcessLifetime
 }
 
@@ -62,7 +64,7 @@ object AnalyticsStorageInventory {
       AnalyticsStorageSurface("analytics_report_control", Mongo, SanitizedControl, Permanent),
       AnalyticsStorageSurface("analytics_erasure_requests", Mongo, RawSubjects, DeletionMarker),
       AnalyticsStorageSurface("analytics_erasure_completions", Mongo, RawSubjects, Permanent),
-      AnalyticsStorageSurface("analytics_erasure_delta_files", Mongo, RawSubjects, DeletionMarker),
+      AnalyticsStorageSurface("analytics_erasure_delta_files", Mongo, RawSubjects, RequestCompletion),
       AnalyticsStorageSurface("analytics_late_fact_replay_requests", Mongo, SanitizedControl, ReplayRecovery),
       AnalyticsStorageSurface("analytics_streaming_activation", Mongo, SanitizedControl, Permanent),
       AnalyticsStorageSurface("analytics_streaming_lakehouses", Mongo, SanitizedControl, Permanent),

@@ -20,27 +20,37 @@ private[mongo] object MongoProducerRegistrationMigrations {
 
   def registrationValidator: Document = {
     val properties = new Document(MongoFields.Id, new Document("bsonType", "string"))
-      .append("subjectId", new Document("bsonType", "string"))
-      .append("transactionalId", new Document("bsonType", "string"))
-      .append(MongoFields.Kind, new Document("enum", Vector("Operational", "Interview").asJava))
-      .append(MongoFields.State, new Document("enum", Vector("Active", "Fenced").asJava))
+      .append(MongoFields.SubjectId, new Document("bsonType", "string"))
+      .append(MongoFields.TransactionalId, new Document("bsonType", "string"))
+      .append(
+        MongoFields.Kind,
+        new Document(
+          "enum",
+          Vector(ProducerRegistrationValues.Operational, ProducerRegistrationValues.Interview).asJava
+        )
+      )
+      .append(
+        MongoFields.State,
+        new Document("enum", Vector(ProducerRegistrationValues.Active, ProducerRegistrationValues.Fenced).asJava)
+      )
       .append("registeredAt", new Document("bsonType", "date"))
     val schema = new Document("bsonType", "object")
       .append(
         "required",
         Vector(
           MongoFields.Id,
-          "subjectId",
-          "transactionalId",
+          MongoFields.SubjectId,
+          MongoFields.TransactionalId,
           MongoFields.Kind,
           MongoFields.State,
           "registeredAt"
         ).asJava
       )
       .append("properties", properties)
-    val active = new Document(MongoFields.State, "Active").append(MongoFields.ExpiresAt, new Document("$exists", false))
-    val fenced = new Document(MongoFields.State, "Fenced")
-      .append("fencedAt", new Document("$type", "date"))
+    val active = new Document(MongoFields.State, ProducerRegistrationValues.Active)
+      .append(MongoFields.ExpiresAt, new Document("$exists", false))
+    val fenced = new Document(MongoFields.State, ProducerRegistrationValues.Fenced)
+      .append(MongoFields.FencedAt, new Document("$type", "date"))
       .append(MongoFields.ExpiresAt, new Document("$type", "date"))
     new Document(
       "$and",
@@ -72,10 +82,10 @@ private[mongo] object MongoProducerRegistrationMigrations {
           .updateOne(
             Filters.eq(MongoFields.Id, s"$subject:$id"),
             Updates.combine(
-              Updates.setOnInsert("subjectId", subject),
-              Updates.setOnInsert("transactionalId", id),
+              Updates.setOnInsert(MongoFields.SubjectId, subject),
+              Updates.setOnInsert(MongoFields.TransactionalId, id),
               Updates.setOnInsert(MongoFields.Kind, kind),
-              Updates.setOnInsert(MongoFields.State, "Active"),
+              Updates.setOnInsert(MongoFields.State, ProducerRegistrationValues.Active),
               Updates.setOnInsert("registeredAt", now)
             ),
             new UpdateOptions().upsert(true)
@@ -116,7 +126,7 @@ private[mongo] object MongoProducerRegistrationMigrations {
                 _ <- fields.traverse_ { case (field, kind) =>
                   ids(row, field).flatMap { values =>
                     val checked =
-                      if (kind == "Interview")
+                      if (kind == ProducerRegistrationValues.Interview)
                         com.example.graphQL.cats.domain.workflow.InterviewSubjectCleanup
                           .validateProducerIds(values)
                           .leftMap(_ => MigrationError.StepFailed(run.id, "invalid interview producer attribution"))
@@ -148,17 +158,26 @@ private[mongo] object MongoProducerRegistrationMigrations {
         .all
         .flatMap { rows =>
           rows.toList.traverse_ { row =>
-            val strings = Vector(MongoFields.Id, "subjectId", "transactionalId", MongoFields.Kind, MongoFields.State)
+            val strings = Vector(
+              MongoFields.Id,
+              MongoFields.SubjectId,
+              MongoFields.TransactionalId,
+              MongoFields.Kind,
+              MongoFields.State
+            )
               .forall(field => Option(row.get(field)).exists { case value: String => value.nonEmpty; case _ => false })
             val active =
-              Option(row.get(MongoFields.State)).contains("Active") && !row.containsKey(MongoFields.ExpiresAt)
+              Option(row.get(MongoFields.State))
+                .contains(ProducerRegistrationValues.Active) && !row.containsKey(MongoFields.ExpiresAt)
             val fenced =
-              Option(row.get(MongoFields.State)).contains("Fenced") &&
-                Option(row.get("fencedAt")).exists(_.isInstanceOf[Date]) &&
+              Option(row.get(MongoFields.State)).contains(ProducerRegistrationValues.Fenced) &&
+                Option(row.get(MongoFields.FencedAt)).exists(_.isInstanceOf[Date]) &&
                 Option(row.get(MongoFields.ExpiresAt)).exists(_.isInstanceOf[Date])
             if (
               strings && Option(row.get("registeredAt")).exists(_.isInstanceOf[Date]) &&
-              Set("Operational", "Interview").contains(row.getString(MongoFields.Kind)) && (active || fenced)
+              Set(ProducerRegistrationValues.Operational, ProducerRegistrationValues.Interview).contains(
+                row.getString(MongoFields.Kind)
+              ) && (active || fenced)
             ) IO.unit
             else run.fail("invalid producer registry evidence")
           } *> rows.lastOption.fold(IO.unit)(row => verify(Some(row.getString(MongoFields.Id))))
@@ -168,12 +187,15 @@ private[mongo] object MongoProducerRegistrationMigrations {
       MongoHiringValidators.install(database, MongoCollections.OutboxSubjectFences, fenceValidator) *>
       migrate(
         MongoCollections.OutboxSubjectFences,
-        Vector("transactionalIds" -> "Operational", MongoFields.InterviewTransactionalIds -> "Interview"),
+        Vector(
+          "transactionalIds" -> ProducerRegistrationValues.Operational,
+          MongoFields.InterviewTransactionalIds -> ProducerRegistrationValues.Interview
+        ),
         _ => Nil
       ) *>
       migrate(
         MongoCollections.AnalyticsErasureRequests,
-        Vector("transactionalIds" -> "Operational"),
+        Vector("transactionalIds" -> ProducerRegistrationValues.Operational),
         row => {
           val common = List(Updates.set(MongoFields.ProducerRegistry, true))
           if (row.getString(MongoFields.State) == "Complete") common
@@ -190,7 +212,7 @@ private[mongo] object MongoProducerRegistrationMigrations {
       // Existing empty cleanup arrays are bounded; populated snapshots are first copied then reset for fresh proof.
       migrate(
         MongoCollections.InterviewSubjectCleanup,
-        Vector(MongoFields.InterviewTransactionalIds -> "Interview"),
+        Vector(MongoFields.InterviewTransactionalIds -> ProducerRegistrationValues.Interview),
         _ =>
           List(
             Updates.set(MongoFields.ProducerRegistry, true),

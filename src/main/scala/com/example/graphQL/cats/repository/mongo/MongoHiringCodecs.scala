@@ -315,7 +315,8 @@ private[mongo] object MongoHiringCodecs {
     MongoFields.UpdatedAt,
     MongoFields.ClosedAt,
     MongoFields.Embedding,
-    MongoFields.EmbeddingMeta
+    MongoFields.EmbeddingMeta,
+    MongoFields.AdmissionFence
   )
   private val ApplicationFields = Set(
     MongoFields.Id,
@@ -566,6 +567,7 @@ private[mongo] object MongoHiringCodecs {
             None
           )
       },
+      value.createdAt.toDate,
       value.createdAt.toDate,
       value.accountStatus.toString,
       value.deletedAt.map(Date.from),

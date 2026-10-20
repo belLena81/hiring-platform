@@ -179,8 +179,7 @@ final class MongoUserRepository(
             ),
             MongoUpdate.combine(
               MongoUpdate.set(MongoFields.Embedding, encoded.get(MongoFields.Embedding)),
-              MongoUpdate.set(MongoFields.EmbeddingMeta, encoded.get(MongoFields.EmbeddingMeta)),
-              MongoUpdate.inc(MongoFields.Version, 1L)
+              MongoUpdate.set(MongoFields.EmbeddingMeta, encoded.get(MongoFields.EmbeddingMeta))
             )
           )
       )

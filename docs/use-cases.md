@@ -426,7 +426,8 @@ One Mongo transaction, shared with the mutation receipt context (`ApplicationSer
 ```text
 outbox_subject_fences  upsert, $inc fencingVersion (actor fence; also checks an active
                        Candidate and an active recruiter of the job; MongoApplicationWriteFence)
-jobs                   guard: _id matches and status is Open; $set updatedAt, $inc version
+jobs                   guard: _id matches and status is Open; $inc admissionFence
+                       (version and updatedAt are content-only and not written)
                        (the observed revision is not matched)
 applications           INSERT (candidate/job unique index)
 application_events     INSERT (initial CREATED event)

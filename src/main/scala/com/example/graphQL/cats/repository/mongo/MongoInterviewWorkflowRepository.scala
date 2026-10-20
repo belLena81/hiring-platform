@@ -21,7 +21,6 @@ import com.example.graphQL.cats.service.events.OperationalEvents
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.RepositoryError
 import mongo4cats.client.ClientSession
-import org.bson.Document
 
 import java.time.Instant
 import java.util.UUID
@@ -150,17 +149,7 @@ final class MongoInterviewWorkflowRepository(
                 )
                 (updated, change) = transition
                 _ <- touchJobOwner(session, updated.jobId.value.toString, workflow.recruiterId)
-                _ <- participantsOf(workflow).distinct.traverse_(id =>
-                  guardWrite(
-                    users,
-                    session,
-                    MongoFilter.and(
-                      MongoFilter.eq(MongoFields.Id, id.value.toString),
-                      MongoFilter.eq(MongoFields.AccountStatus, "Active")
-                    ),
-                    MongoUpdate.inc(MongoFields.Version, 1L)
-                  )
-                )
+                _ <- fenceParticipants(session, workflow)
                 _ <- writeApplicationStatus(session, workflow.applicationId, change.previousStatus, updated)
                 eventId = StableIds.uuid(s"${workflow.id.value}:status")
                 statusEvent = ApplicationEvent(
@@ -185,11 +174,7 @@ final class MongoInterviewWorkflowRepository(
                 _ <- insert(
                   session,
                   inbox,
-                  new Document(MongoFields.Id, receiptId)
-                    .append(WorkflowIdField, workflow.id.value.toString)
-                    .append("candidateId", workflow.candidateId.value.toString)
-                    .append("recruiterId", workflow.recruiterId.value.toString)
-                    .append(MongoFields.OccurredAt, now.toDate)
+                  hiringReceiptDocument(receiptId, workflow.id, workflow.candidateId, workflow.recruiterId, now)
                 )
                 next <- MongoF.fromEither(
                   InterviewWorkflow
@@ -434,8 +419,12 @@ final class MongoInterviewWorkflowRepository(
                       _ <- insert(
                         session,
                         inbox,
-                        inboxDocument(inboxId, workflow.id, inboxMessageId, workflow.revision, occurredAt)
-                          .append("auditActorId", cause.auditActor.map(_.value.toString).orNull)
+                        cause.auditActor.fold(
+                          inboxDocument(inboxId, workflow.id, inboxMessageId, workflow.revision, occurredAt)
+                        )(actor =>
+                          inboxDocument(inboxId, workflow.id, inboxMessageId, workflow.revision, occurredAt)
+                            .append("auditActorId", actor.value.toString)
+                        )
                       )
                       _ <-
                         if (cause.resetsAttempts)

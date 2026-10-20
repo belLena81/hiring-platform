@@ -66,7 +66,6 @@ private[mongo] object MongoIndexNames {
   val SearchSessionsExpiry = "search_sessions_expiry"
   val SearchSessionWorkClaim = "search_session_work_claim"
   val SearchSessionWorkRetention = "search_session_work_retention"
-  val ConsumerReceiptsId = "consumer_receipts_group_event"
   val ConsumerReceiptsExpiry = "consumer_receipts_expiry"
   val MutationReceiptsKey = "mutation_receipts_operation_scope_key"
   val MutationReceiptsExpiry = "mutation_receipts_expiry"
@@ -91,6 +90,7 @@ private[mongo] object MongoIndexNames {
   val InterviewWorkflowCommandDue = "interview_workflow_commands_due"
   val InterviewWorkflowCommandLease = "interview_workflow_commands_lease"
   val InterviewWorkflowInboxIdentity = "interview_workflow_inbox_identity_unique"
+  val InterviewWorkflowInboxHiringSubjects = "interview_workflow_inbox_hiring_subject_ids"
   val InterviewCalendarParticipants = "interview_calendar_participants_active"
   val InterviewCalendarRelease = "interview_calendar_release_unique"
   val InterviewCalendarReservationIdentity = "interview_calendar_reservation_identity_unique"
@@ -171,6 +171,7 @@ private[mongo] object MongoFields {
   val Results = "results"
   val ResultId = "resultId"
   val Score = "score"
+  val Rank = "rank"
   val ExpiresAt = "expiresAt"
   val Session = "session"
   val Event = "event"
@@ -202,6 +203,7 @@ private[mongo] object MongoFields {
   val ReceiptId = "receiptId"
   val RequestedAt = "requestedAt"
   val FencingVersion = "fencingVersion"
+  val AdmissionFence = "admissionFence"
   val NextRevision = "nextRevision"
   val EventId = "eventId"
   val Partition = "partition"
@@ -246,4 +248,15 @@ private[mongo] object MongoFields {
   val ProducerRegistry = "producerRegistry"
   val InterviewTransactionalIds = "interviewTransactionalIds"
   val RetrievalScore = "retrievalScore"
+  val SubjectId = "subjectId"
+  val TransactionalId = "transactionalId"
+  val FencedAt = "fencedAt"
+}
+
+/** Stored `kind` and `state` values of a producer registration row, shared with the analytics build. */
+private[mongo] object ProducerRegistrationValues {
+  val Operational = "Operational"
+  val Interview = "Interview"
+  val Active = "Active"
+  val Fenced = "Fenced"
 }

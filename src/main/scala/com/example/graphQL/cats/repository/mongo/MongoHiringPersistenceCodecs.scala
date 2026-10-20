@@ -50,6 +50,7 @@ private[mongo] object MongoHiringPersistenceCodecs {
       role: String,
       profile: Option[StoredProfile],
       createdAt: Date,
+      updatedAt: Date,
       accountStatus: String,
       deletedAt: Option[Date],
       adminSingletonKey: Option[String],
@@ -72,7 +73,8 @@ private[mongo] object MongoHiringPersistenceCodecs {
       updatedAt: Date,
       closedAt: Option[Date],
       embedding: Option[List[Double]],
-      embeddingMeta: Option[StoredEmbeddingMeta]
+      embeddingMeta: Option[StoredEmbeddingMeta],
+      admissionFence: Option[Long] = None
   )
 
   final case class StoredApplication(
@@ -167,9 +169,9 @@ private[mongo] object MongoHiringPersistenceCodecs {
     ScalaMacros.createCodecProviderIgnoreNone[StoredApplication](),
     ScalaMacros.createCodecProviderIgnoreNone[StoredApplicationEvent](),
     ScalaMacros.createCodecProviderIgnoreNone[StoredOperationalEvent](),
-    ScalaMacros.createCodecProvider[StoredOutboxRecord](),
+    ScalaMacros.createCodecProviderIgnoreNone[StoredOutboxRecord](),
     ScalaMacros.createCodecProviderIgnoreNone[StoredSearchSessionResult](),
-    ScalaMacros.createCodecProvider[StoredSearchSession](),
+    ScalaMacros.createCodecProviderIgnoreNone[StoredSearchSession](),
     ScalaMacros.createCodecProviderIgnoreNone[StoredAnalyticsReportControl]()
   )
 
@@ -184,8 +186,8 @@ private[mongo] object MongoHiringPersistenceCodecs {
   private val applicationCodec = ScalaMacros.createCodecIgnoreNone[StoredApplication](registry)
   private val applicationEventCodec = ScalaMacros.createCodecIgnoreNone[StoredApplicationEvent](registry)
   private val operationalEventCodec = ScalaMacros.createCodecIgnoreNone[StoredOperationalEvent](registry)
-  private val outboxCodec = ScalaMacros.createCodec[StoredOutboxRecord](registry)
-  private val searchSessionCodec = ScalaMacros.createCodec[StoredSearchSession](registry)
+  private val outboxCodec = ScalaMacros.createCodecIgnoreNone[StoredOutboxRecord](registry)
+  private val searchSessionCodec = ScalaMacros.createCodecIgnoreNone[StoredSearchSession](registry)
   private val analyticsReportControlCodec = ScalaMacros.createCodecIgnoreNone[StoredAnalyticsReportControl](registry)
 
   def location(value: StoredLocation): Document = encode(value, locationCodec)

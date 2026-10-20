@@ -31,12 +31,15 @@ private[mongo] object MongoProducerRegistrations {
         MongoSessionOperations.updateOne(
           Mongo4catsCollections.documents(database, Collection),
           session,
-          MongoFilter.and(MongoFilter.eq("_id", s"$subject:$transactionalId"), MongoFilter.eq("state", "Active")),
+          MongoFilter.and(
+            MongoFilter.eq(MongoFields.Id, s"$subject:$transactionalId"),
+            MongoFilter.eq(MongoFields.State, ProducerRegistrationValues.Active)
+          ),
           MongoUpdate.combine(
-            MongoUpdate.setOnInsert("subjectId", subject),
-            MongoUpdate.setOnInsert("transactionalId", transactionalId),
-            MongoUpdate.setOnInsert("kind", kind),
-            MongoUpdate.setOnInsert("state", "Active"),
+            MongoUpdate.setOnInsert(MongoFields.SubjectId, subject),
+            MongoUpdate.setOnInsert(MongoFields.TransactionalId, transactionalId),
+            MongoUpdate.setOnInsert(MongoFields.Kind, kind),
+            MongoUpdate.setOnInsert(MongoFields.State, ProducerRegistrationValues.Active),
             MongoUpdate.setOnInsert("registeredAt", now.toDate)
           ),
           new UpdateOptions().upsert(true)
@@ -53,17 +56,17 @@ private[mongo] object MongoProducerRegistrations {
             _.find(
               MongoFilter
                 .and(
-                  MongoFilter.eq("subjectId", subject),
-                  MongoFilter.eq("kind", kind),
-                  MongoFilter.eq("state", "Active")
+                  MongoFilter.eq(MongoFields.SubjectId, subject),
+                  MongoFilter.eq(MongoFields.Kind, kind),
+                  MongoFilter.eq(MongoFields.State, ProducerRegistrationValues.Active)
                 )
                 .bson
-            ).sort(Sorts.ascending("_id")).limit(BatchSize).all
+            ).sort(Sorts.ascending(MongoFields.Id)).limit(BatchSize).all
           )
       )
       .subflatMap(
         _.toVector.traverse(row =>
-          Option(row.get("transactionalId"))
+          Option(row.get(MongoFields.TransactionalId))
             .collect { case id: String => id }
             .toRight(RepositoryError.InvalidStoredData)
         )
@@ -85,13 +88,13 @@ private[mongo] object MongoProducerRegistrations {
             Mongo4catsCollections.documents(database, Collection),
             None,
             MongoFilter.and(
-              MongoFilter.eq("subjectId", subject),
-              MongoFilter.eq("kind", kind),
-              MongoFilter.in("transactionalId", ids.toList)
+              MongoFilter.eq(MongoFields.SubjectId, subject),
+              MongoFilter.eq(MongoFields.Kind, kind),
+              MongoFilter.in(MongoFields.TransactionalId, ids.toList)
             ),
             MongoUpdate.combine(
-              MongoUpdate.set("state", "Fenced"),
-              MongoUpdate.set("fencedAt", now.toDate),
+              MongoUpdate.set(MongoFields.State, ProducerRegistrationValues.Fenced),
+              MongoUpdate.set(MongoFields.FencedAt, now.toDate),
               MongoUpdate.set("expiresAt", Date.from(now.plusSeconds(RetentionSeconds)))
             )
           )

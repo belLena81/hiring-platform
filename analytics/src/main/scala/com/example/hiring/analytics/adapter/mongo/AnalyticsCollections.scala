@@ -60,9 +60,23 @@ private[analytics] object AnalyticsCollections {
     val HiddenAt = "hiddenAt"
     val CompletedAt = "completedAt"
     val AsOf = "asOf"
+    val SubjectId = "subjectId"
+    val Kind = "kind"
+    val TransactionalId = "transactionalId"
+    val FencedAt = "fencedAt"
+    val ProducerRegistry = "producerRegistry"
+  }
+
+  /** Persisted values of the main-owned producer registration `kind` and `state` fields. */
+  object ProducerRegistration {
+    val OperationalKind = "Operational"
+    val InterviewKind = "Interview"
+    val ActiveState = "Active"
+    val FencedState = "Fenced"
   }
 
   object MigrationIds {
+    val AttributableProducerRegistrations = "012_attributable_producer_registrations"
     val OutboxSubjectReferences = "003_event_outbox_subject_references"
   }
 }

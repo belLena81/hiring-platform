@@ -211,15 +211,12 @@ final class MongoApplicationRepository private (
     val guardFilter = MongoFilter.and(
       MongoFilter.eq(MongoFields.Id, observedJob.id.value.toString),
       // The observed revision is deliberately not matched: the application copies only the job id, and the status
-      // guard plus the version bump already serialize against close. Matching it would turn every concurrent
-      // submission into a typed Conflict instead of a transaction retry.
-      MongoFilter.lt(MongoFields.Version, Long.MaxValue),
+      // guard plus the admission fence bump already serialize against close. Matching it would turn every concurrent
+      // submission into a typed Conflict instead of a transaction retry. The content revision and `updatedAt` are
+      // not touched, so a submission never invalidates a recruiter's edit.
       MongoFilter.eq(MongoFields.Status, JobStatus.Open.toString)
     )
-    val update = MongoUpdate.combine(
-      MongoUpdate.set(MongoFields.UpdatedAt, application.createdAt.toDate),
-      MongoUpdate.inc(MongoFields.Version, 1L)
-    )
+    val update = MongoUpdate.inc(MongoFields.AdmissionFence, 1L)
     val guard = MongoSessionOperations.updateOne(jobs, session, guardFilter, update)
     RepositoryF.lift(guard).flatMap { result =>
       MongoF.fromEither(MongoRepositorySupport.matchedOne(result)) *>

@@ -68,6 +68,7 @@ final class InterviewRequestReceiptIndexMigrationIntegrationSpec extends MongoIn
         .append("documentType", "requestReceipt")
         .append("requestWorkflowId", workflow)
         .append("requestFingerprint", "f")
+        .append(MongoFields.CreatedAt, java.util.Date.from(java.time.Instant.parse("2026-10-07T12:00:00Z")))
       for {
         _ <- initialize(fixture.database)
         _ <- MongoRepositoryTestSupport.insertOne(fixture.database, MongoCollections.InterviewWorkflows, receipt)

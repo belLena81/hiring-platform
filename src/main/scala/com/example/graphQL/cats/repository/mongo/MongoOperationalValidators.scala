@@ -1,0 +1,446 @@
+package com.example.graphQL.cats.repository.mongo
+
+import org.bson.Document
+
+import scala.jdk.CollectionConverters.*
+
+/** Strict `$jsonSchema` validators of the operational collections that migration `025` installs, one definition per
+  * collection. Every rule comes from the stored shape the collection's writers produce:
+  *   - closed shapes (`additionalProperties: false`): applications, application events and the receipts, which have one
+  *     writer and no evolving fields;
+  *   - open shapes (required fields and types only): embedding work, search sessions and work, and the interview
+  *     collections, whose lifecycle fields grow with the workflow;
+  *   - polymorphic interview collections carry `documentType` with one `oneOf` branch per stored type.
+  *
+  * Enumerations are stored by Scala name. The closed domain enumerations are written here as literals so a new
+  * enumeration case is a deliberate validator change; `MongoOperationalValidatorsSpec` compares them with the domain.
+  */
+private[mongo] object MongoOperationalValidators {
+  import MongoValidatorSchemas.*
+
+  val ApplicationStatuses: List[String] = List("Created", "Accepted", "Declined", "Interview", "Hired", "Rejected")
+  val UserRoles: List[String] = List("Candidate", "Recruiter", "Admin")
+  val EmbeddingWorkKinds: List[String] = List("Job", "CandidateProfile")
+  val EmbeddingWorkStates: List[String] = List("Ready", "Retry", "Processing", "Failed")
+  val EmbeddingWorkFailures: List[String] =
+    List("RetryExhausted", "DocumentTooLarge", "InvalidWorkKey", "InvalidResponse")
+  val SearchSessionWorkStates: List[String] = List("Ready", "Processing", "Retry", "Failed")
+  val SearchSessionWorkFailures: List[String] = List("RetryExhausted", "InvalidWork")
+  val MutationReceiptStates: List[String] = List("InProgress", "Completed")
+
+  private def text: Document = new Document("bsonType", "string")
+  private def array(items: Document): Document = new Document("bsonType", "array").append("items", items)
+  private def int: Document = new Document("bsonType", "int")
+  private def document: Document = new Document("bsonType", "object")
+  private def binary: Document = new Document("bsonType", "binData")
+  private def double: Document = new Document("bsonType", "double")
+
+  private def properties(entries: (String, Document)*): Document =
+    entries.foldLeft(new Document()) { case (all, (name, schema)) => all.append(name, schema) }
+
+  private def validator(required: List[String], entries: Document, closed: Boolean): Document = {
+    val schema = objectSchema(required, entries)
+    new Document("$jsonSchema", if (closed) schema.append("additionalProperties", false) else schema)
+  }
+
+  /** One `oneOf` branch per stored `documentType`; a document with another or no type matches none. */
+  private def polymorphic(branches: List[(String, List[String], Document)]): Document = {
+    val tagged = branches.map { case (tag, required, entries) =>
+      objectSchema(
+        MongoFields.DocumentType :: required,
+        new Document(entries).append(MongoFields.DocumentType, enumSchema(tag))
+      )
+    }
+    new Document(
+      "$jsonSchema",
+      new Document("bsonType", "object")
+        .append("required", List(MongoFields.DocumentType).asJava)
+        .append("oneOf", tagged.asJava)
+    )
+  }
+
+  private def leaseFields: List[(String, Document)] = List(
+    MongoFields.LeaseOwner -> text,
+    MongoFields.LeaseToken -> text,
+    MongoFields.LeaseUntil -> date
+  )
+
+  def applicationsValidator: Document = validator(
+    List(
+      MongoFields.Id,
+      MongoFields.CandidateId,
+      MongoFields.JobId,
+      MongoFields.Status,
+      MongoFields.CreatedAt,
+      MongoFields.UpdatedAt
+    ),
+    properties(
+      MongoFields.Id -> stringUuid,
+      MongoFields.CandidateId -> stringUuid,
+      MongoFields.JobId -> stringUuid,
+      MongoFields.Status -> enumSchema(ApplicationStatuses*),
+      MongoFields.CreatedAt -> date,
+      MongoFields.UpdatedAt -> date
+    ),
+    closed = true
+  )
+
+  def applicationEventsValidator: Document = validator(
+    List(
+      MongoFields.Id,
+      MongoFields.ApplicationId,
+      MongoFields.NewStatus,
+      MongoFields.ActorId,
+      MongoFields.OccurredAt
+    ),
+    properties(
+      MongoFields.Id -> stringUuid,
+      MongoFields.ApplicationId -> stringUuid,
+      MongoFields.PreviousStatus -> enumSchema(ApplicationStatuses*),
+      MongoFields.NewStatus -> enumSchema(ApplicationStatuses*),
+      MongoFields.ActorId -> stringUuid,
+      MongoFields.ActorRole -> enumSchema(UserRoles*),
+      MongoFields.OccurredAt -> date,
+      MongoFields.Feedback -> text,
+      MongoFields.Reason -> text
+    ),
+    closed = true
+  )
+
+  def embeddingWorkValidator: Document = validator(
+    List(
+      MongoFields.Id,
+      MongoFields.Kind,
+      MongoFields.WorkEntityId,
+      MongoFields.State,
+      MongoFields.Generation,
+      MongoFields.Attempts,
+      MongoFields.AvailableAt,
+      MongoFields.CreatedAt,
+      MongoFields.UpdatedAt
+    ),
+    properties(
+      (List(
+        MongoFields.Id -> shortText,
+        MongoFields.Kind -> enumSchema(EmbeddingWorkKinds*),
+        MongoFields.WorkEntityId -> shortText,
+        MongoFields.State -> enumSchema(EmbeddingWorkStates*),
+        MongoFields.Generation -> nonNegativeLong,
+        MongoFields.Attempts -> nonNegativeInt,
+        MongoFields.AvailableAt -> date,
+        MongoFields.CreatedAt -> date,
+        MongoFields.UpdatedAt -> date,
+        MongoFields.Failure -> enumSchema(EmbeddingWorkFailures*),
+        MongoFields.FinishedAt -> date
+      ) ++ leaseFields)*
+    ),
+    closed = false
+  )
+
+  private def sessionProperties: List[(String, Document)] = List(
+    MongoFields.Id -> stringUuid,
+    MongoFields.ActorId -> stringUuid,
+    MongoFields.SearchKind -> text,
+    MongoFields.Query -> text,
+    MongoFields.Filter -> text,
+    MongoFields.Model -> text,
+    MongoFields.Results -> array(
+      objectSchema(
+        List(MongoFields.ResultId, MongoFields.Rank, MongoFields.Score),
+        properties(MongoFields.ResultId -> text, MongoFields.Rank -> int, MongoFields.Score -> double)
+      )
+    ),
+    MongoFields.OccurredAt -> date,
+    MongoFields.ExpiresAt -> date
+  )
+
+  private val SessionRequired: List[String] = List(
+    MongoFields.Id,
+    MongoFields.ActorId,
+    MongoFields.SearchKind,
+    MongoFields.Filter,
+    MongoFields.Results,
+    MongoFields.OccurredAt,
+    MongoFields.ExpiresAt
+  )
+
+  def searchSessionsValidator: Document = validator(SessionRequired, properties(sessionProperties*), closed = false)
+
+  def searchSessionWorkValidator: Document = {
+    val queryFreeSession = objectSchema(SessionRequired, properties(sessionProperties*))
+      .append("not", new Document("required", List(MongoFields.Query).asJava))
+    val event = objectSchema(
+      List(MongoFields.Id, MongoFields.Payload, MongoFields.EnvelopeBytes),
+      properties(
+        MongoFields.Id -> stringUuid,
+        MongoFields.Payload -> text,
+        MongoFields.EnvelopeBytes -> binary
+      )
+    )
+    validator(
+      List(
+        MongoFields.Id,
+        MongoFields.ActorId,
+        MongoFields.Session,
+        MongoFields.Event,
+        MongoFields.State,
+        MongoFields.Attempts,
+        MongoFields.AvailableAt,
+        MongoFields.CreatedAt,
+        MongoFields.UpdatedAt
+      ),
+      properties(
+        (List(
+          MongoFields.Id -> stringUuid,
+          MongoFields.ActorId -> stringUuid,
+          MongoFields.Session -> queryFreeSession,
+          MongoFields.Event -> event,
+          MongoFields.State -> enumSchema(SearchSessionWorkStates*),
+          MongoFields.Attempts -> nonNegativeInt,
+          MongoFields.AvailableAt -> date,
+          MongoFields.CreatedAt -> date,
+          MongoFields.UpdatedAt -> date,
+          MongoFields.Failure -> enumSchema(SearchSessionWorkFailures*),
+          MongoFields.FinishedAt -> date,
+          MongoFields.RetentionExpiresAt -> date
+        ) ++ leaseFields)*
+      ),
+      closed = false
+    )
+  }
+
+  def mutationReceiptsValidator: Document = validator(
+    List(
+      MongoFields.Id,
+      MongoFields.Operation,
+      MongoFields.ActorScope,
+      MongoFields.IdempotencyKey,
+      MongoFields.Fingerprint,
+      MongoFields.State,
+      MongoFields.CreatedAt,
+      MongoFields.ExpiresAt
+    ),
+    properties(
+      MongoFields.Id -> stringUuid,
+      MongoFields.Operation -> text,
+      MongoFields.ActorScope -> text,
+      MongoFields.IdempotencyKey -> stringUuid,
+      MongoFields.Fingerprint -> text,
+      MongoFields.State -> enumSchema(MutationReceiptStates*),
+      MongoFields.CreatedAt -> date,
+      MongoFields.CompletedAt -> date,
+      MongoFields.ExpiresAt -> date,
+      MongoFields.Entity -> document.append(
+        "properties",
+        properties(MongoFields.Type -> text, MongoFields.EntityId -> text)
+      )
+    ),
+    closed = true
+  )
+
+  def consumerReceiptsValidator: Document = {
+    val required = List(
+      MongoFields.Id,
+      MongoFields.ConsumerGroup,
+      MongoFields.EventId,
+      MongoFields.AggregateType,
+      MongoFields.AggregateId,
+      MongoFields.CreatedAt,
+      MongoFields.ExpiresAt
+    )
+    validator(
+      required,
+      properties(
+        MongoFields.Id -> text,
+        MongoFields.ConsumerGroup -> text,
+        MongoFields.EventId -> stringUuid,
+        MongoFields.AggregateType -> text,
+        MongoFields.AggregateId -> text,
+        MongoFields.CreatedAt -> date,
+        MongoFields.ExpiresAt -> date
+      ),
+      closed = true
+    )
+  }
+
+  def interviewWorkflowsValidator: Document = polymorphic(
+    List(
+      (
+        MongoInterviewFields.WorkflowType,
+        List(
+          MongoFields.Id,
+          MongoFields.ApplicationId,
+          "initiatedBy",
+          MongoFields.CandidateId,
+          MongoFields.RecruiterId,
+          MongoInterviewFields.StartField,
+          MongoInterviewFields.EndField,
+          "preCommitDeadline",
+          MongoInterviewFields.IdempotencyKeyField,
+          MongoInterviewFields.RevisionField,
+          "phase",
+          "notified"
+        ),
+        properties(
+          MongoFields.Id -> stringUuid,
+          MongoFields.ApplicationId -> stringUuid,
+          "initiatedBy" -> stringUuid,
+          "initiatedByRole" -> text,
+          MongoFields.CandidateId -> stringUuid,
+          MongoFields.RecruiterId -> stringUuid,
+          MongoInterviewFields.StartField -> date,
+          MongoInterviewFields.EndField -> date,
+          "preCommitDeadline" -> date,
+          MongoInterviewFields.IdempotencyKeyField -> text,
+          MongoInterviewFields.RevisionField -> nonNegativeLong,
+          "phase" -> text,
+          "notified" -> array(text),
+          MongoInterviewWorkflowLifecycleCodec.GenerationField -> nonNegativeInt,
+          MongoInterviewWorkflowLifecycleCodec.PendingStartField -> date,
+          MongoInterviewWorkflowLifecycleCodec.PendingEndField -> date,
+          MongoInterviewWorkflowLifecycleCodec.CancelledAtField -> date,
+          MongoInterviewWorkflowLifecycleCodec.ProposalField -> document,
+          MongoInterviewWorkflowLifecycleCodec.RescheduleRequestedAtField -> date,
+          MongoInterviewWorkflowLifecycleCodec.RepairOriginField -> text,
+          MongoInterviewWorkflowLifecycleCodec.SkippedGenerationsField -> nonNegativeInt,
+          "attemptEpochRevision" -> nonNegativeLong,
+          MongoFields.RetentionExpiresAt -> date
+        )
+      ),
+      (
+        MongoInterviewFields.RequestReceiptType,
+        List(
+          MongoFields.Id,
+          MongoInterviewFields.RequestWorkflowField,
+          MongoInterviewFields.RequestFingerprintField,
+          MongoFields.CreatedAt
+        ),
+        properties(
+          MongoFields.Id -> text,
+          MongoInterviewFields.RequestWorkflowField -> stringUuid,
+          MongoInterviewFields.RequestFingerprintField -> text,
+          MongoFields.CreatedAt -> date,
+          MongoFields.RetentionExpiresAt -> date
+        )
+      )
+    )
+  )
+
+  def interviewWorkflowInboxValidator: Document = polymorphic(
+    List(
+      (
+        MongoInterviewFields.InboxReceiptType,
+        List(
+          MongoFields.Id,
+          MongoInterviewFields.WorkflowIdField,
+          MongoInterviewFields.MessageIdField,
+          MongoInterviewFields.RevisionField,
+          MongoFields.OccurredAt
+        ),
+        properties(
+          MongoFields.Id -> text,
+          MongoInterviewFields.WorkflowIdField -> stringUuid,
+          MongoInterviewFields.MessageIdField -> text,
+          MongoInterviewFields.RevisionField -> nonNegativeLong,
+          MongoFields.OccurredAt -> date,
+          "repaired" -> nonNegativeInt,
+          "auditActorId" -> stringUuid,
+          MongoFields.RetentionExpiresAt -> date
+        )
+      ),
+      (
+        MongoInterviewFields.HiringReceiptType,
+        List(
+          MongoFields.Id,
+          MongoInterviewFields.WorkflowIdField,
+          MongoFields.SubjectIds,
+          MongoFields.OccurredAt
+        ),
+        properties(
+          MongoFields.Id -> text,
+          MongoInterviewFields.WorkflowIdField -> stringUuid,
+          MongoFields.SubjectIds -> array(stringUuid).append("minItems", 1).append("maxItems", 2),
+          MongoFields.OccurredAt -> date,
+          MongoFields.RetentionExpiresAt -> date
+        )
+      ),
+      (
+        MongoInterviewFields.QuarantineType,
+        List(MongoFields.Id, "failureCode", MongoFields.OccurredAt, MongoFields.RetentionExpiresAt),
+        properties(
+          MongoFields.Id -> text,
+          "failureCode" -> text,
+          MongoFields.OccurredAt -> date,
+          MongoFields.RetentionExpiresAt -> date
+        )
+      )
+    )
+  )
+
+  def interviewCalendarReservationsValidator: Document = validator(
+    List(
+      MongoFields.Id,
+      MongoInterviewFields.WorkflowIdField,
+      "reserveKey",
+      "releaseKey",
+      MongoFields.CandidateId,
+      MongoFields.RecruiterId,
+      "participants",
+      MongoInterviewFields.StartField,
+      MongoInterviewFields.EndField,
+      "reservedAt"
+    ),
+    properties(
+      MongoFields.Id -> text,
+      MongoInterviewFields.WorkflowIdField -> stringUuid,
+      "reserveKey" -> text,
+      "releaseKey" -> text,
+      MongoFields.CandidateId -> stringUuid,
+      MongoFields.RecruiterId -> stringUuid,
+      "participants" -> array(stringUuid).append("minItems", 1).append("maxItems", 2),
+      MongoInterviewFields.StartField -> date,
+      MongoInterviewFields.EndField -> date,
+      "reservedAt" -> date,
+      MongoInterviewFields.ReleasedAtField -> date,
+      MongoFields.RetentionExpiresAt -> date
+    ),
+    closed = false
+  )
+
+  def interviewNotificationReceiptsValidator: Document = validator(
+    List(
+      MongoFields.Id,
+      MongoInterviewFields.WorkflowIdField,
+      "recipientId",
+      "participant",
+      MongoFields.Kind,
+      "deliveredAt"
+    ),
+    properties(
+      MongoFields.Id -> text,
+      MongoInterviewFields.WorkflowIdField -> stringUuid,
+      "recipientId" -> stringUuid,
+      "participant" -> enumSchema("Candidate", "Recruiter"),
+      MongoFields.Kind -> text,
+      "deliveredAt" -> date,
+      MongoFields.RetentionExpiresAt -> date
+    ),
+    closed = true
+  )
+
+  /** Installed by migration 025 in this order; the users definition is `MongoHiringValidators.userValidator`. */
+  def all: List[(String, Document)] = List(
+    MongoCollections.Users -> MongoHiringValidators.userValidator,
+    MongoCollections.Applications -> applicationsValidator,
+    MongoCollections.ApplicationEvents -> applicationEventsValidator,
+    MongoCollections.EmbeddingWork -> embeddingWorkValidator,
+    MongoCollections.SearchSessions -> searchSessionsValidator,
+    MongoCollections.SearchSessionWork -> searchSessionWorkValidator,
+    MongoCollections.MutationReceipts -> mutationReceiptsValidator,
+    MongoCollections.ConsumerReceipts -> consumerReceiptsValidator,
+    MongoCollections.InterviewWorkflows -> interviewWorkflowsValidator,
+    MongoCollections.InterviewWorkflowInbox -> interviewWorkflowInboxValidator,
+    MongoCollections.InterviewCalendarReservations -> interviewCalendarReservationsValidator,
+    MongoCollections.InterviewNotificationReceipts -> interviewNotificationReceiptsValidator
+  )
+}

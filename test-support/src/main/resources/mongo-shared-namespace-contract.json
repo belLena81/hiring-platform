@@ -1,0 +1,149 @@
+{
+  "description": "Shared contract for MongoDB names used by both the application build and the separate analytics build. Asserted by MongoSharedNamespaceContractSpec (root) and AnalyticsSharedNamespaceContractSpec (analytics) so neither build can rename a shared name alone. Index ownership is recorded as it is today and is not a decision to move it. Index entries owned by analytics are documentation-only until those names become constants in the analytics build.",
+  "collections": {
+    "analyticsErasureRequests": "analytics_erasure_requests",
+    "analyticsErasureCompletions": "analytics_erasure_completions",
+    "analyticsErasureDeltaFiles": "analytics_erasure_delta_files",
+    "analyticsWorkerHeartbeats": "analytics_worker_heartbeats",
+    "analyticsReportSnapshots": "analytics_report_snapshots",
+    "analyticsReportControl": "analytics_report_control",
+    "analyticsReportRuns": "analytics_report_runs",
+    "eventOutbox": "event_outbox",
+    "hiringMigrationLedger": "hiring_migration_ledger",
+    "outboxSubjectFences": "outbox_subject_fences",
+    "users": "users",
+    "producerRegistrations": "producer_registrations"
+  },
+  "fields": {
+    "Id": "_id",
+    "State": "state",
+    "SubjectIds": "subjectIds",
+    "SubjectRefsVersion": "subjectRefsVersion",
+    "LeaseToken": "leaseToken",
+    "LeaseUntil": "leaseUntil",
+    "UpdatedAt": "updatedAt",
+    "CreatedAt": "createdAt",
+    "ExpiresAt": "expiresAt",
+    "ReceiptId": "receiptId",
+    "AccountStatus": "accountStatus",
+    "RequestedAt": "requestedAt",
+    "FencingVersion": "fencingVersion",
+    "Deleted": "deleted",
+    "Topic": "topic",
+    "Generation": "generation",
+    "Revision": "revision",
+    "NextRevision": "nextRevision",
+    "LastPublishedRevision": "lastPublishedRevision",
+    "LastRunId": "lastRunId",
+    "RunId": "runId",
+    "HiddenAt": "hiddenAt",
+    "CompletedAt": "completedAt",
+    "AsOf": "asOf",
+    "SubjectId": "subjectId",
+    "Kind": "kind",
+    "TransactionalId": "transactionalId",
+    "FencedAt": "fencedAt",
+    "ProducerRegistry": "producerRegistry"
+  },
+  "migrationIds": {
+    "eventOutboxSubjectReferences": "003_event_outbox_subject_references",
+    "attributableProducerRegistrations": "012_attributable_producer_registrations"
+  },
+  "indexes": [
+    {
+      "collection": "event_outbox",
+      "name": "event_outbox_claim",
+      "owner": "main"
+    },
+    {
+      "collection": "event_outbox",
+      "name": "event_outbox_published_retention",
+      "owner": "main"
+    },
+    {
+      "collection": "event_outbox",
+      "name": "event_outbox_subject_ids",
+      "owner": "main"
+    },
+    {
+      "collection": "outbox_subject_fences",
+      "name": "outbox_subject_fences_lease_until",
+      "owner": "main"
+    },
+    {
+      "collection": "users",
+      "name": "users_emailCanonical_unique",
+      "owner": "main"
+    },
+    {
+      "collection": "analytics_erasure_requests",
+      "name": "analytics_erasure_requests_state_requested",
+      "owner": "main"
+    },
+    {
+      "collection": "analytics_erasure_requests",
+      "name": "analytics_erasure_request_receipt_unique",
+      "owner": "main"
+    },
+    {
+      "collection": "analytics_erasure_requests",
+      "name": "analytics_erasure_request_expiry",
+      "owner": "main"
+    },
+    {
+      "collection": "analytics_erasure_completions",
+      "name": "analytics_erasure_completion_receipt_unique",
+      "owner": "main"
+    },
+    {
+      "collection": "analytics_worker_heartbeats",
+      "name": "analytics_worker_heartbeat_expiry",
+      "owner": "main"
+    },
+    {
+      "collection": "analytics_report_snapshots",
+      "name": "analytics_report_snapshots_published_as_of",
+      "owner": "main"
+    },
+    {
+      "collection": "analytics_report_snapshots",
+      "name": "analytics_report_snapshots_expiry",
+      "owner": "main"
+    },
+    {
+      "collection": "analytics_report_runs",
+      "name": "analytics_report_runs_expiry",
+      "owner": "main"
+    },
+    {
+      "collection": "producer_registrations",
+      "name": "producer_registration_subject_state",
+      "owner": "main"
+    },
+    {
+      "collection": "producer_registrations",
+      "name": "producer_registration_generation_state",
+      "owner": "main"
+    },
+    {
+      "collection": "producer_registrations",
+      "name": "producer_registration_fenced_expiry",
+      "owner": "main"
+    },
+    {
+      "collection": "analytics_report_runs",
+      "name": "analytics_report_runs_retention_v1",
+      "owner": "analytics"
+    }
+  ],
+  "values": {
+    "producerRegistrationKinds": {
+      "operational": "Operational",
+      "interview": "Interview"
+    },
+    "producerRegistrationStates": {
+      "active": "Active",
+      "fenced": "Fenced"
+    }
+  }
+}

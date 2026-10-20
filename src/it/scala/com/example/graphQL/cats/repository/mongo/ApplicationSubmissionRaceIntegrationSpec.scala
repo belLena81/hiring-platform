@@ -151,8 +151,10 @@ final class ApplicationSubmissionRaceIntegrationSpec extends MongoIntegrationSui
         assertEquals(applicationRows, accepted.toLong)
         assertEquals(historyRows, accepted.toLong)
         assertEquals(outboxRows, accepted.toLong)
-        // Every accepted submission advanced the job revision exactly once.
-        assertEquals(job.get("version").asInstanceOf[Number].longValue(), accepted.toLong)
+        // Every accepted submission advanced the admission fence exactly once; the content revision is untouched.
+        assertEquals(job.get("admissionFence").asInstanceOf[Number].longValue(), accepted.toLong)
+        assertEquals(job.get("version").asInstanceOf[Number].longValue(), 0L)
+        assertEquals(job.getDate("updatedAt").toInstant, fixtureTime)
       }
     }
   }
@@ -160,10 +162,11 @@ final class ApplicationSubmissionRaceIntegrationSpec extends MongoIntegrationSui
   /*
    * Soundness: a submission commits only if the job document still matches its _id and status Open (the observed
    * version is deliberately not matched, so concurrent submissions retry instead of conflicting), and every committed
-   * submission or closure bumps the version. Hence a closure and a submission that both commit are serialized with the
+   * submission bumps the admission fence and every closure bumps the content revision. Hence a closure and a submission that both commit are serialized with the
    * submission first (the closure's Closed status would fail the submission's guard otherwise), and a submission that
    * observed Closed cannot commit. Observable consequences asserted below:
-   * the final version equals the number of committed writers (a lost guard would lose a bump), the application exists
+   * the final fence equals the number of committed submissions and the version the number of committed closures (a
+   * lost guard would lose a bump), the application exists
    * exactly when the submission was accepted, and a rejected submission is only Conflict or "job must be open".
    */
   test("ARR-03.2 closing a job racing a submission never leaves an application committed after the closure") {
@@ -189,7 +192,12 @@ final class ApplicationSubmissionRaceIntegrationSpec extends MongoIntegrationSui
             assertEquals(applicationRows, if (submitted.isRight) 1L else 0L)
             assertEquals(historyRows, applicationRows)
             assertEquals(job.getString("status"), if (closed.isRight) "Closed" else "Open")
-            assertEquals(job.get("version").asInstanceOf[Number].longValue(), committedWriters)
+            assertEquals(job.get("version").asInstanceOf[Number].longValue(), if (closed.isRight) 1L else 0L)
+            assertEquals(
+              Option(job.get("admissionFence")).fold(0L)(_.asInstanceOf[Number].longValue()),
+              if (submitted.isRight) 1L else 0L
+            )
+            assertEquals(committedWriters, List(submitted.isRight, closed.isRight).count(identity).toLong)
             (submitted.isRight, closed.isRight)
           }
         }

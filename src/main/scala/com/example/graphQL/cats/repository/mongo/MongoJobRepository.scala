@@ -331,14 +331,14 @@ final class MongoJobRepository(
     for {
       nextVersion <- MongoF.fromEither(Versioned.nextVersion(expected.version).toRight(RepositoryError.Conflict))
       result <- RepositoryF.lift(
-        MongoSessionOperations.replaceOne(
+        MongoSessionOperations.updateOne(
           collection,
           session,
           MongoFilter.and(
             MongoFilter.eq(MongoFields.Id, expected.value.id.value.toString),
             MongoFilter.eq(MongoFields.Version, expected.version)
           ),
-          MongoHiringCodecs.job(replacement, nextVersion)
+          MongoJobContentUpdate(replacement)
         )
       )
       _ <- MongoF.fromEither(MongoRepositorySupport.matchedOne(result))
@@ -376,8 +376,7 @@ final class MongoJobRepository(
             ),
             MongoUpdate.combine(
               MongoUpdate.set(MongoFields.Embedding, encoded.get(MongoFields.Embedding)),
-              MongoUpdate.set(MongoFields.EmbeddingMeta, encoded.get(MongoFields.EmbeddingMeta)),
-              MongoUpdate.inc(MongoFields.Version, 1L)
+              MongoUpdate.set(MongoFields.EmbeddingMeta, encoded.get(MongoFields.EmbeddingMeta))
             )
           )
       )

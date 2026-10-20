@@ -34,11 +34,13 @@ final class MongoProducerGenerationMaintenance(
 
   /** Each invocation reads at most 64 registrations; IDs may recur on later pages for another subject. */
   def inventory(after: Option[String]): RepositoryF[IO, ProducerGenerationInventoryPage] = {
-    val filters = MongoFilter.eq("state", "Active") :: after.toList.map(MongoFilter.gt("_id", _))
+    val filters = MongoFilter.eq(MongoFields.State, ProducerRegistrationValues.Active) :: after.toList.map(
+      MongoFilter.gt(MongoFields.Id, _)
+    )
     boundary(
       rows.flatMap(
         _.find(MongoFilter.and(filters*).bson)
-          .sort(Sorts.ascending("_id"))
+          .sort(Sorts.ascending(MongoFields.Id))
           .limit(MongoProducerRegistrations.BatchSize)
           .all
       )
@@ -47,8 +49,8 @@ final class MongoProducerGenerationMaintenance(
         batch.toVector
           .traverse { row =>
             for {
-              cursor <- text(row, "_id")
-              id <- text(row, "transactionalId")
+              cursor <- text(row, MongoFields.Id)
+              id <- text(row, MongoFields.TransactionalId)
               _ <- KafkaProducerGenerationRetirement.canonicalPrefix(id)
             } yield cursor -> id
           }
@@ -69,30 +71,30 @@ final class MongoProducerGenerationMaintenance(
           _.find(
             MongoFilter
               .and(
-                MongoFilter.eq("transactionalId", transactionalId),
-                MongoFilter.eq("state", "Active")
+                MongoFilter.eq(MongoFields.TransactionalId, transactionalId),
+                MongoFilter.eq(MongoFields.State, ProducerRegistrationValues.Active)
               )
               .bson
-          ).sort(Sorts.ascending("_id")).limit(MongoProducerRegistrations.BatchSize).all
+          ).sort(Sorts.ascending(MongoFields.Id)).limit(MongoProducerRegistrations.BatchSize).all
         )
       ).flatMap { batch =>
         if (batch.isEmpty) ().asRepository
         else
           for {
-            ids <- MongoF.fromEither(batch.toList.traverse(text(_, "_id")))
+            ids <- MongoF.fromEither(batch.toList.traverse(text(_, MongoFields.Id)))
             now <- RepositoryF.lift(currentTime)
             _ <- boundary(
               MongoSessionOperations.updateMany(
                 rows,
                 None,
                 MongoFilter.and(
-                  MongoFilter.eq("transactionalId", transactionalId),
-                  MongoFilter.eq("state", "Active"),
-                  MongoFilter.in("_id", ids)
+                  MongoFilter.eq(MongoFields.TransactionalId, transactionalId),
+                  MongoFilter.eq(MongoFields.State, ProducerRegistrationValues.Active),
+                  MongoFilter.in(MongoFields.Id, ids)
                 ),
                 MongoUpdate.combine(
-                  MongoUpdate.set("state", "Fenced"),
-                  MongoUpdate.set("fencedAt", now.toDate),
+                  MongoUpdate.set(MongoFields.State, ProducerRegistrationValues.Fenced),
+                  MongoUpdate.set(MongoFields.FencedAt, now.toDate),
                   MongoUpdate.set("expiresAt", Date.from(now.plusSeconds(MongoProducerRegistrations.RetentionSeconds)))
                 )
               )

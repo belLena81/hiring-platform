@@ -102,6 +102,8 @@ final class AnalyticsErasureRetentionIntegrationSpec extends SharedRecoveryRunti
         _ = assertEquals(first, ErasureClaimOutcome.Deferred)
         checkpoint <- request.document("analytics_erasure_requests")
         _ = assertEquals(checkpoint.getString("phase"), ErasurePhase.DeltaPurged.toString)
+        // Evidence is complete once the purge checkpoints and is removed with the completion (MSC-02.3).
+        files <- request.stores.progress.readDeltaFiles(request.id)
         _ <- IO(passed.set(true))
         _ <- request.harness.sync(
           _.getCollection("analytics_erasure_requests")
@@ -115,7 +117,8 @@ final class AnalyticsErasureRetentionIntegrationSpec extends SharedRecoveryRunti
         _ = assertEquals(completion.getString("receiptId"), request.receiptId)
         done <- request.document("analytics_erasure_requests")
         _ = assertEquals(done.getString("state"), "Complete")
-        files <- request.stores.progress.readDeltaFiles(request.id)
+        evidenceAfterCompletion <- request.stores.progress.readDeltaFiles(request.id)
+        _ = assertEquals(evidenceAfterCompletion, Vector.empty[String])
         progressAfter <- harness.count(harness.paths.streamingProgress)
       } yield Erased(files, progressBefore, progressAfter)
     }

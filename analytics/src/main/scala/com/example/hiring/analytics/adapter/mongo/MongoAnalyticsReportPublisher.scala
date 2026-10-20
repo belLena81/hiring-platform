@@ -67,7 +67,8 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
       requests: MongoCollection[F, AnalyticsMongoRecords.ErasureRequest],
       users: MongoCollection[F, AnalyticsMongoRecords.UserAccountStatus],
       fences: MongoCollection[F, AnalyticsMongoRecords.PublisherFence],
-      completions: MongoCollection[F, AnalyticsMongoRecords.ErasureCompletion]
+      completions: MongoCollection[F, AnalyticsMongoRecords.ErasureCompletion],
+      deltaEvidence: MongoCollection[F, AnalyticsMongoRecords.DeltaFileEvidence]
   )
 
   private def collections: F[Collections] =
@@ -99,6 +100,10 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
       database.getCollection[AnalyticsMongoRecords.ErasureCompletion](
         AnalyticsCollections.ErasureCompletions,
         AnalyticsMongoRecords.erasureCompletionRegistry
+      ),
+      database.getCollection[AnalyticsMongoRecords.DeltaFileEvidence](
+        AnalyticsCollections.ErasureDeltaFiles,
+        AnalyticsMongoRecords.deltaFileEvidenceRegistry
       )
     ).mapN(Collections.apply)
 
@@ -408,153 +413,167 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
     if (!expiresAt.isAfter(report.asOf) || !expiresAt.isAfter(completedAt))
       reject(AnalyticsError.InvalidConfiguration("erasure snapshot expiry must follow publication time"))
     else
-      transactional { session =>
-        val requestFilter = Filters.and(
-          ownedClaimFilter(claim, completedAt),
-          Filters.eq(AnalyticsCollections.Fields.Phase, ErasurePhase.ReadyToPublish.persistedName)
-        )
-        for {
-          request <- lift(
-            streams.optional(
-              collections.requests.underlying
-                .find(session.underlying, requestFilter)
-                .projection(Projections.include(AnalyticsCollections.Fields.Id, AnalyticsCollections.Fields.ReceiptId))
-                .first
-            )
+      // The completion delete is a requestId lookup; provision its index before (never inside) the transaction.
+      lift(MongoAnalyticsErasureProgress.ensureRequestIndex(collections.deltaEvidence, streams)) *> transactional {
+        session =>
+          val requestFilter = Filters.and(
+            ownedClaimFilter(claim, completedAt),
+            Filters.eq(AnalyticsCollections.Fields.Phase, ErasurePhase.ReadyToPublish.persistedName)
           )
-          requestDoc <- result(request.toRight(AnalyticsError.GuardedErasurePublicationRejected))
-          receiptId = requestDoc.receiptId
-          user <- lift(
-            streams.optional(
-              collections.users.underlying
-                .find(session.underlying, Filters.eq(AnalyticsCollections.Fields.Id, claim.requestId.value))
-                .projection(
-                  Projections.include(AnalyticsCollections.Fields.Id, AnalyticsCollections.Fields.AccountStatus)
+          for {
+            request <- lift(
+              streams.optional(
+                collections.requests.underlying
+                  .find(session.underlying, requestFilter)
+                  .projection(
+                    Projections.include(AnalyticsCollections.Fields.Id, AnalyticsCollections.Fields.ReceiptId)
+                  )
+                  .first
+              )
+            )
+            requestDoc <- result(request.toRight(AnalyticsError.GuardedErasurePublicationRejected))
+            receiptId = requestDoc.receiptId
+            user <- lift(
+              streams.optional(
+                collections.users.underlying
+                  .find(session.underlying, Filters.eq(AnalyticsCollections.Fields.Id, claim.requestId.value))
+                  .projection(
+                    Projections.include(AnalyticsCollections.Fields.Id, AnalyticsCollections.Fields.AccountStatus)
+                  )
+                  .first
+              )
+            )
+            userDoc <- result(user.toRight(AnalyticsError.GuardedErasurePublicationRejected))
+            accountStatus = userDoc.accountStatus
+            _ <- result(Either.cond(accountStatus == "Deleted", (), AnalyticsError.GuardedErasurePublicationRejected))
+            fence <- lift(
+              streams.optional(
+                collections.fences.underlying
+                  .find(
+                    session.underlying,
+                    Filters.and(
+                      Filters.eq(AnalyticsCollections.Fields.Id, claim.requestId.value),
+                      Filters.eq(AnalyticsCollections.Fields.Deleted, true)
+                    )
+                  )
+                  .projection(
+                    Projections.include(
+                      AnalyticsCollections.Fields.Id,
+                      AnalyticsCollections.Fields.Deleted,
+                      AnalyticsCollections.Fields.LeaseToken,
+                      AnalyticsCollections.Fields.LeaseUntil
+                    )
+                  )
+                  .first
+              )
+            )
+            _ <- result(Either.cond(fence.nonEmpty, (), AnalyticsError.GuardedErasurePublicationRejected))
+            nonReadyCount <- lift(
+              streams.one(
+                collections.requests.underlying
+                  .countDocuments(session.underlying, nonReadyOtherRequests(claim.requestId.value))
+              )
+            )
+            _ <- result(Either.cond(nonReadyCount == 0L, (), AnalyticsError.GuardedErasurePublicationRejected))
+            reserved <- lift(
+              readReservation(session, collections.reservations, reservation.runId.value)
+            )
+            reservedRecord <- result(reserved.toRight(AnalyticsError.RunIdRangeConflict(reservation.runId.value)))
+            reservedValue <- result(MongoAnalyticsReportRecords.decodeRun(reservedRecord))
+            _ <- result(
+              Either.cond(
+                reservedValue.reservation == reservation && reservedValue.state == ReportState.Reserved,
+                (),
+                AnalyticsError.RunIdRangeConflict(reservation.runId.value)
+              )
+            )
+            state <- lift(
+              readControl(session, collections.control)
+            )
+            stateRecord <- result(state.toRight(AnalyticsError.RunIdRangeConflict(reservation.runId.value)))
+            decodedState <- result(MongoAnalyticsReportRecords.decodeControl(stateRecord))
+            _ <- result(
+              Either.cond(
+                decodedState.generation == reservation.generation &&
+                  ReportState.ErasurePublishableFromControl.contains(decodedState.state),
+                (),
+                AnalyticsError.RunIdRangeConflict(reservation.runId.value)
+              )
+            )
+            _ <- result(
+              Either.cond(
+                reservation.revision > decodedState.lastPublishedRevision,
+                (),
+                AnalyticsError.RunIdRangeConflict(reservation.runId.value)
+              )
+            )
+            changed <- lift(
+              markControlPublished(session, collections.control, reservation, ReportState.ErasurePublishableFromControl)
+            )
+            _ <- result(Either.cond(changed, (), AnalyticsError.RunIdRangeConflict(reservation.runId.value)))
+            _ <- lift(
+              upsertSnapshot(session, collections.snapshots, reservation, report, expiresAt)
+            )
+            _ <- lift(markReservationPublished(session, collections.reservations, reservation.runId.value))
+            completed <- lift(
+              casUpdate(
+                session,
+                collections.requests,
+                requestFilter,
+                Updates.combine(
+                  Updates.set(AnalyticsCollections.Fields.State, ErasureRequestState.Complete.persistedName),
+                  Updates.set(AnalyticsCollections.Fields.Phase, ErasurePhase.ReportPublished.persistedName),
+                  Updates.set(AnalyticsCollections.Fields.Progress, 0),
+                  Updates.set(
+                    AnalyticsCollections.Fields.ProgressKey,
+                    ErasurePhase.ReportPublished.ordinal.toLong * ErasurePhase.ProgressPerPhase
+                  ),
+                  Updates.set(AnalyticsCollections.Fields.CompletedAt, Date.from(completedAt)),
+                  Updates.set(
+                    AnalyticsCollections.Fields.ExpiresAt,
+                    Date.from(
+                      completedAt.plus(java.time.Duration.ofDays(operational.retention.deletionMarkerDays.toLong))
+                    )
+                  ),
+                  Updates.unset(AnalyticsCollections.Fields.LeaseToken),
+                  Updates.unset(AnalyticsCollections.Fields.LeaseUntil)
                 )
-                .first
+              )
             )
-          )
-          userDoc <- result(user.toRight(AnalyticsError.GuardedErasurePublicationRejected))
-          accountStatus = userDoc.accountStatus
-          _ <- result(Either.cond(accountStatus == "Deleted", (), AnalyticsError.GuardedErasurePublicationRejected))
-          fence <- lift(
-            streams.optional(
-              collections.fences.underlying
-                .find(
+            _ <- result(Either.cond(completed, (), AnalyticsError.GuardedErasurePublicationRejected))
+            // Physical absence was verified before ReadyToPublish and the completion ledger below is the durable
+            // proof, so the per-file evidence has no reader once the request is Complete.
+            _ <- lift(
+              streams.one(
+                collections.deltaEvidence.underlying.deleteMany(
                   session.underlying,
-                  Filters.and(
-                    Filters.eq(AnalyticsCollections.Fields.Id, claim.requestId.value),
-                    Filters.eq(AnalyticsCollections.Fields.Deleted, true)
-                  )
+                  Filters.eq(AnalyticsCollections.Fields.RequestId, claim.requestId.value)
                 )
-                .projection(
-                  Projections.include(
-                    AnalyticsCollections.Fields.Id,
-                    AnalyticsCollections.Fields.Deleted,
-                    AnalyticsCollections.Fields.LeaseToken,
-                    AnalyticsCollections.Fields.LeaseUntil
-                  )
-                )
-                .first
+              )
             )
-          )
-          _ <- result(Either.cond(fence.nonEmpty, (), AnalyticsError.GuardedErasurePublicationRejected))
-          nonReadyCount <- lift(
-            streams.one(
-              collections.requests.underlying
-                .countDocuments(session.underlying, nonReadyOtherRequests(claim.requestId.value))
-            )
-          )
-          _ <- result(Either.cond(nonReadyCount == 0L, (), AnalyticsError.GuardedErasurePublicationRejected))
-          reserved <- lift(
-            readReservation(session, collections.reservations, reservation.runId.value)
-          )
-          reservedRecord <- result(reserved.toRight(AnalyticsError.RunIdRangeConflict(reservation.runId.value)))
-          reservedValue <- result(MongoAnalyticsReportRecords.decodeRun(reservedRecord))
-          _ <- result(
-            Either.cond(
-              reservedValue.reservation == reservation && reservedValue.state == ReportState.Reserved,
-              (),
-              AnalyticsError.RunIdRangeConflict(reservation.runId.value)
-            )
-          )
-          state <- lift(
-            readControl(session, collections.control)
-          )
-          stateRecord <- result(state.toRight(AnalyticsError.RunIdRangeConflict(reservation.runId.value)))
-          decodedState <- result(MongoAnalyticsReportRecords.decodeControl(stateRecord))
-          _ <- result(
-            Either.cond(
-              decodedState.generation == reservation.generation &&
-                ReportState.ErasurePublishableFromControl.contains(decodedState.state),
-              (),
-              AnalyticsError.RunIdRangeConflict(reservation.runId.value)
-            )
-          )
-          _ <- result(
-            Either.cond(
-              reservation.revision > decodedState.lastPublishedRevision,
-              (),
-              AnalyticsError.RunIdRangeConflict(reservation.runId.value)
-            )
-          )
-          changed <- lift(
-            markControlPublished(session, collections.control, reservation, ReportState.ErasurePublishableFromControl)
-          )
-          _ <- result(Either.cond(changed, (), AnalyticsError.RunIdRangeConflict(reservation.runId.value)))
-          _ <- lift(
-            upsertSnapshot(session, collections.snapshots, reservation, report, expiresAt)
-          )
-          _ <- lift(markReservationPublished(session, collections.reservations, reservation.runId.value))
-          completed <- lift(
-            casUpdate(
-              session,
-              collections.requests,
-              requestFilter,
+            updates = receiptId.fold(
               Updates.combine(
-                Updates.set(AnalyticsCollections.Fields.State, ErasureRequestState.Complete.persistedName),
-                Updates.set(AnalyticsCollections.Fields.Phase, ErasurePhase.ReportPublished.persistedName),
-                Updates.set(AnalyticsCollections.Fields.Progress, 0),
-                Updates.set(
-                  AnalyticsCollections.Fields.ProgressKey,
-                  ErasurePhase.ReportPublished.ordinal.toLong * ErasurePhase.ProgressPerPhase
-                ),
-                Updates.set(AnalyticsCollections.Fields.CompletedAt, Date.from(completedAt)),
-                Updates.set(
-                  AnalyticsCollections.Fields.ExpiresAt,
-                  Date.from(
-                    completedAt.plus(java.time.Duration.ofDays(operational.retention.deletionMarkerDays.toLong))
-                  )
-                ),
-                Updates.unset(AnalyticsCollections.Fields.LeaseToken),
-                Updates.unset(AnalyticsCollections.Fields.LeaseUntil)
+                Updates.setOnInsert(AnalyticsCollections.Fields.Id, claim.requestId.value),
+                Updates.setOnInsert(AnalyticsCollections.Fields.CompletedAt, Date.from(completedAt))
+              ): Bson
+            )(id =>
+              Updates.combine(
+                Updates.setOnInsert(AnalyticsCollections.Fields.Id, claim.requestId.value),
+                Updates.setOnInsert(AnalyticsCollections.Fields.CompletedAt, Date.from(completedAt)),
+                Updates.setOnInsert(AnalyticsCollections.Fields.ReceiptId, id)
               )
             )
-          )
-          _ <- result(Either.cond(completed, (), AnalyticsError.GuardedErasurePublicationRejected))
-          updates = receiptId.fold(
-            Updates.combine(
-              Updates.setOnInsert(AnalyticsCollections.Fields.Id, claim.requestId.value),
-              Updates.setOnInsert(AnalyticsCollections.Fields.CompletedAt, Date.from(completedAt))
-            ): Bson
-          )(id =>
-            Updates.combine(
-              Updates.setOnInsert(AnalyticsCollections.Fields.Id, claim.requestId.value),
-              Updates.setOnInsert(AnalyticsCollections.Fields.CompletedAt, Date.from(completedAt)),
-              Updates.setOnInsert(AnalyticsCollections.Fields.ReceiptId, id)
-            )
-          )
-          _ <- lift(
-            streams.one(
-              collections.completions.underlying.updateOne(
-                session.underlying,
-                Filters.eq(AnalyticsCollections.Fields.Id, claim.requestId.value),
-                updates,
-                new UpdateOptions().upsert(true)
+            _ <- lift(
+              streams.one(
+                collections.completions.underlying.updateOne(
+                  session.underlying,
+                  Filters.eq(AnalyticsCollections.Fields.Id, claim.requestId.value),
+                  updates,
+                  new UpdateOptions().upsert(true)
+                )
               )
             )
-          )
-        } yield ()
+          } yield ()
       }
   }
 

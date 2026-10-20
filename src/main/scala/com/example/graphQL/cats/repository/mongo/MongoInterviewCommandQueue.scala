@@ -191,7 +191,14 @@ final class MongoInterviewCommandQueue(
         if (valid)
           participantsOf(workflow).distinct.traverse_(subject =>
             MongoProducerRegistrations
-              .register(database, session, subject.value.toString, generation.transactionalId, "Interview", now)
+              .register(
+                database,
+                session,
+                subject.value.toString,
+                generation.transactionalId,
+                ProducerRegistrationValues.Interview,
+                now
+              )
           )
         else ().asRepository
     } yield valid
@@ -317,7 +324,7 @@ final class MongoInterviewCommandQueue(
             None,
             MongoFilter.eq(MongoFields.Id, s"quarantine:$identity"),
             MongoUpdate.combine(
-              MongoUpdate.setOnInsert(DocumentTypeField, "quarantine"),
+              MongoUpdate.setOnInsert(DocumentTypeField, QuarantineType),
               MongoUpdate.setOnInsert("failureCode", InterviewFailureCode.InvalidMessage.wire),
               MongoUpdate.setOnInsert(MongoFields.OccurredAt, now.toDate),
               MongoUpdate.setOnInsert(

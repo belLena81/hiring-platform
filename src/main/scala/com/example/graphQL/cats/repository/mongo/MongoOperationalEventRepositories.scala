@@ -479,7 +479,14 @@ final class MongoOperationalEventOutboxRepository(
     }
     MongoOutboxSubjectLeases.acquire(claim.subjectIds)(subject =>
       acquireOne(subject) *>
-        MongoProducerRegistrations.register(database, session, subject, transactionalId, "Operational", now)
+        MongoProducerRegistrations.register(
+          database,
+          session,
+          subject,
+          transactionalId,
+          ProducerRegistrationValues.Operational,
+          now
+        )
     )
   }
 

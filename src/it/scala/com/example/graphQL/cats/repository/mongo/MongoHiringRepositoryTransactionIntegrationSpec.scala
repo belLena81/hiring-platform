@@ -907,7 +907,19 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends MongoIntegrationSu
                   .flatMap(
                     _.updateOne(
                       Filters.eq(MongoFields.Id, candidate.id.value.toString),
-                      new Document("$set", new Document(MongoFields.AccountStatus, AccountStatus.Deleted.toString))
+                      new Document(
+                        "$set",
+                        new Document(MongoFields.AccountStatus, AccountStatus.Deleted.toString)
+                      ).append(
+                        "$unset",
+                        new Document()
+                          .append(MongoFields.Email, "")
+                          .append(MongoFields.EmailCanonical, "")
+                          .append(MongoFields.PasswordHash, "")
+                          .append(MongoFields.Profile, "")
+                          .append(MongoFields.Embedding, "")
+                          .append(MongoFields.EmbeddingMeta, "")
+                      )
                     )
                   )
               )

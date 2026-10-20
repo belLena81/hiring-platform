@@ -84,9 +84,9 @@ private[mongo] final class MongoRecruiterJobClosurePages(
         versionedJobs.map(_.value.copy(status = JobStatus.Closed, closedAt = Some(closedAt), updatedAt = closedAt))
       val writes = versionedJobs.zip(closedJobs).traverse_ { case (observed, closed) =>
         for {
-          nextVersion <- MongoF.fromEither(Versioned.nextVersion(observed.version).toRight(RepositoryError.Conflict))
+          _ <- MongoF.fromEither(Versioned.nextVersion(observed.version).toRight(RepositoryError.Conflict))
           result <- RepositoryF.lift(
-            MongoSessionOperations.replaceOne(
+            MongoSessionOperations.updateOne(
               jobs,
               session,
               MongoFilter.and(
@@ -94,7 +94,7 @@ private[mongo] final class MongoRecruiterJobClosurePages(
                 MongoFilter.eq(MongoFields.Version, observed.version),
                 MongoFilter.eq(MongoFields.Status, JobStatus.Open.toString)
               ),
-              MongoHiringCodecs.job(closed, nextVersion)
+              MongoJobContentUpdate(closed)
             )
           )
           _ <- MongoF.fromEither(MongoRepositorySupport.matchedOne(result))

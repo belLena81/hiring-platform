@@ -29,6 +29,12 @@ private[graphQL] object MongoRepositoryTestSupport {
   def insertOne(database: MongoDatabase[IO], name: String, document: JavaDocument): IO[Unit] =
     collection(database, name).flatMap(_.insertOne(document)).void
 
+  /** Seeds a deliberately partial or unreadable row: the collection validators are bypassed for this one write. */
+  def insertUnvalidated(database: MongoDatabase[IO], name: String, document: JavaDocument): IO[Unit] =
+    collection(database, name)
+      .flatMap(_.insertOne(document, new InsertOneOptions().bypassDocumentValidation(true)))
+      .void
+
   def count(database: MongoDatabase[IO], name: String, filter: Bson = new BsonDocument()): IO[Long] =
     collection(database, name).flatMap(_.count(filter))
 
