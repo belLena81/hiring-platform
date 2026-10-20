@@ -115,7 +115,7 @@ final class UserAccountService[F[_]: MonadThrow](
     }
 
   override def me(actor: ActorContext): UseCaseF[F, User] =
-    authorization.resolve(actor)
+    authorization.resolveProfile(actor)
 
   override def updateMyProfile(
       request: IdempotencyRequest,

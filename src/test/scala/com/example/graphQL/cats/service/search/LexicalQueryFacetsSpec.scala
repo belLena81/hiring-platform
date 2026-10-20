@@ -377,6 +377,7 @@ final class LexicalQueryFacetsSpec extends CatsEffectSuite {
     export delegate.{
       relatedJobs,
       find,
+      findOwner,
       findVersioned,
       findSubmissionSnapshot,
       findOpen,

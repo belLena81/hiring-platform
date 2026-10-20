@@ -147,7 +147,7 @@ final class SemanticSearchService[F[_]: Monad](
   ): UseCaseF[F, PreparedCandidateMatch] =
     for {
       user <- authorization.resolve(actor)
-      job <- authorizeJobForMatching(user, UseCaseF.found(jobs.find(jobId), "job"))
+      job <- authorizeJobForMatching(user, withEmbedding(jobId))
       normalizedQuery = queryText.map(_.trim).filter(_.nonEmpty)
       _ <- normalizedQuery.traverse_(requireQueryLength)
       validatedFilters <- EitherT.fromEither[F](
@@ -323,11 +323,9 @@ final class SemanticSearchService[F[_]: Monad](
       ids: List[UserId]
   ): UseCaseF[F, List[CandidateSearchEligibility]] =
     for {
-      (currentActor, scope) <- authorization.readScope(actor).leftMap(searchFailure)
-      currentJob <- authorizeJobForMatching(
-        currentActor,
-        UseCaseF.found(jobs.find(jobId), "job").leftMap(searchFailure)
-      )
+      (currentActor, scope) <- authorization.currentReadScope(actor).leftMap(searchFailure)
+      // Read again after retrieval on purpose: the job may have been edited, closed or re-embedded meanwhile.
+      currentJob <- authorizeJobForMatching(currentActor, withEmbedding(jobId).leftMap(searchFailure))
       _ <- UseCaseF.ensure[F](
         currentJob.embedding.exists(embedding =>
           embedding.meta == queryMeta && jobEmbeddingIsCurrent(currentJob, embedding)
@@ -340,14 +338,11 @@ final class SemanticSearchService[F[_]: Monad](
     } yield currentUsers
 
   /** A non-Candidate user matching candidates against an open job it may manage. */
-  private def authorizeJobForMatching(user: User, job: UseCaseF[F, Job]): UseCaseF[F, Job] =
+  private def authorizeJobForMatching(user: ActorRecord, job: UseCaseF[F, Job]): UseCaseF[F, Job] =
     for {
       _ <- UseCaseF.ensure[F](user.role != UserRole.Candidate, UseCaseError.Domain(DomainError.RecruiterRequired))
       found <- job
-      _ <- UseCaseF.ensure[F](
-        user.role != UserRole.Recruiter || found.recruiterId == user.id,
-        UseCaseError.Domain(DomainError.Forbidden)
-      )
+      _ <- UseCaseF.forbidUnless[F](user.role != UserRole.Recruiter || found.recruiterId == user.id)
       _ <- UseCaseF.ensure[F](found.status == JobStatus.Open, UseCaseError.Domain(DomainError.JobMustBeOpen))
     } yield found
 
@@ -386,14 +381,18 @@ final class SemanticSearchService[F[_]: Monad](
     embedding.meta.model == embeddingModel &&
       embedding.meta.sourceHash == SourceHash.sha256(SearchableText.candidate(profile))
 
+  /** The whole job including its embedding: ranking compares the stored embedding with the current job text. */
+  private def withEmbedding(jobId: JobId): UseCaseF[F, Job] =
+    UseCaseF.found(jobs.findVersioned(jobId).map(_.map(_.value)), "job")
+
   private def requireCandidate(user: User): UseCaseF[F, Unit] =
     UseCaseF.ensure[F](user.role == UserRole.Candidate, UseCaseError.Domain(DomainError.CandidateRequired))
 
   private def resolveCandidate(actor: ActorContext): UseCaseF[F, User] =
-    authorization.resolve(actor).flatTap(requireCandidate)
+    authorization.resolveWithEmbedding(actor).flatTap(requireCandidate)
 
   private def currentCandidate(actor: ActorContext): UseCaseF[F, (User, HiringReadScope)] =
-    authorization.readScope(actor).leftMap(searchFailure).flatTap((user, _) => requireCandidate(user))
+    authorization.readScopeWithEmbedding(actor).leftMap(searchFailure).flatTap((user, _) => requireCandidate(user))
 
   private def embedQuery(text: String): UseCaseF[F, EmbeddingVector] =
     EitherT

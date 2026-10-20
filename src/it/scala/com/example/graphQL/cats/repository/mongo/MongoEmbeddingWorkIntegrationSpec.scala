@@ -239,8 +239,13 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
               } yield ()
             }
           count <- calls.get
-          user <- successful(users.find(candidateId)).flatMap(IO.fromOption(_)(new AssertionError("Missing candidate")))
-          job <- successful(jobs.find(application.jobId)).flatMap(IO.fromOption(_)(new AssertionError("Missing job")))
+          // `find` omits the vector by design; the embedding metadata is read with the whole-document read.
+          user <- successful(users.findVersioned(candidateId))
+            .flatMap(IO.fromOption(_)(new AssertionError("Missing candidate")))
+            .map(_.value)
+          job <- successful(jobs.findVersioned(application.jobId))
+            .flatMap(IO.fromOption(_)(new AssertionError("Missing job")))
+            .map(_.value)
         } yield {
           assertEquals(count, 2)
           val source =
@@ -481,8 +486,9 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
         staleJob <- jobs.updateEmbedding(observedJob, embedding).value
         staleUser <- users.updateEmbedding(observedUser, embedding).value
         completions <- List(first, second).traverse(claim => work.complete(claim).value)
-        currentJob <- successful(jobs.find(jobId))
-        currentUser <- successful(users.find(candidateId))
+        // The whole-document reads: `find` omits the vector, so it could not show that a stale write left none.
+        currentJob <- successful(jobs.findVersioned(jobId)).map(_.map(_.value))
+        currentUser <- successful(users.findVersioned(candidateId)).map(_.map(_.value))
         documents <- List(first.key, second.key).traverse(stored(db, _))
       } yield {
         assertEquals(staleJob, Left(RepositoryError.Conflict))

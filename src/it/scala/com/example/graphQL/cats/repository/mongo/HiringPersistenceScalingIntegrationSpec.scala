@@ -598,7 +598,11 @@ final class HiringPersistenceScalingIntegrationSpec extends MongoIntegrationSuit
     )
     scope <- IO.fromEither(
       HiringReadScope
-        .validated(ActorContext(candidate.id, candidate.role), candidate, ActorAuthorization(users))
+        .validated(
+          ActorContext(candidate.id, candidate.role),
+          com.example.graphQL.cats.service.port.ActorRecord.of(candidate),
+          ActorAuthorization(users)
+        )
         .leftMap(error => new AssertionError(error.toString))
     )
     nearby = NearbyJobsQuery(center, 10d, JobSearchFilter(None, Set.empty, None))

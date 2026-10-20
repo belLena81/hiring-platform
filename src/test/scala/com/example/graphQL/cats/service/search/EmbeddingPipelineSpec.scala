@@ -1472,6 +1472,8 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
 
     override def find(id: Identifiers.JobId): RepositoryF[IO, Option[Job]] = delegate.find(id)
 
+    override def findOwner(id: Identifiers.JobId): RepositoryF[IO, Option[JobOwner]] = delegate.findOwner(id)
+
     override def findSubmissionSnapshot(id: Identifiers.JobId): RepositoryF[IO, Option[JobSubmissionSnapshot]] =
       delegate.findSubmissionSnapshot(id)
 

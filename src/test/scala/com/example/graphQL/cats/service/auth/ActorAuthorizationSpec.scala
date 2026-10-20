@@ -2,7 +2,7 @@ package com.example.graphQL.cats.service.auth
 
 import cats.effect.IO
 import com.example.graphQL.cats.domain.model.{AccountStatus, EntityEmbedding, User, UserRole}
-import com.example.graphQL.cats.service.port.{RepositoryF, UserRepository}
+import com.example.graphQL.cats.service.port.{ActorRecord, RepositoryF, UserRepository}
 import com.example.graphQL.cats.service.{ActorContext, AuthenticationError, ServiceFixtures, UseCaseError}
 import munit.CatsEffectSuite
 
@@ -22,7 +22,7 @@ final class ActorAuthorizationSpec extends CatsEffectSuite {
     val authorization = ActorAuthorization(repository(Map(activeUser.id -> activeUser)))
 
     authorization.resolve(ActorContext(activeUser.id, UserRole.Recruiter)).value.map { result =>
-      assertEquals(result, Right(activeUser))
+      assertEquals(result, Right(ActorRecord.of(activeUser)))
     }
   }
 

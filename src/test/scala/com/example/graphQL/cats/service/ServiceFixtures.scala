@@ -5,6 +5,8 @@ import cats.effect.IO
 import cats.effect.Ref
 import cats.syntax.all.*
 import com.example.graphQL.cats.service.port.{
+  ActorRecord,
+  JobOwner,
   ApplicationRepository,
   ApplicationWriteActor,
   JobRepository,
@@ -155,6 +157,9 @@ private[cats] object ServiceFixtures {
     override def relatedUsers(scope: HiringReadScope, keys: List[UserRelationKey]): RepositoryF[IO, List[RelatedUser]] =
       RepositoryF.at[IO].raise(RepositoryError.Unavailable)
 
+    override def findActor(id: UserId): RepositoryF[IO, Option[ActorRecord]] =
+      find(id).map(_.map(ActorRecord.of))
+
     override def findVersioned(id: UserId): RepositoryF[IO, Option[Versioned[User]]] =
       com.example.graphQL.cats.service.port.RepositoryF.fromFEither(
         find(id).value.map(_.map(_.map(Versioned(_, 0L))))
@@ -188,6 +193,10 @@ private[cats] object ServiceFixtures {
       relationLookup.fold(RepositoryF.at[IO].fromEither[List[RelatedUser]](Left(RepositoryError.Unavailable)))(lookup =>
         RepositoryF.lift(lookup(scope, keys))
       )
+
+    override def findActor(id: UserId): RepositoryF[IO, Option[ActorRecord]] =
+      com.example.graphQL.cats.service.port.RepositoryF
+        .fromFEither(findOne(id).map(user => Right(user.map(ActorRecord.of))))
 
     override def find(id: UserId): RepositoryF[IO, Option[User]] =
       com.example.graphQL.cats.service.port.RepositoryF.fromFEither(findOne(id).map(Right(_)))
@@ -230,6 +239,9 @@ private[cats] object ServiceFixtures {
       relationLookup.fold(RepositoryF.at[IO].fromEither[List[RelatedJob]](Left(RepositoryError.Unavailable)))(lookup =>
         RepositoryF.lift(lookup(scope, keys))
       )
+
+    override def findOwner(id: JobId): RepositoryF[IO, Option[JobOwner]] =
+      com.example.graphQL.cats.service.port.RepositoryF.fromFEither(findOne(id).map(job => Right(job.map(JobOwner.of))))
 
     override def find(id: JobId): RepositoryF[IO, Option[Job]] =
       com.example.graphQL.cats.service.port.RepositoryF.fromFEither(findOne(id).map(Right(_)))

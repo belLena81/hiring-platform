@@ -137,7 +137,11 @@ final class MongoOperationalAccessEvaluationIntegrationSpec extends MongoIntegra
       val authorization = ActorAuthorization(users)
       def scope(value: User): HiringReadScope =
         HiringReadScope
-          .validated(ActorContext(value.id, value.role), value, authorization)
+          .validated(
+            ActorContext(value.id, value.role),
+            com.example.graphQL.cats.service.port.ActorRecord.of(value),
+            authorization
+          )
           .toOption
           .getOrElse(fail("invalid fixture actor"))
       val candidateScope = scope(candidates.head)

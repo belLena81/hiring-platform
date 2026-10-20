@@ -133,7 +133,7 @@ final class HiringGeographicDiscoveryEvaluationIntegrationSpec extends MongoInte
             com.example.graphQL.cats.service.read.HiringReadScope
               .validated(
                 ActorContext(candidates.head.id, candidates.head.role),
-                candidates.head,
+                com.example.graphQL.cats.service.port.ActorRecord.of(candidates.head),
                 com.example.graphQL.cats.service.auth.ActorAuthorization(users)
               )
               .leftMap(error => new AssertionError(error.toString))

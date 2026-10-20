@@ -6,7 +6,7 @@ import cats.effect.Clock
 import cats.effect.std.UUIDGen
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.error.DomainError
-import com.example.graphQL.cats.domain.model.{ApplicationStatus, User, UserRole}
+import com.example.graphQL.cats.domain.model.{ApplicationStatus, UserRole}
 import com.example.graphQL.cats.domain.model.Identifiers.ApplicationId
 import com.example.graphQL.cats.domain.workflow.*
 import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
@@ -29,6 +29,7 @@ final class InterviewSchedulingService[F[_]](using F: Monad[F], clock: Clock[F],
     proposalTtl: InterviewProposalTtl = InterviewProposalTtl.Default
 ) {
   private val authorization = ActorAuthorization(users)
+  private val authorizedApplications = AuthorizedApplicationAccess(authorization, jobs, applications)
 
   def schedule(
       actor: ActorContext,
@@ -38,10 +39,8 @@ final class InterviewSchedulingService[F[_]](using F: Monad[F], clock: Clock[F],
       idempotencyKey: UUID
   ): UseCaseF[F, InterviewWorkflow] =
     for {
-      user <- authorization.resolve(actor)
-      application <- UseCaseF.found(applications.find(applicationId), "application")
-      job <- UseCaseF.found(jobs.find(application.jobId), "job")
-      _ <- UseCaseF.ensure[F](authorization.canManage(user, job), UseCaseError.Domain(DomainError.Forbidden))
+      managed <- authorizedApplications.manage(actor, applicationId)
+      ManagedApplication(user, application, job) = managed
       canonicalStart = InterviewInterval.canonical(startsAt)
       canonicalEnd = InterviewInterval.canonical(endsAt)
       fingerprint = MutationReceiptFingerprint.fromCanonicalInput(
@@ -98,7 +97,7 @@ final class InterviewSchedulingService[F[_]](using F: Monad[F], clock: Clock[F],
     authorization.resolve(actor).flatMap(visibleTo(_, id))
 
   /** Admin sees every workflow; others only those they participate in, and a hidden one is simply not found. */
-  private def visibleTo(user: User, id: InterviewWorkflowId): UseCaseF[F, InterviewWorkflow] =
+  private def visibleTo(user: ActorRecord, id: InterviewWorkflowId): UseCaseF[F, InterviewWorkflow] =
     UseCaseF
       .repository(
         if (user.role == UserRole.Admin) workflows.findForAdmin(id)
@@ -237,7 +236,7 @@ final class InterviewSchedulingService[F[_]](using F: Monad[F], clock: Clock[F],
       action: InterviewAction,
       canonicalInput: String
   )(
-      event: (User, Instant) => InterviewLifecycleEvent
+      event: (ActorRecord, Instant) => InterviewLifecycleEvent
   ): InterviewActionF[F, InterviewWorkflow] =
     for {
       user <- useCase(authorization.resolve(actor))

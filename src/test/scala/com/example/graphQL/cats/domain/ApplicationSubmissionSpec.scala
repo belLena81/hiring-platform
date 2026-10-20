@@ -43,20 +43,26 @@ class ApplicationSubmissionSpec extends FunSuite {
   private val openJob = JobSubmissionSnapshot(jobId, JobStatus.Open, 0L)
 
   test("candidate can create an application for an open job") {
-    val result = ApplicationSubmission.create(candidate, openJob, applicationId, now)
+    val result = ApplicationSubmission.create(candidate.id, candidate.role, openJob, applicationId, now)
 
     assertEquals(result.map(_.candidateId), Right(candidateId))
     assertEquals(result.map(_.jobId), Right(jobId))
   }
 
   test("non-candidate actor is rejected with a typed domain error") {
-    val result = ApplicationSubmission.create(recruiter, openJob, applicationId, now)
+    val result = ApplicationSubmission.create(recruiter.id, recruiter.role, openJob, applicationId, now)
 
     assertEquals(result, Left(DomainError.CandidateRequired))
   }
 
   test("closed jobs reject new applications") {
-    val result = ApplicationSubmission.create(candidate, openJob.copy(status = JobStatus.Closed), applicationId, now)
+    val result = ApplicationSubmission.create(
+      candidate.id,
+      candidate.role,
+      openJob.copy(status = JobStatus.Closed),
+      applicationId,
+      now
+    )
 
     assertEquals(result, Left(DomainError.JobMustBeOpen))
   }

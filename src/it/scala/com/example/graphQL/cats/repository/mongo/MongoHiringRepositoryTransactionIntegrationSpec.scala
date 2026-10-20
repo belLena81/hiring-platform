@@ -37,6 +37,9 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends MongoIntegrationSu
   override val munitIOTimeout: FiniteDuration = 5.minutes
 
   private val now = Instant.parse("2026-09-22T12:00:00Z")
+  // Receipts carry a TTL index on expiresAt. The fixed test clock is in the past, so an expiry derived from it
+  // can be purged by the TTL monitor mid-test; the receipt expiry therefore follows the real clock.
+  private val receiptExpiry = Instant.now().plusSeconds(3600)
 
   private def replicaSet: Resource[IO, LocalTestServices.MongoEndpoint] = Resource.pure(mongoEndpoint)
   private def uri(instance: LocalTestServices.MongoEndpoint): String = instance.uri
@@ -330,7 +333,7 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends MongoIntegrationSu
               .value
               .flatMap(requireResult)
             receiptResult <- receipts
-              .execute[Unit, String](receiptKey, receiptFingerprint, now, now.plusSeconds(3600)) { context =>
+              .execute[Unit, String](receiptKey, receiptFingerprint, now, receiptExpiry) { context =>
                 jobs
                   .createWithEvents(receiptJob, now, List(receiptEvent), context)
                   .as(
@@ -346,7 +349,7 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends MongoIntegrationSu
                 MutationReceiptKey("createJob", recruiterId.value.toString, UUID.randomUUID()),
                 MutationReceiptFingerprint.fromCanonicalInput("rejected-write"),
                 now,
-                now.plusSeconds(3600)
+                receiptExpiry
               )(_ => RepositoryF.at[IO].pure(MutationWriteOutcome.Rejected("business rejection")))
               .value
               .flatMap(requireResult)
@@ -442,7 +445,7 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends MongoIntegrationSu
             _ <- Resource
               .make(
                 receipts
-                  .execute[Unit, String](key, fingerprint, now, now.plusSeconds(3600)) { context =>
+                  .execute[Unit, String](key, fingerprint, now, receiptExpiry) { context =>
                     jobs.createWithEvents(value, now, List(created), context) *>
                       RepositoryF.lift(
                         written.complete(()).void *> IO.never[MutationWriteOutcome[Unit, String]]
@@ -662,12 +665,12 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends MongoIntegrationSu
           for {
             _ <- MongoHiringSetup.initialize(database, com.example.graphQL.cats.service.Diagnostics.noop[IO])
             oldReceipt <- receipts
-              .execute[Unit, String](key, legacyFingerprint, now, now.plusSeconds(3600)) { _ =>
+              .execute[Unit, String](key, legacyFingerprint, now, receiptExpiry) { _ =>
                 RepositoryF.at[IO].pure(MutationWriteOutcome.Applied(MutationReceiptWrite((), entity)))
               }
               .value
             newFormatRetry <- receipts
-              .execute[Unit, String](key, canonicalFingerprint, now, now.plusSeconds(3600)) { _ =>
+              .execute[Unit, String](key, canonicalFingerprint, now, receiptExpiry) { _ =>
                 RepositoryF.lift(
                   IO.raiseError(new AssertionError("a prior-format receipt must not replay under the new fingerprint"))
                 )
@@ -760,7 +763,11 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends MongoIntegrationSu
           val repository = MongoApplicationRepository.transactional(database, client, Diagnostics.noop[IO])
           val read = HiringReadService(users, jobs, repository)
           def scope(user: User): HiringReadScope = HiringReadScope
-            .validated(ActorContext(user.id, user.role), user, ActorAuthorization(users))
+            .validated(
+              ActorContext(user.id, user.role),
+              com.example.graphQL.cats.service.port.ActorRecord.of(user),
+              ActorAuthorization(users)
+            )
             .fold(error => fail(error.toString), identity)
           val recruiterScope = scope(recruiter)
           val candidateScope = scope(candidate)

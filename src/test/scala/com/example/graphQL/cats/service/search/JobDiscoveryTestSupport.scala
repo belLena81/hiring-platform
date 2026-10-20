@@ -79,6 +79,7 @@ private[cats] object JobDiscoveryTestSupport {
     export delegate.{
       relatedJobs,
       find,
+      findOwner,
       findVersioned,
       findSubmissionSnapshot,
       findOpen,

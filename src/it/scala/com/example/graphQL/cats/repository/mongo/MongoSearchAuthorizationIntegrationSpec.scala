@@ -53,7 +53,11 @@ final class MongoSearchAuthorizationIntegrationSpec extends MongoIntegrationSuit
         new MongoSemanticSearchRepository(db, "jv", "cv", "jl", "cl", 100, 100, diagnostics = Diagnostics.noop[IO])
       val authorization = ActorAuthorization(users)
       def scope(user: User): HiringReadScope = HiringReadScope
-        .validated(ActorContext(user.id, user.role), user, authorization)
+        .validated(
+          ActorContext(user.id, user.role),
+          com.example.graphQL.cats.service.port.ActorRecord.of(user),
+          authorization
+        )
         .toOption
         .getOrElse(fail("invalid scope"))
       val recruiterScope = scope(recruiter)

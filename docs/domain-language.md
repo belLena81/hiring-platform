@@ -20,6 +20,8 @@ Add a term here in the same change that introduces it, and only when it is new o
 | ApplicationEvent | One append-only history record: previous/new status, actor, UTC time, feedback/reason. Written atomically with the status | An operational event on Kafka | `ApplicationEvent` |
 | Operational event | Fact published from the transactional outbox for consumers: at-least-once, idempotent consumers, one unversioned seven-field envelope | ApplicationEvent history | outbox / Kafka publication |
 | Interview workflow | Durable, conditional scheduling around Accepted→Interview; it adds no statuses | The status `Interview` | `domain/workflow` |
+| Actor projection | The minimal user read used for authorization: id, role, account status and whether the Admin is the singleton. It never carries a profile, credential or embedding, and an authenticated request reads it once | The user profile or the whole user document | `ActorRecord`, `users.findActor` |
+| Job ownership projection | The minimal job read used for authorization: id, owning Recruiter and status | The job for display, which carries the description | `JobOwner`, `jobs.findOwner` |
 | Embedding | Derived search data on a Job or Candidate; never operational truth | A user-visible field | embedding work |
 | Consent | Candidate's recruiter-search opt-in; governs candidate matching visibility | Authentication | `CandidateProfile` |
 | Late fact | Analytics event that arrives after its UTC day is closed; retained with an expiry and excluded from published reports until replayed | A quarantined (invalid or conflicting) event | `AnalyticsLateFactStage` |

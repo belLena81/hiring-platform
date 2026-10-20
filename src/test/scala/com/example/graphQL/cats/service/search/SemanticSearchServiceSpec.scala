@@ -705,7 +705,45 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
 
   test("MVR-05 search rechecks the persisted actor when the request carries a cached authenticated viewer") {
     val owned = openJob.copy(embedding = Some(jobEmbedding))
-    val cachedRecruiter = new AuthenticatedActor(ActorContext(recruiterId, UserRole.Recruiter), recruiter)
+    val cachedRecruiter =
+      new AuthenticatedActor(ActorContext(recruiterId, UserRole.Recruiter), ActorRecord.of(recruiter))
+    for {
+      usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map(recruiterId -> recruiter))
+      jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> owned))
+      search = new RetrievalSearchRepository {
+        override def searchJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
+          RepositoryF.fromFEither(IO.pure(Right(Nil)))
+        override def recommendedJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
+          RepositoryF.fromFEither(IO.pure(Right(Nil)))
+        override def candidateMatches(query: VectorSearchQuery): RepositoryF[IO, List[CandidateRetrievalHit]] =
+          RepositoryF.fromFEither(
+            usersRef
+              .update(_.updated(recruiterId, recruiter.copy(accountStatus = AccountStatus.Deleted)))
+              .as(Right(Nil))
+          )
+      }
+      service = semanticService(
+        new InMemoryUsers(usersRef),
+        new InMemoryJobs(jobsRef),
+        FakeEmbeddingService.unused,
+        search
+      )
+      cachedResult <- service
+        .candidateMatches(cachedRecruiter, jobId, pageSize, searchId)
+        .value
+    } yield {
+      assertEquals(
+        cachedResult.left.toOption,
+        Some(UseCaseError.Authentication(com.example.graphQL.cats.service.AuthenticationError.Unauthorized))
+      )
+    }
+  }
+
+  test(
+    "AC-03.4 candidate matching refuses the results when the recruiter is deactivated between retrieval and revalidation"
+  ) {
+    val owned = openJob.copy(embedding = Some(jobEmbedding))
+    val cachedRecruiter = ActorContext(recruiterId, UserRole.Recruiter)
     for {
       usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map(recruiterId -> recruiter))
       jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> owned))

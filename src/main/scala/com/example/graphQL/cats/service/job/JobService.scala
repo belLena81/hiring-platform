@@ -7,6 +7,7 @@ import cats.effect.std.UUIDGen
 import cats.syntax.all.*
 import com.example.graphQL.cats.service.{ActorContext, Diagnostics, SearchError, UseCaseError}
 import com.example.graphQL.cats.service.port.{
+  JobOwner,
   JobRepository,
   LexicalJobMatcher,
   MutationEntityReference,
@@ -84,7 +85,7 @@ final class JobService[F[_]: MonadThrow](
     idempotent.executeFor(actor, "createJob", request, jobReference, replayJob(actor)) { context =>
       for {
         user <- authorization.resolve(actor)
-        _ <- UseCaseF.ensure[F](authorization.canManageJobs(user), UseCaseError.Domain(DomainError.Forbidden))
+        _ <- UseCaseF.forbidUnless[F](authorization.canManageJobs(user))
         now <- EitherT.liftF(clock.realTimeInstant)
         jobId <- EitherT.liftF(uuidGen.randomUUID.map(JobId.apply))
         job <- EitherT.fromEither[F](
@@ -125,7 +126,7 @@ final class JobService[F[_]: MonadThrow](
     for {
       user <- authorization.resolve(actor)
       job <- UseCaseF.found(jobs.find(jobId), "job")
-      _ <- UseCaseF.ensure[F](authorization.canView(user, job), UseCaseError.Domain(DomainError.Forbidden))
+      _ <- UseCaseF.forbidUnless[F](authorization.canView(user, JobOwner.of(job)))
     } yield job
 
   def searchOpenJobs(actor: ActorContext, filter: JobSearchFilter, page: JobPageRequest): UseCaseF[F, List[Job]] =
@@ -195,12 +196,7 @@ final class JobService[F[_]: MonadThrow](
   /** Candidates and the Admin discover jobs; the read scope comes from the persisted actor. */
   private def discoveryScope(actor: ActorContext): UseCaseF[F, HiringReadScope] =
     authorization.readScope(actor).flatMap { (user, scope) =>
-      UseCaseF
-        .ensure(
-          user.role == UserRole.Candidate || user.role == UserRole.Admin,
-          UseCaseError.Domain(DomainError.Forbidden)
-        )
-        .as(scope)
+      UseCaseF.forbidUnless[F](user.role == UserRole.Candidate || user.role == UserRole.Admin).as(scope)
     }
 
   def myJobs(actor: ActorContext, page: JobPageRequest): UseCaseF[F, List[Job]] =

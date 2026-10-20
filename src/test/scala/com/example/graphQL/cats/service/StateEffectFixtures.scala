@@ -70,6 +70,8 @@ private[cats] object StateEffectFixtures {
 
   object Users extends UserRepository[Program] {
     override def relatedUsers(scope: HiringReadScope, keys: List[UserRelationKey]) = unavailable
+    override def findActor(id: UserId): RepositoryF[Program, Option[ActorRecord]] =
+      inspect(_.users.get(id).map(ActorRecord.of))
     override def find(id: UserId): RepositoryF[Program, Option[User]] = inspect(_.users.get(id))
     override def findVersioned(id: UserId) = unavailable
     override def updateEmbedding(id: UserId, embedding: EntityEmbedding) = unavailable
@@ -78,6 +80,7 @@ private[cats] object StateEffectFixtures {
 
   object Jobs extends JobRepository[Program] {
     override def relatedJobs(scope: HiringReadScope, keys: List[JobRelationKey]) = unavailable
+    override def findOwner(id: JobId): RepositoryF[Program, Option[JobOwner]] = inspect(_.jobs.get(id).map(JobOwner.of))
     override def find(id: JobId): RepositoryF[Program, Option[Job]] = inspect(_.jobs.get(id))
     override def findVersioned(id: JobId): RepositoryF[Program, Option[Versioned[Job]]] =
       inspect(_.jobs.get(id).map(Versioned(_, 0L)))
@@ -175,7 +178,7 @@ private[cats] object StateEffectFixtures {
     override def canViewUserEmails(actor: ActorContext, userIds: List[UserId]) = unsupported
     override def application(id: ApplicationId) = unsupported
     override def canViewApplication(actor: ActorContext, applicationId: ApplicationId) =
-      UseCaseF.ensure[Program](true, UseCaseError.Repository(RepositoryError.Unavailable))
+      UseCaseF.found[Program, Application](Applications.find(applicationId), "application")
     override def applicationHistory(
         actor: ActorContext,
         applicationId: ApplicationId,

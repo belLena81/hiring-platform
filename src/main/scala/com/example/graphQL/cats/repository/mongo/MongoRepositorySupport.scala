@@ -528,12 +528,29 @@ private[mongo] object MongoStoredDocumentDecoding {
     repository(decoded.sequence)
 }
 
+private[mongo] object MongoRevisionReads {
+
+  /** The stored revision of one document, reading nothing else. */
+  def revision(
+      collection: IO[MongoCollection[IO, Document]],
+      id: String
+  ): RepositoryF[IO, Option[Long]] =
+    RepositoryF
+      .lift(MongoSessionOperations.findById(collection, None, id, Some(MongoReadProjections.revision)))
+      .subflatMap(
+        _.traverse(document =>
+          MongoDocumentFields.toRepository(MongoDocumentFields.requiredInt64(document, MongoFields.Version, min = 0L))
+        )
+      )
+}
+
 private[mongo] object MongoKeysetPaging {
   def page[A](
       collection: IO[MongoCollection[IO, Document]],
       filter: MongoFilter,
       timestampField: String,
-      pageSize: PageSize
+      pageSize: PageSize,
+      projection: Option[Bson] = None
   )(read: Document => ValidatedNel[MongoHiringCodecs.StoredDocumentError, A])(
       diagnostics: Diagnostics[IO]
   ): RepositoryF[IO, List[A]] =
@@ -542,14 +559,13 @@ private[mongo] object MongoKeysetPaging {
         RepositoryF
           .lift(
             collection
-              .flatMap(
-                _.find(filter.bson)
+              .flatMap { c =>
+                val query = c
+                  .find(filter.bson)
                   .sort(Sorts.orderBy(Sorts.descending(timestampField), Sorts.descending(MongoFields.Id)))
                   .limit(pageSize.value)
-                  .boundedStream(pageSize.value)
-                  .compile
-                  .toList
-              )
+                projection.fold(query)(query.projection).boundedStream(pageSize.value).compile.toList
+              }
           )
           .subflatMap(documents => MongoStoredDocumentDecoding.values(documents.map(read)))
       )

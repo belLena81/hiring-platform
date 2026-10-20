@@ -16,6 +16,10 @@ object UseCaseF {
   def ensure[F[_]: Applicative](condition: Boolean, error: => UseCaseError): UseCaseF[F, Unit] =
     EitherT.cond[F](condition, (), error)
 
+  /** Fails with the `Forbidden` domain outcome unless `condition` holds. */
+  def forbidUnless[F[_]: Applicative](condition: Boolean): UseCaseF[F, Unit] =
+    ensure[F](condition, UseCaseError.Domain(DomainError.Forbidden))
+
   /** A repository lookup whose absence is the domain `NotFound(entity)` outcome. */
   def found[F[_]: Functor, A](value: RepositoryF[F, Option[A]], entity: String): UseCaseF[F, A] =
     repository(value).subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound(entity))))

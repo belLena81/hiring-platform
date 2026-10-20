@@ -47,8 +47,13 @@ final class MongoApplicationRepository private (
     import MongoAuthorizedReadQueries.*
     if (scope.role != UserRole.Candidate) RepositoryF.at[IO].pure(Nil)
     else {
-      val pipeline = List(matching(baseFilter(MongoFields.CandidateId, scope.userId.value.toString, page).bson)) ++
-        actor(scope) ++ List(new Document("$sort", new Document(MongoFields.CreatedAt, -1).append(MongoFields.Id, -1)))
+      // Match, sort and limit run on the indexed applications collection before the actor check, so the
+      // applications_candidate_* index orders the page; a failed actor check still yields an empty page.
+      val pipeline = List(
+        matching(baseFilter(MongoFields.CandidateId, scope.userId.value.toString, page).bson),
+        new Document("$sort", new Document(MongoFields.CreatedAt, -1).append(MongoFields.Id, -1)),
+        new Document("$limit", page.pageSize.value)
+      ) ++ actor(scope)
       documents(database, MongoCollections.Applications, pipeline, page.pageSize.value, diagnostics)
         .subflatMap(values => MongoStoredDocumentDecoding.values(values.map(MongoHiringCodecs.readApplication)))
     }
