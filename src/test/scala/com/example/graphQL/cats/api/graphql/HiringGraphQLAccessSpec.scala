@@ -1101,12 +1101,12 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       """query {
         |  semanticJobSearch(query: "scala backend", filter: { city: "Kyiv", skills: ["Scala"] }, first: 5) {
         |    ... on RankedJobResults {
+        |      model
+        |      searchId
         |      results {
         |        job { id recruiter { id } }
         |        score
         |        searchMode
-        |        model
-        |        searchId
         |      }
         |    }
         |    __typename
@@ -1120,7 +1120,8 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
         Right(jobId.value.toString)
       )
       assertEquals(payload.downField("results").downArray.get[String]("searchMode"), Right("HYBRID"))
-      assertEquals(payload.downField("results").downArray.get[String]("model"), Right("voyage-4-lite"))
+      assertEquals(payload.get[String]("model"), Right("voyage-4-lite"))
+      assert(payload.get[String]("searchId").isRight, clue(json))
       assert(!json.hcursor.downField("errors").succeeded)
     }
   }
@@ -1318,8 +1319,9 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
   }
 
   test("AC-04.3 ranked results are documented bounded top-N lists with no pageInfo") {
-    assertEquals(outputFields("RankedJobResults"), Set("results", "degraded", "degradedReason"))
-    assertEquals(outputFields("RankedCandidateResults"), Set("results", "degraded", "degradedReason"))
+    val resultFields = Set("results", "searchId", "model", "degradedReason")
+    assertEquals(outputFields("RankedJobResults"), resultFields)
+    assertEquals(outputFields("RankedCandidateResults"), resultFields)
     List("semanticJobSearch", "recommendedJobs", "candidateMatches").foreach { field =>
       val description = HiringGraphQLSchema.schema.query.fieldsByName(field).head.description.getOrElse("")
       assert(description.contains("bounded top-N list") && description.contains("no pageInfo"), description)
@@ -1328,10 +1330,10 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
 
   test("AC-06.3 semanticJobSearch rejects the same invalid filter as the other job discovery operations") {
     val blankCity =
-      """query { semanticJobSearch(query: "scala", filter: { city: " " }, first: 5) { ... on RankedJobResults { results { searchId } } ... on ValidationError { code field } } }"""
+      """query { semanticJobSearch(query: "scala", filter: { city: " " }, first: 5) { ... on RankedJobResults { searchId } ... on ValidationError { code field } } }"""
     val tooManySkills = {
       val skills = (1 to 101).map(index => s""""Skill$index"""").mkString(", ")
-      s"""query { semanticJobSearch(query: "scala", filter: { skills: [$skills] }, first: 5) { ... on RankedJobResults { results { searchId } } ... on ValidationError { code field } } }"""
+      s"""query { semanticJobSearch(query: "scala", filter: { skills: [$skills] }, first: 5) { ... on RankedJobResults { searchId } ... on ValidationError { code field } } }"""
     }
     List(blankCity, tooManySkills).traverse(executeWithSemanticSearch(_, Some(candidateActor))).map { results =>
       results.foreach { json =>

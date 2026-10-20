@@ -7,51 +7,51 @@ mutation CancelInterview($input: InterviewActionInput!) {
 }
 mutation RequestInterviewReschedule($input: InterviewActionInput!) {
   requestInterviewReschedule(input: $input) {
-    ... on InterviewWorkflow { id revision progress rescheduleRequested }
+    ... on InterviewWorkflow { id revision progress rescheduleRequestedAt }
     ... on ValidationError { code message field }
     ... on DomainError { code message retryAfterSeconds }
   }
 }
 mutation DismissInterviewRescheduleRequest($input: InterviewActionInput!) {
   dismissInterviewRescheduleRequest(input: $input) {
-    ... on InterviewWorkflow { id revision progress rescheduleRequested }
+    ... on InterviewWorkflow { id revision progress rescheduleRequestedAt }
     ... on ValidationError { code message field }
     ... on DomainError { code message retryAfterSeconds }
   }
 }
 mutation ProposeInterviewReschedule($input: ProposeInterviewRescheduleInput!) {
   proposeInterviewReschedule(input: $input) {
-    ... on InterviewWorkflow { id revision progress proposedStartsAt proposedEndsAt proposalExpiresAt }
+    ... on InterviewWorkflow { id revision progress proposal { slot { startsAt endsAt } expiresAt } }
     ... on ValidationError { code message field }
     ... on DomainError { code message retryAfterSeconds }
   }
 }
 mutation WithdrawInterviewReschedule($input: InterviewActionInput!) {
   withdrawInterviewReschedule(input: $input) {
-    ... on InterviewWorkflow { id revision progress proposedStartsAt }
+    ... on InterviewWorkflow { id revision progress proposal { slot { startsAt } } }
     ... on ValidationError { code message field }
     ... on DomainError { code message retryAfterSeconds }
   }
 }
 mutation AcceptInterviewReschedule($input: InterviewActionInput!) {
   acceptInterviewReschedule(input: $input) {
-    ... on InterviewWorkflow { id revision progress pendingStartsAt pendingEndsAt }
+    ... on InterviewWorkflow { id revision progress pending { startsAt endsAt } }
     ... on ValidationError { code message field }
     ... on DomainError { code message retryAfterSeconds }
   }
 }
 mutation DeclineInterviewReschedule($input: InterviewActionInput!) {
   declineInterviewReschedule(input: $input) {
-    ... on InterviewWorkflow { id revision progress proposedStartsAt }
+    ... on InterviewWorkflow { id revision progress proposal { slot { startsAt } } }
     ... on ValidationError { code message field }
     ... on DomainError { code message retryAfterSeconds }
   }
 }
 query InterviewLifecycle($workflowId: InterviewWorkflowID!) {
   interviewWorkflow(workflowId: $workflowId) {
-    id applicationId startsAt endsAt revision progress notifiedParticipants
-    pendingStartsAt pendingEndsAt cancelledAt
-    proposedStartsAt proposedEndsAt proposalExpiresAt rescheduleRequested
+    id applicationId slot { startsAt endsAt } revision progress notifiedParticipants
+    pending { startsAt endsAt } cancelledAt
+    proposal { slot { startsAt endsAt } expiresAt } rescheduleRequestedAt
   }
 }
 mutation InterviewActionOutcomes($action: InterviewActionInput!, $propose: ProposeInterviewRescheduleInput!) {

@@ -73,12 +73,19 @@ private[graphql] object HiringGraphQLModel {
   final case class AuthSuccess(user: User, accessToken: String, expiresAt: Instant)
   final case class DeletionReceipt(receiptId: String, status: AccountDeletionStatus)
   final case class InteractionSuccess(eventId: UUID)
-  final case class PageInfo(hasNextPage: Boolean, endCursor: Option[String])
+
+  /** `hasPreviousPage` is true when the page was requested after a cursor, that is, when it does not start the list. */
+  final case class PageInfo(
+      hasNextPage: Boolean,
+      hasPreviousPage: Boolean,
+      startCursor: Option[String],
+      endCursor: Option[String]
+  )
   final case class Edge[A](node: A, cursor: String)
   final case class Connection[A](edges: List[Edge[A]], pageInfo: PageInfo)
 
   /** The page of a job search together with the identifier of the search that produced it. */
-  final case class JobSearchConnection(connection: Connection[Job], searchId: SearchId)
+  final case class JobSearchConnection(edges: List[Edge[Job]], pageInfo: PageInfo, searchId: SearchId)
   final case class NearbyJobEdge(node: Job, distanceKm: Double, cursor: String)
   final case class NearbyJobsConnection(edges: List[NearbyJobEdge], pageInfo: PageInfo)
   final case class JobFilterGraphQLInput(
@@ -100,32 +107,41 @@ private[graphql] object HiringGraphQLModel {
     case Recruiter(value: RecruiterProfile)
   }
 
+  /** What every ranked hit carries, whatever it ranks. */
+  sealed trait ScoredHit {
+    def score: Double
+    def searchMode: SearchMode
+    def matchedSkills: List[String]
+    def retrievalScore: Option[Double]
+  }
   final case class RankedJobPayload(
       job: Job,
       score: Double,
       searchMode: SearchMode,
-      model: Option[String],
-      searchId: SearchId,
       matchedSkills: List[String],
       retrievalScore: Option[Double]
-  )
+  ) extends ScoredHit
   final case class RankedCandidatePayload(
       candidate: CandidateMatchCandidate,
       score: Double,
       searchMode: SearchMode,
-      model: Option[String],
-      searchId: SearchId,
       matchedSkills: List[String],
       retrievalScore: Option[Double]
-  )
+  ) extends ScoredHit
+
+  /** `searchId` and `model` describe the whole search, so they sit here once; `model` is absent for keyword results. A
+    * present `degradedReason` is what marks the results as degraded.
+    */
   final case class RankedJobResults(
       results: List[RankedJobPayload],
-      degraded: Boolean = false,
+      searchId: SearchId,
+      model: Option[String],
       degradedReason: Option[String] = None
   )
   final case class RankedCandidateResults(
       results: List[RankedCandidatePayload],
-      degraded: Boolean = false,
+      searchId: SearchId,
+      model: Option[String],
       degradedReason: Option[String] = None
   )
   final case class AnalyticsReportPayload(

@@ -3,7 +3,7 @@
 ## Identity and scope
 
 - Task / roadmap phase: GraphQL capability enhancements on the current API (supports Phase 3 GraphQL/performance goals and Phase 13 observability; no new roadmap phase).
-- Status: draft
+- Status: in progress. R1 (nested fields, with `Application.interview` deferred), the cursor, shared connection and shared error-field parts of R5, and the API-layer clean-up of the consolidation slice S4 are implemented (2026-10-19, worktree `graph-access`). R2, R4, R6, R7, R8, R9 are untouched. R3 has a recorded decision, below.
 - Coordinator: Product Manager. Proposed owners: Software Architect (contract and subscription transport decision), Scala Developer (schema, resolvers, routes), Data Engineer (projection and indexes), Security Engineer and Code Reviewer (independent verdicts), QA Engineer (final validation).
 - User outcome: use GraphQL features that change code size, client flexibility or runtime cost: graph-shaped nested access, query-driven database projection, push updates, persisted operations, shared interfaces, schema-declared policy and field-level telemetry.
 - Problem / actors / behavior:
@@ -53,6 +53,18 @@ Independent work continues while a question is open; only the named requirement 
 
 ### Decisions / change notes
 
+- 2026-10-19 (slice S4 of [hiring model and retrieval consolidation](hiring-model-and-retrieval-consolidation.md)):
+  - R1 implemented on the existing use cases. Names: `Job.applications(first, after, status)`, `Application.events(first, after)` (the draft said `history`; `events` matches the `ApplicationEvent` type), `User.applications(first, after, status)` (non-null only for the viewer's own account, null for every other user without a read), `InterviewWorkflow.application` (needs `canViewApplication`, otherwise null). The per-parent lists call the authorized list use case once per parent; the complexity reducer prices a nested connection as `1 + first * children`, and `first` is bounded at every level, so fan-out is bounded (a 100 x 100 nest is rejected). Related `candidate`/`job` stay on the batched fetchers. A true one-read-per-level batch for the lists needs a keyed service method (a service slice) and is the follow-up, not done here.
+  - `Application.interview` is deferred: `InterviewSchedulingService` can only inspect a workflow by workflow id, and no repository port is exposed to the API for lookup by application. It needs a service method that finds the workflow by application under the participant predicate.
+  - Cursor: the HS256 JWT cursor is replaced by `base64url(kind|fields|expiry).base64url(HMAC-SHA256)` under the same derived key. A cursor is a position and every request is authorized again, so the lifetime only limits how long a paused client may resume; the codec default is one day, signature failures and kind mismatches are unchanged. `auth.jwt.cursor-ttl-seconds` now defaults to 86400 (the maximum the config accepts) in `application.conf`; the key name is kept although the cursor is no longer a JWT.
+  - `PageInfo` gained `startCursor` and `hasPreviousPage`. Both are free for keyset paging: `startCursor` is the first edge cursor, and `hasPreviousPage` is true when an `after` cursor was supplied (the page does not start the list). `totalCount` is not added: it needs a count query per list and no use case asks for it.
+  - Review follow-up (2026-10-19): nested list fields (`Job.applications`, `Application.events`, `User.applications`) carry a base complexity of 5 per parent (`5 + first * children`; root lists stay `1 + first * children`); with the cheapest selection `myJobs(first: 99)` plus one nested row fits and 100 parents are rejected (tested), aliases and fragments are charged per occurrence, and `first` 0 or negative is rejected at every level. Application, event, job and user cursors are signed together with their scope (parent id and status or role filter), so a cursor from job A or another status is refused elsewhere (`INVALID_CURSOR`).
+  - R5 partial: one `edges`/`pageInfo` builder for every connection type (including `NearbyJobsConnection` and `JobSearchConnection`, which no longer copies edges from a nested connection) and one `Cursor` scalar. The `Connection`/`Node` interfaces are not added; no client needs them yet.
+  - GQ-04: every error type already implements `UserError`, so `... on UserError { code message }` reads the refusal of any mutation or search; a test proves it across two mutations. A `MutationPayload` interface or one shared union was rejected: success types (`Job`, `Application`, `User`) are shared with queries and cannot implement a mutation-only interface, and a union cannot contain another union. The common error fields are now declared once by a helper.
+  - GQ-06 (pre-MVP, changed directly, no shims): `RankedJobResults`/`RankedCandidateResults` carry `searchId` and `model` once; `degraded` is removed in favour of the nullable `degradedReason`; `JobDiscoveryFacets.coverage` is removed and `coverageLimit` (null = every match counted) is the single field; `InterviewWorkflow` has `pending: TimeSlot`, `proposal: RescheduleProposal { slot, expiresAt }` and `rescheduleRequestedAt`; `ScoredHit` is the interface of `RankedJob` and `RankedCandidate`. The current interval is `slot: TimeSlot!`, consistent with `pending` and `proposal.slot`.
+  - GQ-07: the reducers and complexity weights moved to `QueryAdmission`. The idempotency fingerprint was not rewired to the Sangria input value: there is no hand-written parallel decoder to remove, since each input's Circe `Decoder` (needed by the `FromInput` bridge) and `Encoder` (the canonical fingerprint) are `derives` clauses. Deriving the fingerprint from the raw Sangria argument would change the canonical bytes of every stored idempotency receipt and rely on unspecified shapes of `Args.raw`, for no reduction in code the team maintains.
+  - R3 / GQ-05 decision (no code): subscriptions are not implemented. Sangria (4.2.19 here) models subscriptions as a `Subscription` root whose fields return streams through its `SubscriptionStream` abstraction (separate artifacts supply Akka Streams, Monix and RxScala instances; an fs2 instance would be hand-written or need a new dependency). No stream bridge is a direct dependency of this build and nothing was spiked, so A1/A2 stay unverified (from memory of the library, not read from its source). Besides the stream bridge, R3 needs a WebSocket route (`graphql-transport-ws`) in http4s, a post-commit event source (Q1), per-subscriber re-authorization, connection limits and a bounded buffer. Polling `interviewWorkflow` and the nested lists remain the way to observe changes. Choose Q1/Q2 and approve a streaming dependency before this is built.
+
 - 2026-10-14: draft written from user request "embrace high and medium points". Federation (point 10) and batch mutations (point 11) excluded as speculative or in conflict with single-transaction invariants.
 - Pre-MVP policy applies: one active schema shape. Update SDL, fixtures, examples and tests directly; no dual shapes or compatibility fields.
 - Authorization stays in services. Nested fields, subscriptions and projection must not create a second authorization path.
@@ -71,12 +83,13 @@ Independent work continues while a question is open; only the named requirement 
 
 Add to the SDL:
 
-- `Job.applications(first: Int!, after: String, status: ApplicationStatus): ApplicationConnection!` (owner recruiter or Admin only).
-- `Application.history(first: Int!, after: String): ApplicationEventConnection!` (same visibility as `applicationHistory`).
-- `Application.interview: InterviewWorkflow` (null when none; visibility as `interviewWorkflow`).
-- `User.applications(first: Int!, after: String, status: ApplicationStatus): ApplicationConnection!` (the viewer themself only, equal to `myApplications`).
+- `Job.applications(first: Int!, after: Cursor, status: ApplicationStatus): ApplicationConnection!` (owner recruiter or Admin only).
+- `Application.events(first: Int!, after: Cursor): ApplicationEventConnection!` (same visibility as `applicationHistory`; named `events` after the `ApplicationEvent` type).
+- `User.applications(first: Int!, after: Cursor, status: ApplicationStatus): ApplicationConnection` (nullable: the viewer's own account only, equal to `myApplications`; null for every other user).
+- `InterviewWorkflow.application: Application` (null unless the caller may view the application).
+- `Application.interview: InterviewWorkflow` is **deferred** to the service-layer slice: it needs `InterviewWorkflowRepository.findByApplication` and a service method under the participant predicate.
 
-Behavior: a recruiter's request for `myJobs { edges { node { title applications(first: 20) { edges { node { status candidate { id } history(first: 5) { edges { node { newStatus } } } } } } } } }` is answered with batched reads per level. Number of Mongo round trips per nesting level is bounded and independent of the number of parents (no N+1).
+Behavior: a recruiter's request for `myJobs { edges { node { title applications(first: 20) { edges { node { status candidate { id } events(first: 5) { edges { node { newStatus } } } } } } } } }` is answered with batched reads for related users and jobs. The nested lists themselves are one authorized read per parent (N+1 by design, implemented in S4), priced by a base of 5 per parent plus `first` times the selection, so about 99 parents fit the 1000-unit limit; keyed list ports (one read per level, independent of the parent count) are the follow-up in the service-layer slice.
 
 Root queries `jobApplications`, `myApplications`, `applicationHistory` remain unless a decision removes them. If kept, they and the nested fields share one resolver implementation.
 
@@ -179,7 +192,7 @@ Evidence columns are filled only after observation.
 
 | ID | Given / When / Then | Implementation and test paths | Verification command or method | Actual outcome |
 |---|---|---|---|---|
-| AC-01 | Nested fields (AC-01.1-01.5) return the same authorized data as root queries and use batched reads | Not implemented | `sbt test` (schema and access spec); integration test with query counting | Not run |
+| AC-01 | Nested fields (AC-01.1-01.5) return the same authorized data as root queries and use batched reads | Implemented as AC-07.1 to AC-07.10 of the consolidation spec: `HiringGraphQLGraphAccessSpec`, `HiringApiRoutesSpec` (nested page size), `QueryAdmission`; `Application.interview` deferred; per-parent lists are one authorized read per parent | `sbt -batch test`: 1531 passed, 0 failed (2026-10-19); no query-counting integration run | Partly met: relations batched (AC-01.4 for `candidate`), lists per parent; AC-01.5 met |
 | AC-02 | Projection (AC-02.1-02.3) limits fields read and never changes visibility | Not implemented | Repository integration test with Mongo `explain` and command monitoring; before/after workload | Not run |
 | AC-03 | Subscriptions (AC-03.1-03.6) deliver after commit only to authorized, bounded subscribers | Not implemented | Integration test with replica-set Mongo and WebSocket client; concurrency test | Not run |
 | AC-04 | Persisted operations (AC-04.1-04.4) execute by hash, allow-list enforced | Not implemented | `sbt test` route tests | Not run |
@@ -188,8 +201,8 @@ Evidence columns are filled only after observation.
 | AC-07 | `@defer`/`@stream` enabled or documented as unsupported (Q4) | Not implemented | Spike result and, if enabled, route test | Not run |
 | AC-08 | Telemetry (AC-08.1-08.2) records timings without content | Not implemented | Unit test with in-memory tracer | Not run |
 | AC-09 | Facets on connections (AC-09.1), if kept | Not implemented | `sbt test` plus Atlas Local integration if lexical facets involved | Not run |
-| AC-10 | Security gates: forbidden-access tests for direct ID, nested relationship, batch-loader and subscription paths for Candidate, Recruiter (owner and non-owner), Admin | Not implemented | `sbt test` and integration tests | Not run |
-| AC-11 | Docs and fixtures updated: SDL file, operation fixtures, README/ARCHITECTURE GraphQL sections, domain language terms | Not implemented | Review plus schema/fixture checks | Not run |
+| AC-10 | Security gates: forbidden-access tests for direct ID, nested relationship, batch-loader and subscription paths for Candidate, Recruiter (owner and non-owner), Admin | Direct ID, nested and batch paths: `HiringGraphQLGraphAccessSpec`; subscription paths not applicable (not built) | `sbt -batch test` | Met for the implemented paths; independent Security Engineer verdict pending |
+| AC-11 | Docs and fixtures updated: SDL file, operation fixtures, README/ARCHITECTURE GraphQL sections, domain language terms | `hiring.graphql`, `graph-access.graphql` and the changed fixtures, manifest, `docs/api.md`, `README.md`, `docs/domain-language.md` (Opaque cursor, Nested connection, Time slot) | fixture validation test, manifest equality test | Met for the implemented slice (`ARCHITECTURE.md` not changed) |
 | AC-12 | `sbt test` and configured formatting/linting pass; integration tests run for persistence and subscription changes; missing infrastructure reported as unverified | Not implemented | `scripts/check-local.sh`, `sbt test`, `sbt it:test` (confirm command from build) | Not run |
 
 ## Performance and cost
@@ -223,7 +236,7 @@ Recovery: all slices are code-only; revert by removing SDL fields and resolvers.
 
 ## Checkpoint and review
 
-- Completed criteria and changed files: none; this document is the only change.
+- Completed criteria and changed files: see the decision log above and the S4 checkpoint in the consolidation spec.
 - Latest commands/results: none run for this spec; source facts above come from reading files on 2026-10-14.
 - Blockers and next concrete action: Architect spike for A1/A2 and Q1-Q5; then mark the spec ready and start slice 2.
 - Code Reviewer verdict and scope: pending

@@ -120,7 +120,7 @@ object HiringGraphQLSchema {
                 operationName = request.operationName,
                 queryValidator = QueryValidator.default,
                 exceptionHandler = exceptionHandler,
-                queryReducers = HiringGraphQLSchemaAssembly.queryReducers,
+                queryReducers = QueryAdmission.queryReducers,
                 deferredResolver = HiringGraphQLSchemaAssembly.deferredResolver,
                 errorsLimit = Some(20)
               )

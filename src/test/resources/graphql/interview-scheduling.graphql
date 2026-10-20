@@ -1,12 +1,12 @@
 mutation ScheduleInterview($input: ScheduleInterviewInput!) {
   scheduleInterview(input: $input) {
-    ... on InterviewWorkflow { id applicationId startsAt endsAt revision progress notifiedParticipants }
+    ... on InterviewWorkflow { id applicationId slot { startsAt endsAt } revision progress notifiedParticipants }
     ... on ValidationError { code message field }
     ... on DomainError { code message retryAfterSeconds }
   }
 }
 query InterviewProgress($workflowId: InterviewWorkflowID!) {
-  interviewWorkflow(workflowId: $workflowId) { id applicationId startsAt endsAt revision progress notifiedParticipants }
+  interviewWorkflow(workflowId: $workflowId) { id applicationId slot { startsAt endsAt } revision progress notifiedParticipants }
 }
 mutation RepairInterview($input: RepairInterviewInput!) {
   repairInterviewWorkflow(input: $input) {

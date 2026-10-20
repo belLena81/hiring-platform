@@ -4,7 +4,12 @@ import com.example.graphQL.cats.api.graphql.HiringGraphQLInputs.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLResolverSupport.*
 import com.example.graphQL.cats.domain.model.*
-import com.example.graphQL.cats.domain.model.Identifiers.ApplicationId
+import cats.data.EitherT
+import cats.effect.IO
+import com.example.graphQL.cats.domain.error.DomainError
+import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId}
+import com.example.graphQL.cats.domain.workflow.InterviewWorkflow
+import com.example.graphQL.cats.service.UseCaseError
 import com.example.graphQL.cats.domain.pagination.{
   ApplicationCursor,
   ApplicationEventCursor,
@@ -15,27 +20,84 @@ import sangria.schema.Context
 
 private[graphql] object HiringGraphQLApplicationResolvers {
   def myApplications(context: Context[RequestContext, Unit]): HiringGraphQLResult[Connection[Application]] =
+    ownApplications(context)
+
+  def jobApplications(context: Context[RequestContext, Unit]): HiringGraphQLResult[Connection[Application]] =
+    applicationsToJob(context, context.arg(jobIdArgument))
+
+  def applicationHistory(context: Context[RequestContext, Unit]): HiringGraphQLResult[Connection[ApplicationEvent]] =
+    historyOf(context, context.arg(applicationIdArgument))
+
+  /** `Job.applications`: the same use case and authorization as `jobApplications`, for the job being resolved. */
+  def jobApplicationsOf(context: Context[RequestContext, Job]): HiringGraphQLResult[Connection[Application]] =
+    applicationsToJob(context, context.value.id)
+
+  /** `Application.events`: the same use case and authorization as `applicationHistory`. */
+  def applicationEventsOf(
+      context: Context[RequestContext, Application]
+  ): HiringGraphQLResult[Connection[ApplicationEvent]] =
+    historyOf(context, context.value.id)
+
+  /** `User.applications`: only the viewer's own account has applications to list, through `myApplications`. Any other
+    * user resolves to null without a read, so a candidate or recruiter reached through a relation exposes nothing.
+    */
+  def userApplications(context: Context[RequestContext, User]): HiringGraphQLResult[Option[Connection[Application]]] =
+    authenticated(context) { case (actor, _) =>
+      if (actor.userId == context.value.id) ownApplications(context).map(Some(_))
+      else EitherT.pure[IO, HiringGraphQLFailure](None)
+    }
+
+  /** `InterviewWorkflow.application`: visible exactly when the caller may view the application, otherwise null (a
+    * workflow the caller can see never reveals an application the caller cannot).
+    */
+  def workflowApplication(
+      context: Context[RequestContext, InterviewWorkflow]
+  ): HiringGraphQLResult[Option[Application]] =
     authenticated(context) { case (actor, hiring) =>
-      applicationConnection(context, hiring)(request =>
+      val applicationId = context.value.applicationId
+      EitherT(
+        raiseOnUseCaseError(hiring.readModel.canViewApplication(actor, applicationId))
+          .flatMap(_ => raiseOnUseCaseError(hiring.readModel.application(applicationId)))
+          .value
+          .map {
+            case Left(
+                  HiringGraphQLFailure.UseCase(UseCaseError.Domain(DomainError.Forbidden | DomainError.NotFound(_)))
+                ) =>
+              Right(None)
+            case other => other
+          }
+      )
+    }
+
+  private def ownApplications(context: Context[RequestContext, ?]): HiringGraphQLResult[Connection[Application]] =
+    authenticated(context) { case (actor, hiring) =>
+      applicationConnection(hiring, context, "my-applications")(request =>
         raiseOnUseCaseError(hiring.applicationService.myApplications(actor, request))
       )
     }
 
-  def jobApplications(context: Context[RequestContext, Unit]): HiringGraphQLResult[Connection[Application]] =
+  private def applicationsToJob(
+      context: Context[RequestContext, ?],
+      jobId: JobId
+  ): HiringGraphQLResult[Connection[Application]] =
     authenticated(context) { case (actor, hiring) =>
-      applicationConnection(context, hiring)(request =>
-        raiseOnUseCaseError(hiring.applicationService.jobApplications(actor, context.arg(jobIdArgument), request))
+      applicationConnection(hiring, context, s"job-applications:${jobId.value}")(request =>
+        raiseOnUseCaseError(hiring.applicationService.jobApplications(actor, jobId, request))
       )
     }
 
-  def applicationHistory(context: Context[RequestContext, Unit]): HiringGraphQLResult[Connection[ApplicationEvent]] =
+  private def historyOf(
+      context: Context[RequestContext, ?],
+      applicationId: ApplicationId
+  ): HiringGraphQLResult[Connection[ApplicationEvent]] =
     authenticated(context) { case (actor, hiring) =>
       paged[ApplicationEventCursor, ApplicationEventPageRequest, ApplicationEvent](
         hiring,
         context.arg(firstArgument),
-        context.arg(afterArgument)
+        context.arg(afterArgument),
+        s"application-events:${applicationId.value}"
       )(ApplicationEventPageRequest.apply)(request =>
-        raiseOnUseCaseError(hiring.readModel.applicationHistory(actor, context.arg(applicationIdArgument), request))
+        raiseOnUseCaseError(hiring.readModel.applicationHistory(actor, applicationId, request))
       )(event => ApplicationEventCursor(event.occurredAt, event.id))
     }
 
@@ -112,13 +174,14 @@ private[graphql] object HiringGraphQLApplicationResolvers {
       )
     }
 
-  private def applicationConnection(context: Context[RequestContext, Unit], hiring: HiringGraphQLServices)(
+  private def applicationConnection(hiring: HiringGraphQLServices, context: Context[RequestContext, ?], list: String)(
       fetch: ApplicationPageRequest => HiringGraphQLResult[List[Application]]
   ): HiringGraphQLResult[Connection[Application]] =
     paged[ApplicationCursor, ApplicationPageRequest, Application](
       hiring,
       context.arg(firstArgument),
-      context.arg(afterArgument)
+      context.arg(afterArgument),
+      s"$list:${context.arg(applicationStatusArgument).fold("any")(_.toString)}"
     )((cursor, size) => ApplicationPageRequest(context.arg(applicationStatusArgument), cursor, size))(fetch)(
       application => ApplicationCursor(application.createdAt, application.id)
     )

@@ -1474,7 +1474,16 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     )
   }
 
-  test("ARR-01.1 only root query fields take a page size, so no nested connection can bypass the pre-execution check") {
+  test("ARR-01.1 an oversized or negative first on a nested connection is rejected before resolver work") {
+    List(
+      "query { myJobs(first: 5) { edges { node { applications(first: 101) { edges { cursor } } } } } }",
+      "query { myJobs(first: 5) { edges { node { applications(first: -1) { edges { cursor } } } } } }",
+      "query { myApplications(first: 5) { edges { node { events(first: 0) { edges { cursor } } } } } }",
+      "query { me { applications(first: 1000) { edges { cursor } } } }"
+    ).traverse_(assertPageSizeRefused(_))
+  }
+
+  test("ARR-01.1 nested paged fields are exactly the known nested connections, each covered by the reducer") {
     import sangria.schema.ObjectType
     val offenders = HiringGraphQLSchema.schema.allTypes.values.toList.collect {
       case objectType: ObjectType[?, ?] if objectType.name != "Query" =>
@@ -1482,7 +1491,11 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
           .filter(_.arguments.exists(_.name == "first"))
           .map(field => s"${objectType.name}.${field.name}")
     }.flatten
-    assertEquals(offenders, Nil, "a nested paged field needs its own pre-execution page size test")
+    assertEquals(
+      offenders.sorted,
+      List("Application.events", "Job.applications", "User.applications"),
+      "a nested paged field needs its own pre-execution page size test"
+    )
   }
 
   test("F5 the mutations that take a password are exactly the rate-limited signUp and login") {

@@ -196,12 +196,12 @@ private[graphql] object HiringGraphQLResolverSupport {
         .attempt
         .void
 
-  def authenticated[A](context: Context[RequestContext, Unit])(
+  def authenticated[A](context: Context[RequestContext, ?])(
       action: (ActorContext, HiringGraphQLServices) => HiringGraphQLResult[A]
   ): HiringGraphQLResult[A] = authenticated(context).flatMap(action.tupled)
 
   /** Runs `action` only while the hiring services are available. */
-  def withHiring[A](context: Context[RequestContext, Unit])(
+  def withHiring[A](context: Context[RequestContext, ?])(
       action: HiringGraphQLServices => HiringGraphQLResult[A]
   ): HiringGraphQLResult[A] =
     EitherT.liftF[IO, HiringGraphQLFailure, ProbeResult](context.ctx.hiringAvailable).flatMap {
@@ -223,7 +223,7 @@ private[graphql] object HiringGraphQLResolverSupport {
     }
 
   /** One bounded cursor page: decodes `after`, fetches with the request built from it, and signs the cursors. */
-  def paged[C, R, A](hiring: HiringGraphQLServices, first: Int, after: Option[String])(
+  def paged[C, R, A](hiring: HiringGraphQLServices, first: Int, after: Option[String], scope: String)(
       build: (Option[C], PageSize) => R
   )(fetch: R => HiringGraphQLResult[List[A]])(cursorOf: A => C)(using
       CursorCodec.Keyed[C]
@@ -231,15 +231,42 @@ private[graphql] object HiringGraphQLResolverSupport {
     given CursorCodec.CursorKey = hiring.cursorKey
     for {
       now <- EitherT.liftF[IO, HiringGraphQLFailure, Instant](IO.realTimeInstant)
-      (request, size) <- inputResult(cursorPage(first, after, CursorCodec.decode[C](_, now))(build))
+      (request, size) <- inputResult(cursorPage(first, after, decodeScoped[C](scope, _, now))(build))
       values <- fetch(request)
-    } yield connection(values, size)(value => CursorCodec.encode(cursorOf(value), now))
+    } yield connection(values, size, after.isDefined)(value =>
+      CursorCodec.encode(CursorCodec.Scoped(scope, cursorOf(value)), now)
+    )
   }
 
-  def connection[A](values: List[A], requested: Int)(cursor: A => String): Connection[A] = {
-    val nodes = values.take(requested)
-    val edges = nodes.map(value => Edge(value, cursor(value)))
-    Connection(edges, PageInfo(values.size > requested, edges.lastOption.map(_.cursor)))
+  private def decodeScoped[C](scope: String, value: String, now: Instant)(using
+      CursorCodec.Keyed[C],
+      CursorCodec.CursorKey
+  ): Either[CursorCodec.CursorError, C] =
+    CursorCodec
+      .decode[CursorCodec.Scoped[C]](value, now)
+      .flatMap(found => Either.cond(found.scope == scope, found.value, CursorCodec.CursorError.CriteriaMismatch))
+
+  /** The one place that turns a fetched window (one row more than requested) into edges and page information, for every
+    * list field. `edge` builds the edge of one row; `cursorOf` reads the cursor back from it.
+    */
+  def pageOf[A, E](values: List[A], requested: Int, afterSupplied: Boolean)(edge: A => E)(
+      cursorOf: E => String
+  ): (List[E], PageInfo) = {
+    val edges = values.take(requested).map(edge)
+    (
+      edges,
+      PageInfo(
+        hasNextPage = values.size > requested,
+        hasPreviousPage = afterSupplied,
+        startCursor = edges.headOption.map(cursorOf),
+        endCursor = edges.lastOption.map(cursorOf)
+      )
+    )
+  }
+
+  def connection[A](values: List[A], requested: Int, afterSupplied: Boolean)(cursor: A => String): Connection[A] = {
+    val (edges, pageInfo) = pageOf(values, requested, afterSupplied)(value => Edge(value, cursor(value)))(_.cursor)
+    Connection(edges, pageInfo)
   }
 
   private def validationError(
@@ -251,7 +278,7 @@ private[graphql] object HiringGraphQLResolverSupport {
   }
 
   private def authenticated(
-      context: Context[RequestContext, Unit]
+      context: Context[RequestContext, ?]
   ): HiringGraphQLResult[(ActorContext, HiringGraphQLServices)] =
     withHiring(context)(hiring => context.ctx.authenticatedActor.map(_ -> hiring))
 
