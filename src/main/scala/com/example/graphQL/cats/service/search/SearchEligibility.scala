@@ -39,8 +39,10 @@ object SearchEligibilityPolicy {
   /** Every live job check except embedding freshness: the lexical fallback needs no embedding. */
   def jobLexical(current: JobSearchEligibility, filter: JobSearchFilter): Boolean =
     current.job.status == JobStatus.Open &&
-      filter.city.forall(requested => current.job.location.city.contains(requested)) &&
-      filter.skills.subsetOf(current.job.skills) &&
+      filter.city.forall(requested =>
+        current.job.location.city.exists(city => SearchTerm.canonical(city) == SearchTerm.canonical(requested))
+      ) &&
+      SearchTerm.canonicalSorted(filter.skills).toSet.subsetOf(current.job.skills.map(SearchTerm.canonical)) &&
       filter.createdAfter.forall(after => !current.job.createdAt.isBefore(after))
 
   def candidate(

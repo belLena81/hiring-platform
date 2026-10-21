@@ -372,8 +372,10 @@ final class MongoJobRepository(
     baseJobFilter(
       List(
         Some(MongoFilter.eq(MongoFields.Status, JobStatus.Open.toString)),
-        filter.city.map(city => MongoFilter.eq(s"${MongoFields.Location}.${MongoFields.City}", city)),
-        Option.when(filter.skills.nonEmpty)(MongoFilter.all(MongoFields.Skills, filter.skills.toList.sorted)),
+        filter.city.map(city => MongoFilter.eq(MongoFields.LocationCityCanonical, SearchTerm.canonical(city))),
+        Option.when(filter.skills.nonEmpty)(
+          MongoFilter.all(MongoFields.SkillsCanonical, SearchTerm.canonicalSorted(filter.skills))
+        ),
         filter.createdAfter.map(createdAfter => MongoFilter.gte(MongoFields.CreatedAt, createdAfter.toDate))
       ),
       page
@@ -430,7 +432,10 @@ object MongoJobRepository {
       List(
         new Document(
           "$project",
-          new Document("skills", new Document("$setUnion", List("$skills", List.empty[String].asJava).asJava))
+          new Document(
+            "skills",
+            new Document("$setUnion", List(s"$$${MongoFields.SkillsCanonical}", List.empty[String].asJava).asJava)
+          )
         ),
         new Document("$unwind", "$skills"),
         new Document("$match", new Document("skills", new Document("$ne", ""))),
@@ -449,10 +454,20 @@ object MongoJobRepository {
     ).append(
       "cities",
       List(
-        new Document("$match", new Document("location.city", new Document("$nin", List(null, "").asJava))),
-        new Document("$group", new Document("_id", "$location.city").append("count", new Document("$sum", 1))),
+        new Document(
+          "$match",
+          new Document(MongoFields.LocationCityCanonical, new Document("$nin", List(null, "").asJava))
+        ),
+        // Cities group by their canonical form; the bucket keeps one deterministic display spelling (the smallest).
+        new Document(
+          "$group",
+          new Document("_id", s"$$${MongoFields.LocationCityCanonical}")
+            .append("count", new Document("$sum", 1))
+            .append("display", new Document("$min", s"$$${MongoFields.LocationCity}"))
+        ),
         new Document("$sort", new Document("count", -1).append("_id", 1)),
-        new Document("$limit", bucketReadLimit)
+        new Document("$limit", bucketReadLimit),
+        new Document("$project", new Document("_id", "$display").append("count", 1))
       ).asJava
     ).append(
       "remote",
@@ -483,9 +498,10 @@ object MongoJobRepository {
     val pipeline = radiusStage ++ initialMatch ++ List(
       new Document(
         "$project",
-        new Document(MongoFields.Skills, 1)
+        new Document(MongoFields.SkillsCanonical, 1)
           .append("location.country", 1)
-          .append("location.city", 1)
+          .append(MongoFields.LocationCity, 1)
+          .append(MongoFields.LocationCityCanonical, 1)
           .append("location.remote", 1)
       ),
       new Document("$facet", facets)
@@ -505,10 +521,13 @@ object MongoJobRepository {
       matchedIds.toList.map(ids =>
         new Document(MongoFields.Id, new Document("$in", ids.toList.map(_.value.toString).sorted.asJava))
       ) ++
-      filter.city.toList.map(city => new Document("location.city", city.trim)) ++
+      filter.city.toList.map(city => new Document(MongoFields.LocationCityCanonical, SearchTerm.canonical(city))) ++
       Option
         .when(filter.skills.nonEmpty)(
-          new Document("skills", new Document("$all", filter.skills.toList.map(_.trim).distinct.sorted.asJava))
+          new Document(
+            MongoFields.SkillsCanonical,
+            new Document("$all", SearchTerm.canonicalSorted(filter.skills).asJava)
+          )
         )
         .toList ++
       filter.createdAfter.toList.map(value => new Document("createdAt", new Document("$gte", value.toDate)))

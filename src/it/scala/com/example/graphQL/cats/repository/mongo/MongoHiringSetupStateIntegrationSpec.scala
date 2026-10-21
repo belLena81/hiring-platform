@@ -52,7 +52,9 @@ final class MongoHiringSetupStateIntegrationSpec extends MongoIntegrationSuite {
     "023_consumer_receipt_identity",
     "024_optional_field_absence",
     "025_operational_collection_validators",
-    "026_outbox_envelope_source"
+    "026_outbox_envelope_source",
+    "027_job_canonical_filters",
+    "028_binary_embedding_vectors"
   )
 
   /** Records schema-changing commands, which the shared access fixture deliberately ignores. */
@@ -172,7 +174,11 @@ final class MongoHiringSetupStateIntegrationSpec extends MongoIntegrationSuite {
     mongoResource.use { fixture =>
       recording(fixture).use { case (database, commands) =>
         def job(id: String, fence: Option[AnyRef]) = {
-          val base = new Document(MongoFields.Id, id).append(MongoFields.Version, Long.box(0L))
+          val base = new Document(MongoFields.Id, id)
+            .append(MongoFields.Version, Long.box(0L))
+            .append(MongoFields.Skills, java.util.List.of("Scala"))
+            .append(MongoFields.SkillsCanonical, java.util.List.of("scala"))
+            .append(MongoFields.Location, new Document(MongoFields.Country, "Cyprus"))
           fence.foreach(value => base.append(MongoFields.AdmissionFence, value))
           base
         }
@@ -192,7 +198,15 @@ final class MongoHiringSetupStateIntegrationSpec extends MongoIntegrationSuite {
           setup <- MongoHiringSetup.setupDatabase(database)
           _ <- setup.runCommand(new Document("collMod", MongoCollections.Jobs).append("validator", new Document()))
           ledger <- Mongo4catsCollections.documents(database, MongoCollections.HiringMigrationLedger)
-          _ <- ledger.deleteOne(Filters.eq(MongoFields.Id, MigrationIds.JobAdmissionFence.value))
+          // The later job steps (canonical filters, binary vectors) are not complete in that environment either.
+          _ <- ledger.deleteMany(
+            Filters.in(
+              MongoFields.Id,
+              MigrationIds.JobAdmissionFence.value,
+              MigrationIds.JobCanonicalFilters.value,
+              MigrationIds.BinaryEmbeddingVectors.value
+            )
+          )
           _ <- MongoHiringSetup.initialize(database, Diagnostics.noop[IO])
           upgraded <- ledgerRows(database)
           installed <- MongoHiringValidators.validatorMatches(
@@ -241,7 +255,12 @@ final class MongoHiringSetupStateIntegrationSpec extends MongoIntegrationSuite {
           new Document("type", "Point").append("coordinates", java.util.List.of(Double.box(200d), Double.box(0d)))
         val job = new Document(MongoFields.Id, "job-invalid-point")
           .append(MongoFields.Version, Long.box(0L))
-          .append(MongoFields.Location, new Document(MongoFields.Point, invalidPoint))
+          .append(MongoFields.Skills, java.util.List.of("Scala"))
+          .append(MongoFields.SkillsCanonical, java.util.List.of("scala"))
+          .append(
+            MongoFields.Location,
+            new Document(MongoFields.Country, "Cyprus").append(MongoFields.Point, invalidPoint)
+          )
         for {
           jobs <- Mongo4catsCollections.documents(database, MongoCollections.Jobs)
           _ <- jobs.insertOne(job)

@@ -66,18 +66,13 @@ private[mongo] object MongoCandidateResidenceIntegrityMigrations {
   val MigrationId: String = Id.value
   import MongoBatchScan.BatchSize
 
-  /** The installed users validator is the one this step completed against or its documented successor (`025`). */
+  /** The installed users validator is the one this step completed against or a documented successor (`025`, `028`). */
   private def requireValidator(database: MongoHiringSetup.SetupDatabase): IO[Unit] =
-    MongoHiringValidators
-      .assertStrictValidators(database, List(MongoCollections.Users -> MongoHiringValidators.userValidatorV1))
-      .handleErrorWith {
-        case _: MigrationError.ValidatorMismatch =>
-          MongoHiringValidators.assertStrictValidators(
-            database,
-            List(MongoCollections.Users -> MongoHiringValidators.userValidator)
-          )
-        case error => IO.raiseError(error)
-      }
+    MongoHiringValidators.assertAnyStrictValidator(
+      database,
+      MongoCollections.Users,
+      MongoHiringValidators.userValidatorHistory
+    )
 
   /** Run before installing the user validator so completed-proof drift cannot be silently overwritten. */
   def verifyCompleted(database: MongoHiringSetup.SetupDatabase): IO[Unit] =

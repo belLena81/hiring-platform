@@ -441,11 +441,12 @@ private[mongo] object MongoOperationalValidators {
     closed = true
   )
 
-  /** Installed by migration 025 in this order; the users definition is `MongoHiringValidators.userValidator`. The
-    * search-session-work definition is the one 025 installed; [[withEnvelopeSource]] is its documented successor.
+  /** Installed by migration 025 in this order; the users definition is `MongoHiringValidators.userValidatorV2`. The
+    * search-session-work definition is the one 025 installed; [[withEnvelopeSource]] is its documented successor and
+    * [[current]] adds the users successor of migration 028.
     */
   def all: List[(String, Document)] = List(
-    MongoCollections.Users -> MongoHiringValidators.userValidator,
+    MongoCollections.Users -> MongoHiringValidators.userValidatorV2,
     MongoCollections.Applications -> applicationsValidator,
     MongoCollections.ApplicationEvents -> applicationEventsValidator,
     MongoCollections.EmbeddingWork -> embeddingWorkValidator,
@@ -458,6 +459,21 @@ private[mongo] object MongoOperationalValidators {
     MongoCollections.InterviewCalendarReservations -> interviewCalendarReservationsValidator,
     MongoCollections.InterviewNotificationReceipts -> interviewNotificationReceiptsValidator
   )
+
+  /** The definitions installed after every migration has completed. */
+  def current: List[(String, Document)] = withEnvelopeSource.map {
+    case (MongoCollections.Users, _) => MongoCollections.Users -> MongoHiringValidators.userValidator
+    case other                       => other
+  }
+
+  /** The accepted definitions per collection for the 025 completed proof: what 025 installed and every successor. */
+  def acceptedByCompletedProof: List[(String, List[Document])] = all.map {
+    case (MongoCollections.Users, _) =>
+      MongoCollections.Users -> MongoHiringValidators.userValidatorHistory.drop(1)
+    case (MongoCollections.SearchSessionWork, validator) =>
+      MongoCollections.SearchSessionWork -> List(validator, searchSessionWorkValidator)
+    case (name, validator) => name -> List(validator)
+  }
 
   /** [[all]] with the search-session-work successor installed by migration 026, for the 025 completed proof. */
   def withEnvelopeSource: List[(String, Document)] = all.map {

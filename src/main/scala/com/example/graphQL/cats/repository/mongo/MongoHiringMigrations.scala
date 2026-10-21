@@ -102,6 +102,8 @@ private[mongo] object MongoHiringMigrations {
           run(MongoOptionalFieldAbsenceMigrations.step),
           run(MongoOperationalCollectionValidatorMigrations.step),
           run(MongoOutboxEnvelopeSourceMigrations.step),
+          run(MongoJobCanonicalFilterMigrations.step),
+          run(MongoBinaryEmbeddingVectorMigrations.step),
           createAccountRegistry(database)
         ).sequence_
       }

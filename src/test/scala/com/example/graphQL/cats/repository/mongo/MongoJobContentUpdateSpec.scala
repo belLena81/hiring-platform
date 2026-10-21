@@ -44,13 +44,17 @@ class MongoJobContentUpdateSpec extends FunSuite {
         "description",
         "requirements",
         "skills",
+        "skillsCanonical",
         "location.country",
         "location.remote",
         "status",
         "updatedAt"
       )
     )
-    assertEquals(keys(update, "$unset"), Set("location.city", "location.point", "closedAt"))
+    assertEquals(
+      keys(update, "$unset"),
+      Set("location.city", "location.cityCanonical", "location.point", "closedAt")
+    )
     assertEquals(update.getDocument("$inc").getInt64("version").getValue, 1L)
     assertEquals(keys(update, "$inc"), Set("version"))
   }

@@ -180,7 +180,13 @@ final class AtlasLexicalQueryFacetsIntegrationSpec extends CatsEffectSuite {
         )
         radius <- facets(svc, JobFacetQuery(noFilter, Some(NearbyRadius(nicosia, 20d)), Some("scala")))
         structured <- facets(svc, JobFacetQuery(noFilter, None))
+        // MSC-08.1: the structured filter compares canonical values, so spelling and case do not change the counts.
+        shouting <- facets(
+          svc,
+          JobFacetQuery(JobSearchFilter(Some(" NICOSIA "), Set("SCALA"), Some(now)), None, Some("scala"))
+        )
       } yield {
+        assertEquals(shouting, conjunction)
         assertEquals(typical, Right(JobDiscoveryFacets.fromJobs(matching)))
         assertEquals(
           conjunction,

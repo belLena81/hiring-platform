@@ -361,8 +361,14 @@ private[graphql] object HiringGraphQLInputs {
     deriveInputObjectType[JobFilterGraphQLInput](
       InputObjectTypeName("JobFilter"),
       InputObjectTypeDescription("Structured filters shared by every job discovery operation."),
-      DocumentInputField("city", "Only jobs in this city; it must not be blank."),
-      DocumentInputField("skills", "Only jobs that require all of these skills; at most 100, each of bounded length."),
+      DocumentInputField(
+        "city",
+        "Only jobs in this city, compared ignoring case and surrounding spaces; it must not be blank."
+      ),
+      DocumentInputField(
+        "skills",
+        "Only jobs that require all of these skills, each compared ignoring case and surrounding spaces; at most 100, each of bounded length."
+      ),
       DocumentInputField("createdAfter", "Only jobs created after this instant.")
     )
   lazy val jobFilterArgument: Argument[Option[JobFilterGraphQLInput]] =

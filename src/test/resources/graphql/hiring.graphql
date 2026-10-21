@@ -744,10 +744,10 @@ type JobFacetBucket {
 
 "Structured filters shared by every job discovery operation."
 input JobFilter {
-  "Only jobs in this city; it must not be blank."
+  "Only jobs in this city, compared ignoring case and surrounding spaces; it must not be blank."
   city: String
 
-  "Only jobs that require all of these skills; at most 100, each of bounded length."
+  "Only jobs that require all of these skills, each compared ignoring case and surrounding spaces; at most 100, each of bounded length."
   skills: [String!]
 
   "Only jobs created after this instant."

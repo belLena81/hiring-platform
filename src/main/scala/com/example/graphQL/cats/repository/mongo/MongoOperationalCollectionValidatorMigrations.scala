@@ -30,14 +30,10 @@ private[mongo] object MongoOperationalCollectionValidatorMigrations {
   val MigrationId: String = Id.value
 
   private def verifyCompleted(database: MongoHiringSetup.SetupDatabase): IO[CompletedProof] =
-    MongoHiringValidators
-      .assertStrictValidators(database, MongoOperationalValidators.all)
-      .handleErrorWith {
-        case _: MigrationError.ValidatorMismatch =>
-          // Migration 026 replaces the search-session-work definition with its documented successor.
-          MongoHiringValidators.assertStrictValidators(database, MongoOperationalValidators.withEnvelopeSource)
-        case error => IO.raiseError(error)
-      }
+    // Migration 026 replaces the search-session-work definition and 028 the users definition with their documented
+    // successors; the proof accepts either one and fails closed on any other drift.
+    MongoOperationalValidators.acceptedByCompletedProof
+      .traverse_ { case (name, accepted) => MongoHiringValidators.assertAnyStrictValidator(database, name, accepted) }
       .as(CompletedProof.Trusted)
 
   /** Fails with the first collection holding a row its validator rejects; the error names the collection only. */

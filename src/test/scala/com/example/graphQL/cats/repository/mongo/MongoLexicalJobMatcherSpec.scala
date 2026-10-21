@@ -33,8 +33,8 @@ final class MongoLexicalJobMatcherSpec extends FunSuite {
     val rendered = search.toJson
     assert(!rendered.contains("embeddingMeta.model"), rendered)
     assert(rendered.contains(""""path": "status""""), rendered)
-    assert(rendered.contains(""""path": "location.city""""), rendered)
-    assert(rendered.contains(""""path": "skills""""), rendered)
+    assert(rendered.contains(""""path": "location.cityCanonical""""), rendered)
+    assert(rendered.contains(""""path": "skillsCanonical""""), rendered)
     assert(rendered.contains(""""path": "createdAt""""), rendered)
   }
 
@@ -65,8 +65,8 @@ final class MongoLexicalJobMatcherSpec extends FunSuite {
     val restricted = MongoJobRepository.discoveryFilter(filter, Some(Set(id(2), id(1))))
     val clauses = restricted.getList("$and", classOf[Document]).asScala.toList
     assertEquals(clauses.head.getString("status"), "Open")
-    assert(clauses.exists(_.containsKey("location.city")))
-    assert(clauses.exists(_.containsKey("skills")))
+    assert(clauses.exists(_.containsKey("location.cityCanonical")))
+    assert(clauses.exists(_.containsKey("skillsCanonical")))
     assert(clauses.exists(_.containsKey("createdAt")))
     assertEquals(
       clauses

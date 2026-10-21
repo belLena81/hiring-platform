@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.service.search
 
-import com.example.graphQL.cats.domain.model.{EmbeddingMeta, GeoPoint, Job, SearchMode}
+import com.example.graphQL.cats.domain.model.{EmbeddingMeta, GeoPoint, Job, SearchMode, SearchTerm}
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.pagination.PageSize
 import com.example.graphQL.cats.shared.crypto.CriteriaDigest
@@ -259,9 +259,9 @@ object SearchedCandidate {
 
 object SkillMatching {
   def matched(candidateSkills: Set[String], targetSkills: Set[String]): List[String] = {
-    val candidateCanonical = candidateSkills.map(_.trim.toLowerCase(java.util.Locale.ROOT))
+    val candidateCanonical = candidateSkills.map(SearchTerm.canonical)
     targetSkills.toList
-      .filter(skill => candidateCanonical.contains(skill.trim.toLowerCase(java.util.Locale.ROOT)))
-      .sortBy(skill => (skill.trim.toLowerCase(java.util.Locale.ROOT), skill))
+      .filter(skill => candidateCanonical.contains(SearchTerm.canonical(skill)))
+      .sortBy(skill => (SearchTerm.canonical(skill), skill))
   }
 }

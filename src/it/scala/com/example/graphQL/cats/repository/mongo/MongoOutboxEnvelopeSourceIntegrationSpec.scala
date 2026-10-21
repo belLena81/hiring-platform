@@ -108,7 +108,7 @@ final class MongoOutboxEnvelopeSourceIntegrationSpec extends MongoIntegrationSui
 
   private def successorInstalled(database: MongoDatabase[IO]): IO[Boolean] =
     MongoHiringSetup.setupDatabase(database).flatMap { setup =>
-      (MongoOperationalValidators.withEnvelopeSource :+ (Outbox -> MongoHiringValidators.outboxValidator)).forallM {
+      (MongoOperationalValidators.current :+ (Outbox -> MongoHiringValidators.outboxValidator)).forallM {
         case (name, expected) => MongoHiringValidators.validatorMatches(setup, name, expected)
       }
     }

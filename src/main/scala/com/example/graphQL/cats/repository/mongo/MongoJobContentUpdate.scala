@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
-import com.example.graphQL.cats.domain.model.Job
+import com.example.graphQL.cats.domain.model.{Job, SearchTerm}
 import org.bson.Document
 
 import scala.jdk.CollectionConverters.*
@@ -12,7 +12,8 @@ import scala.jdk.CollectionConverters.*
   * status for closure).
   */
 private[mongo] object MongoJobContentUpdate {
-  private val City = s"${MongoFields.Location}.${MongoFields.City}"
+  private val City = MongoFields.LocationCity
+  private val CityCanonical = MongoFields.LocationCityCanonical
 
   def apply(job: Job): MongoUpdate = {
     val location = job.location
@@ -30,9 +31,11 @@ private[mongo] object MongoJobContentUpdate {
       MongoUpdate.set(MongoFields.Description, job.description),
       MongoUpdate.set(MongoFields.Requirements, job.requirements.asJava),
       MongoUpdate.set(MongoFields.Skills, job.skills.toList.sorted.asJava),
+      MongoUpdate.set(MongoFields.SkillsCanonical, job.skills.toList.sorted.map(SearchTerm.canonical).asJava),
       MongoUpdate.set(s"${MongoFields.Location}.${MongoFields.Country}", location.country),
       MongoUpdate.set(s"${MongoFields.Location}.${MongoFields.Remote}", location.remote),
       optional(City, location.city),
+      optional(CityCanonical, location.city.map(SearchTerm.canonical)),
       optional(MongoFields.LocationPoint, point),
       MongoUpdate.set(MongoFields.Status, job.status.toString),
       MongoUpdate.set(MongoFields.UpdatedAt, java.util.Date.from(job.updatedAt)),

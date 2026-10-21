@@ -19,11 +19,22 @@ private[mongo] object MongoAtlasSearchSetup {
       .append(MongoFields.Title, string)
       .append(MongoFields.Description, string)
       .append(MongoFields.Requirements, string)
-      .append(MongoFields.Skills, List(string, token).asJava)
+      .append(MongoFields.Skills, string)
+      .append(MongoFields.SkillsCanonical, token)
       .append(MongoFields.Status, token)
       .append(MongoFields.CreatedAt, new Document("type", "date"))
-      .append(MongoFields.Location, document(new Document(MongoFields.City, token)))
+      .append(MongoFields.Location, document(new Document(MongoFields.CityCanonical, token)))
       .append(MongoFields.EmbeddingMeta, document(new Document(MongoFields.Model, token)))
+  )
+
+  /** Job vector filter paths: the canonical city and skills (`027_job_canonical_filters`), never the display values. */
+  private[mongo] val jobVectorFilterPaths: List[String] = List(
+    MongoFields.Status,
+    MongoFields.LocationCityCanonical,
+    MongoFields.SkillsCanonical,
+    MongoFields.CreatedAt,
+    MongoFields.RecruiterId,
+    MongoFields.EmbeddingMetaModel
   )
 
   private[mongo] def candidateLexicalDefinition: Document = lexical(
@@ -84,16 +95,7 @@ private[mongo] object MongoAtlasSearchSetup {
         MongoCollections.Jobs,
         new SearchIndexModel(
           config.jobVectorIndex,
-          vectorDefinition(
-            List(
-              MongoFields.Status,
-              MongoFields.LocationCity,
-              MongoFields.Skills,
-              MongoFields.CreatedAt,
-              MongoFields.RecruiterId,
-              MongoFields.EmbeddingMetaModel
-            )
-          ),
+          vectorDefinition(jobVectorFilterPaths),
           SearchIndexType.vectorSearch()
         )
       ),
@@ -181,14 +183,7 @@ private[mongo] object MongoAtlasSearchSetup {
         }
         poll
       }
-    val jobFilters = Set(
-      MongoFields.Status,
-      MongoFields.LocationCity,
-      MongoFields.Skills,
-      MongoFields.CreatedAt,
-      MongoFields.RecruiterId,
-      MongoFields.EmbeddingMetaModel
-    )
+    val jobFilters = jobVectorFilterPaths.toSet
     await(config.jobVectorIndex, MongoCollections.Jobs, index => validVector(index, jobFilters)) *>
       await(config.jobLexicalIndex, MongoCollections.Jobs, index => validLexical(index, jobLexicalDefinition)) *>
       await(config.candidateVectorIndex, MongoCollections.Users, index => validVector(index, candidateVectorFilters)) *>

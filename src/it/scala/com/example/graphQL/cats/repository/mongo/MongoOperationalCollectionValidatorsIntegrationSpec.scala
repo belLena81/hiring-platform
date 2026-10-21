@@ -59,7 +59,7 @@ final class MongoOperationalCollectionValidatorsIntegrationSpec extends MongoInt
 
   private def validatorsInstalled(database: MongoDatabase[IO]): IO[Boolean] =
     MongoHiringSetup.setupDatabase(database).flatMap { setup =>
-      MongoOperationalValidators.withEnvelopeSource.forallM { case (name, expected) =>
+      MongoOperationalValidators.current.forallM { case (name, expected) =>
         MongoHiringValidators.validatorMatches(setup, name, expected)
       }
     }
@@ -75,9 +75,17 @@ final class MongoOperationalCollectionValidatorsIntegrationSpec extends MongoInt
       }
       _ <- MongoHiringValidators.install(setup, MongoCollections.Users, MongoHiringValidators.userValidatorV1)
       _ <- MongoHiringValidators.install(setup, MongoCollections.EventOutbox, MongoHiringValidators.outboxValidatorV1)
+      _ <- MongoHiringValidators.install(setup, MongoCollections.Jobs, MongoHiringValidators.jobValidatorV2)
       rows <- collection(database, MongoCollections.HiringMigrationLedger)
       _ <- rows.deleteMany(
-        Filters.in(MongoFields.Id, Absence.value, Validators.value, MigrationIds.OutboxEnvelopeSource.value)
+        Filters.in(
+          MongoFields.Id,
+          Absence.value,
+          Validators.value,
+          MigrationIds.OutboxEnvelopeSource.value,
+          MigrationIds.JobCanonicalFilters.value,
+          MigrationIds.BinaryEmbeddingVectors.value
+        )
       )
     } yield ()
 
@@ -659,7 +667,7 @@ final class MongoOperationalCollectionValidatorsIntegrationSpec extends MongoInt
           MongoHiringValidators.userValidatorV1
         )
         _ <- init(fixture.database)
-        v2Installed <- MongoHiringValidators.validatorMatches(
+        currentInstalled <- MongoHiringValidators.validatorMatches(
           setup,
           MongoCollections.Users,
           MongoHiringValidators.userValidator
@@ -670,7 +678,7 @@ final class MongoOperationalCollectionValidatorsIntegrationSpec extends MongoInt
         drifted <- init(fixture.database).attempt
       } yield {
         assert(v1Installed)
-        assert(v2Installed)
+        assert(currentInstalled)
         assertEquals(drifted, Left(MigrationError.ValidatorMismatch(MongoCollections.Users)))
       }
     }

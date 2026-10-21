@@ -25,18 +25,46 @@ private[mongo] object MongoHiringCodecs {
   import StoredDocumentError.*
 
   def userWithPassword(value: User, passwordHash: PasswordHash, version: Long = 0L): Document =
-    MongoHiringPersistenceCodecs.user(storedUser(value, Some(passwordHash.encoded), version))
+    withEmbedding(
+      MongoHiringPersistenceCodecs.user(storedUser(value, Some(passwordHash.encoded), version)),
+      value.embedding
+    )
 
   def user(value: User, version: Long = 0L): Document =
-    MongoHiringPersistenceCodecs.user(storedUser(value, None, version))
+    withEmbedding(MongoHiringPersistenceCodecs.user(storedUser(value, None, version)), value.embedding)
+
+  /** The vector is the one field the generated codecs do not carry: it is stored as a float32 BSON vector. */
+  private def withEmbedding(document: Document, embedding: Option[EntityEmbedding]): Document = {
+    embedding.foreach(value => document.put(MongoFields.Embedding, MongoEmbeddingVectors.encode(value.values)))
+    document
+  }
+
+  private def withoutEmbedding(document: Document): Document =
+    if (!document.containsKey(MongoFields.Embedding)) document
+    else {
+      val copy = new Document(document)
+      copy.remove(MongoFields.Embedding)
+      copy
+    }
+
+  private def storedVector(document: Document): ValidatedNel[StoredDocumentError, Option[List[Float]]] =
+    Option(document.get(MongoFields.Embedding)).traverse(raw =>
+      MongoEmbeddingVectors.decode(raw).toValidNel(InvalidField(MongoFields.Embedding))
+    )
 
   def readUser(document: Document): ValidatedNel[StoredDocumentError, User] =
     readVersionedUser(document).map(_.value)
 
   def readVersionedUser(document: Document): ValidatedNel[StoredDocumentError, Versioned[User]] =
-    decode(document, UserFields)(MongoHiringPersistenceCodecs.decodeUser).andThen(readVersionedUser)
+    (
+      decode(withoutEmbedding(document), UserFields)(MongoHiringPersistenceCodecs.decodeUser),
+      storedVector(document)
+    ).tupled.andThen { case (stored, vector) => readVersionedUser(stored, vector) }
 
-  private def readVersionedUser(value: StoredUser): ValidatedNel[StoredDocumentError, Versioned[User]] =
+  private def readVersionedUser(
+      value: StoredUser,
+      vector: Option[List[Float]]
+  ): ValidatedNel[StoredDocumentError, Versioned[User]] =
     (
       uuid(MongoFields.Id, value._id).toValidatedNel.map(UserId.apply),
       value.email.traverse(email =>
@@ -49,7 +77,7 @@ private[mongo] object MongoHiringCodecs {
       enumValue(MongoFields.AccountStatus, value.accountStatus, AccountStatus.values).toValidatedNel,
       value.deletedAt.map(_.toInstant).validNel,
       value.adminSingletonKey.map(_.contains("singleton-admin")).getOrElse(false).validNel,
-      readEmbedding(value.embedding, value.embeddingMeta)
+      readEmbedding(vector, value.embeddingMeta)
     ).mapN { (id, email, name, role, profile, createdAt, accountStatus, deletedAt, adminSingleton, embedding) =>
       Versioned(
         User(id, email, name, role, profile, createdAt, adminSingleton, embedding, accountStatus, deletedAt),
@@ -61,21 +89,31 @@ private[mongo] object MongoHiringCodecs {
     }
 
   def readCredentials(document: Document): ValidatedNel[StoredDocumentError, Option[AccountCredentials]] =
-    decode(document, UserFields)(MongoHiringPersistenceCodecs.decodeUser).andThen { value =>
+    (
+      decode(withoutEmbedding(document), UserFields)(MongoHiringPersistenceCodecs.decodeUser),
+      storedVector(document)
+    ).tupled.andThen { case (value, vector) =>
       value.passwordHash.fold(None.validNel)(hash =>
-        readVersionedUser(value).map(v => AccountCredentials(v.value, PasswordHash.fromEncoded(hash)).some)
+        readVersionedUser(value, vector).map(v => AccountCredentials(v.value, PasswordHash.fromEncoded(hash)).some)
       )
     }
 
-  def job(job: Job, version: Long = 0L): Document = MongoHiringPersistenceCodecs.job(storedJob(job, version))
+  def job(job: Job, version: Long = 0L): Document =
+    withEmbedding(MongoHiringPersistenceCodecs.job(storedJob(job, version)), job.embedding)
 
   def readJob(document: Document): ValidatedNel[StoredDocumentError, Job] =
     readVersionedJob(document).map(_.value)
 
   def readVersionedJob(document: Document): ValidatedNel[StoredDocumentError, Versioned[Job]] =
-    decode(document, JobFields)(MongoHiringPersistenceCodecs.decodeJob).andThen(readVersionedJob)
+    (
+      decode(withoutEmbedding(document), JobFields)(MongoHiringPersistenceCodecs.decodeJob),
+      storedVector(document)
+    ).tupled.andThen { case (stored, vector) => readVersionedJob(stored, vector) }
 
-  private def readVersionedJob(value: StoredJob): ValidatedNel[StoredDocumentError, Versioned[Job]] =
+  private def readVersionedJob(
+      value: StoredJob,
+      vector: Option[List[Float]]
+  ): ValidatedNel[StoredDocumentError, Versioned[Job]] =
     (
       uuid(MongoFields.Id, value._id).toValidatedNel.map(JobId.apply),
       uuid(MongoFields.RecruiterId, value.recruiterId).toValidatedNel.map(UserId.apply),
@@ -88,7 +126,7 @@ private[mongo] object MongoHiringCodecs {
       value.createdAt.toInstant.validNel,
       value.updatedAt.toInstant.validNel,
       value.closedAt.map(_.toInstant).validNel,
-      readEmbedding(value.embedding, value.embeddingMeta)
+      readEmbedding(vector, value.embeddingMeta)
     ).mapN(Job.apply).map(Versioned(_, value.version)).andThen { job =>
       Either.cond(job.version >= 0L, job, InvalidField(MongoFields.Version)).toValidatedNel
     }
@@ -319,7 +357,8 @@ private[mongo] object MongoHiringCodecs {
     MongoFields.ClosedAt,
     MongoFields.Embedding,
     MongoFields.EmbeddingMeta,
-    MongoFields.AdmissionFence
+    MongoFields.AdmissionFence,
+    MongoFields.SkillsCanonical
   )
   private val ApplicationFields = Set(
     MongoFields.Id,
@@ -418,13 +457,13 @@ private[mongo] object MongoHiringCodecs {
             MongoHiringPersistenceCodecs.StoredCandidateResidence(
               residence.country,
               residence.city,
-              residence.country.trim.toLowerCase(java.util.Locale.ROOT),
-              residence.city.map(_.trim.toLowerCase(java.util.Locale.ROOT))
+              SearchTerm.canonical(residence.country),
+              residence.city.map(SearchTerm.canonical)
             )
           ),
           profile.availabilityStatus.map(_.toString),
           Some(profile.recruiterSearchOptIn),
-          Some(profile.skills.toList.map(_.trim.toLowerCase(java.util.Locale.ROOT)).sorted)
+          Some(profile.skills.toList.map(SearchTerm.canonical).sorted)
         )
       )
     case UserProfile.Recruiter(profile) =>
@@ -470,7 +509,7 @@ private[mongo] object MongoHiringCodecs {
     value.fold(MissingField(field).invalidNel)(_.validNel)
 
   private def readEmbedding(
-      values: Option[List[Double]],
+      values: Option[List[Float]],
       meta: Option[StoredEmbeddingMeta]
   ): ValidatedNel[StoredDocumentError, Option[EntityEmbedding]] =
     (values, meta) match {
@@ -478,20 +517,18 @@ private[mongo] object MongoHiringCodecs {
       case (Some(numbers), Some(value)) =>
         Some(
           EntityEmbedding(
-            numbers.map(_.toFloat),
+            numbers,
             EmbeddingMeta(value.model, value.sourceHash, value.updatedAt.toInstant)
           )
         ).validNel
       case _ => InconsistentDocument.invalidNel
     }
 
-  def embeddingDocument(embedding: EntityEmbedding): Document =
-    MongoHiringPersistenceCodecs.embedding(
-      StoredEmbeddingFields(
-        embedding.values.map(_.toDouble),
-        StoredEmbeddingMeta(embedding.meta.model, embedding.meta.sourceHash, embedding.meta.updatedAt.toDate)
-      )
-    )
+  /** The `embedding` vector and `embeddingMeta` fields written by the derived-data (embedding) update. */
+  def embeddingDocument(embedding: EntityEmbedding): Document = {
+    val meta = StoredEmbeddingMeta(embedding.meta.model, embedding.meta.sourceHash, embedding.meta.updatedAt.toDate)
+    withEmbedding(MongoHiringPersistenceCodecs.embedding(StoredEmbeddingFields(meta)), Some(embedding))
+  }
 
   private def isOutbox(document: Document): Boolean =
     document.keySet.asScala.exists(
@@ -519,7 +556,6 @@ private[mongo] object MongoHiringCodecs {
 
   private def storedUser(value: User, passwordHash: Option[String], version: Long): StoredUser = {
     val emailCanonical = value.email.map(email => AccountName.canonical(email.value))
-    val embedding = value.embedding.map(_.values.map(_.toDouble))
     val embeddingMeta = value.embedding.map(embedding =>
       StoredEmbeddingMeta(
         embedding.meta.model,
@@ -548,13 +584,13 @@ private[mongo] object MongoHiringCodecs {
               MongoHiringPersistenceCodecs.StoredCandidateResidence(
                 residence.country,
                 residence.city,
-                residence.country.trim.toLowerCase(java.util.Locale.ROOT),
-                residence.city.map(_.trim.toLowerCase(java.util.Locale.ROOT))
+                SearchTerm.canonical(residence.country),
+                residence.city.map(SearchTerm.canonical)
               )
             ),
             candidate.availabilityStatus.map(_.toString),
             Some(candidate.recruiterSearchOptIn),
-            Some(candidate.skills.toList.map(_.trim.toLowerCase(java.util.Locale.ROOT)).sorted)
+            Some(candidate.skills.toList.map(SearchTerm.canonical).sorted)
           )
         case UserProfile.Recruiter(recruiter) =>
           StoredProfile(
@@ -575,13 +611,11 @@ private[mongo] object MongoHiringCodecs {
       value.deletedAt.map(Date.from),
       Option.when(value.role == UserRole.Admin && value.adminSingleton)("singleton-admin"),
       passwordHash,
-      embedding,
       embeddingMeta
     )
   }
 
   private def storedJob(value: Job, version: Long): StoredJob = {
-    val embedding = value.embedding.map(_.values.map(_.toDouble))
     val embeddingMeta = value.embedding.map(embedding =>
       StoredEmbeddingMeta(
         embedding.meta.model,
@@ -589,6 +623,7 @@ private[mongo] object MongoHiringCodecs {
         embedding.meta.updatedAt.toDate
       )
     )
+    val skills = value.skills.toList.sorted
     StoredJob(
       value.id.value.toString,
       version,
@@ -596,19 +631,20 @@ private[mongo] object MongoHiringCodecs {
       value.title,
       value.description,
       value.requirements,
-      value.skills.toList.sorted,
+      skills,
       StoredLocation(
         value.location.country,
         value.location.city,
         value.location.remote,
-        value.location.coordinates.map(point => StoredGeoPoint("Point", List(point.longitude, point.latitude)))
+        value.location.coordinates.map(point => StoredGeoPoint("Point", List(point.longitude, point.latitude))),
+        value.location.city.map(SearchTerm.canonical)
       ),
       value.status.toString,
       value.createdAt.toDate,
       value.updatedAt.toDate,
       value.closedAt.map(Date.from),
-      embedding,
-      embeddingMeta
+      embeddingMeta,
+      skillsCanonical = Some(skills.map(SearchTerm.canonical))
     )
   }
 

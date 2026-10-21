@@ -541,8 +541,8 @@ private[mongo] object MongoSearchEligibilityRendering {
   private def path(field: SearchEligibilityField): String = field match {
     case SearchEligibilityField.JobStatus              => MongoFields.Status
     case SearchEligibilityField.EmbeddingModel         => MongoFields.EmbeddingMetaModel
-    case SearchEligibilityField.JobCity                => MongoFields.LocationCity
-    case SearchEligibilityField.JobSkill               => MongoFields.Skills
+    case SearchEligibilityField.JobCity                => MongoFields.LocationCityCanonical
+    case SearchEligibilityField.JobSkill               => MongoFields.SkillsCanonical
     case SearchEligibilityField.JobCreatedAt           => MongoFields.CreatedAt
     case SearchEligibilityField.CandidateRole          => MongoFields.Role
     case SearchEligibilityField.CandidateAccountStatus => MongoFields.AccountStatus

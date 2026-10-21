@@ -35,6 +35,7 @@ object SearchEvaluationAtlasRunner extends IOApp {
       branchLimit: Int,
       storedSource: Boolean,
       quantization: Option[String],
+      vectorStorage: String,
       pageSize: Int,
       concurrency: Int,
       temperature: String,
@@ -87,6 +88,13 @@ object SearchEvaluationAtlasRunner extends IOApp {
         .get("quantization")
         .filter(_ != "none")
         .traverse(value => Either.cond(value == "scalar", value, "--quantization must be none or scalar"))
+      // The application stores float32 binary vectors (migration 028); the float64 array form is the pre-028 baseline.
+      vectorStorage = values.getOrElse("vector-storage", "float32-binary")
+      _ <- Either.cond(
+        Set("float32-binary", "float64-array").contains(vectorStorage),
+        (),
+        "--vector-storage must be float32-binary or float64-array"
+      )
       pageSize <- int("page-size", 7)
       concurrency <- int("concurrency", 1)
       temperature = values.getOrElse("temperature", "cold")
@@ -127,6 +135,7 @@ object SearchEvaluationAtlasRunner extends IOApp {
       branchLimit,
       storedSource,
       quantization,
+      vectorStorage,
       pageSize,
       concurrency,
       temperature,
@@ -237,7 +246,11 @@ object SearchEvaluationAtlasRunner extends IOApp {
         new Document("_id", f"doc-$id%05d")
           .append("category", Int.box(id % 10))
           .append("judgedTopic", Int.box(id % 7))
-          .append("embedding", vector.map(java.lang.Double.valueOf).asJava)
+          .append(
+            "embedding",
+            if (settings.vectorStorage == "float64-array") vector.map(java.lang.Double.valueOf).asJava
+            else MongoEmbeddingVectors.encode(vector.map(_.toFloat))
+          )
       }.toList
       collection.insertMany(documents)
     }
@@ -412,7 +425,7 @@ object SearchEvaluationAtlasRunner extends IOApp {
           SearchEvaluationRankingOrigin.ObservedAtlas,
           "deterministic-synthetic",
           settings.dimensions,
-          s"synthetic-vector-cosine-dimensions-${settings.dimensions}-category-storedSource-${settings.storedSource}-quantization-${settings.quantization.getOrElse("none")}",
+          s"synthetic-vector-cosine-dimensions-${settings.dimensions}-category-storedSource-${settings.storedSource}-quantization-${settings.quantization.getOrElse("none")}-vectorStorage-${settings.vectorStorage}",
           settings.numCandidates,
           settings.branchLimit,
           settings.pageSize,
