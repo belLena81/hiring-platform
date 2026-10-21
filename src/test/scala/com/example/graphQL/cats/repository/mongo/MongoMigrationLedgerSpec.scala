@@ -86,7 +86,8 @@ final class MongoMigrationLedgerSpec extends FunSuite {
       "022_interview_subject_attribution",
       "023_consumer_receipt_identity",
       "024_optional_field_absence",
-      "025_operational_collection_validators"
+      "025_operational_collection_validators",
+      "026_outbox_envelope_source"
     )
     val actual = List(
       MigrationIds.UserJobRevisions,
@@ -113,7 +114,8 @@ final class MongoMigrationLedgerSpec extends FunSuite {
       MigrationIds.InterviewSubjectAttribution,
       MigrationIds.ConsumerReceiptIdentity,
       MigrationIds.OptionalFieldAbsence,
-      MigrationIds.OperationalCollectionValidators
+      MigrationIds.OperationalCollectionValidators,
+      MigrationIds.OutboxEnvelopeSource
     ).map(_.value)
     assertEquals(actual, expected)
     assertEquals(MongoDeletedAccountEmbeddingMigrations.MigrationId, MigrationIds.DeletedAccountEmbeddings.value)
@@ -132,6 +134,7 @@ final class MongoMigrationLedgerSpec extends FunSuite {
       MongoOperationalCollectionValidatorMigrations.MigrationId,
       MigrationIds.OperationalCollectionValidators.value
     )
+    assertEquals(MongoOutboxEnvelopeSourceMigrations.MigrationId, MigrationIds.OutboxEnvelopeSource.value)
     assertEquals(
       MongoInterviewSubjectAttributionMigrations.MigrationId,
       MigrationIds.InterviewSubjectAttribution.value

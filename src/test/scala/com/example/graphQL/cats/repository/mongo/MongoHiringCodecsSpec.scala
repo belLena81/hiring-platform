@@ -427,6 +427,24 @@ class MongoHiringCodecsSpec extends FunSuite {
       },
       Right((Right(operational), List(candidateId.value.toString)))
     )
+    // MSC-06.1: the envelope bytes are the single stored copy of the event body.
+    val stored = MongoHiringCodecs.outboxRecord(operational, now).toOption.get
+    assert(!stored.containsKey(MongoFields.Payload) && stored.containsKey(MongoFields.EnvelopeBytes))
+    assert(!MongoHiringCodecs.operationalEvent(operational).containsKey(MongoFields.Payload))
+    // A row that migration 026 has not rewritten yet still reads through the envelope; the payload copy is ignored.
+    assertEquals(
+      MongoHiringCodecs.readOperationalEvent(new Document(stored).append(MongoFields.Payload, "{}")).toEither,
+      Right(operational)
+    )
+    // A queried top-level field that disagrees with the envelope is rejected.
+    assert(
+      MongoHiringCodecs.readOperationalEvent(new Document(stored).append(MongoFields.AggregateId, "other")).isInvalid
+    )
+    assert(
+      MongoHiringCodecs
+        .readOperationalEvent(new Document(stored).append(MongoFields.EnvelopeBytes, Array[Byte](1, 2, 3)))
+        .isInvalid
+    )
     assertEquals(MongoHiringCodecs.readSearchSession(MongoHiringCodecs.searchSession(search)).toEither, Right(search))
     assert(
       MongoHiringCodecs

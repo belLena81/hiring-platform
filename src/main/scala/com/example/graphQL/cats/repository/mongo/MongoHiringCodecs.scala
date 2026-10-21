@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
-import cats.data.ValidatedNel
+import cats.data.{Validated, ValidatedNel}
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.*
@@ -8,8 +8,6 @@ import com.example.graphQL.cats.service.events.*
 import com.example.graphQL.cats.service.port.Versioned
 import MongoHiringPersistenceCodecs.*
 import com.example.graphQL.cats.infrastructure.events.{OperationalEventWireCodec, SearchFilterWireCodec}
-import io.circe.Json
-import io.circe.parser.parse
 import org.bson.Document
 
 import java.time.Instant
@@ -152,12 +150,12 @@ private[mongo] object MongoHiringCodecs {
   def operationalEvent(value: OperationalEventEnvelope): Document =
     MongoHiringPersistenceCodecs.operationalEvent(storedOperationalEvent(value))
 
-  // Envelope size is enforced at write (`outboxRecord`) and claim time, so this stored read does not re-measure it.
+  // Envelope size is enforced at write (`outboxRecord`); `OperationalEventWireCodec.decode` re-checks it on this read.
   def readOperationalEvent(document: Document): ValidatedNel[StoredDocumentError, OperationalEventEnvelope] = {
     val eventDocument = if (isOutbox(document)) projectOperationalEvent(document) else document
-    val fields = if (isOutbox(document)) OutboxFields else OperationalEventFields
+    val fields = if (isOutbox(document)) OutboxFields else StoredEventFields
     noUnexpectedFields(document, fields)
-      .andThen(_ => decode(eventDocument, OperationalEventFields)(MongoHiringPersistenceCodecs.decodeOperationalEvent))
+      .andThen(_ => decode(eventDocument, StoredEventFields)(MongoHiringPersistenceCodecs.decodeOperationalEvent))
       .andThen(readOperationalEvent)
   }
 
@@ -182,28 +180,34 @@ private[mongo] object MongoHiringCodecs {
     OperationalEventFields.foreach(field => Option(document.get(field)).foreach(value => event.put(field, value)))
     event
 
+  /** The envelope bytes are the single stored copy of the event; the top-level fields only serve queries and must agree
+    * with them.
+    */
   private def readOperationalEvent(
       value: StoredOperationalEvent
   ): ValidatedNel[StoredDocumentError, OperationalEventEnvelope] =
     (
       uuid(MongoFields.Id, value._id).toValidatedNel,
       enumValue(MongoFields.EventType, value.eventType, OperationalEventType.values).toValidatedNel,
-      value.occurredAt.toInstant.validNel,
       enumValue(MongoFields.AggregateType, value.aggregateType, OperationalAggregateType.values).toValidatedNel,
-      value.aggregateId.validNel,
-      uuid(MongoFields.ActorId, value.actorId).toValidatedNel.map(UserId.apply),
-      parseJson(MongoFields.Payload, value.payload).toValidatedNel
+      uuid(MongoFields.ActorId, value.actorId).toValidatedNel
     ).tupled
-      .andThen { case (eventId, eventType, occurredAt, aggregateType, aggregateId, actorId, payloadJson) =>
+      .andThen { _ =>
         OperationalEventWireCodec
-          .decodePayload(eventType, payloadJson)
-          .leftMap(_ => InvalidField(MongoFields.Payload))
+          .decode(value.envelopeBytes)
+          .leftMap(_ => InvalidField(MongoFields.EnvelopeBytes))
           .toValidatedNel
-          .map(OperationalEventEnvelope(eventId, eventType, occurredAt, aggregateType, aggregateId, actorId, _))
       }
-      .andThen(event =>
-        OperationalEventContract.validate(event).leftMap(_ => InvalidField(MongoFields.Payload)).toValidatedNel
-      )
+      .andThen { event =>
+        val consistent = event.eventId.toString == value._id &&
+          event.eventType.toString == value.eventType &&
+          event.occurredAt.toDate == value.occurredAt &&
+          event.aggregateType.toString == value.aggregateType &&
+          event.aggregateId == value.aggregateId &&
+          event.actorId.value.toString == value.actorId &&
+          event.partitionKey == value.partitionKey
+        Validated.condNel(consistent, event, InconsistentDocument)
+      }
 
   def outboxRecord(
       value: OperationalEventEnvelope,
@@ -231,7 +235,6 @@ private[mongo] object MongoHiringCodecs {
         event.actorId,
         Some(subjectIds),
         Some(1),
-        event.payload,
         event.envelopeBytes,
         event.partitionKey,
         "Retryable",
@@ -346,11 +349,13 @@ private[mongo] object MongoHiringCodecs {
     MongoFields.AggregateType,
     MongoFields.AggregateId,
     MongoFields.ActorId,
-    MongoFields.Payload,
     MongoFields.EnvelopeBytes,
     MongoFields.PartitionKey
   )
-  private val OutboxFields = OperationalEventFields ++ Set(
+  // Migration 026 removes `payload`; readers tolerate (and ignore) it until that proof holds, so migration 003's
+  // backfill still decodes a row that has not been rewritten yet.
+  private val StoredEventFields = OperationalEventFields + MongoFields.Payload
+  private val OutboxFields = StoredEventFields ++ Set(
     MongoFields.State,
     MongoFields.Attempts,
     MongoFields.AvailableAt,
@@ -512,9 +517,6 @@ private[mongo] object MongoHiringCodecs {
   ): Either[StoredDocumentError, Option[A]] =
     value.traverse(enumValue(field, _, values))
 
-  private def parseJson(field: String, value: String): Either[StoredDocumentError, Json] =
-    parse(value).leftMap(_ => InvalidField(field))
-
   private def storedUser(value: User, passwordHash: Option[String], version: Long): StoredUser = {
     val emailCanonical = value.email.map(email => AccountName.canonical(email.value))
     val embedding = value.embedding.map(_.values.map(_.toDouble))
@@ -619,7 +621,6 @@ private[mongo] object MongoHiringCodecs {
       value.aggregateType.toString,
       value.aggregateId,
       value.actorId.value.toString,
-      OperationalEventWireCodec.payloadJson(value.payload).noSpaces,
       OperationalEventWireCodec.bytes(value),
       value.partitionKey
     )

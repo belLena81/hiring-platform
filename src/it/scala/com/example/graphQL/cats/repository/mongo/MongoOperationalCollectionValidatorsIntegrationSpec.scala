@@ -4,6 +4,7 @@ import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.InterviewLifecycleFixtures
 import com.example.graphQL.cats.domain.workflow.InterviewWorkflowId
+import com.example.graphQL.cats.infrastructure.events.OperationalEventWireCodec
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.{Application, CandidateProfile, JobStatus, User, UserProfile, UserRole}
 import com.example.graphQL.cats.service.{Diagnostics, RepositoryError}
@@ -58,7 +59,7 @@ final class MongoOperationalCollectionValidatorsIntegrationSpec extends MongoInt
 
   private def validatorsInstalled(database: MongoDatabase[IO]): IO[Boolean] =
     MongoHiringSetup.setupDatabase(database).flatMap { setup =>
-      MongoOperationalValidators.all.forallM { case (name, expected) =>
+      MongoOperationalValidators.withEnvelopeSource.forallM { case (name, expected) =>
         MongoHiringValidators.validatorMatches(setup, name, expected)
       }
     }
@@ -73,8 +74,11 @@ final class MongoOperationalCollectionValidatorsIntegrationSpec extends MongoInt
         setup.runCommand(new Document("collMod", name).append("validator", new Document()))
       }
       _ <- MongoHiringValidators.install(setup, MongoCollections.Users, MongoHiringValidators.userValidatorV1)
+      _ <- MongoHiringValidators.install(setup, MongoCollections.EventOutbox, MongoHiringValidators.outboxValidatorV1)
       rows <- collection(database, MongoCollections.HiringMigrationLedger)
-      _ <- rows.deleteMany(Filters.in(MongoFields.Id, Absence.value, Validators.value))
+      _ <- rows.deleteMany(
+        Filters.in(MongoFields.Id, Absence.value, Validators.value, MigrationIds.OutboxEnvelopeSource.value)
+      )
     } yield ()
 
   private def candidate(name: String, id: UUID = UUID.randomUUID()): User =
@@ -402,6 +406,10 @@ final class MongoOperationalCollectionValidatorsIntegrationSpec extends MongoInt
       OperationalEvents.searchPerformed(UUID.randomUUID(), session).fold(error => fail(error.toString), identity)
     val work = MongoSearchSessionWorkCodecs.work(PendingSearchSessionWork(session, searchEvent), now)
     work.get(MongoFields.Session, classOf[Document]).append(MongoFields.Query, null).append(MongoFields.Model, null)
+    // The validator installed at 025 still requires the embedded `payload` copy that migration 026 removes.
+    work
+      .get(MongoFields.Event, classOf[Document])
+      .append(MongoFields.Payload, OperationalEventWireCodec.payloadJson(searchEvent.payload).noSpaces)
     val workflow = InterviewLifecycleFixtures.workflowId
     val outboxRow =
       MongoHiringCodecs.outboxRecord(event(actor), now).fold(message => fail(message), identity)
@@ -604,7 +612,12 @@ final class MongoOperationalCollectionValidatorsIntegrationSpec extends MongoInt
       val late = MongoHiringCodecs.outboxRecord(event(actor), now).fold(message => fail(message), identity)
       for {
         _ <- init(fixture.database)
-        _ <- insert(fixture.database, MongoCollections.EventOutbox, late.append(MongoFields.LeaseOwner, null))
+        // The outbox validator rejects a null lease, so an earlier binary's write is simulated past validation.
+        _ <- MongoRepositoryTestSupport.insertUnvalidated(
+          fixture.database,
+          MongoCollections.EventOutbox,
+          late.append(MongoFields.LeaseOwner, null)
+        )
         _ <- init(fixture.database)
         row <- find(fixture.database, MongoCollections.EventOutbox, late.getString(MongoFields.Id))
         state <- ledgerRow(fixture.database, Absence)

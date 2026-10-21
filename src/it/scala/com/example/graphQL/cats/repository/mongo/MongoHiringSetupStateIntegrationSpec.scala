@@ -51,7 +51,8 @@ final class MongoHiringSetupStateIntegrationSpec extends MongoIntegrationSuite {
     "022_interview_subject_attribution",
     "023_consumer_receipt_identity",
     "024_optional_field_absence",
-    "025_operational_collection_validators"
+    "025_operational_collection_validators",
+    "026_outbox_envelope_source"
   )
 
   /** Records schema-changing commands, which the shared access fixture deliberately ignores. */

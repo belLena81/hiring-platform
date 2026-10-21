@@ -29,6 +29,7 @@ private[mongo] object MongoValidatorSchemas {
   */
 private[mongo] object MongoHiringValidators {
   import MongoHiringSetup.SetupDatabase
+  import MongoValidatorSchemas.*
 
   private val bsonRegistry = MongoClientSettings.getDefaultCodecRegistry
   private val StrictLevel = "strict"
@@ -85,18 +86,35 @@ private[mongo] object MongoHiringValidators {
       }
     }
 
-  def outboxValidator: Document = {
+  /** The outbox validator `013_hiring_workflow_integrity` installed; kept so its audit and completed proof still hold
+    * until the documented successor ([[outboxValidator]]) is installed by `026_outbox_envelope_source`.
+    */
+  def outboxValidatorV1: Document = outboxSchema(successor = false)
+
+  /** The current outbox validator: `envelopeBytes` is the only stored copy of the event body (`payload` is forbidden),
+    * and the lease fields are absent or typed, never `null`.
+    */
+  def outboxValidator: Document = outboxSchema(successor = true)
+
+  private def outboxSchema(successor: Boolean): Document = {
     val subjectIds = new Document("bsonType", "array")
       .append("minItems", 1)
       .append("uniqueItems", true)
       .append("items", new Document("bsonType", "string"))
     val version = new Document("bsonType", "int").append("enum", List(1).asJava)
-    val schema = new Document("bsonType", "object")
-      .append("required", List(MongoFields.SubjectIds, MongoFields.SubjectRefsVersion).asJava)
-      .append(
-        "properties",
-        new Document(MongoFields.SubjectIds, subjectIds).append(MongoFields.SubjectRefsVersion, version)
-      )
+    val baseline = new Document(MongoFields.SubjectIds, subjectIds).append(MongoFields.SubjectRefsVersion, version)
+    val baselineRequired = List(MongoFields.SubjectIds, MongoFields.SubjectRefsVersion)
+    val schema =
+      if (!successor) objectSchema(baselineRequired, baseline)
+      else
+        objectSchema(
+          baselineRequired :+ MongoFields.EnvelopeBytes,
+          baseline
+            .append(MongoFields.EnvelopeBytes, new Document("bsonType", "binData"))
+            .append(MongoFields.LeaseOwner, new Document("bsonType", "string"))
+            .append(MongoFields.LeaseToken, new Document("bsonType", "string"))
+            .append(MongoFields.LeaseUntil, date)
+        ).append("not", new Document("required", List(MongoFields.Payload).asJava))
     new Document("$jsonSchema", schema)
   }
 

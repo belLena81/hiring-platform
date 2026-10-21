@@ -101,6 +101,7 @@ private[mongo] object MongoHiringMigrations {
           run(MongoConsumerReceiptIdentityMigrations.step),
           run(MongoOptionalFieldAbsenceMigrations.step),
           run(MongoOperationalCollectionValidatorMigrations.step),
+          run(MongoOutboxEnvelopeSourceMigrations.step),
           createAccountRegistry(database)
         ).sequence_
       }

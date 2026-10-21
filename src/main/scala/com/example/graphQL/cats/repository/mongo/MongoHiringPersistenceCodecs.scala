@@ -106,7 +106,6 @@ private[mongo] object MongoHiringPersistenceCodecs {
       aggregateType: String,
       aggregateId: String,
       actorId: String,
-      payload: String,
       envelopeBytes: Array[Byte],
       partitionKey: String
   )
@@ -121,7 +120,6 @@ private[mongo] object MongoHiringPersistenceCodecs {
       actorId: String,
       subjectIds: Option[List[String]],
       subjectRefsVersion: Option[Int],
-      payload: String,
       envelopeBytes: Array[Byte],
       partitionKey: String,
       state: String,

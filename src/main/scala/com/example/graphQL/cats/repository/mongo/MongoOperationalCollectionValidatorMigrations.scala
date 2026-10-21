@@ -15,9 +15,10 @@ import scala.jdk.CollectionConverters.*
   * there is no checkpoint; the whole step is idempotent and a restart reruns the same three phases.
   *
   * The completed proof is read-only and exact: every definition in `MongoOperationalValidators.all` (users V2 included)
-  * must be installed unchanged, so later drift fails closed with the drifted collection and is never overwritten. The
-  * users validator is also installed at every start by `MongoHiringSetup`; the earlier proof of
-  * `016_candidate_residence_integrity` accepts it as the documented successor of its own definition.
+  * must be installed unchanged (or, for search-session-work, its successor from `026`), so later drift fails closed
+  * with the drifted collection and is never overwritten. The users validator is also installed at every start by
+  * `MongoHiringSetup`; the earlier proof of `016_candidate_residence_integrity` accepts it as the documented successor
+  * of its own definition.
   *
   * Recovery is forward-only. Stop every writer running an earlier binary before upgrading: it stores `null` optional
   * values, `subjectIds` on workflows and notification receipts, an inbox receipt without `documentType` and a user
@@ -29,7 +30,15 @@ private[mongo] object MongoOperationalCollectionValidatorMigrations {
   val MigrationId: String = Id.value
 
   private def verifyCompleted(database: MongoHiringSetup.SetupDatabase): IO[CompletedProof] =
-    MongoHiringValidators.assertStrictValidators(database, MongoOperationalValidators.all).as(CompletedProof.Trusted)
+    MongoHiringValidators
+      .assertStrictValidators(database, MongoOperationalValidators.all)
+      .handleErrorWith {
+        case _: MigrationError.ValidatorMismatch =>
+          // Migration 026 replaces the search-session-work definition with its documented successor.
+          MongoHiringValidators.assertStrictValidators(database, MongoOperationalValidators.withEnvelopeSource)
+        case error => IO.raiseError(error)
+      }
+      .as(CompletedProof.Trusted)
 
   /** Fails with the first collection holding a row its validator rejects; the error names the collection only. */
   private def audit(run: MigrationRun): IO[Unit] =

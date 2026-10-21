@@ -166,17 +166,30 @@ private[mongo] object MongoOperationalValidators {
 
   def searchSessionsValidator: Document = validator(SessionRequired, properties(sessionProperties*), closed = false)
 
-  def searchSessionWorkValidator: Document = {
+  /** The definition migration 025 installed: the embedded event still carries the `payload` copy. */
+  def searchSessionWorkValidatorV1: Document = searchSessionWorkSchema(successor = false)
+
+  /** The current definition (installed by 026): `event.envelopeBytes` is the only copy of the event body. */
+  def searchSessionWorkValidator: Document = searchSessionWorkSchema(successor = true)
+
+  private def searchSessionWorkSchema(successor: Boolean): Document = {
     val queryFreeSession = objectSchema(SessionRequired, properties(sessionProperties*))
       .append("not", new Document("required", List(MongoFields.Query).asJava))
-    val event = objectSchema(
-      List(MongoFields.Id, MongoFields.Payload, MongoFields.EnvelopeBytes),
-      properties(
-        MongoFields.Id -> stringUuid,
-        MongoFields.Payload -> text,
-        MongoFields.EnvelopeBytes -> binary
-      )
-    )
+    val event =
+      if (successor)
+        objectSchema(
+          List(MongoFields.Id, MongoFields.EnvelopeBytes),
+          properties(MongoFields.Id -> stringUuid, MongoFields.EnvelopeBytes -> binary)
+        ).append("not", new Document("required", List(MongoFields.Payload).asJava))
+      else
+        objectSchema(
+          List(MongoFields.Id, MongoFields.Payload, MongoFields.EnvelopeBytes),
+          properties(
+            MongoFields.Id -> stringUuid,
+            MongoFields.Payload -> text,
+            MongoFields.EnvelopeBytes -> binary
+          )
+        )
     validator(
       List(
         MongoFields.Id,
@@ -428,14 +441,16 @@ private[mongo] object MongoOperationalValidators {
     closed = true
   )
 
-  /** Installed by migration 025 in this order; the users definition is `MongoHiringValidators.userValidator`. */
+  /** Installed by migration 025 in this order; the users definition is `MongoHiringValidators.userValidator`. The
+    * search-session-work definition is the one 025 installed; [[withEnvelopeSource]] is its documented successor.
+    */
   def all: List[(String, Document)] = List(
     MongoCollections.Users -> MongoHiringValidators.userValidator,
     MongoCollections.Applications -> applicationsValidator,
     MongoCollections.ApplicationEvents -> applicationEventsValidator,
     MongoCollections.EmbeddingWork -> embeddingWorkValidator,
     MongoCollections.SearchSessions -> searchSessionsValidator,
-    MongoCollections.SearchSessionWork -> searchSessionWorkValidator,
+    MongoCollections.SearchSessionWork -> searchSessionWorkValidatorV1,
     MongoCollections.MutationReceipts -> mutationReceiptsValidator,
     MongoCollections.ConsumerReceipts -> consumerReceiptsValidator,
     MongoCollections.InterviewWorkflows -> interviewWorkflowsValidator,
@@ -443,4 +458,10 @@ private[mongo] object MongoOperationalValidators {
     MongoCollections.InterviewCalendarReservations -> interviewCalendarReservationsValidator,
     MongoCollections.InterviewNotificationReceipts -> interviewNotificationReceiptsValidator
   )
+
+  /** [[all]] with the search-session-work successor installed by migration 026, for the 025 completed proof. */
+  def withEnvelopeSource: List[(String, Document)] = all.map {
+    case (MongoCollections.SearchSessionWork, _) => MongoCollections.SearchSessionWork -> searchSessionWorkValidator
+    case other                                   => other
+  }
 }

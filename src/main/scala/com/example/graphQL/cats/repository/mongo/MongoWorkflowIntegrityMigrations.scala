@@ -170,12 +170,23 @@ private[mongo] object MongoWorkflowIntegrityMigrations {
   /** What this cutover installs; the interview cancellation cutover later replaces the command validator. */
   private val validators: List[(String, Document)] = List(
     MongoCollections.InterviewWorkflowCommands -> baselineCommandValidator,
-    MongoCollections.EventOutbox -> MongoHiringValidators.outboxValidator
+    MongoCollections.EventOutbox -> MongoHiringValidators.outboxValidatorV1
   )
 
-  private val successorValidators: List[(String, Document)] = List(
-    MongoCollections.InterviewWorkflowCommands -> commandValidator,
-    MongoCollections.EventOutbox -> MongoHiringValidators.outboxValidator
+  /** Documented successors: the command validator of 018 and the outbox validator of 026, in any combination. */
+  private val successorValidators: List[List[(String, Document)]] = List(
+    List(
+      MongoCollections.InterviewWorkflowCommands -> commandValidator,
+      MongoCollections.EventOutbox -> MongoHiringValidators.outboxValidatorV1
+    ),
+    List(
+      MongoCollections.InterviewWorkflowCommands -> baselineCommandValidator,
+      MongoCollections.EventOutbox -> MongoHiringValidators.outboxValidator
+    ),
+    List(
+      MongoCollections.InterviewWorkflowCommands -> commandValidator,
+      MongoCollections.EventOutbox -> MongoHiringValidators.outboxValidator
+    )
   )
 
   /** Exact installed validators plus the covered 003/010 proofs are required before their old scans are skipped. The
@@ -183,12 +194,12 @@ private[mongo] object MongoWorkflowIntegrityMigrations {
     * drift and fails closed.
     */
   private def verifyCompleted(database: MongoHiringSetup.SetupDatabase): IO[CompletedProof] =
-    MongoHiringValidators
-      .assertStrictValidators(database, validators)
-      .handleErrorWith {
-        case _: MigrationError.ValidatorMismatch =>
-          MongoHiringValidators.assertStrictValidators(database, successorValidators)
-        case error => IO.raiseError(error)
+    successorValidators
+      .foldLeft(MongoHiringValidators.assertStrictValidators(database, validators)) { (previous, candidate) =>
+        previous.handleErrorWith {
+          case _: MigrationError.ValidatorMismatch => MongoHiringValidators.assertStrictValidators(database, candidate)
+          case error                               => IO.raiseError(error)
+        }
       } *>
       MongoMigrationLedger.requireComplete(database, CoveredProofs).as(CompletedProof.Trusted)
 

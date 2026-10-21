@@ -101,7 +101,7 @@ class MongoOperationalEventContractIntegrationSpec extends MongoIntegrationSuite
   }
 
   private val corruptions: List[(String, Document => Document)] = List(
-    "malformed payload" -> (row => row.append("payload", "{\"unexpected\":\"retained\"}")),
+    "queried field that disagrees with the envelope" -> (row => row.append("aggregateId", "other-aggregate")),
     "malformed wire bytes" -> (row => row.append("envelopeBytes", new Binary(Array[Byte](1, 2, 3)))),
     "oversized wire bytes" -> (row => row.append("envelopeBytes", new Binary(Array.fill[Byte](262145)(32)))),
     "different wire event" -> (row =>
@@ -115,7 +115,6 @@ class MongoOperationalEventContractIntegrationSpec extends MongoIntegrationSuite
         val bad = corrupt(document(event(UserId(UUID.randomUUID()))))
           .append("availableAt", Date.from(now.minusSeconds(1)))
         val healthy = event(UserId(UUID.randomUUID()))
-        val originalPayload = bad.getString("payload")
         val originalBytes = wireBytes(bad)
         val originalSubjects = bad.getList("subjectIds", classOf[String]).asScala.toVector
         val repository =
@@ -140,7 +139,7 @@ class MongoOperationalEventContractIntegrationSpec extends MongoIntegrationSuite
           assertEquals(claimed.map(_.event.eventId), List(healthy.eventId))
           assertEquals(saved.getString("state"), "Failed")
           assertEquals(saved.getString("lastError"), "INVALID_EVENT_CONTRACT")
-          assertEquals(saved.getString("payload"), originalPayload)
+          assert(!saved.containsKey("payload"))
           assertEquals(wireBytes(saved), originalBytes)
           assertEquals(saved.getList("subjectIds", classOf[String]).asScala.toVector, originalSubjects)
           assert(!saved.containsKey("leaseToken"))
