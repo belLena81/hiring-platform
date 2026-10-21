@@ -15,6 +15,14 @@ private[analytics] object AnalyticsCollections {
   val Users = "users"
   val ProducerRegistrations = "producer_registrations"
 
+  /** Index names the analytics build creates and owns, including those on collections shared with the application. */
+  object IndexNames {
+    val ReportRunsRetention = "analytics_report_runs_retention_v1"
+    val ErasureDeltaFilesRequest = "analytics_erasure_delta_files_request_v1"
+    val LateFactReplayDetailsRetention = "analytics_late_fact_replay_details_retention_v1"
+    val LateFactReplayReceiptDependencies = "analytics_late_fact_replay_receipt_dependencies_v1"
+  }
+
   object Fields {
     val Id = "_id"
     val State = "state"

@@ -1,5 +1,5 @@
 {
-  "description": "Shared contract for MongoDB names used by both the application build and the separate analytics build. Asserted by MongoSharedNamespaceContractSpec (root) and AnalyticsSharedNamespaceContractSpec (analytics) so neither build can rename a shared name alone. Index ownership is recorded as it is today and is not a decision to move it. Index entries owned by analytics are documentation-only until those names become constants in the analytics build.",
+  "description": "Shared contract for MongoDB names used by both the application build and the separate analytics build. Asserted by MongoSharedNamespaceContractSpec (root) and AnalyticsSharedNamespaceContractSpec (analytics) so neither build can rename a shared name alone. Index ownership is recorded as it is today and is not a decision to move it. Index entries whose owner is analytics are asserted by AnalyticsSharedNamespaceContractSpec against constants in the analytics build.",
   "collections": {
     "analyticsErasureRequests": "analytics_erasure_requests",
     "analyticsErasureCompletions": "analytics_erasure_completions",
@@ -133,6 +133,11 @@
     {
       "collection": "analytics_report_runs",
       "name": "analytics_report_runs_retention_v1",
+      "owner": "analytics"
+    },
+    {
+      "collection": "analytics_erasure_delta_files",
+      "name": "analytics_erasure_delta_files_request_v1",
       "owner": "analytics"
     }
   ],

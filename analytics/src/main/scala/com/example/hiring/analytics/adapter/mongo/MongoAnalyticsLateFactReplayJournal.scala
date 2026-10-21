@@ -44,7 +44,7 @@ private[analytics] final class MongoAnalyticsLateFactReplayJournal[F[_]: Async](
           value.underlying.createIndex(
             Indexes.compoundIndex(Indexes.ascending("lakehouseId"), Indexes.ascending("publishedAt")),
             new IndexOptions()
-              .name("analytics_late_fact_replay_details_retention_v1")
+              .name(AnalyticsCollections.IndexNames.LateFactReplayDetailsRetention)
               .partialFilterExpression(
                 Filters.and(Filters.eq("progress", "Published"), Filters.exists("coordinates", true))
               )
@@ -56,7 +56,7 @@ private[analytics] final class MongoAnalyticsLateFactReplayJournal[F[_]: Async](
         streams.one(
           value.underlying.createIndex(
             Indexes.compoundIndex(Indexes.ascending("lakehouseId"), Indexes.ascending("progress")),
-            new IndexOptions().name("analytics_late_fact_replay_receipt_dependencies_v1")
+            new IndexOptions().name(AnalyticsCollections.IndexNames.LateFactReplayReceiptDependencies)
           )
         )
       )

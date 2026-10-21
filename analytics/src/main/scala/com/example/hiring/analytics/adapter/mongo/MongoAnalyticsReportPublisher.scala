@@ -587,7 +587,7 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
               Indexes.ascending(AnalyticsCollections.Fields.State),
               Indexes.ascending(AnalyticsCollections.Fields.CreatedAt)
             ),
-            new IndexOptions().name("analytics_report_runs_retention_v1")
+            new IndexOptions().name(AnalyticsCollections.IndexNames.ReportRunsRetention)
           )
         )
         .void

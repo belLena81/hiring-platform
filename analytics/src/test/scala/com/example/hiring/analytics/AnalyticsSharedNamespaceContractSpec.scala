@@ -1,6 +1,6 @@
 package com.example.hiring.analytics
 
-import com.example.hiring.analytics.adapter.mongo.AnalyticsCollections
+import com.example.hiring.analytics.adapter.mongo.{AnalyticsCollections, MongoAnalyticsErasureProgress}
 import io.circe.Json
 import io.circe.parser.parse
 
@@ -74,6 +74,34 @@ class AnalyticsSharedNamespaceContractSpec extends munit.FunSuite {
       "ProducerRegistry" -> f.ProducerRegistry
     )
     assertEquals(actual, strings("fields"))
+  }
+
+  test("MSC-07.1 analytics-owned index names match the contract") {
+    val n = AnalyticsCollections.IndexNames
+    val known = Set(
+      AnalyticsCollections.ReportRuns -> n.ReportRunsRetention,
+      AnalyticsCollections.ErasureDeltaFiles -> n.ErasureDeltaFilesRequest
+    )
+    val owned = contract.hcursor
+      .downField("indexes")
+      .as[List[Map[String, String]]]
+      .toOption
+      .get
+      .filter(_.get("owner").contains("analytics"))
+      .map(i => i("collection") -> i("name"))
+    assertEquals(owned.toSet, known)
+    assertEquals(owned.size, known.size)
+    assertEquals(MongoAnalyticsErasureProgress.DeltaEvidenceRequestIndex, n.ErasureDeltaFilesRequest)
+  }
+
+  test("MSC-07.1 analytics-only collection index names keep their persisted values") {
+    assertEquals(
+      List(
+        AnalyticsCollections.IndexNames.LateFactReplayDetailsRetention,
+        AnalyticsCollections.IndexNames.LateFactReplayReceiptDependencies
+      ),
+      List("analytics_late_fact_replay_details_retention_v1", "analytics_late_fact_replay_receipt_dependencies_v1")
+    )
   }
 
   test("MSC-07.1 the ledger migration ids analytics names match the contract") {
