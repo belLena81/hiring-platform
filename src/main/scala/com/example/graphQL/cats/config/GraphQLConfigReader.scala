@@ -1,14 +1,17 @@
 package com.example.graphQL.cats.config
 
+import io.github.iltotore.iron.pureconfig.given
 import _root_.pureconfig.*
 
-/** Plain numbers: ranges are validated together so one startup error lists every violation. */
+/** Bounds are decoded by the refined types; pureconfig reports every failing field, so one startup error still lists
+  * every violation.
+  */
 private[config] final case class RawCostBudgetConfig(
-    windowSeconds: Int,
-    maxCost: Int,
-    maxActorBuckets: Int,
-    maxClientBuckets: Int,
-    overflowBuckets: Int
+    windowSeconds: CostBudgetWindowSeconds,
+    maxCost: CostBudgetMaxCost,
+    maxActorBuckets: CostBudgetBuckets,
+    maxClientBuckets: CostBudgetBuckets,
+    overflowBuckets: CostBudgetOverflowBuckets
 ) derives ConfigReader
 
 private[config] final case class RawPersistedQueryConfig(mode: String, manifest: Option[String]) derives ConfigReader

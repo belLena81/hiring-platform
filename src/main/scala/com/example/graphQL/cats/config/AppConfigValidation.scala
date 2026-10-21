@@ -26,7 +26,6 @@ private[config] object AppConfigValidation {
       (
         loadSection[RawHttpConfig](source, "http"),
         loadSection[RawMongoConfig](source, "mongo")
-          .andThen(mongo => HttpMongoConfigValidation.validMongoDatabase(mongo.database).as(mongo))
       ).tupled.andThen(HttpMongoConfigValidation.read.tupled),
       loadSection[RawLoggingConfig](source, "logging"),
       loadSection[RawAuthConfig](source, "auth").andThen(AuthConfigValidation.read),
@@ -102,7 +101,7 @@ private[config] object AppConfigValidation {
       .cursor()
       .fold(
         _ => ReadinessConfig().validNel,
-        _ => loadSection[RawReadinessConfig](source, "readiness").andThen(ReadinessConfigValidation.read)
+        _ => loadSection[RawReadinessConfig](source, "readiness").map(ReadinessConfigValidation.read)
       )
 
   private def loadSection[A: ConfigReader](source: ConfigSource, section: String): ValidatedNel[ConfigError, A] =

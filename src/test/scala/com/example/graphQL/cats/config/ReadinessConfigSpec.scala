@@ -1,6 +1,7 @@
 package com.example.graphQL.cats.config
 
 import munit.FunSuite
+import scala.concurrent.duration.*
 
 final class ReadinessConfigSpec extends FunSuite {
   private val packaged: String = {
@@ -26,12 +27,12 @@ final class ReadinessConfigSpec extends FunSuite {
 
   test("ARR-07.1 packaged readiness thresholds equal the typed defaults") {
     assertEquals(load().map(_.readiness), Right(ReadinessConfig()))
-    assertEquals(ReadinessConfig(), ReadinessConfig(60, 300, 1800, 1000))
+    assertEquals(ReadinessConfig(), ReadinessConfig(60.seconds, 300.seconds, 1800.seconds, 1000.millis))
   }
 
   test("ARR-07.2 the closure-row age threshold exceeds the row retry cap so a backing-off row is not an alert") {
     val config = load().toOption.get
-    assert(config.readiness.maxClosureWorkAgeSeconds * 1000L > config.recruiterJobClosure.rowRetryMaxMillis.toLong)
+    assert(config.readiness.maxClosureWorkAge.toMillis > config.recruiterJobClosure.rowRetryMaxMillis.toLong)
   }
 
   test("ARR-07.1 a zero or negative threshold is rejected with every violation reported together") {

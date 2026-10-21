@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.service.auth
 
+import io.github.iltotore.iron.autoRefine
 import cats.effect.{IO, Ref}
 import cats.effect.std.Semaphore
 import cats.effect.std.UUIDGen

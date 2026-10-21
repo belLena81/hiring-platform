@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.config
 
+import io.github.iltotore.iron.autoRefine
 import munit.FunSuite
 
 /** ARR-14: the cost budget is typed configuration with packaged defaults and accumulated validation. */
@@ -50,7 +51,7 @@ final class CostBudgetConfigSpec extends FunSuite {
         .withPackagedDefaults(
           "graphql.cost-budget { window-seconds = 60, max-cost = 1000, max-actor-buckets = 50, max-client-buckets = 50, overflow-buckets = 8 }"
         )
-        .map(_.graphql.costBudget.maxCost),
+        .map(_.graphql.costBudget.maxCost.toInt),
       Right(1000)
     )
   }

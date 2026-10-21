@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.config
 
+import io.github.iltotore.iron.autoRefine
 import com.example.graphQL.cats.domain.pagination.PageSize
 import com.comcast.ip4s.{Host, Port as Ip4sPort}
 import munit.FunSuite
@@ -377,7 +378,7 @@ class AppConfigSpec extends FunSuite {
         |""".stripMargin
     val result = AppConfigFixtures.fromConfig(raw + local, Map.empty)
     assertEquals(
-      result.map(config => (config.host.toString, config.port.value, config.admissionPermits, config.mongoUri)),
+      result.map(config => (config.host.toString, config.port.value, config.admissionPermits.toInt, config.mongoUri)),
       Right(("127.0.0.1", 8080, 16, "mongodb://127.0.0.1:27017"))
     )
   }
@@ -414,7 +415,7 @@ class AppConfigSpec extends FunSuite {
       )
     )
     assertEquals(
-      result.map(config => (config.host.toString, config.port.value, config.admissionPermits, config.mongoUri)),
+      result.map(config => (config.host.toString, config.port.value, config.admissionPermits.toInt, config.mongoUri)),
       Right(("::1", 9090, 96, "mongodb://127.0.0.1:27018"))
     )
     assertEquals(result.map(_.requestTimeout), Right(30.seconds))
@@ -562,7 +563,7 @@ class AppConfigSpec extends FunSuite {
     assertEquals(
       AppConfigFixtures
         .fromConfig(defaults + local, Map.empty)
-        .map(config => (config.host.toString, config.port.value, config.admissionPermits, config.mongoUri)),
+        .map(config => (config.host.toString, config.port.value, config.admissionPermits.toInt, config.mongoUri)),
       Right(("127.42.10.8", 9091, 16, "mongodb://127.0.0.1:27018"))
     )
   }
@@ -769,7 +770,7 @@ class AppConfigSpec extends FunSuite {
   }
 
   test("HGQL-AC02 cursor JWT TTL is bounded and defaults to fifteen minutes") {
-    assertEquals(AppConfigFixtures.fromConfig(defaultConfig, Map.empty).map(_.jwtAuth.cursorTtlSeconds), Right(900L))
+    assertEquals(AppConfigFixtures.fromConfig(defaultConfig, Map.empty).map(_.jwtAuth.cursorTtl), Right(900.seconds))
     assertContainsError(
       AppConfigFixtures
         .fromConfig(defaultConfig.replace("cursor-ttl-seconds = 900", "cursor-ttl-seconds = 59"), Map.empty),
@@ -941,6 +942,7 @@ class AppConfigSpec extends FunSuite {
       ("mongo.discovery.max-roots = 0", ConfigError.InvalidDiscoveryMaxRoots),
       ("mongo.discovery.max-roots = 65", ConfigError.InvalidDiscoveryMaxRoots),
       ("mongo.discovery.max-time-millis = 99", ConfigError.InvalidDiscoveryMaxTime),
+      ("mongo.discovery.max-time-millis = 60001", ConfigError.InvalidDiscoveryMaxTime),
       ("mongo.discovery.max-time-millis = \"fast\"", ConfigError.InvalidDiscoveryMaxTime),
       ("mongo.discovery.max-time-millis = 5000", ConfigError.InvalidDiscoveryDeadline)
     ).foreach { case (setting, expected) =>
@@ -958,14 +960,14 @@ class AppConfigSpec extends FunSuite {
 
   test("HDQ-12 lexical facet match limit defaults to 1000 and is validated to 1..5000") {
     assertEquals(
-      AppConfigFixtures.fromConfig(defaultConfig, Map.empty).map(_.discovery.lexicalFacetMatchLimit),
+      AppConfigFixtures.fromConfig(defaultConfig, Map.empty).map(_.discovery.lexicalFacetMatchLimit.toInt),
       Right(1000)
     )
     List(1, 5000).foreach { value =>
       assertEquals(
         AppConfigFixtures
           .fromConfig(defaultConfig + s"mongo.discovery.lexical-facet-match-limit = $value\n", Map.empty)
-          .map(_.discovery.lexicalFacetMatchLimit),
+          .map(_.discovery.lexicalFacetMatchLimit.toInt),
         Right(value)
       )
     }

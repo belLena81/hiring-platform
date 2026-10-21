@@ -4,23 +4,28 @@ import cats.data.ValidatedNel
 import cats.syntax.all.*
 
 private[config] object GraphQLConfigValidation {
-  private val Windows = 1 to 3600
-  // A budget below the per-query cap would refuse a query the schema itself admits.
-  private val MaxCosts = GraphQLConfig.MaxQueryComplexity to 1000000
-  private val Buckets = 1 to 100000
-  private val OverflowBuckets = 1 to 4096
 
+  /** Per-field bounds are decoded by the refined raw types; the rules here relate settings to each other. */
   def read(raw: RawGraphQLConfig): ValidatedNel[ConfigError, GraphQLConfig] =
-    (
-      within(raw.costBudget.windowSeconds, Windows, ConfigError.InvalidCostBudgetWindow),
-      within(raw.costBudget.maxCost, MaxCosts, ConfigError.InvalidCostBudgetMaxCost),
-      within(raw.costBudget.maxActorBuckets, Buckets, ConfigError.InvalidCostBudgetActorBuckets),
-      within(raw.costBudget.maxClientBuckets, Buckets, ConfigError.InvalidCostBudgetClientBuckets),
-      within(raw.costBudget.overflowBuckets, OverflowBuckets, ConfigError.InvalidCostBudgetOverflowBuckets),
-      persistedQueries(raw.persistedQueries)
-    ).mapN((window, maxCost, actors, clients, overflow, persisted) =>
-      GraphQLConfig(CostBudgetConfig(window, maxCost, actors, clients, overflow), raw.schemaExposure, persisted)
-    )
+    (budgetAdmitsMaximalQuery(raw.costBudget), persistedQueries(raw.persistedQueries)).mapN { (budget, persisted) =>
+      GraphQLConfig(
+        CostBudgetConfig(
+          budget.windowSeconds,
+          budget.maxCost,
+          budget.maxActorBuckets,
+          budget.maxClientBuckets,
+          budget.overflowBuckets
+        ),
+        raw.schemaExposure,
+        persisted
+      )
+    }
+
+  /** A budget below the per-query cap would refuse a query the schema itself admits. */
+  private def budgetAdmitsMaximalQuery(budget: RawCostBudgetConfig): ValidatedNel[ConfigError, RawCostBudgetConfig] =
+    Either
+      .cond(budget.maxCost >= GraphQLConfig.MaxQueryComplexity, budget, ConfigError.InvalidCostBudgetMaxCost)
+      .toValidatedNel
 
   /** An absent section is `off`; `allowlist` needs a non-blank manifest path (the file itself is read at startup). */
   private def persistedQueries(raw: Option[RawPersistedQueryConfig]): ValidatedNel[ConfigError, PersistedQueryConfig] =
@@ -34,6 +39,4 @@ private[config] object GraphQLConfigValidation {
       }
     }
 
-  private def within(value: Int, range: Range, error: ConfigError): ValidatedNel[ConfigError, Int] =
-    Either.cond(range.contains(value), value, error).toValidatedNel
 }

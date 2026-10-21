@@ -6,7 +6,7 @@ import scala.concurrent.duration.FiniteDuration
 private[config] final case class TransportSettings(
     host: Host,
     port: Ip4sPort,
-    admissionPermits: Int,
+    admissionPermits: AdmissionPermits,
     requestTimeout: FiniteDuration,
     trustedProxy: TrustedProxyConfig,
     mongoUri: String,

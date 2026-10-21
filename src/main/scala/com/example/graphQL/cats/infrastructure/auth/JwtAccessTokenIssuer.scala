@@ -17,7 +17,7 @@ final class JwtAccessTokenIssuer(config: JwtAuthConfig) extends AccessTokenIssue
 
 object JwtAccessTokenIssuer {
   def issue(config: JwtAuthConfig, userId: UserId, now: Instant): AccountToken = {
-    val expiresAt = now.plusSeconds(config.accessTokenSeconds)
+    val expiresAt = now.plusSeconds(config.accessToken.toSeconds)
     val claim = JwtClaim()
       .about(userId.value.toString)
       .by(config.issuer)

@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import io.github.iltotore.iron.autoRefine
 import cats.effect.IO
 import cats.effect.std.Semaphore
 import cats.syntax.all.*

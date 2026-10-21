@@ -1,6 +1,5 @@
 package com.example.graphQL.cats
 
-import scala.concurrent.duration.DurationInt
 import cats.data.NonEmptyList
 import cats.effect.{ExitCode, IO, IOApp, Resource}
 import cats.data.Kleisli
@@ -48,7 +47,7 @@ object Main extends IOApp {
     interviewActionLimiter <- Resource.eval(InterviewActionRateLimiter.create(config.interviewActionRateLimit))
     costBudgetLimiter <- Resource.eval(CostBudgetLimiter.create(config.graphql.costBudget))
     reportCache <- Resource.eval(
-      ReadinessCache.create[IO, ReadinessReport](config.readiness.reportCacheMillis.millis)
+      ReadinessCache.create[IO, ReadinessReport](config.readiness.reportCache)
     )
     authenticator = new JwtActorAuthenticator(config.jwtAuth, runtime.userAuthenticator, cats.effect.Clock[IO])
     authenticate = Kleisli(authenticator.authenticate)
@@ -71,7 +70,7 @@ object Main extends IOApp {
       ),
       telemetry.tracer
     )
-    routeConfig = HiringApiRoutes.HttpConfig(config.admissionPermits, config.requestTimeout)
+    routeConfig = HiringApiRoutes.HttpConfig(config.admissionPermits.toLong, config.requestTimeout)
     routeSet <- Resource.eval(routeBuilder.httpRoutes(routeConfig))
     routes <- telemetry.instrument(routeSet)
     _ <- HiringPlatformServer.resource(config.host, config.port, routes, diagnostics)
