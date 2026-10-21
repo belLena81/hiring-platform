@@ -314,6 +314,34 @@ final class MongoBinaryEmbeddingVectorIntegrationSpec extends MongoJobDiscoveryF
     }
   }
 
+  test("MSC-09.1 migration 028 fails closed on a finite double beyond float32 range and resumes once it is repaired") {
+    mongoResource.use { fixture =>
+      val count = 3
+      val overflowId = job(count).id.value.toString
+      val overflow = java.util.List.of[java.lang.Double](1e300, 0.5, 0.25, 0.125, 0.0, 0.0, 0.0, 0.0)
+      for {
+        _ <- seedLegacy(fixture.database, count)
+        jobs <- collection(fixture.database, Jobs)
+        _ <- jobs.updateOne(Filters.eq(MongoFields.Id, overflowId), Updates.set(MongoFields.Embedding, overflow))
+        failed <- init(fixture.database).attempt
+        running <- stepRow(fixture.database)
+        unchanged <- rawEmbedding(fixture.database, Jobs, overflowId)
+        _ <- jobs.updateOne(
+          Filters.eq(MongoFields.Id, overflowId),
+          Updates.set(MongoFields.Embedding, arrayForm(vector(count)))
+        )
+        _ <- init(fixture.database)
+        done <- stepRow(fixture.database)
+        _ <- assertConverted(fixture.database, count)
+      } yield {
+        assertEquals(failed, Left(MigrationError.StepFailed(Step, s"found a malformed vector in $Jobs")))
+        assertEquals(running.map(_.getString(MongoFields.State)), Some("Running"))
+        assertEquals(unchanged, overflow: AnyRef)
+        assertEquals(done.map(_.getString(MongoFields.State)), Some("Complete"))
+      }
+    }
+  }
+
   test(
     "MSC-10.1 drift of a successor validator behind the completed migration 028 fails closed and is not overwritten"
   ) {

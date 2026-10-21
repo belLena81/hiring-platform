@@ -381,6 +381,30 @@ final class MongoJobCanonicalFilterIntegrationSpec extends MongoJobDiscoveryFixt
     }
   }
 
+  test("MSC-10.1 a reopened migration 027 does not downgrade the installed successor jobs validator") {
+    mongoResource.use { fixture =>
+      for {
+        _ <- init(fixture.database)
+        setup <- MongoHiringSetup.setupDatabase(fixture.database)
+        installedBefore <- MongoHiringValidators.validatorMatches(setup, Jobs, MongoHiringValidators.jobValidator)
+        coll <- jobs(fixture.database)
+        legacy = legacyOpenCity
+        _ <- coll.createIndex(legacy._1, legacy._2.name(MongoJobCanonicalFilterMigrations.LegacyIndexNames.head))
+        reopened <- indexNames(fixture.database)
+        _ <- init(fixture.database)
+        names <- indexNames(fixture.database)
+        state <- stepRow(fixture.database)
+        installedAfter <- MongoHiringValidators.validatorMatches(setup, Jobs, MongoHiringValidators.jobValidator)
+      } yield {
+        assert(installedBefore)
+        assert(reopened.contains(MongoJobCanonicalFilterMigrations.LegacyIndexNames.head))
+        assert(MongoJobCanonicalFilterMigrations.LegacyIndexNames.forall(!names.contains(_)), clue(names))
+        assertEquals(state.map(_.getString(MongoFields.State)), Some("Complete"))
+        assert(installedAfter)
+      }
+    }
+  }
+
   test("MSC-10.1 drift of the jobs validator behind the completed migration 027 fails closed and is not overwritten") {
     mongoResource.use { fixture =>
       for {
@@ -396,7 +420,7 @@ final class MongoJobCanonicalFilterIntegrationSpec extends MongoJobDiscoveryFixt
     }
   }
 
-  test("MSC-10.1 the replacement indexes serve the canonical list and discovery filters without a sort stage") {
+  test("MSC-08.1 the replacement indexes serve the canonical list and discovery filters without a sort stage") {
     mongoResource.use { fixture =>
       val values = (1 to 12).toList.map { index =>
         val base = jobWith(index, Set("Scala"), Some(if (index <= 6) "Kyiv" else "Lviv"))
@@ -431,6 +455,7 @@ final class MongoJobCanonicalFilterIntegrationSpec extends MongoJobDiscoveryFixt
         assert(stages.contains(MongoIndexNames.JobsOpenCityCreated), stages)
         assert(!stages.contains("SORT"), stages)
         assertEquals(stats.get[Long]("nReturned"), Right(3L))
+        assertEquals(stats.get[Long]("totalKeysExamined"), Right(3L))
         assertEquals(stats.get[Long]("totalDocsExamined"), Right(3L))
       }
     }
