@@ -82,7 +82,7 @@ private[cats] object StateEffectFixtures {
     override def findVersioned(id: JobId): RepositoryF[Program, Option[Versioned[Job]]] =
       inspect(_.jobs.get(id).map(Versioned(_, 0L)))
     override def findSubmissionSnapshot(id: JobId): RepositoryF[Program, Option[JobSubmissionSnapshot]] =
-      inspect(_.jobs.get(id).map(job => JobSubmissionSnapshot(job.id, job.status, 0L)))
+      inspect(_.jobs.get(id).map(job => JobSubmissionSnapshot(job.id, job.status)))
     override def findOpen(filter: JobSearchFilter, page: JobPageRequest) = unavailable
     override def nearbyJobs(scope: HiringReadScope, query: NearbyJobsQuery, limit: Int) = unavailable
     override def jobDiscoveryFacets(

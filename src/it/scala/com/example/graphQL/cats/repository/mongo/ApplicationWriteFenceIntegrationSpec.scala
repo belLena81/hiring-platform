@@ -72,7 +72,7 @@ final class ApplicationWriteFenceIntegrationSpec extends MongoIntegrationSuite {
     def countWhere(collection: String, filter: org.bson.conversions.Bson): IO[Long] =
       MongoRepositoryTestSupport.count(fixture.database, collection, filter)
 
-    def snapshot(job: Job): JobSubmissionSnapshot = JobSubmissionSnapshot(job.id, JobStatus.Open, 0L)
+    def snapshot(job: Job): JobSubmissionSnapshot = JobSubmissionSnapshot(job.id, JobStatus.Open)
 
     def submit(candidate: User, job: Job): IO[Either[RepositoryError, Unit]] = {
       val application = Application.create(ApplicationId(UUID.randomUUID()), candidate.id, job.id, at)

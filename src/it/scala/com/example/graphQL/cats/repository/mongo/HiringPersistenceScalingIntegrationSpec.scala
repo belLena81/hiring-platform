@@ -207,7 +207,7 @@ final class HiringPersistenceScalingIntegrationSpec extends MongoIntegrationSuit
         else
           jobs
             .findVersioned(selected)
-            .map(_.map(value => JobSubmissionSnapshot(value.value.id, value.value.status, value.version)))
+            .map(_.map(value => JobSubmissionSnapshot(value.value.id, value.value.status)))
       for {
         snapshot <- requireResult(read).flatMap(value => IO.fromOption(value)(new AssertionError("Missing seeded job")))
         application = Application.create(
@@ -268,21 +268,13 @@ final class HiringPersistenceScalingIntegrationSpec extends MongoIntegrationSuit
       reads = commands.filter(command =>
         command.containsKey("find") && command.getString("find").getValue == MongoCollections.Jobs
       )
-      first <- requireResult(
-        if (projected) jobs.findSubmissionSnapshot(jobIds(0))
-        else
-          jobs
-            .findVersioned(jobIds(0))
-            .map(_.map(value => JobSubmissionSnapshot(value.value.id, value.value.status, value.version)))
-      )
       _ <- IO(assertEquals(applicationsCount, eventsCount))
-      _ <- IO.whenA(hot)(IO(assertEquals(first.map(_.revision), Some(applicationsCount))))
       projectedBsonBytes <- MongoRepositoryTestSupport
         .collection(fixture.database, MongoCollections.Jobs)
         .flatMap(
           _.aggregate[Document](
             List(
-              new Document("$project", new Document("_id", 1).append("status", 1).append("version", 1)),
+              new Document("$project", new Document("_id", 1).append("status", 1)),
               new Document(
                 "$group",
                 new Document("_id", null)

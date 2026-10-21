@@ -298,7 +298,7 @@ final class RecruiterJobClosureIntegrationSpec extends MongoIntegrationSuite {
         )
         attempt <- applications
           .createForOpenJobWithEvents(
-            JobSubmissionSnapshot(target, JobStatus.Open, 0L),
+            JobSubmissionSnapshot(target, JobStatus.Open),
             application,
             event,
             Nil,

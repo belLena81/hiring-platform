@@ -239,7 +239,7 @@ private[cats] object ServiceFixtures {
         .fromFEither(findOne(id).map(value => Right(value.map(Versioned(_, 0L)))))
 
     override def findSubmissionSnapshot(id: JobId): RepositoryF[IO, Option[JobSubmissionSnapshot]] =
-      findVersioned(id).map(_.map(job => JobSubmissionSnapshot(job.value.id, job.value.status, job.version)))
+      findVersioned(id).map(_.map(job => JobSubmissionSnapshot(job.value.id, job.value.status)))
 
     override def findOpen(filter: JobSearchFilter, page: JobPageRequest): RepositoryF[IO, List[Job]] =
       com.example.graphQL.cats.service.port.RepositoryF.fromFEither(
