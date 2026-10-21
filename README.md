@@ -31,7 +31,7 @@ Login/signup idempotency receipts use domain-separated HMAC fingerprints keyed b
 
 ## Local build
 
-`sbt run` forks a separate JVM so Cats Effect `IOApp` owns the application lifecycle. The packaged configuration has no defaults for the HTTP bind address, port, MongoDB URI or JWT secret; supply them through the environment (`HTTP_HOST`, `HTTP_PORT`, `MONGODB_URI`, `AUTH_JWT_HS256_SECRET`) or an explicitly selected configuration file. `src/main/resources/local.conf` binds `127.0.0.1:8080`, enables schema exposure and is loaded only when selected by `config.resource`/`config.file`. Start MongoDB locally, then run the application:
+`sbt run` forks a separate JVM so Cats Effect `IOApp` owns the application lifecycle. The packaged configuration has no defaults for the HTTP bind address, port, MongoDB URI or JWT secret; supply them through the environment (`HTTP_HOST`, `HTTP_PORT`, `MONGODB_URI`, `AUTH_JWT_HS256_SECRET`) or an explicitly selected configuration file. `HTTP_PORT` must be within 1024–32767: lower ports need a privileged process and higher ones overlap the default Linux ephemeral range. `src/main/resources/local.conf` binds `127.0.0.1:8080`, enables schema exposure and is loaded only when selected by `config.resource`/`config.file`. Start MongoDB locally, then run the application:
 
 ```bash
 docker compose up -d mongodb

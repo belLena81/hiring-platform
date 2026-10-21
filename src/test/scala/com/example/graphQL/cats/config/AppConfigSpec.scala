@@ -221,7 +221,7 @@ class AppConfigSpec extends FunSuite {
     val config =
       """http {
         |  host = "::1"
-        |  port = 65535
+        |  port = 32767
         |  admission-permits = 64
         |  request-timeout-ms = 5000
         |  trusted-proxy-cidrs = []
@@ -317,7 +317,7 @@ class AppConfigSpec extends FunSuite {
       Right(
         AppConfig(
           Host.fromString("::1").get,
-          Ip4sPort.fromInt(65535).get,
+          Ip4sPort.fromInt(32767).get,
           64,
           5.seconds,
           TrustedProxyConfig(Nil),
@@ -581,7 +581,7 @@ class AppConfigSpec extends FunSuite {
   test("P1-AC01 rejects invalid values without returning their contents") {
     val invalid = List(
       ("http.host", List("not-an-ip"), ConfigError.InvalidHost),
-      ("http.port", List("0", "65536", "-1", "2147483648"), ConfigError.InvalidPort),
+      ("http.port", List("0", "1023", "32768", "65535", "-1", "2147483648"), ConfigError.InvalidPort),
       ("http.admission-permits", List("0", "1025", "-1", "synthetic-secret"), ConfigError.InvalidAdmissionPermits),
       (
         "mongo.uri",
@@ -625,7 +625,7 @@ class AppConfigSpec extends FunSuite {
   }
 
   test("P1-AC01 accepts boundary ports without application logging levels") {
-    List("1", "65535").foreach { port =>
+    List("1024", "32767").foreach { port =>
       assert(AppConfigFixtures.fromConfig(defaultConfig + s"http.port = $port\n", Map.empty).isRight)
     }
     List("1", "1024").foreach { permits =>

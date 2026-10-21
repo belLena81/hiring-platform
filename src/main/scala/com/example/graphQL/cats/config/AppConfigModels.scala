@@ -395,7 +395,10 @@ object KafkaConfig {
   inline val DefaultRestartMaxDelaySeconds = 30
 }
 
-type Port = Int :| Interval.Closed[1, 65535]
+/** Bindable by a non-root service: ports below 1024 need `CAP_NET_BIND_SERVICE`, and ports above 32767 fall inside the
+  * default Linux ephemeral range (`net.ipv4.ip_local_port_range`), where an outgoing connection may already hold them.
+  */
+type Port = Int :| Interval.Closed[1024, 32767]
 type AdmissionPermits = Int :| Interval.Closed[1, 1024]
 type NonBlank128 = String :| (Not[Blank] & MaxLength[128])
 type NonBlankStr = String :| Not[Blank]

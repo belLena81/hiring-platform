@@ -14,10 +14,9 @@ private object HttpMongoReaders {
     ConfigReader[String].emap(value =>
       IpAddress.fromString(value).toRight(CannotConvert(value, "IpAddress", "invalid"))
     )
+  // The bindable range is owned by the `Port` refinement; ip4s only re-expresses an already valid value.
   given ConfigReader[Ip4sPort] =
-    ConfigReader[Int].emap(value =>
-      Ip4sPort.fromInt(value).filter(_.value > 0).toRight(CannotConvert(value.toString, "Port", "invalid"))
-    )
+    ConfigReader[Port].emap(value => Ip4sPort.fromInt(value).toRight(CannotConvert(value.toString, "Port", "invalid")))
   // The URI may embed credentials, so it never appears in the failure. Repository results are trusted only when the
   // write concern acknowledges them, so an unacknowledged (w=0) concern is rejected at the configuration boundary.
   given ConfigReader[ConnectionString] =
