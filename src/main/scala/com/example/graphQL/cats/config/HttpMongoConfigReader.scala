@@ -64,7 +64,7 @@ private[config] final case class RawHttpConfig(
 ) derives ConfigReader
 private[config] final case class RawMongoConfig(
     uri: ConnectionString,
-    database: MongoDatabase,
+    database: MongoDatabaseName,
     resetOnStart: Option[Boolean],
     discovery: Option[DiscoveryConfig]
 ) derives ConfigReader

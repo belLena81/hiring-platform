@@ -458,18 +458,18 @@ type CostBudgetOverflowBuckets = Int :| Interval.Closed[1, 4096]
 /** MongoDB database-name rules: non-empty, under 64 UTF-8 bytes, and free of the characters MongoDB forbids. Byte
   * length is not constant-foldable, so this constraint is applied to decoded values only, never to literals.
   */
-final class MongoDatabaseName
-object MongoDatabaseName {
+final class ValidMongoDatabaseName
+object ValidMongoDatabaseName {
   private val Forbidden = "/\\.\"$*<>:|?"
   def test(value: String): Boolean =
     value.nonEmpty && value.getBytes(java.nio.charset.StandardCharsets.UTF_8).length < 64 &&
       !value.exists(c => c.isWhitespace || c.isControl || Forbidden.contains(c))
-  given Constraint[String, MongoDatabaseName] with {
-    override inline def test(inline value: String): Boolean = MongoDatabaseName.test(value)
+  given Constraint[String, ValidMongoDatabaseName] with {
+    override inline def test(inline value: String): Boolean = ValidMongoDatabaseName.test(value)
     override inline def message: String = "Should be a valid MongoDB database name"
   }
 }
-type MongoDatabase = String :| MongoDatabaseName
+type MongoDatabaseName = String :| ValidMongoDatabaseName
 type EmbeddingDurableRetryMs = Int :| Interval.Closed[100, 3600000]
 type EmbeddingWorkerRestartDelayMs = Int :| Interval.Closed[100, 60000]
 type InterviewMaxAttempts = Int :| Interval.Closed[1, 100]

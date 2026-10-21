@@ -35,18 +35,34 @@ final class ReadinessConfigSpec extends FunSuite {
     assert(config.readiness.maxClosureWorkAge.toMillis > config.recruiterJobClosure.rowRetryMaxMillis.toLong)
   }
 
-  test("ARR-07.1 a zero or negative threshold is rejected with every violation reported together") {
+  test("ARR-07.1 an out-of-range threshold is rejected with every violation reported together") {
     val extra =
       """readiness.worker-staleness-seconds = 0
         |readiness.max-outbox-age-seconds = -5
-        |readiness.report-cache-millis = 0
+        |readiness.max-closure-work-age-seconds = 604801
+        |readiness.report-cache-millis = 10001
         |""".stripMargin
     load(extra) match {
       case Left(issues) =>
         assert(issues.toList.contains(ConfigError.InvalidReadinessWorkerStaleness), clue(issues))
         assert(issues.toList.contains(ConfigError.InvalidReadinessOutboxAge), clue(issues))
+        assert(issues.toList.contains(ConfigError.InvalidReadinessClosureWorkAge), clue(issues))
         assert(issues.toList.contains(ConfigError.InvalidReadinessCache), clue(issues))
-      case other => fail(s"Expected both readiness errors, got $other")
+      case other => fail(s"Expected every readiness error, got $other")
     }
+  }
+
+  test("ARR-07.1 thresholds on the range edges are accepted") {
+    val extra =
+      """readiness.worker-staleness-seconds = 1
+        |readiness.max-outbox-age-seconds = 604800
+        |readiness.max-closure-work-age-seconds = 604800
+        |readiness.report-cache-millis = 100
+        |""".stripMargin
+    assertEquals(
+      load(extra).map(_.readiness),
+      Right(ReadinessConfig(1.second, 604800.seconds, 604800.seconds, 100.millis))
+    )
+    assert(load("readiness.report-cache-millis = 10000\n").isRight)
   }
 }

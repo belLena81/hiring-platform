@@ -595,7 +595,7 @@ class AppConfigSpec extends FunSuite {
         ),
         ConfigError.InvalidMongoUri
       ),
-      ("mongo.database", List("a/b", "a.b", "a b", "a$b", "a" * 64), ConfigError.InvalidMongoDatabase)
+      ("mongo.database", List("", "a/b", "a.b", "a b", "a$b", "a" * 64), ConfigError.InvalidMongoDatabase)
     )
     invalid.foreach { case (key, values, error) =>
       values.foreach { value =>
@@ -948,7 +948,20 @@ class AppConfigSpec extends FunSuite {
     ).foreach { case (setting, expected) =>
       assertContainsError(AppConfigFixtures.fromConfig(defaultConfig + setting + "\n", Map.empty), expected)
     }
-    assert(AppConfigFixtures.fromConfig(defaultConfig + "mongo.discovery.max-time-millis = 4999\n", Map.empty).isRight)
+    List("100", "4999").foreach { value =>
+      assert(
+        AppConfigFixtures.fromConfig(defaultConfig + s"mongo.discovery.max-time-millis = $value\n", Map.empty).isRight
+      )
+    }
+    assert(
+      AppConfigFixtures
+        .fromConfig(
+          defaultConfig.replace("request-timeout-ms = 5000", "request-timeout-ms = 60000") +
+            "mongo.discovery.max-time-millis = 59999\n",
+          Map.empty
+        )
+        .isRight
+    )
     assertEquals(
       AppConfigFixtures
         .fromConfig(defaultConfig + "mongo.discovery { permits = 0, max-roots = 65 }\n", Map.empty)

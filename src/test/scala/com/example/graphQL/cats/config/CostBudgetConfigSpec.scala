@@ -56,6 +56,29 @@ final class CostBudgetConfigSpec extends FunSuite {
     )
   }
 
+  test("ARR-14.1 values on the upper range edges are accepted and one past each is rejected") {
+    val top =
+      "graphql.cost-budget { window-seconds = 3600, max-cost = 1000000, max-actor-buckets = 100000, max-client-buckets = 100000, overflow-buckets = 4096 }"
+    assertEquals(
+      AppConfigFixtures.withPackagedDefaults(top).map(_.graphql.costBudget),
+      Right(CostBudgetConfig(3600, 1000000, 100000, 100000, 4096))
+    )
+    val past =
+      "graphql.cost-budget { window-seconds = 3601, max-cost = 1000001, max-actor-buckets = 100001, max-client-buckets = 100001, overflow-buckets = 4097 }"
+    assertEquals(
+      AppConfigFixtures.withPackagedDefaults(past).left.map(_.toList.map(_.key).toSet),
+      Left(
+        Set(
+          "GRAPHQL_COST_BUDGET_WINDOW_SECONDS",
+          "GRAPHQL_COST_BUDGET_MAX_COST",
+          "GRAPHQL_COST_BUDGET_MAX_ACTOR_BUCKETS",
+          "GRAPHQL_COST_BUDGET_MAX_CLIENT_BUCKETS",
+          "GRAPHQL_COST_BUDGET_OVERFLOW_BUCKETS"
+        )
+      )
+    )
+  }
+
   test("ARR-15.1 schema exposure is off in the packaged defaults") {
     assertEquals(AppConfigFixtures.withPackagedDefaults("").map(_.graphql.schemaExposure), Right(false))
   }
