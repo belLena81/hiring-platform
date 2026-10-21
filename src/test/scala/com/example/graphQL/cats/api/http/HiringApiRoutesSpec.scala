@@ -515,6 +515,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         jobs,
         applications,
         repository,
+        com.example.graphQL.cats.service.mutation.TestIdempotency.noop,
         5.minutes,
         IO.pure(ServiceFixtures.now)
       )

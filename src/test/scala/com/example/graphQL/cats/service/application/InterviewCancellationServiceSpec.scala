@@ -15,6 +15,7 @@ import com.example.graphQL.cats.service.{
   ServiceFixtures,
   UseCaseError
 }
+import com.example.graphQL.cats.service.mutation.{Idempotent, TestIdempotency}
 import com.example.graphQL.cats.service.protocol.IdempotencyRequest
 import java.time.Instant
 import java.util.UUID
@@ -100,12 +101,14 @@ final class InterviewCancellationServiceSpec extends CatsEffectSuite {
       events <- Ref.of[IO, Vector[ApplicationEvent]](Vector.empty)
       errors <- Ref.of[IO, Option[RepositoryError]](None)
       repository <- InMemoryInterviewWorkflowRepository.create(workflow, status)
+      receipts <- TestIdempotency.remembering
     } yield Arrangement(
       new InterviewSchedulingService[IO](
         new InMemoryUsers(users),
         new InMemoryJobs(jobs),
         new InMemoryApplications(applications, events, errors),
         repository,
+        Idempotent(receipts),
         5.minutes,
         IO.pure(clock),
         proposalTtl = ttl
@@ -560,15 +563,15 @@ final class InterviewCancellationServiceSpec extends CatsEffectSuite {
     }
   }
 
-  test("DHW-23 repeating a request whose flag is already set returns the workflow and stores no receipt") {
+  test("DHW-23 repeating a request whose flag is already set returns the workflow and writes no workflow state") {
     arranged(workflowIn(InterviewWorkflowPhase.Completed, _.copy(rescheduleRequestedAt = Some(now)))).flatMap { a =>
       for {
         results <- List.fill(5)(run(a, Action.Request, candidateActor)).sequence
-        receipts <- a.repository.store.get.map(_.requestReceipts.size)
+        commands <- a.commands
         stored <- a.stored
       } yield {
         assert(results.forall(_ == Right(stored)), clue(results))
-        assertEquals(receipts, 0)
+        assertEquals(commands, 0)
       }
     }
   }

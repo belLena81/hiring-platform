@@ -294,9 +294,8 @@ final class InterviewSchedulingWorkerIntegrationSpec extends KafkaIntegrationSui
                   repository.create(
                     workflow,
                     InterviewWorkflow.initialCommand(workflow),
-                    workflow.idempotencyKey,
-                    MutationReceiptFingerprint.fromCanonicalInput(workflow.id.value.toString),
-                    now
+                    now,
+                    MutationWriteContext.directWrite
                   )
                 )
               )
@@ -371,7 +370,7 @@ final class InterviewSchedulingWorkerIntegrationSpec extends KafkaIntegrationSui
                 deliveredBeforeCrash.get
                   .timeout(120.seconds)
                   .flatMap(receipt =>
-                    success(repository.hasHiringReceipt(receipt.workflowId)).map(assert(_)) *>
+                    success(repository.isHiringCommitted(receipt.workflowId)).map(assert(_)) *>
                       repository
                         .find(receipt.idempotencyKey)
                         .value
@@ -393,6 +392,8 @@ final class InterviewSchedulingWorkerIntegrationSpec extends KafkaIntegrationSui
               )
             }
             durations <- completed.get.map(_.values.toList.sorted)
+            _ <- workflows
+              .traverse_(value => ApplicationStatusInvariant.assertAgrees(fixture.database, value.applicationId))
             calendarCount <- Mongo4catsCollections
               .documents(fixture.database, MongoCollections.InterviewCalendarReservations)
               .flatMap(_.count)

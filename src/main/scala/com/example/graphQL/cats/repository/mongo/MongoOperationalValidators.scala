@@ -107,11 +107,17 @@ private[mongo] object MongoOperationalValidators {
     closed = true
   )
 
-  def embeddingWorkValidator: Document = validator(
-    List(
-      MongoFields.Id,
-      MongoFields.Kind,
-      MongoFields.WorkEntityId,
+  /** The work row's kind and entity are the parts of its `_id` (`Kind:entityId`) and are not stored again. */
+  def embeddingWorkValidator: Document = embeddingWorkSchema(withKeyFields = false)
+
+  /** The definition migration 025 installed, which still required the two redundant key fields. */
+  def embeddingWorkValidatorThrough025: Document = embeddingWorkSchema(withKeyFields = true)
+
+  private def embeddingWorkSchema(withKeyFields: Boolean): Document = validator(
+    List(MongoFields.Id) ++ Option
+      .when(withKeyFields)(List(MongoFields.Kind, MongoFields.WorkEntityId))
+      .toList
+      .flatten ++ List(
       MongoFields.State,
       MongoFields.Generation,
       MongoFields.Attempts,
@@ -120,19 +126,25 @@ private[mongo] object MongoOperationalValidators {
       MongoFields.UpdatedAt
     ),
     properties(
-      (List(
-        MongoFields.Id -> shortText,
-        MongoFields.Kind -> enumSchema(EmbeddingWorkKinds*),
-        MongoFields.WorkEntityId -> shortText,
-        MongoFields.State -> enumSchema(EmbeddingWorkStates*),
-        MongoFields.Generation -> nonNegativeLong,
-        MongoFields.Attempts -> nonNegativeInt,
-        MongoFields.AvailableAt -> date,
-        MongoFields.CreatedAt -> date,
-        MongoFields.UpdatedAt -> date,
-        MongoFields.Failure -> enumSchema(EmbeddingWorkFailures*),
-        MongoFields.FinishedAt -> date
-      ) ++ leaseFields)*
+      (List(MongoFields.Id -> shortText) ++
+        Option
+          .when(withKeyFields)(
+            List(
+              MongoFields.Kind -> enumSchema(EmbeddingWorkKinds*),
+              MongoFields.WorkEntityId -> shortText
+            )
+          )
+          .toList
+          .flatten ++ List(
+          MongoFields.State -> enumSchema(EmbeddingWorkStates*),
+          MongoFields.Generation -> nonNegativeLong,
+          MongoFields.Attempts -> nonNegativeInt,
+          MongoFields.AvailableAt -> date,
+          MongoFields.CreatedAt -> date,
+          MongoFields.UpdatedAt -> date,
+          MongoFields.Failure -> enumSchema(EmbeddingWorkFailures*),
+          MongoFields.FinishedAt -> date
+        ) ++ leaseFields)*
     ),
     closed = false
   )
@@ -166,7 +178,13 @@ private[mongo] object MongoOperationalValidators {
 
   def searchSessionsValidator: Document = validator(SessionRequired, properties(sessionProperties*), closed = false)
 
-  def searchSessionWorkValidator: Document = {
+  /** The work row holds the session only; its `SearchPerformed` event is derived when the work completes. */
+  def searchSessionWorkValidator: Document = searchSessionWorkSchema(withEvent = false)
+
+  /** The definition migration 025 installed, which also required a stored copy of the event. */
+  def searchSessionWorkValidatorThrough025: Document = searchSessionWorkSchema(withEvent = true)
+
+  private def searchSessionWorkSchema(withEvent: Boolean): Document = {
     val queryFreeSession = objectSchema(SessionRequired, properties(sessionProperties*))
       .append("not", new Document("required", List(MongoFields.Query).asJava))
     val event = objectSchema(
@@ -178,23 +196,20 @@ private[mongo] object MongoOperationalValidators {
       )
     )
     validator(
-      List(
-        MongoFields.Id,
-        MongoFields.ActorId,
-        MongoFields.Session,
-        MongoFields.Event,
-        MongoFields.State,
-        MongoFields.Attempts,
-        MongoFields.AvailableAt,
-        MongoFields.CreatedAt,
-        MongoFields.UpdatedAt
-      ),
+      List(MongoFields.Id, MongoFields.ActorId, MongoFields.Session) ++ Option.when(withEvent)(MongoFields.Event) ++
+        List(
+          MongoFields.State,
+          MongoFields.Attempts,
+          MongoFields.AvailableAt,
+          MongoFields.CreatedAt,
+          MongoFields.UpdatedAt
+        ),
       properties(
         (List(
           MongoFields.Id -> stringUuid,
           MongoFields.ActorId -> stringUuid,
-          MongoFields.Session -> queryFreeSession,
-          MongoFields.Event -> event,
+          MongoFields.Session -> queryFreeSession
+        ) ++ Option.when(withEvent)(MongoFields.Event -> event).toList ++ List(
           MongoFields.State -> enumSchema(SearchSessionWorkStates*),
           MongoFields.Attempts -> nonNegativeInt,
           MongoFields.AvailableAt -> date,
@@ -263,7 +278,13 @@ private[mongo] object MongoOperationalValidators {
     )
   }
 
-  def interviewWorkflowsValidator: Document = polymorphic(
+  /** Workflows only: interview request idempotency is a `mutation_receipts` row. */
+  def interviewWorkflowsValidator: Document = interviewWorkflowsSchema(withRequestReceipts = false)
+
+  /** The definition migration 025 installed, which also accepted the request receipt document type. */
+  def interviewWorkflowsValidatorThrough025: Document = interviewWorkflowsSchema(withRequestReceipts = true)
+
+  private def interviewWorkflowsSchema(withRequestReceipts: Boolean): Document = polymorphic(
     List(
       (
         MongoInterviewFields.WorkflowType,
@@ -306,27 +327,31 @@ private[mongo] object MongoOperationalValidators {
           "attemptEpochRevision" -> nonNegativeLong,
           MongoFields.RetentionExpiresAt -> date
         )
-      ),
-      (
-        MongoInterviewFields.RequestReceiptType,
-        List(
-          MongoFields.Id,
-          MongoInterviewFields.RequestWorkflowField,
-          MongoInterviewFields.RequestFingerprintField,
-          MongoFields.CreatedAt
-        ),
-        properties(
-          MongoFields.Id -> text,
-          MongoInterviewFields.RequestWorkflowField -> stringUuid,
-          MongoInterviewFields.RequestFingerprintField -> text,
-          MongoFields.CreatedAt -> date,
-          MongoFields.RetentionExpiresAt -> date
+      )
+    ) ++ Option
+      .when(withRequestReceipts)(
+        (
+          MongoInterviewFields.RetiredRequestReceiptType,
+          List(MongoFields.Id, "requestWorkflowId", "requestFingerprint", MongoFields.CreatedAt),
+          properties(
+            MongoFields.Id -> text,
+            "requestWorkflowId" -> stringUuid,
+            "requestFingerprint" -> text,
+            MongoFields.CreatedAt -> date,
+            MongoFields.RetentionExpiresAt -> date
+          )
         )
       )
-    )
+      .toList
   )
 
-  def interviewWorkflowInboxValidator: Document = polymorphic(
+  /** Inbox receipts and quarantine markers: the hiring commit is evidenced by its `application_events` row. */
+  def interviewWorkflowInboxValidator: Document = interviewWorkflowInboxSchema(withHiringReceipts = false)
+
+  /** The definition migration 025 installed, which also accepted the hiring receipt document type. */
+  def interviewWorkflowInboxValidatorThrough025: Document = interviewWorkflowInboxSchema(withHiringReceipts = true)
+
+  private def interviewWorkflowInboxSchema(withHiringReceipts: Boolean): Document = polymorphic(
     List(
       (
         MongoInterviewFields.InboxReceiptType,
@@ -349,22 +374,6 @@ private[mongo] object MongoOperationalValidators {
         )
       ),
       (
-        MongoInterviewFields.HiringReceiptType,
-        List(
-          MongoFields.Id,
-          MongoInterviewFields.WorkflowIdField,
-          MongoFields.SubjectIds,
-          MongoFields.OccurredAt
-        ),
-        properties(
-          MongoFields.Id -> text,
-          MongoInterviewFields.WorkflowIdField -> stringUuid,
-          MongoFields.SubjectIds -> array(stringUuid).append("minItems", 1).append("maxItems", 2),
-          MongoFields.OccurredAt -> date,
-          MongoFields.RetentionExpiresAt -> date
-        )
-      ),
-      (
         MongoInterviewFields.QuarantineType,
         List(MongoFields.Id, "failureCode", MongoFields.OccurredAt, MongoFields.RetentionExpiresAt),
         properties(
@@ -374,7 +383,21 @@ private[mongo] object MongoOperationalValidators {
           MongoFields.RetentionExpiresAt -> date
         )
       )
-    )
+    ) ++ Option
+      .when(withHiringReceipts)(
+        (
+          MongoInterviewFields.RetiredHiringReceiptType,
+          List(MongoFields.Id, MongoInterviewFields.WorkflowIdField, MongoFields.SubjectIds, MongoFields.OccurredAt),
+          properties(
+            MongoFields.Id -> text,
+            MongoInterviewFields.WorkflowIdField -> stringUuid,
+            MongoFields.SubjectIds -> array(stringUuid).append("minItems", 1).append("maxItems", 2),
+            MongoFields.OccurredAt -> date,
+            MongoFields.RetentionExpiresAt -> date
+          )
+        )
+      )
+      .toList
   )
 
   def interviewCalendarReservationsValidator: Document = validator(
@@ -428,7 +451,7 @@ private[mongo] object MongoOperationalValidators {
     closed = true
   )
 
-  /** Installed by migration 025 in this order; the users definition is `MongoHiringValidators.userValidator`. */
+  /** The current definitions, in installation order; the users definition is `MongoHiringValidators.userValidator`. */
   def all: List[(String, Document)] = List(
     MongoCollections.Users -> MongoHiringValidators.userValidator,
     MongoCollections.Applications -> applicationsValidator,
@@ -443,4 +466,18 @@ private[mongo] object MongoOperationalValidators {
     MongoCollections.InterviewCalendarReservations -> interviewCalendarReservationsValidator,
     MongoCollections.InterviewNotificationReceipts -> interviewNotificationReceiptsValidator
   )
+
+  /** The definitions migration 025 installed. Later migrations replaced four of them (embedding work, search session
+    * work, interview workflows and the inbox); 025 installs these and its completed proof accepts either generation.
+    */
+  def installedBy025: List[(String, Document)] = all.map {
+    case (MongoCollections.EmbeddingWork, _)     => MongoCollections.EmbeddingWork -> embeddingWorkValidatorThrough025
+    case (MongoCollections.SearchSessionWork, _) =>
+      MongoCollections.SearchSessionWork -> searchSessionWorkValidatorThrough025
+    case (MongoCollections.InterviewWorkflows, _) =>
+      MongoCollections.InterviewWorkflows -> interviewWorkflowsValidatorThrough025
+    case (MongoCollections.InterviewWorkflowInbox, _) =>
+      MongoCollections.InterviewWorkflowInbox -> interviewWorkflowInboxValidatorThrough025
+    case entry => entry
+  }
 }

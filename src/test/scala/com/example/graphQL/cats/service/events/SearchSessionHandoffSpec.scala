@@ -8,7 +8,7 @@ import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.Diagnostics
-import com.example.graphQL.cats.service.events.{OperationalEvents, SearchSession, SearchSessionResult}
+import com.example.graphQL.cats.service.events.{SearchSession, SearchSessionResult}
 import java.time.Instant
 import java.util.UUID
 import cats.effect.testkit.TestControl
@@ -180,12 +180,7 @@ final class SearchSessionHandoffSpec extends CatsEffectSuite {
       now,
       now.plusSeconds(3600)
     )
-    val work = PendingSearchSessionWork(
-      session,
-      OperationalEvents
-        .searchPerformed(UUID.fromString("00000000-0000-0000-0000-000000000903"), session)
-        .fold(error => fail(error.toString), identity)
-    )
+    val work = PendingSearchSessionWork(session)
 
     new SearchSessionWorkRepository[IO] {
       override def enqueue(work: PendingSearchSessionWork, createdAt: Instant): RepositoryF[IO, Unit] =

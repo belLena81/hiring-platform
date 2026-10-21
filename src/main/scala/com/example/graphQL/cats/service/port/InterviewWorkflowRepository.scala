@@ -41,17 +41,17 @@ final case class InterviewWorkflowCommandRecord(
     executionAttempts: Int = 0
 )
 
-/** Who drives a lifecycle transition. An actor request carries the trusted actor and its idempotent request identity;
-  * an internal transition carries the receipt identity of its cause.
+/** Who drives a lifecycle transition. An actor request carries the trusted actor; its idempotency is the caller's
+  * mutation receipt, written in the same transaction. An internal transition carries the receipt identity of its cause.
   */
 enum InterviewLifecycleOrigin {
-  case Actor(access: InterviewWorkflowAccess, requestKey: UUID, fingerprint: MutationReceiptFingerprint)
+  case Actor(access: InterviewWorkflowAccess)
   case Internal(cause: InterviewAdvanceCause)
 
   /** The person behind the write, as the role and id the pure actor policy needs; the system has none. */
   def actor: Option[(UserRole, UserId)] = this match {
-    case Actor(access, _, _) => Some((access.role, access.actorId))
-    case Internal(_)         => None
+    case Actor(access) => Some((access.role, access.actorId))
+    case Internal(_)   => None
   }
 }
 
@@ -122,11 +122,6 @@ trait InterviewWorkflowRepository[F[_]] {
       result: InterviewResult,
       now: Instant
   ): RepositoryF[F, Unit]
-  def findRequest(
-      actorId: UserId,
-      requestKey: UUID,
-      fingerprint: MutationReceiptFingerprint
-  ): RepositoryF[F, Option[InterviewWorkflow]]
   def findCommand(
       workflowId: InterviewWorkflowId,
       stepId: String
@@ -144,15 +139,17 @@ trait InterviewWorkflowRepository[F[_]] {
       now: Instant,
       execution: Option[ClaimedInterviewWorkflowCommand] = None
   ): RepositoryF[F, Unit]
-  def hasHiringReceipt(workflowId: InterviewWorkflowId): RepositoryF[F, Boolean]
+  def isHiringCommitted(workflowId: InterviewWorkflowId): RepositoryF[F, Boolean]
 
+  /** Stores a new workflow with its first command. Request idempotency is the caller's mutation receipt: `context` is
+    * the receipt transaction, so a replayed request never reaches this write.
+    */
   def create(
       workflow: InterviewWorkflow,
       initialCommand: InterviewWorkflowCommand,
-      requestKey: UUID,
-      fingerprint: MutationReceiptFingerprint,
-      createdAt: Instant
-  ): RepositoryF[F, InterviewWorkflowAdvanceResult]
+      createdAt: Instant,
+      context: MutationWriteContext
+  ): RepositoryF[F, Unit]
 
   def findForActor(
       workflowId: InterviewWorkflowId,
@@ -182,11 +179,12 @@ trait InterviewWorkflowRepository[F[_]] {
 
   /** The one canonical write path for cancel, reschedule request and proposal transitions.
     *
-    * In one guarded transaction it fences the participants, resolves the request or cause receipt, loads the workflow
-    * under the actor's participant predicate, runs the pure `InterviewLifecyclePolicy` against `expectedRevision`, and
-    * persists the next workflow state, receipt and lifecycle command intents. A `Cancel` event additionally applies the
-    * existing `Interview -> Rejected` application transition (history with the generated feedback and the
-    * `statusChanged` operational event) in the same transaction, so a lost race writes nothing.
+    * In one guarded transaction it fences the participants, resolves the cause receipt (an actor request is the
+    * caller's mutation receipt, passed as `context`), loads the workflow under the actor's participant predicate, runs
+    * the pure `InterviewLifecyclePolicy` against `expectedRevision`, and persists the next workflow state, receipt and
+    * lifecycle command intents. A `Cancel` event additionally applies the existing `Interview -> Rejected` application
+    * transition (history with the generated feedback and the `statusChanged` operational event) in the same
+    * transaction, so a lost race writes nothing.
     */
   def applyLifecycle(
       workflowId: InterviewWorkflowId,
@@ -194,7 +192,8 @@ trait InterviewWorkflowRepository[F[_]] {
       event: InterviewLifecycleEvent,
       origin: InterviewLifecycleOrigin,
       now: Instant,
-      availableAt: Option[Instant]
+      availableAt: Option[Instant],
+      context: MutationWriteContext = MutationWriteContext.directWrite
   ): RepositoryF[F, InterviewLifecycleOutcome]
 
   /** The guarded part of the reschedule swap, run by the executor while the workflow is `RescheduleSwapPending`.

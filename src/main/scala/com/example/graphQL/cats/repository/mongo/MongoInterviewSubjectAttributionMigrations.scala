@@ -29,6 +29,9 @@ private[mongo] object MongoInterviewSubjectAttributionMigrations {
   private val Id: MigrationId = MigrationIds.InterviewSubjectAttribution
   val MigrationId: String = Id.value
 
+  /** The `documentType` this step wrote; `027_interview_hiring_receipt_removal` later deleted these documents. */
+  private val HiringReceiptType = MongoInterviewFields.RetiredHiringReceiptType
+
   private val Unattributed: Bson = Filters.exists(MongoFields.DocumentType, false)
 
   private def inbox(database: MongoHiringSetup.SetupDatabase) =
@@ -57,7 +60,7 @@ private[mongo] object MongoInterviewSubjectAttributionMigrations {
           .updateOne(
             Filters.and(Filters.eq(MongoFields.Id, key), Unattributed),
             Updates.combine(
-              Updates.set(MongoFields.DocumentType, MongoInterviewFields.HiringReceiptType),
+              Updates.set(MongoFields.DocumentType, HiringReceiptType),
               Updates.set(MongoFields.SubjectIds, subjects.asJava),
               Updates.unset(MongoFields.CandidateId),
               Updates.unset(MongoFields.RecruiterId)

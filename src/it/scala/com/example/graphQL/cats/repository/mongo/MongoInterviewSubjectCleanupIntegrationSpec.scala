@@ -723,52 +723,8 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
     }
   }
 
-  test("request receipts remain attributable after workflow TTL and purge their linked orphan commands") {
-    mongoResource.use { fixture =>
-      val subject = UserId(UUID.randomUUID())
-      val workflowId = UUID.randomUUID().toString
-      val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
-      for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
-        _ <- MongoRepositoryTestSupport.insertUnvalidated(
-          fixture.database,
-          MongoCollections.InterviewWorkflows,
-          new Document("_id", s"request:${subject.value}:${UUID.randomUUID()}")
-            .append("documentType", "requestReceipt")
-            .append("requestWorkflowId", workflowId)
-        )
-        _ <- MongoRepositoryTestSupport.insertOne(
-          fixture.database,
-          MongoCollections.InterviewWorkflowCommands,
-          new Document("_id", s"$workflowId:command")
-            .append("workflowId", workflowId)
-            .append("stepId", "command")
-            .append("revision", Long.box(0L))
-            .append("attempts", Int.box(0))
-            .append("executionAttempts", Int.box(0))
-            .append("commandState", "Pending")
-            .append("availableAt", java.util.Date.from(Instant.now()))
-            .append("occurredAt", java.util.Date.from(Instant.now()))
-            .append("command", new Document("kind", "requireRepair").append("reason", "retry exhausted: provider"))
-        )
-        _ <- cleanup.enqueue(subject, Instant.now(), None).value.flatMap(result => IO(assert(result.isRight)))
-        absentBefore <- cleanup.absent(subject).value
-        _ <- step(cleanup)
-        _ <- step(cleanup)
-        absentAfter <- cleanup.absent(subject).value
-        receipts <- MongoRepositoryTestSupport.count(fixture.database, MongoCollections.InterviewWorkflows)
-        commands <- MongoRepositoryTestSupport.count(fixture.database, MongoCollections.InterviewWorkflowCommands)
-      } yield {
-        assertEquals(absentBefore, Right(false))
-        assertEquals(absentAfter, Right(true))
-        assertEquals(receipts, 0L)
-        assertEquals(commands, 0L)
-      }
-    }
-  }
-
   private enum CleanupAttribution {
-    case RequestReceipt, CalendarReservation, NotificationReceipt, Workflow
+    case CalendarReservation, NotificationReceipt, Workflow
   }
 
   private val cleanupDataCollections = Vector(
@@ -788,10 +744,6 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
     val at = Date.from(Instant.now())
     ids.toList.traverse_ { id =>
       val sources = attribution.toList.map {
-        case CleanupAttribution.RequestReceipt =>
-          MongoCollections.InterviewWorkflows -> new Document("_id", s"request:${subject.value}:$id")
-            .append("documentType", "requestReceipt")
-            .append("requestWorkflowId", id)
         case CleanupAttribution.CalendarReservation =>
           MongoCollections.InterviewCalendarReservations -> new Document("_id", id)
             .append("workflowId", id)
@@ -804,6 +756,8 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
         case CleanupAttribution.Workflow =>
           MongoCollections.InterviewWorkflows -> new Document("_id", id)
             .append("documentType", "workflow")
+            // The store allows one workflow per application, so each seeded workflow names its own.
+            .append("applicationId", UUID.randomUUID().toString)
             .append("candidateId", subject.value.toString)
             .append("recruiterId", UUID.randomUUID().toString)
             .append("subjectIds", java.util.List.of(subject.value.toString))
@@ -831,7 +785,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
   private def cleanupCounts(database: mongo4cats.database.MongoDatabase[IO]): IO[Vector[Long]] =
     cleanupDataCollections.traverse(name => MongoRepositoryTestSupport.count(database, name))
 
-  test("cleanup removes linked children across more than one request receipt batch and preserves another subject") {
+  test("cleanup removes linked children across more than one batch and preserves another subject") {
     mongoResource.use { fixture =>
       val subject = UserId(UUID.randomUUID())
       val other = UserId(UUID.randomUUID())
@@ -843,10 +797,10 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
           fixture.database,
           other,
           Vector(UUID.randomUUID().toString),
-          Set(CleanupAttribution.RequestReceipt)
+          Set(CleanupAttribution.CalendarReservation)
         )
         preserved <- cleanupCounts(fixture.database)
-        _ <- seedCleanupData(fixture.database, subject, ids, Set(CleanupAttribution.RequestReceipt))
+        _ <- seedCleanupData(fixture.database, subject, ids, Set(CleanupAttribution.CalendarReservation))
         _ <- cleanup.enqueue(subject, Instant.now(), None).value.flatMap(result => IO(assert(result.isRight)))
         _ <- List.fill(4)(()).traverse_(_ => step(cleanup, passed = true))
         complete <- cleanup.complete(subject)

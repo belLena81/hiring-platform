@@ -431,7 +431,8 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
             event: InterviewLifecycleEvent,
             origin: InterviewLifecycleOrigin,
             now: Instant,
-            availableAt: Option[Instant]
+            availableAt: Option[Instant],
+            context: MutationWriteContext
         ) = RepositoryF
           .lift(
             applied.update(a => a.copy(lifecycle = a.lifecycle :+ ((expectedRevision, event, origin, availableAt))))
@@ -611,7 +612,8 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
             event: InterviewLifecycleEvent,
             origin: InterviewLifecycleOrigin,
             now: Instant,
-            availableAt: Option[Instant]
+            availableAt: Option[Instant],
+            context: MutationWriteContext
         ) =
           RepositoryF.lift(applied.update(_ :+ (event -> origin))).as(InterviewLifecycleOutcome.Duplicate(cancelling))
         override def settleNotificationResult(
@@ -702,7 +704,8 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
             event: InterviewLifecycleEvent,
             origin: InterviewLifecycleOrigin,
             at: Instant,
-            availableAt: Option[Instant]
+            availableAt: Option[Instant],
+            context: MutationWriteContext
         ) = RepositoryF.lift(applied.update(_ :+ event)).as(InterviewLifecycleOutcome.Duplicate(open))
         override def quarantine(identity: String, at: Instant) =
           RepositoryF.lift(quarantined.update(_ :+ identity))

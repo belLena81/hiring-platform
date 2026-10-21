@@ -125,10 +125,8 @@ final class MongoInterviewCalendarLedger(store: MongoInterviewWorkflowStore) ext
               for {
                 reservation <- MongoF.fromEither(decodeReservation(document))
                 _ <- fenceExecution(session, reservation.workflowId, execution)
-                receipt <- RepositoryF.lift(
-                  MongoSessionOperations.findById(inbox, session, s"${reservation.workflowId.value}:hiring")
-                )
-                _ <- MongoF.fromEither(Either.cond(receipt.isEmpty, (), RepositoryError.Conflict))
+                committed <- isHiringCommitted(session, reservation.workflowId)
+                _ <- MongoF.fromEither(Either.cond(!committed, (), RepositoryError.Conflict))
                 _ <- bumpProviderFence(session, reservation.workflowId, InterviewWorkflowPhase.CompensationPending)
                 _ <- markReleased(session, reservation, at)
               } yield ()

@@ -5,7 +5,7 @@ import cats.effect.std.UUIDGen
 import cats.effect.{Clock, IO}
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, UserId}
-import com.example.graphQL.cats.domain.model.{Application, ApplicationStatus}
+import com.example.graphQL.cats.domain.model.Application
 import com.example.graphQL.cats.domain.workflow.*
 import com.example.graphQL.cats.service.Diagnostics
 import com.example.graphQL.cats.service.port.*
@@ -49,6 +49,7 @@ final class MongoInterviewWorkflowStore(
   val outbox = collection(MongoCollections.EventOutbox)
   val subjectFences = collection(MongoCollections.OutboxSubjectFences)
   private val subjectFence = new MongoSubjectFence(database)
+  val statusWrite = new ApplicationStatusWrite(database, diagnostics)
 
   private[mongo] def guardWrite(
       collection: IO[MongoSessionOperations.Documents],
@@ -186,24 +187,23 @@ final class MongoInterviewWorkflowStore(
       MongoUpdate.inc(MongoFields.AdmissionFence, 1L)
     )
 
-  private[mongo] def writeApplicationStatus(
+  /** The hiring commit is its status write: the deterministic `application_events` row exists exactly when it
+    * committed. Reads only `_id`, by primary key.
+    */
+  private[mongo] def isHiringCommitted(
       session: Option[ClientSession[IO]],
-      applicationId: ApplicationId,
-      previous: ApplicationStatus,
-      updated: Application
-  ): RepositoryF[IO, Unit] =
-    guardWrite(
-      applications,
-      session,
-      MongoFilter.and(
-        MongoFilter.eq(MongoFields.Id, applicationId.value.toString),
-        MongoFilter.eq(MongoFields.Status, previous.toString)
-      ),
-      MongoUpdate.combine(
-        MongoUpdate.set(MongoFields.Status, updated.status.toString),
-        MongoUpdate.set(MongoFields.UpdatedAt, updated.updatedAt.toDate)
+      workflowId: InterviewWorkflowId
+  ): RepositoryF[IO, Boolean] =
+    RepositoryF
+      .lift(
+        MongoSessionOperations.findById(
+          applicationEvents,
+          session,
+          hiringStatusEventId(workflowId).toString,
+          Some(com.mongodb.client.model.Projections.include(MongoFields.Id))
+        )
       )
-    )
+      .map(_.nonEmpty)
 
   private[mongo] def readApplication(document: Document): RepositoryF[IO, Application] =
     MongoF.fromEither(MongoStoredDocumentDecoding.repository(MongoHiringCodecs.readApplication(document)))

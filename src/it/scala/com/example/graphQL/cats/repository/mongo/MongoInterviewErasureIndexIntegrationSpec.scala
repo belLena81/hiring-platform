@@ -21,8 +21,9 @@ import org.bson.{BsonDocument, Document}
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
-/** Interview erasure and consumer-receipt identity: every purge query is index-served, hiring receipts are attributed
-  * (migration 022) even when their workflow is gone, and the redundant receipt index is retired (migration 023).
+/** Interview erasure and consumer-receipt identity: every purge query is index-served, migration 022 still attributes
+  * the hiring receipts of an older database (its successor 027 then removes them), and the redundant receipt index is
+  * retired (migration 023).
   */
 final class MongoInterviewErasureIndexIntegrationSpec extends MongoIntegrationSuite {
   override val munitIOTimeout: FiniteDuration = 10.minutes
@@ -37,6 +38,19 @@ final class MongoInterviewErasureIndexIntegrationSpec extends MongoIntegrationSu
 
   private def setup(database: mongo4cats.database.MongoDatabase[IO]): IO[Unit] =
     MongoHiringSetup.initialize(database, Diagnostics.noop[IO])
+
+  /** Migration 022 alone: a full start would also run its successor 027, which deletes the receipts 022 attributes. */
+  private def attribution(database: mongo4cats.database.MongoDatabase[IO]): IO[Unit] =
+    MongoHiringSetup
+      .setupDatabase(database)
+      .flatMap(handle =>
+        // The inbox validator of the database 022 ran on: the one migration 025 installed, which still knows the shape.
+        MongoHiringValidators.install(
+          handle,
+          MongoCollections.InterviewWorkflowInbox,
+          MongoOperationalValidators.interviewWorkflowInboxValidatorThrough025
+        ) *> MongoMigrationRunner.run(handle, MongoInterviewSubjectAttributionMigrations.step)
+      )
 
   private def insertMany(
       database: mongo4cats.database.MongoDatabase[IO],
@@ -72,13 +86,6 @@ final class MongoInterviewErasureIndexIntegrationSpec extends MongoIntegrationSu
             initiatedBy = recruiter(id)
           )
         )
-      ) ++ per(id =>
-        MongoInterviewWorkflowCodec.requestReceiptDocument(
-          MongoInterviewWorkflowCodec.requestReceiptId(subject, id),
-          InterviewWorkflowId(id),
-          com.example.graphQL.cats.service.port.MutationReceiptFingerprint.fromCanonicalInput(id.toString),
-          now
-        )
       )),
       MongoCollections.InterviewWorkflowCommands -> per(id =>
         new Document(MongoFields.Id, s"$id:command")
@@ -93,17 +100,9 @@ final class MongoInterviewErasureIndexIntegrationSpec extends MongoIntegrationSu
           .append("occurredAt", Date.from(now))
           .append("command", new Document("kind", "requireRepair").append("reason", "retry exhausted: provider"))
       ),
-      MongoCollections.InterviewWorkflowInbox -> (per(id =>
-        MongoInterviewWorkflowCodec.hiringReceiptDocument(
-          s"$id:hiring",
-          InterviewWorkflowId(id),
-          subject,
-          recruiter(id),
-          now
-        )
-      ) ++ per(id =>
+      MongoCollections.InterviewWorkflowInbox -> per(id =>
         MongoInterviewWorkflowCodec.inboxDocument(s"$id:message", InterviewWorkflowId(id), "message", 1L, now)
-      )),
+      ),
       MongoCollections.InterviewCalendarReservations -> per(id =>
         new Document(MongoFields.Id, id.toString)
           .append("workflowId", id.toString)
@@ -169,15 +168,12 @@ final class MongoInterviewErasureIndexIntegrationSpec extends MongoIntegrationSu
       Set(
         MongoIndexNames.InterviewWorkflowCandidate,
         MongoIndexNames.InterviewWorkflowRecruiter,
-        MongoIndexNames.InterviewWorkflowRequestReceipt,
         "_id_"
       )
     case MongoCollections.InterviewCalendarReservations =>
       Set(MongoIndexNames.InterviewCalendarParticipants, MongoIndexNames.InterviewCalendarReservationIdentity)
     case MongoCollections.InterviewNotificationReceipts =>
       Set(MongoIndexNames.InterviewNotificationRecipient, MongoIndexNames.workflowIdentity(collection))
-    case MongoCollections.InterviewWorkflowInbox =>
-      Set(MongoIndexNames.InterviewWorkflowInboxHiringSubjects, MongoIndexNames.workflowIdentity(collection))
     case other => Set(MongoIndexNames.workflowIdentity(other))
   }
 
@@ -223,17 +219,17 @@ final class MongoInterviewErasureIndexIntegrationSpec extends MongoIntegrationSu
               .command(database, new Document("collStats", MongoCollections.InterviewWorkflowInbox))
           )
       } yield {
-        // Cost record: one key per hiring receipt (at most one per workflow) in a partial index.
+        // MR-07: the hiring receipt and its erasure index are gone; the inbox is reached through its workflow id only.
         val sizes = inboxStats.get("indexSizes", classOf[Document])
         println(s"Inbox index sizes (bytes) after purge of the seeded dataset: ${sizes.toJson}")
-        assert(sizes.containsKey(MongoIndexNames.InterviewWorkflowInboxHiringSubjects))
-        // Ana owns request receipts, commands, both inbox rows, reservations and notifications for 3 workflows.
+        assert(!sizes.containsKey(MongoIndexNames.InterviewWorkflowInboxHiringSubjects), clue(sizes))
+        // Ana owns commands, an inbox row, reservations and notifications for 3 workflows.
         assert(before.forall(_ > 0L), clue(before))
         assertEquals(after.sum, 0L)
         assertEquals(remaining, baseline)
         assertEquals(absentBefore, Right(false))
         assertEquals(absentAfter, Right(true))
-        assertEquals(absenceReads.size, 4)
+        assertEquals(absenceReads.size, 3)
         (absencePlans ++ purgePlans).foreach { case (collection, explained) =>
           val winning = winningPlan(explained)
           assert(!stages(winning).contains("COLLSCAN"), clue((collection, winning)))
@@ -247,7 +243,7 @@ final class MongoInterviewErasureIndexIntegrationSpec extends MongoIntegrationSu
         workflowFinds.foreach(explained =>
           assertEquals(
             indexes(winningPlan(explained)),
-            Set(MongoIndexNames.InterviewWorkflowCandidate, MongoIndexNames.InterviewWorkflowRecruiter, "_id_")
+            Set(MongoIndexNames.InterviewWorkflowCandidate, MongoIndexNames.InterviewWorkflowRecruiter)
           )
         )
         absencePlans.foreach { case (collection, explained) =>
@@ -258,48 +254,6 @@ final class MongoInterviewErasureIndexIntegrationSpec extends MongoIntegrationSu
           assert(examined <= 1L && keys <= 2L, clue((collection, examined, keys)))
           println(s"Erasure absence check $collection: documentsExamined=$examined keysExamined=$keys")
         }
-      }
-    }
-  }
-
-  test("MSC-02.2 an orphan hiring receipt, whose workflow already expired, is purged and others are untouched") {
-    mongoResource.use { fixture =>
-      val database = fixture.database
-      val ana = UserId(UUID.randomUUID())
-      val other = UserId(UUID.randomUUID())
-      val gone = UUID.randomUUID()
-      val kept = UUID.randomUUID()
-      val cleanup = new MongoInterviewSubjectCleanup(database)
-      def receipt(subject: UserId, id: UUID) =
-        MongoInterviewWorkflowCodec.hiringReceiptDocument(
-          s"$id:hiring",
-          InterviewWorkflowId(id),
-          subject,
-          UserId(UUID.randomUUID()),
-          now
-        )
-      for {
-        _ <- setup(database)
-        _ <- insertMany(
-          database,
-          MongoCollections.InterviewWorkflowInbox,
-          List(receipt(ana, gone), receipt(other, kept))
-        )
-        workflows <- count(database, MongoCollections.InterviewWorkflows, new BsonDocument())
-        absentBefore <- cleanup.absent(ana).value
-        enqueued <- cleanup.enqueue(ana, now, None).value
-        _ <- cleanup.purge(ana).value.flatMap(result => IO(assert(result.isRight)))
-        absentAfter <- cleanup.absent(ana).value
-        left <- Mongo4catsCollections
-          .documents(database, MongoCollections.InterviewWorkflowInbox)
-          .flatMap(_.find(Filters.empty()).all)
-          .map(_.toList)
-      } yield {
-        assertEquals(workflows, 0L)
-        assertEquals(absentBefore, Right(false))
-        assert(enqueued.isRight)
-        assertEquals(absentAfter, Right(true))
-        assertEquals(left.map(_.getString(MongoFields.Id)), List(s"$kept:hiring"))
       }
     }
   }
@@ -315,36 +269,6 @@ final class MongoInterviewErasureIndexIntegrationSpec extends MongoIntegrationSu
       .documents(database, MongoCollections.InterviewWorkflows)
       .flatMap(_.find(Filters.empty()).all)
       .map(_.toList.map(_.getString(MongoFields.Id)).sorted)
-
-  test("MSC-02.1 an orphan request receipt whose workflow expired is found by its identity range and purged") {
-    mongoResource.use { fixture =>
-      val database = fixture.database
-      val ana = UserId(UUID.randomUUID())
-      val other = UserId(UUID.randomUUID())
-      val gone = UUID.randomUUID()
-      def receipt(subject: UserId, id: UUID) =
-        MongoInterviewWorkflowCodec.requestReceiptDocument(
-          MongoInterviewWorkflowCodec.requestReceiptId(subject, id),
-          InterviewWorkflowId(id),
-          com.example.graphQL.cats.service.port.MutationReceiptFingerprint.fromCanonicalInput(id.toString),
-          now
-        )
-      val kept = UUID.randomUUID()
-      val cleanup = new MongoInterviewSubjectCleanup(database)
-      for {
-        _ <- setup(database)
-        _ <- insertMany(database, MongoCollections.InterviewWorkflows, List(receipt(ana, gone), receipt(other, kept)))
-        before <- cleanup.absent(ana).value
-        _ <- cleanup.purge(ana).value
-        after <- cleanup.absent(ana).value
-        left <- workflowIds(database)
-      } yield {
-        assertEquals(before, Right(false))
-        assertEquals(after, Right(true))
-        assertEquals(left, List(MongoInterviewWorkflowCodec.requestReceiptId(other, kept)))
-      }
-    }
-  }
 
   test("MSC-02.1 an Admin-initiated workflow is purged through its candidate and the Admin is not attributable") {
     mongoResource.use { fixture =>
@@ -408,36 +332,6 @@ final class MongoInterviewErasureIndexIntegrationSpec extends MongoIntegrationSu
     }
   }
 
-  test("MSC-02.2 an old-shape hiring receipt is left to migration 022 and purged once it has run") {
-    mongoResource.use { fixture =>
-      val database = fixture.database
-      val ana = UserId(UUID.randomUUID())
-      val old = UUID.randomUUID().toString
-      val cleanup = new MongoInterviewSubjectCleanup(database)
-      for {
-        _ <- setup(database)
-        _ <- insertMany(
-          database,
-          MongoCollections.InterviewWorkflowInbox,
-          List(legacyReceipt(old, ana.value.toString, UUID.randomUUID().toString))
-        )
-        beforeMigration <- cleanup.absent(ana).value
-        _ <- cleanup.purge(ana).value
-        stillThere <- inboxIds(database)
-        _ <- dropLedger(database, MigrationIds.InterviewSubjectAttribution)
-        _ <- setup(database)
-        afterMigration <- cleanup.absent(ana).value
-        _ <- cleanup.purge(ana).value
-        gone <- inboxIds(database)
-      } yield {
-        assertEquals(beforeMigration, Right(true))
-        assertEquals(stillThere, List(s"$old:hiring"))
-        assertEquals(afterMigration, Right(false))
-        assertEquals(gone, Nil)
-      }
-    }
-  }
-
   test("MSC-02.2 migration 022 rescans once when an earlier binary wrote a receipt below the saved checkpoint") {
     mongoResource.use { fixture =>
       val database = fixture.database
@@ -454,7 +348,7 @@ final class MongoInterviewErasureIndexIntegrationSpec extends MongoIntegrationSu
         handle <- MongoHiringSetup.setupDatabase(database)
         _ <- MongoMigrationLedger.markRunning(handle, MigrationIds.InterviewSubjectAttribution)
         _ <- MongoMigrationLedger.checkpoint(handle, MigrationIds.InterviewSubjectAttribution, "z")
-        result <- setup(database).attempt
+        result <- attribution(database).attempt
         missing <- unattributed(database)
         row <- ledgerRow(database, MigrationIds.InterviewSubjectAttribution)
       } yield {
@@ -502,7 +396,7 @@ final class MongoInterviewErasureIndexIntegrationSpec extends MongoIntegrationSu
         _ <- setup(database)
         _ <- insertMany(database, MongoCollections.InterviewWorkflowInbox, orphan :: typed :: legacy)
         _ <- dropLedger(database, MigrationIds.InterviewSubjectAttribution)
-        _ <- setup(database)
+        _ <- attribution(database)
         row <- ledgerRow(database, MigrationIds.InterviewSubjectAttribution)
         stored <- MongoRepositoryTestSupport.findOne(
           database,
@@ -526,12 +420,8 @@ final class MongoInterviewErasureIndexIntegrationSpec extends MongoIntegrationSu
           Filters.eq(MongoFields.Id, "typed:message")
         )
         _ <- fixture.commands.clear
-        _ <- setup(database)
+        _ <- attribution(database)
         restart <- fixture.commands.snapshot
-        // A purge reaches an attributed receipt without its workflow.
-        cleanup = new MongoInterviewSubjectCleanup(database)
-        _ <- cleanup.purge(UserId(UUID.fromString(ana))).value
-        remaining <- count(database, MongoCollections.InterviewWorkflowInbox, Filters.eq(MongoFields.SubjectIds, ana))
       } yield {
         assertEquals(row.map(_.getString(MongoFields.State)), Some("Complete"))
         assertEquals(attributed, 1101L)
@@ -546,7 +436,6 @@ final class MongoInterviewErasureIndexIntegrationSpec extends MongoIntegrationSu
           ),
           Nil
         )
-        assertEquals(remaining, 0L)
       }
     }
   }
@@ -562,13 +451,13 @@ final class MongoInterviewErasureIndexIntegrationSpec extends MongoIntegrationSu
         _ <- setup(database)
         _ <- insertMany(database, MongoCollections.InterviewWorkflowInbox, bad :: legacy)
         _ <- dropLedger(database, MigrationIds.InterviewSubjectAttribution)
-        first <- setup(database).attempt
+        first <- attribution(database).attempt
         running <- ledgerRow(database, MigrationIds.InterviewSubjectAttribution)
-        second <- setup(database).attempt
+        second <- attribution(database).attempt
         _ <- Mongo4catsCollections
           .documents(database, MongoCollections.InterviewWorkflowInbox)
           .flatMap(_.deleteOne(Filters.eq(MongoFields.Id, "~unattributable")))
-        repaired <- setup(database).attempt
+        repaired <- attribution(database).attempt
         done <- ledgerRow(database, MigrationIds.InterviewSubjectAttribution)
         // An earlier binary writes one more legacy receipt after completion; the next start repairs it.
         _ <- insertMany(
@@ -576,7 +465,7 @@ final class MongoInterviewErasureIndexIntegrationSpec extends MongoIntegrationSu
           MongoCollections.InterviewWorkflowInbox,
           List(legacyReceipt("ffffffff-ffff-ffff-ffff-ffffffffffff", ana, bob))
         )
-        _ <- setup(database)
+        _ <- attribution(database)
         late <- unattributed(database)
       } yield {
         val expected = MigrationError.StepFailed(
@@ -605,7 +494,7 @@ final class MongoInterviewErasureIndexIntegrationSpec extends MongoIntegrationSu
         _ <- setup(database)
         _ <- insertMany(database, MongoCollections.InterviewWorkflowInbox, legacy)
         _ <- dropLedger(database, MigrationIds.InterviewSubjectAttribution)
-        _ <- (setup(database), setup(database)).parTupled
+        _ <- (attribution(database), attribution(database)).parTupled
         missing <- unattributed(database)
         attributed <- count(
           database,

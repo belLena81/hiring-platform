@@ -37,27 +37,6 @@ private[mongo] object MongoInterviewWorkflowCodec {
     }
   }
 
-  def requestReceiptDocument(
-      receiptId: String,
-      workflowId: InterviewWorkflowId,
-      fingerprint: MutationReceiptFingerprint,
-      createdAt: Instant
-  ): Document =
-    new Document(MongoFields.Id, receiptId)
-      .append(DocumentTypeField, RequestReceiptType)
-      .append(RequestWorkflowField, workflowId.value.toString)
-      .append(RequestFingerprintField, fingerprint.value)
-      .append(MongoFields.CreatedAt, createdAt.toDate)
-
-  def requestReceiptId(actorId: UserId, requestKey: UUID): String =
-    s"request:${actorId.value}:$requestKey"
-
-  def decodeReceipt(document: Document): Either[RepositoryError, (InterviewWorkflowId, String)] =
-    for {
-      workflow <- uuid(document, RequestWorkflowField).map(InterviewWorkflowId.apply)
-      fingerprint <- string(document, RequestFingerprintField)
-    } yield workflow -> fingerprint
-
   def inboxDocument(
       id: String,
       workflowId: InterviewWorkflowId,
@@ -72,19 +51,9 @@ private[mongo] object MongoInterviewWorkflowCodec {
       .append(RevisionField, revision)
       .append(MongoFields.OccurredAt, at.toDate)
 
-  /** The hiring receipt names its subjects so erasure finds it without the workflow, which may have expired. */
-  def hiringReceiptDocument(
-      id: String,
-      workflowId: InterviewWorkflowId,
-      candidateId: UserId,
-      recruiterId: UserId,
-      at: Instant
-  ): Document =
-    new Document(MongoFields.Id, id)
-      .append(DocumentTypeField, HiringReceiptType)
-      .append(WorkflowIdField, workflowId.value.toString)
-      .append(MongoFields.SubjectIds, List(candidateId.value.toString, recruiterId.value.toString).distinct.asJava)
-      .append(MongoFields.OccurredAt, at.toDate)
+  /** The status event of the hiring commit has a deterministic identity, so a repeated commit finds its own row. */
+  def hiringStatusEventId(workflowId: InterviewWorkflowId): java.util.UUID =
+    com.example.graphQL.cats.shared.StableIds.uuid(s"${workflowId.value}:status")
 
   def commandDocument(record: InterviewWorkflowCommandRecord): Document =
     commandEnvelope(

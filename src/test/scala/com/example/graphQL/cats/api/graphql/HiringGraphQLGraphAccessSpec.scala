@@ -126,6 +126,7 @@ final class HiringGraphQLGraphAccessSpec extends CatsEffectSuite {
         jobs,
         applicationRepository,
         workflows,
+        com.example.graphQL.cats.service.mutation.TestIdempotency.noop,
         5.minutes,
         IO.pure(now)
       )

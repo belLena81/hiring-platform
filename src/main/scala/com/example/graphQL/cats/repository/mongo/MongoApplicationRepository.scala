@@ -28,6 +28,7 @@ final class MongoApplicationRepository private (
   private def events = Mongo4catsCollections.documents(database, MongoCollections.ApplicationEvents)
   private def jobs = Mongo4catsCollections.documents(database, MongoCollections.Jobs)
   private val writeFence = new MongoApplicationWriteFence(database)
+  private val statusWrite = new ApplicationStatusWrite(database, diagnostics)
   private def outbox = Mongo4catsCollections.documents(database, MongoCollections.EventOutbox)
 
   override def find(id: ApplicationId): RepositoryF[IO, Option[Application]] =
@@ -143,28 +144,7 @@ final class MongoApplicationRepository private (
       event: ApplicationEvent,
       operationalEvents: List[OperationalEventEnvelope],
       session: Option[ClientSession[IO]]
-  ): RepositoryF[IO, Unit] =
-    val statusGuard = event.previousStatus
-      .map(status => MongoFilter.eq(MongoFields.Status, status.toString))
-      .getOrElse(MongoFilter.exists(MongoFields.Status))
-    // The replacement document is the caller's, so the stored owner facts the fence relied on are part of the predicate:
-    // a forged jobId or candidateId matches nothing and the write is refused as a Conflict.
-    val filter = MongoFilter.and(
-      MongoFilter.eq(MongoFields.Id, application.id.value.toString),
-      MongoFilter.eq(MongoFields.JobId, application.jobId.value.toString),
-      MongoFilter.eq(MongoFields.CandidateId, application.candidateId.value.toString),
-      statusGuard
-    )
-    for {
-      result <- RepositoryF.lift(
-        MongoSessionOperations.replaceOne(collection, session, filter, MongoHiringCodecs.application(application))
-      )
-      _ <- MongoF.fromEither(MongoRepositorySupport.matchedOne(result))
-      _ <- MongoRepositorySupport.repositoryGuard(diagnostics, "applications.insertStatusEvent") {
-        RepositoryF.lift(MongoApplicationEventInsertion.insert(events, session, event)).void
-      }(MongoErrors.duplicateAs(RepositoryError.Conflict))
-      _ <- MongoOperationalEventInsertion.insert(outbox, session, operationalEvents, application.updatedAt, diagnostics)
-    } yield ()
+  ): RepositoryF[IO, Unit] = statusWrite(session, application, event, operationalEvents)
 
   /** A duplicate key on the actor's fence document is a lost race (`Conflict`), never a `DuplicateApplication`. */
   private def fenced(operation: String, fence: RepositoryF[IO, Unit]): RepositoryF[IO, Unit] =

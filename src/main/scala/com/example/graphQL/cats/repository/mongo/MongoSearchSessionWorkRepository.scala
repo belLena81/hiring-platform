@@ -13,6 +13,7 @@ import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.Diagnostics
 import com.example.graphQL.cats.infrastructure.events.OperationalEventWireCodec
+import com.example.graphQL.cats.service.events.{OperationalEventEnvelope, OperationalEvents, SearchSession}
 import com.mongodb.client.model.{Sorts, UpdateOptions}
 import org.bson.Document
 
@@ -34,15 +35,7 @@ final class MongoSearchSessionWorkRepository(
 
   override def enqueue(value: PendingSearchSessionWork, now: Instant): RepositoryF[IO, Unit] =
     MongoF
-      .fromEither(
-        OperationalEventWireCodec.validate(value.event).leftMap(_ => RepositoryError.InvalidEvent).flatMap { _ =>
-          Either.cond(
-            value.addressesSession,
-            (),
-            RepositoryError.InvalidEvent
-          )
-        }
-      )
+      .fromEither(derivedEvent(value.session))
       .flatMap { _ =>
         val sanitized = MongoSearchSessionWorkCodecs.work(value, now)
         val filter = MongoFilter.and(
@@ -115,24 +108,18 @@ final class MongoSearchSessionWorkRepository(
       leaseUntil: Instant
   ): RepositoryF[IO, Option[ClaimedSearchSessionWork]] =
     RepositoryF.lift(uuidGen.randomUUID.map(_.toString)).flatMap { token =>
-      val available = MongoFilter.and(
-        MongoFilter
-          .in(MongoFields.State, List(SearchSessionWorkState.Ready, SearchSessionWorkState.Retry).map(_.toString)),
-        MongoFilter.lte(MongoFields.AvailableAt, now.toDate)
-      )
       MongoRepositorySupport
         .repositoryGuard(diagnostics, "searchSessionWork.claim") {
-          MongoLeaseQueue.claimNext(
+          MongoLeaseQueue.claimReady(
             work,
-            None,
-            MongoLeaseQueue.claimable(available, processing, now),
-            MongoLeaseQueue.leaseStamp(SearchSessionWorkState.Processing.toString, workerId, token, leaseUntil, now),
+            List(SearchSessionWorkState.Ready, SearchSessionWorkState.Retry).map(_.toString),
+            SearchSessionWorkState.Processing.toString,
+            workerId,
+            token,
+            now,
+            leaseUntil,
             Sorts.ascending(MongoFields.AvailableAt, MongoFields.CreatedAt, MongoFields.Id)
-          )(document =>
-            MongoF.fromEither(
-              MongoSearchSessionWorkCodecs.readClaim(document).toStored
-            )
-          )
+          )(document => MongoF.fromEither(MongoSearchSessionWorkCodecs.readClaim(document).toStored))
         }
     }
 
@@ -156,13 +143,22 @@ final class MongoSearchSessionWorkRepository(
                 new UpdateOptions().upsert(true)
               )
             )
-            saveSession *>
-              MongoOperationalEventInsertion.insert(outbox, active, List(claim.work.event), now, diagnostics) *>
-              RepositoryF
-                .lift(MongoSessionOperations.deleteOne(work, active, lease))
-                .subflatMap(MongoRepositorySupport.deletedOne(_))
+            MongoF.fromEither(derivedEvent(claim.work.session)).flatMap { event =>
+              saveSession *>
+                MongoOperationalEventInsertion.insert(outbox, active, List(event), now, diagnostics) *>
+                RepositoryF
+                  .lift(MongoSessionOperations.deleteOne(work, active, lease))
+                  .subflatMap(MongoRepositorySupport.deletedOne(_))
+            }
           }
       }(MongoErrors.duplicateAsConflict)
+
+  /** The `SearchPerformed` event is a function of the session, so the work row stores the session once. */
+  private def derivedEvent(session: SearchSession): Either[RepositoryError, OperationalEventEnvelope] =
+    OperationalEvents
+      .searchPerformed(session)
+      .leftMap(_ => RepositoryError.InvalidEvent)
+      .flatMap(event => OperationalEventWireCodec.validate(event).leftMap(_ => RepositoryError.InvalidEvent))
 
   override def retry(claim: ClaimedSearchSessionWork, availableAt: Instant): RepositoryF[IO, Unit] =
     transition(

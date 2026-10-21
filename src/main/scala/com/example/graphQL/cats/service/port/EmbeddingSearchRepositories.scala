@@ -24,6 +24,22 @@ final case class EmbeddingWorkKey(kind: EmbeddingWorkKind, entityId: String) {
   val value: String = s"${kind.toString}:$entityId"
 }
 
+object EmbeddingWorkKey {
+
+  /** The inverse of [[EmbeddingWorkKey.value]]: the work row's `_id` is the only place its kind and entity are stored.
+    */
+  def fromId(value: String): Option[EmbeddingWorkKey] =
+    value.indexOf(':') match {
+      case -1    => None
+      case split =>
+        val (name, entity) = (value.take(split), value.drop(split + 1))
+        EmbeddingWorkKind.values
+          .find(_.toString == name)
+          .filter(_ => entity.nonEmpty)
+          .map(EmbeddingWorkKey(_, entity))
+    }
+}
+
 final case class ClaimedEmbeddingWork(
     key: EmbeddingWorkKey,
     generation: Long,
@@ -108,7 +124,6 @@ trait SearchRecordingFailureRepository[F[_]] {
 }
 
 trait SearchSessionRepository[F[_]] {
-  def save(session: SearchSession, event: OperationalEventEnvelope): RepositoryF[F, Unit]
   def find(id: java.util.UUID): RepositoryF[F, Option[SearchSession]]
   def recordInteraction(
       event: OperationalEventEnvelope,

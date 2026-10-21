@@ -39,10 +39,9 @@ final class MongoInterviewCommandQueue(
       leaseUntil: Instant,
       maxAttempts: Int
   ): RepositoryF[IO, InterviewExecutionClaimOutcome] =
-    if (workerId.isEmpty || workerId.length > 128 || !leaseUntil.isAfter(now) || maxAttempts <= 0)
-      MongoF.raise(RepositoryError.InvalidEvent)
+    if (maxAttempts <= 0) MongoF.raise(RepositoryError.InvalidEvent)
     else
-      RepositoryF.lift(uuids.randomUUID).flatMap { token =>
+      LeaseRequest.whenValid(workerId, now, leaseUntil)(RepositoryF.lift(uuids.randomUUID)).flatMap { token =>
         transactionRunner.run { session =>
           loadWorkflow(command.workflowId, session).flatMap {
             case None =>
@@ -557,13 +556,15 @@ final class MongoInterviewCommandQueue(
       leaseUntil: Instant,
       limit: Int
   ): RepositoryF[IO, List[ClaimedInterviewWorkflowCommand]] =
-    if (workerId.isEmpty || workerId.length > 128 || !leaseUntil.isAfter(now) || limit < 0 || limit > 64)
-      MongoF.raise(RepositoryError.InvalidEvent)
-    else if (limit == 0) List.empty[ClaimedInterviewWorkflowCommand].asRepository
+    if (limit < 0 || limit > 64) MongoF.raise(RepositoryError.InvalidEvent)
     else
-      claimOne(workerId, now, leaseUntil).flatMap {
-        case None        => List.empty[ClaimedInterviewWorkflowCommand].asRepository
-        case Some(claim) => claimDueCommands(workerId, now, leaseUntil, limit - 1).map(claim :: _)
+      LeaseRequest.whenValid(workerId, now, leaseUntil) {
+        if (limit == 0) List.empty[ClaimedInterviewWorkflowCommand].asRepository
+        else
+          claimOne(workerId, now, leaseUntil).flatMap {
+            case None        => List.empty[ClaimedInterviewWorkflowCommand].asRepository
+            case Some(claim) => claimDueCommands(workerId, now, leaseUntil, limit - 1).map(claim :: _)
+          }
       }
 
   private def claimOne(
@@ -603,11 +604,11 @@ final class MongoInterviewCommandQueue(
       now: Instant,
       leaseUntil: Instant
   ): RepositoryF[IO, Boolean] =
-    if (!leaseUntil.isAfter(now)) MongoF.raise(RepositoryError.InvalidEvent)
-    else
+    LeaseRequest.whenWindowValid(now, leaseUntil) {
       MongoRepositorySupport.repositoryGuard(diagnostics, "interviewWorkflow.renewPublication") {
         MongoLeaseQueue.renewHeld(commands, None, claimFilter(claim, now), leaseUntil, Lease.until)
       }
+    }
 
   def markPublished(claim: ClaimedInterviewWorkflowCommand, publishedAt: Instant): RepositoryF[IO, Unit] =
     transitionClaim(

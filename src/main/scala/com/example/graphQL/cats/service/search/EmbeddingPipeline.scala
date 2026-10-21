@@ -18,6 +18,7 @@ import com.example.graphQL.cats.domain.model.{
 }
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.RepositoryError
+import com.example.graphQL.cats.service.resilience.{LeaseHeartbeat, LeaseLost}
 import com.example.graphQL.cats.service.{BackgroundWorker, Diagnostics, LogEvent, LogFields}
 import com.example.graphQL.cats.service.Diagnostics.*
 import com.example.graphQL.cats.service.RepositoryReporting.orReport
@@ -110,8 +111,8 @@ final class EmbeddingPipeline[F[_]](using F: Temporal[F])(
     limitRetries[F](math.max(retryAttempts - 1, 0)) join constantDelay[F](retryDelay)
 
   private def processClaim(claim: ClaimedEmbeddingWork): F[Unit] =
-    Temporal[F]
-      .race(
+    LeaseHeartbeat
+      .guard(leaseDuration, renewFirst = false)(renewClaim(claim))(
         retryingOnFailures(
           process(claim).handleErrorWith(error =>
             diagnostics
@@ -125,11 +126,10 @@ final class EmbeddingPipeline[F[_]](using F: Temporal[F])(
               case ProcessingOutcome.Retry => HandlerDecision.Continue
               case _                       => HandlerDecision.Stop
             })
-        ),
-        leaseHeartbeat(claim)
+        )
       )
       .flatMap { result =>
-        result.fold(_.fold(identity, identity), _ => ProcessingOutcome.Abandoned) match {
+        result.fold(_ => ProcessingOutcome.Abandoned, _.fold(identity, identity)) match {
           case ProcessingOutcome.Abandoned => Applicative[F].unit
           case ProcessingOutcome.Conflict  =>
             orReport(
@@ -217,20 +217,15 @@ final class EmbeddingPipeline[F[_]](using F: Temporal[F])(
     )
   }
 
-  private def renewClaim(claim: ClaimedEmbeddingWork): F[Boolean] =
+  /** A reported failure to renew is an unknown lease, handled as a lost one: the work is abandoned to lease recovery.
+    */
+  private def renewClaim(claim: ClaimedEmbeddingWork): F[Either[LeaseLost, Unit]] =
     now.flatMap(at =>
       work
         .renew(claim, at, at.plusMillis(leaseDuration.toMillis))
         .orReport(diagnostics, LogEvent.EmbeddingProcessingFailed)(false)
+        .map(held => Either.cond(held, (), LeaseLost.Expired))
     )
-
-  private def leaseHeartbeat(claim: ClaimedEmbeddingWork): F[Unit] =
-    Stream
-      .awakeEvery[F]((leaseDuration / 3).max(1.millis))
-      .evalMap(_ => renewClaim(claim))
-      .takeWhile(identity)
-      .compile
-      .drain
 
   private def process(claim: ClaimedEmbeddingWork): F[ProcessingOutcome] =
     onKey(claim)(processJob)(processCandidate)

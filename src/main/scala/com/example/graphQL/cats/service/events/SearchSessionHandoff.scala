@@ -10,7 +10,6 @@ import com.example.graphQL.cats.service.port.{
 }
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.{BackgroundWorker, Diagnostics, LogEvent, LogField, LogFields, LogOutcome}
-import com.example.graphQL.cats.service.events.{OperationalEventEnvelope, SearchSession}
 
 import scala.concurrent.duration.*
 
@@ -24,7 +23,7 @@ final case class SearchSessionHandoffConfig(
 )
 
 trait SearchSessionHandoff[F[_]] {
-  def enqueue(session: SearchSession, event: OperationalEventEnvelope): F[Unit]
+  def enqueue(session: SearchSession): F[Unit]
 }
 
 object SearchSessionHandoff {
@@ -46,9 +45,9 @@ object SearchSessionHandoff {
       )
       .sequence_
       .as(new SearchSessionHandoff[F] {
-        def enqueue(session: SearchSession, event: OperationalEventEnvelope): F[Unit] =
+        def enqueue(session: SearchSession): F[Unit] =
           repository
-            .enqueue(PendingSearchSessionWork(session, event), session.occurredAt)
+            .enqueue(PendingSearchSessionWork(session), session.occurredAt)
             .valueOrF(error => diagnostics.emit(LogEvent.RuntimeFailed, fields = rejectedFields(error)))
       })
   }

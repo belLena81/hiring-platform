@@ -75,9 +75,8 @@ final class InterviewPublicationScalingIntegrationSpec extends KafkaIntegrationS
         repository.create(
           workflow,
           InterviewWorkflow.initialCommand(workflow),
-          workflow.idempotencyKey,
-          MutationReceiptFingerprint.fromCanonicalInput(workflow.id.value.toString),
-          at
+          at,
+          MutationWriteContext.directWrite
         )
       )
     )

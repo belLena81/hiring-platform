@@ -9,6 +9,7 @@ import com.example.graphQL.cats.service.{ActorContext, Diagnostics}
 import com.example.graphQL.cats.service.auth.ActorAuthorization
 import com.example.graphQL.cats.service.port.{ActorRecord, JobOwner, MutationWriteContext}
 import com.example.graphQL.cats.service.read.HiringReadScope
+import com.mongodb.client.model.{Filters, Updates}
 import java.time.Instant
 import java.util.UUID
 import org.bson.{BsonDocument, Document}
@@ -293,7 +294,8 @@ final class MongoAuthorizedReadProjectionIntegrationSpec extends MongoIntegratio
       } yield {
         assertEquals(written, Right(()))
         assertEquals(finds.map(command => fieldNames(projectionOf(command))), List(Set("_id", "version")))
-        assertEquals(reread.map(_.map(_.version)), Right(Some(1L)))
+        // Derived data never advances the content revision.
+        assertEquals(reread.map(_.map(_.version)), Right(Some(0L)))
         assertEquals(reread.map(_.flatMap(_.value.embedding)), Right(Some(vector)))
       }
     }
@@ -545,7 +547,12 @@ final class MongoAuthorizedReadProjectionIntegrationSpec extends MongoIntegratio
         _ <- insertUser(fixture, gone)
         absent <- repository.updateEmbedding(UserId(UUID.randomUUID()), vector).value
         observed <- repository.findVersioned(subject.id).value.map(_.toOption.flatten.get)
-        _ <- repository.updateEmbedding(subject.id, vector).value
+        // Another writer edits the content (its revision advances); an embedding write never does.
+        _ <- MongoRepositoryTestSupport
+          .collection(fixture.database, MongoCollections.Users)
+          .flatMap(
+            _.updateOne(Filters.eq(MongoFields.Id, subject.id.value.toString), Updates.inc(MongoFields.Version, 1L))
+          )
         stale <- repository.updateEmbedding(observed, vector).value
         _ <- markDeleted(fixture, gone.id)
         deleted <- repository.updateEmbedding(gone.id, vector).value

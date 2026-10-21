@@ -51,9 +51,8 @@ final class MongoInterviewCalendarContractIntegrationSpec
               .create(
                 workflow,
                 InterviewWorkflow.initialCommand(workflow),
-                UUID.randomUUID(),
-                MutationReceiptFingerprint.fromCanonicalInput(workflow.id.value.toString),
-                now
+                now,
+                MutationWriteContext.directWrite
               )
               .value
               .flatMap(_.fold(error => IO.raiseError(new AssertionError(s"create failed: $error")), _ => IO.unit))

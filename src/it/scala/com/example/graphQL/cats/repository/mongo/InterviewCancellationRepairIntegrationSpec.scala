@@ -29,7 +29,7 @@ final class InterviewCancellationRepairIntegrationSpec extends MongoIntegrationS
   private def cancel(s: InterviewLifecycleScenario): IO[InterviewWorkflow] =
     s.applied(
       InterviewLifecycleEvent.Cancel(InterviewCancellationInitiator.Candidate, now),
-      s.actor(UserRole.Candidate, s.workflow.candidateId, input = "cancel"),
+      s.actor(UserRole.Candidate, s.workflow.candidateId),
       0L,
       now
     )
@@ -43,7 +43,7 @@ final class InterviewCancellationRepairIntegrationSpec extends MongoIntegrationS
         now,
         InterviewProposalTtl.Default
       ),
-      s.actor(UserRole.Recruiter, s.workflow.recruiterId, input = s"propose-$expected"),
+      s.actor(UserRole.Recruiter, s.workflow.recruiterId),
       expected,
       now
     )
@@ -51,7 +51,7 @@ final class InterviewCancellationRepairIntegrationSpec extends MongoIntegrationS
   private def accept(s: InterviewLifecycleScenario, expected: Long): IO[InterviewWorkflow] =
     s.applied(
       InterviewLifecycleEvent.AcceptProposal(now),
-      s.actor(UserRole.Candidate, s.workflow.candidateId, input = s"accept-$expected"),
+      s.actor(UserRole.Candidate, s.workflow.candidateId),
       expected,
       now
     )

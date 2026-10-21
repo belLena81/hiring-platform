@@ -159,7 +159,7 @@ private[application] final class InterviewProviderExecutor[F[_]: Monad](
         case InterviewWorkflowCommand.CommitAcceptedToInterview(_) =>
           repositoryResult(repository.commitHiring(workflow, now, Some(claim)))
         case InterviewWorkflowCommand.LookupStatusCommitReceipt(id) =>
-          repository.hasHiringReceipt(id).value.map(lookedUp)
+          repository.isHiringCommitted(id).value.map(lookedUp)
         case InterviewWorkflowCommand.ReleaseCalendarSlot(key) => provider(calendar.release(key, now, Some(claim)))
         case InterviewWorkflowCommand.Notify(participant, key) =>
           provider(

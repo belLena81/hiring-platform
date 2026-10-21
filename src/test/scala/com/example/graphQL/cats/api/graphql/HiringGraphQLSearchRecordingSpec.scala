@@ -294,10 +294,6 @@ final class HiringGraphQLSearchRecordingSpec extends CatsEffectSuite {
         RepositoryF.at[IO].fromEither(Right(Some(SearchSessionLookup.Failed)))
     }
     val noSessions = new SearchSessionRepository[IO] {
-      def save(
-          session: com.example.graphQL.cats.service.events.SearchSession,
-          event: com.example.graphQL.cats.service.events.OperationalEventEnvelope
-      ) = RepositoryF.at[IO].fromEither(Right(()))
       def find(id: UUID) = RepositoryF.at[IO].fromEither(Right(None))
       def recordInteraction(
           event: com.example.graphQL.cats.service.events.OperationalEventEnvelope,

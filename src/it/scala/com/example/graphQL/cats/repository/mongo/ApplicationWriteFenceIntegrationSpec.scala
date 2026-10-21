@@ -232,6 +232,11 @@ final class ApplicationWriteFenceIntegrationSpec extends MongoIntegrationSuite {
           application <- h.created(candidate, job)
           (changed, _) <- (h.accept(application, recruiter), h.delete(recruiter)).parTupled
           after <- h.status(application)
+          _ <- ApplicationStatusInvariant.assertAgrees(
+            h.fixture.database,
+            application.id,
+            expectHistory = changed.isRight
+          )
           history <- h.countWhere(
             MongoCollections.ApplicationEvents,
             Filters.eq("applicationId", application.id.value.toString)

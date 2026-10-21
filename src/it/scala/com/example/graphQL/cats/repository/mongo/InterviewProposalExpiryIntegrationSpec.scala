@@ -26,7 +26,7 @@ final class InterviewProposalExpiryIntegrationSpec extends MongoIntegrationSuite
     s.applied(
       InterviewLifecycleEvent
         .Propose(replacement.startsAt, replacement.endsAt, s.workflow.recruiterId, now, InterviewProposalTtl.Default),
-      s.actor(UserRole.Recruiter, s.workflow.recruiterId, input = "propose"),
+      s.actor(UserRole.Recruiter, s.workflow.recruiterId),
       0L,
       now
     )
@@ -188,7 +188,7 @@ final class InterviewProposalExpiryIntegrationSpec extends MongoIntegrationSuite
         due = open.proposal.map(_.expiresAt).getOrElse(fail("no proposal"))
         withdrawn <- s.apply(
           InterviewLifecycleEvent.WithdrawProposal(due.plusSeconds(1)),
-          s.actor(UserRole.Recruiter, s.workflow.recruiterId, input = "withdraw"),
+          s.actor(UserRole.Recruiter, s.workflow.recruiterId),
           open.revision,
           due.plusSeconds(1)
         )

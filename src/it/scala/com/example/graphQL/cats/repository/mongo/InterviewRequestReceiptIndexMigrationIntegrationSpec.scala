@@ -4,13 +4,15 @@ import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.workflow.InterviewWorkflowId
 import com.example.graphQL.cats.service.Diagnostics
-import com.mongodb.client.model.{Filters, IndexOptions, Indexes}
+import com.mongodb.client.model.Filters
 import mongo4cats.database.MongoDatabase
 import org.bson.Document
 import java.util.UUID
 import scala.concurrent.duration.*
 
-/** `019_interview_request_receipt_index`: restart, concurrent start, upgrade and fail-closed behavior. */
+/** `019_interview_request_receipt_index` and its successor `028_interview_request_receipt_removal`: 019 still records
+  * its proof, the index it created is retired by 028, and retention stays index-served without it.
+  */
 final class InterviewRequestReceiptIndexMigrationIntegrationSpec extends MongoIntegrationSuite {
   override val munitIOTimeout: FiniteDuration = 5.minutes
 
@@ -25,7 +27,7 @@ final class InterviewRequestReceiptIndexMigrationIntegrationSpec extends MongoIn
       .collection(database, MongoCollections.InterviewWorkflows)
       .flatMap(_.listIndexes[Document].map(_.toList))
 
-  test("a fresh start installs the sparse request index and records the proof") {
+  test("a fresh start records the proof of 019 and ends without the request index that 028 retires") {
     mongoResource.use { fixture =>
       for {
         _ <- initialize(fixture.database)
@@ -35,82 +37,28 @@ final class InterviewRequestReceiptIndexMigrationIntegrationSpec extends MongoIn
           MongoCollections.HiringMigrationLedger,
           Filters.eq(MongoFields.Id, ledgerId)
         )
-      } yield {
-        val index = indexes.find(_.getString("name") == indexName)
-        assert(index.nonEmpty, clue(indexes.map(_.getString("name"))))
-        assertEquals(index.map(_.getBoolean("sparse", false)), Some(true))
-        assertEquals(
-          index.map(_.get("key", classOf[Document]).keySet().toArray.toList),
-          Some(List("requestWorkflowId"))
-        )
-        assert(ledger.nonEmpty)
-      }
-    }
-  }
-
-  test("a restart is a no-op and a lost index is recreated before workers start") {
-    mongoResource.use { fixture =>
-      for {
-        _ <- initialize(fixture.database)
-        _ <- initialize(fixture.database)
-        collection <- MongoRepositoryTestSupport.collection(fixture.database, MongoCollections.InterviewWorkflows)
-        _ <- collection.dropIndex(indexName)
-        _ <- initialize(fixture.database)
-        indexes <- workflowIndexes(fixture.database)
-      } yield assert(indexes.exists(_.getString("name") == indexName), clue(indexes.map(_.getString("name"))))
-    }
-  }
-
-  test("upgrading existing data keeps every document and recreates the sparse request index") {
-    mongoResource.use { fixture =>
-      val workflow = UUID.randomUUID().toString
-      val receipt = new Document(MongoFields.Id, s"request:${UUID.randomUUID()}:${UUID.randomUUID()}")
-        .append("documentType", "requestReceipt")
-        .append("requestWorkflowId", workflow)
-        .append("requestFingerprint", "f")
-        .append(MongoFields.CreatedAt, java.util.Date.from(java.time.Instant.parse("2026-10-07T12:00:00Z")))
-      for {
-        _ <- initialize(fixture.database)
-        _ <- MongoRepositoryTestSupport.insertOne(fixture.database, MongoCollections.InterviewWorkflows, receipt)
-        collection <- MongoRepositoryTestSupport.collection(fixture.database, MongoCollections.InterviewWorkflows)
-        _ <- collection.dropIndex(indexName)
-        _ <- MongoRepositoryTestSupport
-          .collection(fixture.database, MongoCollections.HiringMigrationLedger)
-          .flatMap(_.deleteOne(Filters.eq(MongoFields.Id, ledgerId)))
-        _ <- initialize(fixture.database)
-        stored <- MongoRepositoryTestSupport.findOne(
+        successor <- MongoRepositoryTestSupport.findOne(
           fixture.database,
-          MongoCollections.InterviewWorkflows,
-          Filters.eq(MongoFields.Id, receipt.getString(MongoFields.Id))
+          MongoCollections.HiringMigrationLedger,
+          Filters.eq(MongoFields.Id, MigrationIds.InterviewRequestReceiptRemoval.value)
         )
-        indexes <- workflowIndexes(fixture.database)
       } yield {
-        assertEquals(stored, Some(receipt))
-        assert(indexes.exists(_.getString("name") == indexName))
+        assert(!indexes.exists(_.getString("name") == indexName), clue(indexes.map(_.getString("name"))))
+        assertEquals(ledger.map(_.getString(MongoFields.State)), Some("Complete"))
+        assertEquals(successor.map(_.getString(MongoFields.State)), Some("Complete"))
       }
     }
   }
 
-  test("an index of that name with another definition fails startup closed") {
-    mongoResource.use { fixture =>
-      for {
-        _ <- initialize(fixture.database)
-        collection <- MongoRepositoryTestSupport.collection(fixture.database, MongoCollections.InterviewWorkflows)
-        _ <- collection.dropIndex(indexName)
-        _ <- collection.createIndex(Indexes.ascending("candidateId"), new IndexOptions().name(indexName))
-        drifted <- initialize(fixture.database).attempt
-      } yield assertEquals(drifted.left.toOption.map(_.getClass.getSimpleName), Some("IndexMismatch"))
-    }
-  }
-
-  test("concurrent starts all complete") {
+  test("a restart and concurrent starts all complete without the retired index coming back") {
     mongoResource.use { fixture =>
       for {
         results <- List.fill(4)(initialize(fixture.database).attempt).parSequence
+        _ <- initialize(fixture.database)
         indexes <- workflowIndexes(fixture.database)
       } yield {
         assert(results.forall(_.isRight), clue(results))
-        assertEquals(indexes.count(_.getString("name") == indexName), 1)
+        assertEquals(indexes.count(_.getString("name") == indexName), 0)
       }
     }
   }

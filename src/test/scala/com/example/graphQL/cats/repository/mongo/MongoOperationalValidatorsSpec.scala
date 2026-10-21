@@ -128,4 +128,40 @@ final class MongoOperationalValidatorsSpec extends FunSuite {
     assert(names.contains(MongoCollections.Users))
     assertNotEquals(MongoHiringValidators.userValidator, MongoHiringValidators.userValidatorV1)
   }
+
+  test("AC-04.2 AC-05.1 the validators replaced after migration 025 differ from the generation 025 installed") {
+    val replaced = Set(
+      MongoCollections.EmbeddingWork,
+      MongoCollections.SearchSessionWork,
+      MongoCollections.InterviewWorkflows,
+      MongoCollections.InterviewWorkflowInbox
+    )
+    MongoOperationalValidators.all.zip(MongoOperationalValidators.installedBy025).foreach {
+      case ((name, current), (installedName, installed)) =>
+        assertEquals(name, installedName)
+        assertEquals(current != installed, replaced(name), name)
+    }
+  }
+
+  test("AC-05.1 the search session work validator no longer knows an event copy") {
+    val current = MongoOperationalValidators.searchSessionWorkValidator.toJson
+    val previous = MongoOperationalValidators.searchSessionWorkValidatorThrough025.toJson
+    assert(!current.contains("\"event\""), clue(current))
+    assert(previous.contains("\"event\""), clue(previous))
+  }
+
+  test("MR-12 the embedding work validator does not require the kind and entity that its identity already holds") {
+    val current = MongoOperationalValidators.embeddingWorkValidator.toJson
+    assert(!current.contains("\"kind\"") && !current.contains("\"entityId\""), clue(current))
+    assert(MongoOperationalValidators.embeddingWorkValidatorThrough025.toJson.contains("\"entityId\""))
+  }
+
+  test("MR-07 MR-08 the interview validators accept neither hiring receipts nor request receipts any more") {
+    val inbox = MongoOperationalValidators.interviewWorkflowInboxValidator.toJson
+    val workflows = MongoOperationalValidators.interviewWorkflowsValidator.toJson
+    assert(!inbox.contains("hiringReceipt"), clue(inbox))
+    assert(!workflows.contains("requestReceipt"), clue(workflows))
+    assert(MongoOperationalValidators.interviewWorkflowInboxValidatorThrough025.toJson.contains("hiringReceipt"))
+    assert(MongoOperationalValidators.interviewWorkflowsValidatorThrough025.toJson.contains("requestReceipt"))
+  }
 }

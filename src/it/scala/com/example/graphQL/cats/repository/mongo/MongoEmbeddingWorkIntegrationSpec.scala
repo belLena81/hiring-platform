@@ -171,6 +171,9 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
           jobs,
           applications,
           workflows,
+          com.example.graphQL.cats.service.mutation.Idempotent(
+            MongoMutationReceiptRepository.transactional(fixture.database, fixture.client, Diagnostics.noop[IO])
+          ),
           5.minutes
         )
         val work = new MongoEmbeddingWorkRepository(fixture.database, Diagnostics.noop[IO])

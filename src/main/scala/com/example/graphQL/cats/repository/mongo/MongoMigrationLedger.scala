@@ -42,6 +42,10 @@ private[mongo] object MigrationIds {
   val ConsumerReceiptIdentity = MigrationId("023_consumer_receipt_identity")
   val OptionalFieldAbsence = MigrationId("024_optional_field_absence")
   val OperationalCollectionValidators = MigrationId("025_operational_collection_validators")
+  val InterviewHiringReceiptRemoval = MigrationId("027_interview_hiring_receipt_removal")
+  val InterviewRequestReceiptRemoval = MigrationId("028_interview_request_receipt_removal")
+  val SearchSessionWorkSingleCopy = MigrationId("029_search_session_work_single_copy")
+  val EmbeddingWorkKeyFromIdentity = MigrationId("030_embedding_work_key_from_identity")
 }
 
 /** Typed setup failures. They remain Throwables so the setup lifecycle boundary keeps one failure channel, while

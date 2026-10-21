@@ -148,6 +148,7 @@ final class HiringGraphQLInterviewActionSpec extends CatsEffectSuite {
       events <- Ref.of[IO, Vector[ApplicationEvent]](Vector.empty)
       errors <- Ref.of[IO, Option[RepositoryError]](None)
       repository <- InMemoryInterviewWorkflowRepository.create(workflow, status)
+      receipts <- com.example.graphQL.cats.service.mutation.TestIdempotency.remembering
       users = new InMemoryUsers(usersRef, Some(ServiceFixtures.userRelations(usersRef, jobsRef, applicationsRef)))
       jobs = new InMemoryJobs(
         jobsRef,
@@ -159,7 +160,15 @@ final class HiringGraphQLInterviewActionSpec extends CatsEffectSuite {
         errors,
         jobLookup = id => jobsRef.get.map(_.get(id))
       )
-      service = new InterviewSchedulingService[IO](users, jobs, applications, repository, 5.minutes, IO.pure(clock))
+      service = new InterviewSchedulingService[IO](
+        users,
+        jobs,
+        applications,
+        repository,
+        com.example.graphQL.cats.service.mutation.Idempotent(receipts),
+        5.minutes,
+        IO.pure(clock)
+      )
     } yield Arrangement(
       HiringGraphQLServices(
         HiringReadService(users, jobs, applications),

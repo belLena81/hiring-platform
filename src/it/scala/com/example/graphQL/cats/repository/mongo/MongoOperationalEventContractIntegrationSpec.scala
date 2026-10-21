@@ -40,10 +40,12 @@ class MongoOperationalEventContractIntegrationSpec extends MongoIntegrationSuite
     }
   }
 
-  test("invalid or mismatched search events reject before durable work enqueue") {
+  test("AC-05.1 a session whose derived event would violate the contract is rejected before durable work enqueue") {
     mongoResource.use { fixture =>
       val actor = UserId(UUID.randomUUID())
-      val session =
+      val first = UUID.randomUUID().toString
+      val second = UUID.randomUUID().toString
+      def session(results: List[SearchSessionResult]) =
         SearchSession(
           UUID.randomUUID(),
           actor,
@@ -51,22 +53,24 @@ class MongoOperationalEventContractIntegrationSpec extends MongoIntegrationSuite
           None,
           SearchFilterSnapshot.Unfiltered,
           None,
-          Nil,
+          results,
           now,
           now.plusSeconds(60)
         )
-      val valid =
-        OperationalEvents.searchPerformed(UUID.randomUUID(), session).fold(error => fail(error.toString), identity)
-      val invalid =
-        List(valid.copy(payload = event(actor).payload), valid.copy(actorId = UserId(UUID.randomUUID())), event(actor))
+      val invalid = List(
+        session(List(SearchSessionResult(first, 1, 0.5d), SearchSessionResult(first, 2, 0.4d))),
+        session(List(SearchSessionResult(first, 2, 0.5d), SearchSessionResult(second, 1, 0.4d))),
+        session(List(SearchSessionResult("not-an-identifier", 1, 0.5d))),
+        session(List(SearchSessionResult(first, 1, Double.NaN)))
+      )
       val repository =
         MongoSearchSessionWorkRepository.transactional(fixture.database, fixture.client, Diagnostics.noop[IO])
       for {
         _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
-        results <- invalid.traverse(value => repository.enqueue(PendingSearchSessionWork(session, value), now).value)
+        results <- invalid.traverse(value => repository.enqueue(PendingSearchSessionWork(value), now).value)
         count <- MongoRepositoryTestSupport.count(fixture.database, MongoCollections.SearchSessionWork)
       } yield {
-        assert(results.forall(_ == Left(RepositoryError.InvalidEvent)))
+        assert(results.forall(_ == Left(RepositoryError.InvalidEvent)), clue(results))
         assertEquals(count, 0L)
       }
     }
@@ -153,7 +157,7 @@ class MongoOperationalEventContractIntegrationSpec extends MongoIntegrationSuite
     "invalid deletion attribution" -> (_.append("subjectIds", java.util.List.of("invalid-subject"))),
     "overflowing attempt counter" -> (_.append("attempts", Long.box(Int.MaxValue.toLong)))
   ).foreach { case (description, corrupt) =>
-    test(s"$description fails closed and leaves the fact unchanged") {
+    test(s"$description fails that fact alone, keeps its evidence and does not block the claim") {
       mongoResource.use { fixture =>
         val bad = corrupt(document(event(UserId(UUID.randomUUID()))))
         val repository =
@@ -164,15 +168,21 @@ class MongoOperationalEventContractIntegrationSpec extends MongoIntegrationSuite
           claimed <- repository
             .claim("contract-test", s"hiring-publisher-${UUID.randomUUID()}", now, now.plusSeconds(30), 1)
             .value
+          again <- repository
+            .claim("contract-test", s"hiring-publisher-${UUID.randomUUID()}", now, now.plusSeconds(30), 1)
+            .value
           retained <- MongoRepositoryTestSupport.findOne(
             fixture.database,
             MongoCollections.EventOutbox,
             new Document("_id", bad.getString("_id"))
           )
         } yield {
-          assertEquals(claimed, Left(RepositoryError.InvalidStoredData))
-          assertEquals(retained.map(_.getString("state")), Some("Retryable"))
+          assertEquals(claimed, Right(Nil))
+          assertEquals(again, Right(Nil))
+          assertEquals(retained.map(_.getString("state")), Some("Failed"))
+          assertEquals(retained.map(_.getString("lastError")), Some("INVALID_EVENT_CONTRACT"))
           assert(retained.exists(row => row.get("leaseToken") == null))
+          assertEquals(retained.map(_.get("subjectIds")), Some(bad.get("subjectIds")))
         }
       }
     }

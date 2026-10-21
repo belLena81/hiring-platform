@@ -1,7 +1,5 @@
 package com.example.graphQL.cats.repository.mongo
 
-import com.example.graphQL.cats.repository.mongo.MongoF.asRepository
-import com.example.graphQL.cats.repository.mongo.MongoStoredDocumentDecoding.toStored
 import com.example.graphQL.cats.service.resilience.CircuitBreaker
 
 import cats.data.NonEmptyList
@@ -26,7 +24,7 @@ import com.example.graphQL.cats.service.port.{
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.Diagnostics
 import com.mongodb.MongoCommandException
-import com.mongodb.client.model.{FindOneAndUpdateOptions, ReturnDocument, Sorts, UpdateOptions, Projections}
+import com.mongodb.client.model.{Sorts, UpdateOptions, Projections}
 import org.bson.Document
 import org.bson.types.Binary
 import java.time.Instant
@@ -34,37 +32,11 @@ import com.example.graphQL.cats.repository.mongo.MongoDocumentFields.Repository.
 import java.util.UUID
 import scala.jdk.CollectionConverters.*
 
-final class MongoSearchSessionRepository(
-    database: MongoDatabase[IO],
-    transactionRunner: MongoTransactionRunner,
-    diagnostics: Diagnostics[IO]
-) extends SearchSessionRepository[IO]
+final class MongoSearchSessionRepository(database: MongoDatabase[IO], diagnostics: Diagnostics[IO])
+    extends SearchSessionRepository[IO]
     with SearchRecordingFailureRepository[IO] {
   private val sessions = Mongo4catsCollections.documents(database, MongoCollections.SearchSessions)
   private val outbox = Mongo4catsCollections.documents(database, MongoCollections.EventOutbox)
-
-  override def save(session: SearchSession, event: OperationalEventEnvelope): RepositoryF[IO, Unit] =
-    MongoRepositorySupport
-      .repositoryGuard(diagnostics, "searchSession.save")(
-        transactionRunner
-          .run { active =>
-            val document = MongoHiringCodecs.searchSession(session)
-            val filter = MongoFilter.and(
-              MongoFilter.eq(MongoFields.Id, session.id.toString),
-              MongoFilter.eq(MongoFields.ActorId, session.actorId.value.toString)
-            )
-            val update = MongoUpdate.combine(
-              document.entrySet().asScala.toList.map(field => MongoUpdate.setOnInsert(field.getKey, field.getValue))*
-            )
-            val options = new UpdateOptions().upsert(true)
-            val result = RepositoryF.lift(MongoSessionOperations.updateOne(sessions, active, filter, update, options))
-            result.flatMap(value =>
-              if (Option(value.getUpsertedId).nonEmpty)
-                MongoOperationalEventInsertion.insert(outbox, active, List(event), session.occurredAt, diagnostics)
-              else ().asRepository
-            )
-          }
-      )(MongoErrors.duplicateAsConflict)
 
   override def find(id: UUID): RepositoryF[IO, Option[SearchSession]] =
     MongoRepositorySupport
@@ -199,7 +171,10 @@ final class MongoOperationalEventOutboxRepository(
         outbox.flatMap(
           _.find(after.fold(due(now))(value => MongoFilter.and(due(now), value)).bson)
             .sort(Sorts.ascending(MongoFields.AvailableAt, MongoFields.OccurredAt, MongoFields.Id))
-            .projection(Projections.include(MongoFields.Id, MongoFields.AvailableAt, MongoFields.OccurredAt))
+            .projection(
+              Projections
+                .include(MongoFields.Id, MongoFields.AvailableAt, MongoFields.OccurredAt, MongoFields.SubjectIds)
+            )
             .limit(MongoProducerRegistrations.BatchSize)
             .all
         )
@@ -227,19 +202,16 @@ final class MongoOperationalEventOutboxRepository(
         rows: List[Document],
         values: List[ClaimedOperationalEvent],
         last: Option[Document]
-    ): RepositoryF[IO, List[ClaimedOperationalEvent]] =
-      if (rows.isEmpty || values.size >= limit) last.traverse_(checkpoint).as(values)
-      else
-        rows match {
-          case row :: tail =>
-            claimOne(workerId, transactionalId, now, leaseUntil, row.getString("_id"))
-              .leftFlatMap {
-                case RepositoryError.Conflict => MongoF.pure(None)
-                case error                    => MongoF.raise(error)
-              }
-              .flatMap(value => scan(tail, values ++ value.toList, Some(row)))
-          case Nil => last.traverse_(checkpoint).as(values)
-        }
+    ): RepositoryF[IO, List[ClaimedOperationalEvent]] = {
+      val need = limit - values.size
+      if (rows.isEmpty || need <= 0) last.traverse_(checkpoint).as(values)
+      else {
+        val batch = MongoOutboxClaimBatch.select(rows.map(candidate), need)
+        val (examined, rest) = rows.splitAt(batch.examined)
+        claimBatch(workerId, transactionalId, now, leaseUntil, batch.claimable, MongoOutboxClaimBatch.Attempts)
+          .flatMap(claimed => scan(rest, values ++ claimed, examined.lastOption.orElse(last)))
+      }
+    }
     for {
       current <- RepositoryF.lift(MongoSessionOperations.findOne(cursors, None, MongoFilter.eq("_id", workerId)))
       after <- MongoF.fromEither(current.traverse(cursorFilter))
@@ -248,6 +220,15 @@ final class MongoOperationalEventOutboxRepository(
       result <- scan(rows, Nil, None)
     } yield result
   }
+
+  private def candidate(row: Document): MongoOutboxClaimBatch.Candidate =
+    MongoOutboxClaimBatch.Candidate(
+      row.getString(MongoFields.Id),
+      // An unreadable subject list is not a reason to skip the row: the claim fails it as an invalid event.
+      Option(row.get(MongoFields.SubjectIds))
+        .collect { case values: java.util.List[?] => values.asScala.toList.collect { case id: String => id } }
+        .getOrElse(Nil)
+    )
 
   private def due(now: Instant): MongoFilter = MongoLeaseQueue.claimable(
     MongoFilter.and(
@@ -274,7 +255,7 @@ final class MongoOperationalEventOutboxRepository(
         MongoLeaseQueue.releaseLease,
         MongoUpdate.set(MongoFields.UpdatedAt, now.toDate)
       )
-    ).flatMap(_ => releaseSubjectLeases(leaseToken))
+    ).flatMap(_ => releaseSubjectLeases(eventId, leaseToken))
 
   override def releaseForRetry(
       eventId: UUID,
@@ -291,7 +272,7 @@ final class MongoOperationalEventOutboxRepository(
         MongoLeaseQueue.releaseLease,
         MongoUpdate.set(MongoFields.UpdatedAt, now.toDate)
       )
-    ).flatMap(_ => releaseSubjectLeases(leaseToken))
+    ).flatMap(_ => releaseSubjectLeases(eventId, leaseToken))
 
   override def markFailed(
       eventId: UUID,
@@ -308,7 +289,7 @@ final class MongoOperationalEventOutboxRepository(
         MongoLeaseQueue.releaseLease,
         MongoUpdate.set(MongoFields.UpdatedAt, now.toDate)
       )
-    ).flatMap(_ => releaseSubjectLeases(leaseToken))
+    ).flatMap(_ => releaseSubjectLeases(eventId, leaseToken))
 
   override def renewLease(
       eventId: UUID,
@@ -335,6 +316,7 @@ final class MongoOperationalEventOutboxRepository(
                       MongoFilter.and(
                         MongoFilter.in(MongoFields.Id, subjectIds),
                         MongoFilter.eq(MongoFields.LeaseToken, leaseToken),
+                        MongoFilter.eq(MongoFields.LeaseEventId, eventId.toString),
                         MongoFilter.ne(MongoFields.Deleted, true)
                       ),
                       MongoUpdate.set(MongoFields.LeaseUntil, leaseUntil.toDate)
@@ -348,191 +330,240 @@ final class MongoOperationalEventOutboxRepository(
           }
       )
 
-  private def claimOne(
+  /** One bounded batch: a single transaction leases the events with one claim token and takes the subject leases of the
+    * live ones, so the cost per event falls with the batch size. A lost race on a subject lease (`Conflict`) re-reads
+    * the held subjects and tries again with fewer events, `attempts` times, before the page is given up.
+    */
+  private def claimBatch(
       workerId: String,
       transactionalId: String,
       now: Instant,
       leaseUntil: Instant,
-      eventId: String
-  ): RepositoryF[IO, Option[ClaimedOperationalEvent]] =
-    MongoRepositorySupport
-      .repositoryGuard(diagnostics, "outbox.claimOne")(transactionRunner.run { session =>
-        claimOneInSession(session, workerId, now, leaseUntil, eventId).flatMap {
-          case None        => MongoF.pure(None)
-          case Some(claim) =>
-            subjectIsDeleted(session, claim).flatMap {
-              case true  => suppressDeletedClaim(session, claim, now).as(None)
-              case false => acquireSubjectLeases(session, claim, transactionalId, now, leaseUntil).as(Some(claim))
-            }
-        }
-      })
+      candidates: List[MongoOutboxClaimBatch.Candidate],
+      attempts: Int
+  ): RepositoryF[IO, List[ClaimedOperationalEvent]] =
+    if (candidates.isEmpty) MongoF.pure(Nil)
+    else
+      RepositoryF.lift(uuidGen.randomUUID).flatMap { id =>
+        val token = id.toString
+        MongoRepositorySupport
+          .repositoryGuard(diagnostics, "outbox.claimBatch")(transactionRunner.run { session =>
+            claimInSession(session, workerId, transactionalId, now, leaseUntil, candidates, token)
+          })
+          .leftFlatMap {
+            case RepositoryError.Conflict if attempts > 1 =>
+              claimBatch(workerId, transactionalId, now, leaseUntil, candidates, attempts - 1)
+            case RepositoryError.Conflict => MongoF.pure(Nil)
+            case error                    => MongoF.raise(error)
+          }
+      }
 
-  private def claimOneInSession(
+  private def claimInSession(
       session: Option[ClientSession[IO]],
       workerId: String,
+      transactionalId: String,
       now: Instant,
       leaseUntil: Instant,
-      eventId: String
-  ): RepositoryF[IO, Option[ClaimedOperationalEvent]] =
-    RepositoryF.lift(uuidGen.randomUUID).flatMap { id =>
-      val token = id.toString
-      MongoRepositorySupport
-        .transactionGuard(diagnostics, "outbox.claimOne", session)(
-          MongoLeaseQueue
-            .claimNext(
+      candidates: List[MongoOutboxClaimBatch.Candidate],
+      token: String
+  ): RepositoryF[IO, List[ClaimedOperationalEvent]] =
+    for {
+      held <- heldSubjects(session, now, candidates.flatMap(_.subjects).distinct)
+      free = candidates.filterNot(_.subjects.exists(held))
+      documents <- leaseEvents(session, workerId, token, now, leaseUntil, free)
+      // A row without readable attribution, attempt counter or subject list, or with an event that cannot be
+      // interpreted, is ended as Failed (its stored evidence is kept) and never blocks the rest of the batch.
+      decoded = documents.map(document => document -> readClaimedRow(document))
+      unreadable = decoded.collect { case (document, Left(_)) => document.getString(MongoFields.Id) }
+      readable = decoded.collect { case (_, Right(claim)) => claim }
+      deleted <- deletedSubjects(session, readable.flatMap(_.subjectIds).distinct)
+      (suppressed, live) = readable.partition(_.subjectIds.exists(deleted))
+      _ <- failClaimed(session, token, unreadable, "INVALID_EVENT_CONTRACT", now)
+      _ <- failClaimed(session, token, suppressed.map(_.event.eventId.toString), "SUBJECT_DELETED", now)
+      _ <- leaseSubjects(session, live, transactionalId, token, now, leaseUntil)
+    } yield live
+
+  /** The subjects whose lease is still held by another claim: their events wait for it to be released or to expire. */
+  private def heldSubjects(
+      session: Option[ClientSession[IO]],
+      now: Instant,
+      subjects: List[String]
+  ): RepositoryF[IO, Set[String]] =
+    if (subjects.isEmpty) MongoF.pure(Set.empty)
+    else
+      MongoRepositorySupport.transactionGuard(diagnostics, "outbox.heldSubjects", session)(
+        RepositoryF
+          .lift(
+            MongoSessionOperations.findManyById(
+              subjectFences,
+              session,
+              MongoFilter.and(MongoFilter.in(MongoFields.Id, subjects), MongoLeaseQueue.leaseHeld(now)),
+              subjects.size,
+              Some(Projections.include(MongoFields.Id))
+            )
+          )
+          .map(_.flatMap(row => Option(row.getString(MongoFields.Id))).toSet)
+      )
+
+  /** Stamps every due candidate with the batch token in one write and reads back exactly the ones this claim won. */
+  private def leaseEvents(
+      session: Option[ClientSession[IO]],
+      workerId: String,
+      token: String,
+      now: Instant,
+      leaseUntil: Instant,
+      candidates: List[MongoOutboxClaimBatch.Candidate]
+  ): RepositoryF[IO, List[Document]] =
+    if (candidates.isEmpty) MongoF.pure(Nil)
+    else {
+      val ids = candidates.map(_.id)
+      MongoRepositorySupport.transactionGuard(diagnostics, "outbox.leaseEvents", session)(
+        RepositoryF
+          .lift(
+            updateMany(
               outbox,
               session,
-              MongoFilter.and(due(now), MongoFilter.eq(MongoFields.Id, eventId)),
+              MongoFilter.and(due(now), MongoFilter.in(MongoFields.Id, ids)),
               MongoUpdate.combine(
                 MongoLeaseQueue.leaseStamp(OutboxState.InFlight.toString, workerId, token, leaseUntil, now),
                 MongoUpdate.inc(MongoFields.Attempts, 1)
-              ),
-              Sorts.ascending(MongoFields.AvailableAt, MongoFields.OccurredAt, MongoFields.Id)
-            ) { document =>
-              // Keep attributable control evidence even when the immutable event cannot be interpreted.
-              MongoF
-                .fromEither(
-                  (
-                    requiredSubjectIds(document),
-                    requiredSubjectRefsVersion(document),
-                    MongoDocumentFields.requiredInt(document, MongoFields.Attempts, min = 0)
-                  )
-                    .mapN((_, _, _) => ())
-                    .toStored
-                )
-                .flatMap { _ =>
-                  readClaimed(document) match {
-                    case Right(claim) => MongoF.pure(Some(claim))
-                    case Left(_)      => failInvalidClaim(session, eventId, token, now).as(None)
-                  }
-                }
-            }
-            .map(_.flatten)
-        )
+              )
+            )
+          )
+          .flatMap(_ =>
+            RepositoryF.lift(
+              MongoSessionOperations.findManyById(
+                outbox,
+                session,
+                MongoFilter.and(MongoFilter.in(MongoFields.Id, ids), MongoFilter.eq(MongoFields.LeaseToken, token)),
+                ids.size
+              )
+            )
+          )
+          .map(MongoOutboxClaimBatch.inOrder(ids, _))
+      )
     }
 
-  private def failInvalidClaim(
+  /** The attributable control evidence every claimed row must carry, even when its event cannot be interpreted. */
+  private def checkStored(document: Document): Either[RepositoryError, Unit] =
+    (
+      requiredSubjectIds(document),
+      requiredSubjectRefsVersion(document),
+      MongoDocumentFields.requiredInt(document, MongoFields.Attempts, min = 0)
+    ).mapN((_, _, _) => ()).leftMap(_ => RepositoryError.InvalidStoredData)
+
+  private def readClaimedRow(document: Document): Either[Unit, ClaimedOperationalEvent] =
+    checkStored(document).leftMap(_ => ()).flatMap(_ => readClaimed(document).leftMap(_ => ()))
+
+  private def deletedSubjects(
       session: Option[ClientSession[IO]],
-      eventId: String,
+      subjects: List[String]
+  ): RepositoryF[IO, Set[String]] =
+    if (subjects.isEmpty) MongoF.pure(Set.empty)
+    else
+      MongoRepositorySupport.transactionGuard(diagnostics, "outbox.subjectIsDeleted", session)(
+        RepositoryF
+          .lift(
+            MongoSessionOperations.findManyById(
+              users,
+              session,
+              MongoFilter
+                .and(MongoFilter.in(MongoFields.Id, subjects), MongoFilter.eq(MongoFields.AccountStatus, "Deleted")),
+              subjects.size,
+              Some(Projections.include(MongoFields.Id))
+            )
+          )
+          .map(_.flatMap(row => Option(row.getString(MongoFields.Id))).toSet)
+      )
+
+  /** Ends claimed events that must never be published, under this claim's token. */
+  private def failClaimed(
+      session: Option[ClientSession[IO]],
       token: String,
+      eventIds: List[String],
+      reason: String,
       now: Instant
   ): RepositoryF[IO, Unit] =
-    RepositoryF
-      .lift(
-        MongoSessionOperations.updateOne(
-          outbox,
-          session,
-          MongoFilter.and(
-            MongoFilter.eq(MongoFields.Id, eventId),
-            inFlight,
-            MongoFilter.eq(MongoFields.LeaseToken, token)
-          ),
-          MongoUpdate.combine(
-            MongoUpdate.set(MongoFields.State, OutboxState.Failed.toString),
-            MongoUpdate.set(MongoFields.LastError, "INVALID_EVENT_CONTRACT"),
-            MongoUpdate.set(MongoFields.UpdatedAt, now.toDate),
-            MongoLeaseQueue.releaseLease
+    if (eventIds.isEmpty) MongoF.pure(())
+    else
+      MongoRepositorySupport.transactionGuard(diagnostics, "outbox.failClaimed", session)(
+        RepositoryF
+          .lift(
+            updateMany(
+              outbox,
+              session,
+              MongoFilter
+                .and(MongoFilter.in(MongoFields.Id, eventIds), inFlight, MongoFilter.eq(MongoFields.LeaseToken, token)),
+              MongoUpdate.combine(
+                MongoUpdate.set(MongoFields.State, OutboxState.Failed.toString),
+                MongoUpdate.set(MongoFields.LastError, reason),
+                MongoUpdate.set(MongoFields.UpdatedAt, now.toDate),
+                MongoLeaseQueue.releaseLease
+              )
+            )
           )
-        )
+          .subflatMap(result =>
+            Either.cond(result.getMatchedCount == eventIds.size.toLong, (), RepositoryError.Conflict)
+          )
       )
-      .subflatMap(MongoRepositorySupport.matchedOne(_))
 
-  private def acquireSubjectLeases(
+  /** Takes the lease of every subject of the live claims and registers the producer generation, each in one ordered
+    * bulk write. A subject lease still held by another claim is a duplicate key: a typed `Conflict` for the retry.
+    */
+  private def leaseSubjects(
       session: Option[ClientSession[IO]],
-      claim: ClaimedOperationalEvent,
+      live: List[ClaimedOperationalEvent],
       transactionalId: String,
+      token: String,
       now: Instant,
       leaseUntil: Instant
-  ): RepositoryF[IO, Unit] = {
-    val leaseAvailable = MongoFilter.or(
-      MongoFilter.exists(MongoFields.LeaseUntil, false),
-      MongoFilter.lte(MongoFields.LeaseUntil, now.toDate)
-    )
-    val options = new FindOneAndUpdateOptions().upsert(true).returnDocument(ReturnDocument.AFTER)
-    def acquireOne(subjectId: String): RepositoryF[IO, Unit] = {
-      val filter = MongoFilter.and(
-        MongoFilter.eq(MongoFields.Id, subjectId),
-        MongoFilter.ne(MongoFields.Deleted, true),
-        leaseAvailable
+  ): RepositoryF[IO, Unit] =
+    if (live.isEmpty) MongoF.pure(())
+    else {
+      val available = MongoFilter.or(
+        MongoFilter.exists(MongoFields.LeaseUntil, false),
+        MongoFilter.lte(MongoFields.LeaseUntil, now.toDate)
       )
-      val update = MongoUpdate.combine(
-        MongoUpdate.setOnInsert(MongoFields.Id, subjectId),
-        MongoUpdate.set(MongoFields.LeaseEventId, claim.event.eventId.toString),
-        MongoUpdate.set(MongoFields.LeaseToken, claim.leaseToken),
-        MongoUpdate.set(MongoFields.LeaseUntil, leaseUntil.toDate)
-      )
+      val grants =
+        MongoOutboxClaimBatch.subjectGrants(live.map(claim => claim.event.eventId.toString -> claim.subjectIds))
+      val entries = grants.map { case (subject, eventId) =>
+        // Deletion is primarily read from `users.accountStatus` inside this transaction; a fence that deletion already
+        // marked is refused here too (a duplicate key on the upsert, a typed Conflict), so a lease can never be granted
+        // on a deleted subject even if the first read were stale.
+        MongoFilter.and(
+          MongoFilter.eq(MongoFields.Id, subject),
+          MongoFilter.ne(MongoFields.Deleted, true),
+          available
+        ) ->
+          MongoUpdate.combine(
+            MongoUpdate.setOnInsert(MongoFields.Id, subject),
+            MongoUpdate.set(MongoFields.LeaseEventId, eventId),
+            MongoUpdate.set(MongoFields.LeaseToken, token),
+            MongoUpdate.set(MongoFields.LeaseUntil, leaseUntil.toDate)
+          )
+      }
       MongoRepositorySupport
-        .transactionGuard(diagnostics, "outbox.acquireSubjectLease", session)(
-          RepositoryF
-            .lift(MongoSessionOperations.findOneAndUpdate(subjectFences, session, filter, update, options))
-            .subflatMap {
-              case Some(_) => Right(())
-              case None    => Left(RepositoryError.Conflict)
-            }
+        .transactionGuard(diagnostics, "outbox.acquireSubjectLeases", session)(
+          RepositoryF.lift(MongoSessionOperations.upsertEach(subjectFences, session, entries))
         ) {
-          case MongoDuplicateKey(_) =>
-            Left(RepositoryError.Conflict)
+          case MongoDuplicateKey(_) => Left(RepositoryError.Conflict)
           case error: MongoCommandException if error.getErrorCode == MongoDuplicateKey.Code =>
             Left(RepositoryError.Conflict)
           case _ => Left(RepositoryError.Unavailable)
-        }
-    }
-    MongoOutboxSubjectLeases.acquire(claim.subjectIds)(subject =>
-      acquireOne(subject) *>
-        MongoProducerRegistrations.register(
+        } *>
+        MongoProducerRegistrations.registerAll(
           database,
           session,
-          subject,
+          grants.map(_._1),
           transactionalId,
           ProducerRegistrationValues.Operational,
           now
         )
-    )
-  }
+    }
 
-  private def subjectIsDeleted(
-      session: Option[ClientSession[IO]],
-      claim: ClaimedOperationalEvent
-  ): RepositoryF[IO, Boolean] = {
-    val filter = MongoFilter.and(
-      MongoFilter.in(MongoFields.Id, claim.subjectIds),
-      MongoFilter.eq(MongoFields.AccountStatus, "Deleted")
-    )
-    MongoRepositorySupport
-      .transactionGuard(diagnostics, "outbox.subjectIsDeleted", session)(
-        RepositoryF
-          .lift(
-            MongoSessionOperations
-              .findOne(users, session, filter)
-          )
-          .map(_.nonEmpty)
-      )
-  }
-
-  private def suppressDeletedClaim(
-      session: Option[ClientSession[IO]],
-      claim: ClaimedOperationalEvent,
-      now: Instant
-  ): RepositoryF[IO, Unit] = {
-    val filter = MongoFilter.and(
-      MongoFilter.eq(MongoFields.Id, claim.event.eventId.toString),
-      inFlight,
-      MongoFilter.eq(MongoFields.LeaseToken, claim.leaseToken)
-    )
-    val update = MongoUpdate.combine(
-      MongoUpdate.set(MongoFields.State, OutboxState.Failed.toString),
-      MongoUpdate.set(MongoFields.LastError, "SUBJECT_DELETED"),
-      MongoUpdate.set(MongoFields.UpdatedAt, now.toDate),
-      MongoLeaseQueue.releaseLease
-    )
-    MongoRepositorySupport.transactionGuard(diagnostics, "outbox.suppressDeletedClaim", session)(
-      RepositoryF
-        .lift(MongoSessionOperations.updateOne(outbox, session, filter, update))
-        .subflatMap(MongoRepositorySupport.matchedOne(_))
-    )
-  }
-
-  private def releaseSubjectLeases(leaseToken: String): RepositoryF[IO, Unit] =
+  /** Releases the subject leases of one event; the batch token is shared, so the event identity selects its subjects.
+    */
+  private def releaseSubjectLeases(eventId: UUID, leaseToken: String): RepositoryF[IO, Unit] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "outbox.releaseSubjectLeases")(
         RepositoryF
@@ -540,7 +571,10 @@ final class MongoOperationalEventOutboxRepository(
             updateMany(
               subjectFences,
               None,
-              MongoFilter.eq(MongoFields.LeaseToken, leaseToken),
+              MongoFilter.and(
+                MongoFilter.eq(MongoFields.LeaseToken, leaseToken),
+                MongoFilter.eq(MongoFields.LeaseEventId, eventId.toString)
+              ),
               MongoUpdate.combine(
                 MongoUpdate.unset(MongoFields.LeaseEventId),
                 MongoUpdate.unset(MongoFields.LeaseToken),
@@ -737,23 +771,59 @@ final class MongoEventQuarantineRepository(database: MongoDatabase[IO], diagnost
 }
 
 object MongoSearchSessionRepository {
-  def transactional(
-      database: MongoDatabase[IO],
-      client: MongoClient[IO],
-      diagnostics: Diagnostics[IO],
-      breaker: CircuitBreaker[IO] = CircuitBreaker.disabled[IO]
-  ): MongoSearchSessionRepository =
-    new MongoSearchSessionRepository(
-      database,
-      MongoTransactionRunner.sessions(client, RepositoryError.Conflict, diagnostics = diagnostics, breaker = breaker),
-      diagnostics
-    )
+  def apply(database: MongoDatabase[IO], diagnostics: Diagnostics[IO]): MongoSearchSessionRepository =
+    new MongoSearchSessionRepository(database, diagnostics)
 }
 
-private[mongo] object MongoOutboxSubjectLeases {
-  def acquire(subjectIds: List[String])(acquireOne: String => RepositoryF[IO, Unit]): RepositoryF[IO, Unit] =
-    if (subjectIds.isEmpty) MongoF.raise(RepositoryError.InvalidStoredData)
-    else subjectIds.sorted.traverse_(acquireOne)
+/** The pure part of the batch claim: which events share a transaction and which subject each lease belongs to. */
+private[mongo] object MongoOutboxClaimBatch {
+
+  /** A due event as the page scan saw it: its identity and the subjects whose lease its publication needs. */
+  final case class Candidate(id: String, subjects: List[String])
+
+  /** Attempts of one page when another claim wins a subject lease between the read and the write. */
+  val Attempts = 3
+
+  /** The events of one batch and how many scanned rows it consumed. */
+  final case class Selection(claimable: List[Candidate], examined: Int)
+
+  /** Takes at most `need` events in scan order such that no two share a subject: a subject lease belongs to one event
+    * at a time, so a later event of the same subject waits for the next claim. Events without subjects are taken as
+    * they are (the claim fails them as invalid). Every row up to the last one taken, or all of them, counts as
+    * examined; rows skipped on the way stay `Retryable`.
+    */
+  def select(rows: List[Candidate], need: Int): Selection = {
+    @annotation.tailrec
+    def loop(rest: List[Candidate], taken: List[Candidate], used: Set[String], examined: Int): Selection =
+      rest match {
+        case _ if taken.size >= need => Selection(taken.reverse, examined)
+        case Nil                     => Selection(taken.reverse, examined)
+        case row :: tail             =>
+          if (row.subjects.exists(used)) loop(tail, taken, used, examined + 1)
+          else loop(tail, row :: taken, used ++ row.subjects, examined + 1)
+      }
+    loop(rows, Nil, Set.empty, 0)
+  }
+
+  /** The subject leases to write, `(subject, event)` in ascending subject order so concurrent batches take their locks
+    * in the same order and cannot deadlock. The first event that names a subject owns it.
+    */
+  def subjectGrants(events: List[(String, List[String])]): List[(String, String)] =
+    events
+      .flatMap { case (eventId, subjects) => subjects.map(_ -> eventId) }
+      .groupBy(_._1)
+      .view
+      .mapValues(_.head._2)
+      .toList
+      .sortBy(_._1)
+
+  /** The documents in the order of `ids`; anything not among them is dropped. */
+  def inOrder(ids: List[String], documents: List[Document]): List[Document] = {
+    val position = ids.zipWithIndex.toMap
+    documents.filter(document => position.contains(document.getString(MongoFields.Id))).sortBy { document =>
+      position(document.getString(MongoFields.Id))
+    }
+  }
 }
 
 /** One bounded read of the oldest waiting row of a durable queue: `limit(1)`, a projection of the timestamp only, and a

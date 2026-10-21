@@ -23,7 +23,6 @@ private[mongo] object MongoSearchSessionWorkCodecs {
         MongoFields.Id -> value.session.id.toString,
         MongoFields.ActorId -> value.session.actorId.value.toString,
         MongoFields.Session -> session,
-        MongoFields.Event -> MongoHiringCodecs.operationalEvent(value.event),
         MongoFields.State -> SearchSessionWorkState.Ready.toString,
         MongoFields.Attempts -> java.lang.Integer.valueOf(0),
         MongoFields.AvailableAt -> now.toDate,
@@ -33,24 +32,19 @@ private[mongo] object MongoSearchSessionWorkCodecs {
     )
   }
 
-  /** Every problem of the stored session and of the stored event is reported, not just the first. */
+  /** Every problem of the stored session is reported, not just the first. */
   def readWork(document: Document): ValidatedNel[StoredDocumentError, PendingSearchSessionWork] =
-    (
-      MongoDocumentFields
-        .requiredDocument(document, MongoFields.Session)
-        .toValidatedNel
-        .andThen(MongoHiringCodecs.readSearchSession),
-      MongoDocumentFields
-        .requiredDocument(document, MongoFields.Event)
-        .toValidatedNel
-        .andThen(MongoHiringCodecs.readOperationalEvent)
-    ).tupled.andThen { case (session, event) =>
-      Validated.condNel(
-        session.query.isEmpty && PendingSearchSessionWork(session, event).addressesSession,
-        PendingSearchSessionWork(session, event),
-        StoredDocumentError.InconsistentDocument
+    MongoDocumentFields
+      .requiredDocument(document, MongoFields.Session)
+      .toValidatedNel
+      .andThen(MongoHiringCodecs.readSearchSession)
+      .andThen(session =>
+        Validated.condNel(
+          session.query.isEmpty,
+          PendingSearchSessionWork(session),
+          StoredDocumentError.InconsistentDocument
+        )
       )
-    }
 
   def readClaim(document: Document): ValidatedNel[StoredDocumentError, ClaimedSearchSessionWork] =
     (

@@ -164,7 +164,7 @@ final class InterviewLifecycleAccountDeletionIntegrationSpec extends MongoIntegr
     }
     s.applied(
       InterviewLifecycleEvent.Cancel(initiator, now),
-      s.actor(role, user, input = s"cancel-$role"),
+      s.actor(role, user),
       expected,
       now
     )
@@ -174,7 +174,7 @@ final class InterviewLifecycleAccountDeletionIntegrationSpec extends MongoIntegr
     s.applied(
       InterviewLifecycleEvent
         .Propose(replacement.startsAt, replacement.endsAt, s.workflow.recruiterId, now, InterviewProposalTtl.Default),
-      s.actor(UserRole.Recruiter, s.workflow.recruiterId, input = s"propose-$expected"),
+      s.actor(UserRole.Recruiter, s.workflow.recruiterId),
       expected,
       now
     )
@@ -182,7 +182,7 @@ final class InterviewLifecycleAccountDeletionIntegrationSpec extends MongoIntegr
   private def accept(s: InterviewLifecycleScenario, expected: Long): IO[InterviewWorkflow] =
     s.applied(
       InterviewLifecycleEvent.AcceptProposal(now),
-      s.actor(UserRole.Candidate, s.workflow.candidateId, input = s"accept-$expected"),
+      s.actor(UserRole.Candidate, s.workflow.candidateId),
       expected,
       now
     )
@@ -268,7 +268,9 @@ final class InterviewLifecycleAccountDeletionIntegrationSpec extends MongoIntegr
     }
   }
 
-  test("DHW-30 an Admin-driven cancel leaves no Admin-keyed receipt behind and the Admin account is untouched") {
+  test(
+    "DHW-30 an Admin-driven cancel leaves no Admin-keyed document in the interview store and the Admin account is untouched"
+  ) {
     scenario { s =>
       val admin = UserId(UUID.randomUUID())
       for {
@@ -303,7 +305,8 @@ final class InterviewLifecycleAccountDeletionIntegrationSpec extends MongoIntegr
         _ <- idle(s)
         after <- activity(s)
       } yield {
-        assertEquals(receiptsBefore, 1L)
+        // MR-08: the interview store holds no request receipt; idempotency is the caller's mutation receipt.
+        assertEquals(receiptsBefore, 0L)
         assertEquals(receiptsAfter, 0L)
         assertEquals(gone, nothingLeft)
         assertEquals(adminStatus, Some("Active"))
@@ -332,7 +335,7 @@ final class InterviewLifecycleAccountDeletionIntegrationSpec extends MongoIntegr
           lateWorker = s.worker("after-expiry", clock = IO.pure(due.plusSeconds(1)))
           deniedAccept <- s.apply(
             InterviewLifecycleEvent.AcceptProposal(now),
-            s.actor(UserRole.Candidate, s.workflow.candidateId, input = "accept-after-deletion"),
+            s.actor(UserRole.Candidate, s.workflow.candidateId),
             open.revision,
             now
           )
@@ -344,7 +347,7 @@ final class InterviewLifecycleAccountDeletionIntegrationSpec extends MongoIntegr
           redelivered <- lateWorker.receiveCommand(message).committed
           lateAccept <- s.apply(
             InterviewLifecycleEvent.AcceptProposal(now),
-            s.actor(UserRole.Candidate, s.workflow.candidateId, input = "accept-after-purge"),
+            s.actor(UserRole.Candidate, s.workflow.candidateId),
             open.revision,
             now
           )
@@ -444,7 +447,7 @@ final class InterviewLifecycleAccountDeletionIntegrationSpec extends MongoIntegr
         proposed <- propose(s)
         withdrawn <- s.applied(
           InterviewLifecycleEvent.WithdrawProposal(now),
-          s.actor(UserRole.Recruiter, s.workflow.recruiterId, input = "withdraw"),
+          s.actor(UserRole.Recruiter, s.workflow.recruiterId),
           proposed.revision,
           now
         )
@@ -637,14 +640,14 @@ final class InterviewLifecycleAccountDeletionIntegrationSpec extends MongoIntegr
                 if (race == "accept")
                   s.apply(
                     InterviewLifecycleEvent.AcceptProposal(now),
-                    s.actor(UserRole.Candidate, s.workflow.candidateId, input = "accept-race"),
+                    s.actor(UserRole.Candidate, s.workflow.candidateId),
                     open.revision,
                     now
                   )
                 else
                   s.apply(
                     InterviewLifecycleEvent.Cancel(InterviewCancellationInitiator.Recruiter, now),
-                    s.actor(UserRole.Recruiter, s.workflow.recruiterId, input = "cancel-race"),
+                    s.actor(UserRole.Recruiter, s.workflow.recruiterId),
                     open.revision,
                     now
                   )
@@ -691,7 +694,7 @@ final class InterviewLifecycleAccountDeletionIntegrationSpec extends MongoIntegr
             delete(s, s.workflow.candidateId),
             s.apply(
               InterviewLifecycleEvent.Cancel(InterviewCancellationInitiator.Recruiter, now),
-              s.actor(UserRole.Recruiter, s.workflow.recruiterId, input = "cancel-fence-race"),
+              s.actor(UserRole.Recruiter, s.workflow.recruiterId),
               0L,
               now
             )

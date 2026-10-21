@@ -152,9 +152,8 @@ final class InterviewPublicationFencingIntegrationSpec extends KafkaIntegrationS
         repository.create(
           value,
           InterviewWorkflow.initialCommand(value),
-          value.idempotencyKey,
-          MutationReceiptFingerprint.fromCanonicalInput(s"fencing:${value.id.value}"),
-          now
+          now,
+          MutationWriteContext.directWrite
         )
       )
       claims <- success(repository.claimDueCommands("fencing-proof", now, now.plusSeconds(600), 1))

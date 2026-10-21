@@ -8,7 +8,7 @@ import com.example.graphQL.cats.domain.workflow.*
 import com.example.graphQL.cats.service.application.InterviewMessagePolicy.{stableId, step}
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.RepositoryError
-import scala.concurrent.duration.*
+import com.example.graphQL.cats.service.resilience.{LeaseHeartbeat, LeaseLost}
 
 /** Claims due commands one at a time and publishes them under a renewed claim lease. */
 private[application] final class InterviewPublication[F[_]: Temporal](
@@ -133,29 +133,18 @@ private[application] final class InterviewPublication[F[_]: Temporal](
       message: InterviewMessage,
       claim: ClaimedInterviewWorkflowCommand
   ): F[PublicationOutcome] = {
-    def renew: F[Option[PublicationOutcome]] = currentTime.flatMap { now =>
+    val renew: F[Either[LeaseLost, Unit]] = currentTime.flatMap { now =>
       repository.renewPublication(claim, now, now.plusMillis(settings.claimLease.toMillis)).value.map {
-        case Right(true)  => None
-        case Right(false) => Some(PublicationOutcome.LeaseLost)
-        case Left(_)      => Some(PublicationOutcome.CoordinationUnavailable)
+        case Right(true)  => Right(())
+        case Right(false) => Left(LeaseLost.Expired)
+        case Left(_)      => Left(LeaseLost.Unavailable)
       }
     }
-    val heartbeat = fs2.Stream
-      .awakeEvery[F]((settings.claimLease / 3).max(1.millis))
-      .evalMap(_ => renew)
-      .unNone
-      .take(1)
-      .compile
-      .last
-      .map(_.getOrElse(PublicationOutcome.CoordinationUnavailable))
-    // Loading and authorization can consume most of the original claim lease.
-    renew.flatMap {
-      case Some(outcome) => Applicative[F].pure(outcome)
-      case None          =>
-        Applicative[F].unit.flatMap(_ => Temporal[F].race(transport.publish(message), heartbeat)).map {
-          case Left(_)        => PublicationOutcome.Published
-          case Right(outcome) => outcome
-        }
+    // Loading and authorization can consume most of the original claim lease, so it is renewed before publishing.
+    LeaseHeartbeat.guard(settings.claimLease)(renew)(transport.publish(message)).map {
+      case Right(_)                    => PublicationOutcome.Published
+      case Left(LeaseLost.Expired)     => PublicationOutcome.LeaseLost
+      case Left(LeaseLost.Unavailable) => PublicationOutcome.CoordinationUnavailable
     }
   }
 }

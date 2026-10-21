@@ -26,12 +26,7 @@ final class SearchSessionHandoffTimingSpec extends CatsEffectSuite {
     now,
     now.plusSeconds(3600)
   )
-  private val work = PendingSearchSessionWork(
-    session,
-    OperationalEvents
-      .searchPerformed(UUID.fromString("00000000-0000-0000-0000-000000000913"), session)
-      .fold(error => fail(error.toString), identity)
-  )
+  private val work = PendingSearchSessionWork(session)
 
   /** The first claim returns work whose completion and retry both fail (recovery deferred); later claims are empty. */
   private def repository(claimedAt: Ref[IO, Vector[FiniteDuration]]): SearchSessionWorkRepository[IO] =

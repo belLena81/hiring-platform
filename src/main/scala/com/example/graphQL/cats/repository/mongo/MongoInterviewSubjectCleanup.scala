@@ -274,29 +274,19 @@ final class MongoInterviewSubjectCleanup(
 
   /** One indexed predicate per collection that names a subject; every stored shape has a single writer.
     *   - workflows: a subject is the workflow's candidate or recruiter (the initiator is that recruiter or the
-    *     undeletable Admin), served by the existing `candidateId` and `recruiterId` indexes. Request receipts keep the
-    *     initiating subject in their `request:<subject>:` `_id`, served by the primary key. They remain after the
-    *     workflow's TTL.
+    *     undeletable Admin), served by the existing `candidateId` and `recruiterId` indexes.
     *   - reservations: `participants` holds both parties, the prefix of the participants index.
     *   - notification receipts: `recipientId`, the prefix of the recipient index.
-    *   - inbox: only hiring receipts name subjects, via the partial hiring-receipt index. Other inbox rows and every
-    *     command row are reached through `workflowId`.
+    *   - inbox rows and every command row name no subject; they are reached through `workflowId`. Interview request
+    *     idempotency lives in `mutation_receipts` (an expiring row of scope, fingerprint and workflow id).
     */
   private def subjectTargets(subject: String): List[(String, MongoFilter)] = List(
     MongoCollections.InterviewWorkflows -> MongoFilter.or(
       MongoFilter.eq(MongoFields.CandidateId, subject),
-      MongoFilter.eq(MongoFields.RecruiterId, subject),
-      MongoFilter.and(
-        MongoFilter.gte(MongoFields.Id, s"request:$subject:"),
-        MongoFilter.lt(MongoFields.Id, s"request:$subject;")
-      )
+      MongoFilter.eq(MongoFields.RecruiterId, subject)
     ),
     MongoCollections.InterviewCalendarReservations -> MongoFilter.eq("participants", subject),
-    MongoCollections.InterviewNotificationReceipts -> MongoFilter.eq("recipientId", subject),
-    MongoCollections.InterviewWorkflowInbox -> MongoFilter.and(
-      MongoFilter.eq(MongoInterviewFields.DocumentTypeField, MongoInterviewFields.HiringReceiptType),
-      MongoFilter.eq(MongoFields.SubjectIds, subject)
-    )
+    MongoCollections.InterviewNotificationReceipts -> MongoFilter.eq("recipientId", subject)
   )
 
   private val ReleasedAtField = "releasedAt"
@@ -323,11 +313,7 @@ final class MongoInterviewSubjectCleanup(
         ) *>
         workflows
           .flatMap(
-            _.deleteMany(
-              MongoFilter
-                .or(MongoFilter.in("_id", ids), MongoFilter.in("requestWorkflowId", ids))
-                .bson
-            )
+            _.deleteMany(MongoFilter.in("_id", ids).bson)
           )
           .void
     }
@@ -335,7 +321,6 @@ final class MongoInterviewSubjectCleanup(
       RepositoryF
         .lift(
           targets
-            .filterNot((name, _) => name == MongoCollections.InterviewWorkflowInbox)
             .traverse((name, predicate) =>
               Mongo4catsCollections
                 .documents(database, name)
@@ -346,17 +331,13 @@ final class MongoInterviewSubjectCleanup(
         )
         .flatMap { found =>
           val ids = found
-            .flatMap(row =>
-              Option(row.getString("workflowId"))
-                .orElse(Option(row.getString("requestWorkflowId")))
-                .orElse(Option(row.getString("_id")))
-            )
+            .flatMap(row => Option(row.getString("workflowId")).orElse(Option(row.getString("_id"))))
             .distinct
           if (ids.isEmpty) ().asRepository
           else releaseLiveHolds(ids) *> RepositoryF.lift(deleteLinked(ids)) *> batch
         }
     batch *> RepositoryF.lift(
-      // The loop above ended with no workflow left; orphan reservations, receipts and hiring receipts remain.
+      // The loop above ended with no workflow left; orphan reservations and notification receipts remain.
       targets
         .filterNot((name, _) => name == MongoCollections.InterviewWorkflows)
         .traverse_((name, predicate) =>

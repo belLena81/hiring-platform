@@ -14,9 +14,11 @@ import scala.jdk.CollectionConverters.*
   * which a writer could have stored an invalid row between the first audit and the install. Nothing is rewritten, so
   * there is no checkpoint; the whole step is idempotent and a restart reruns the same three phases.
   *
-  * The completed proof is read-only and exact: every definition in `MongoOperationalValidators.all` (users V2 included)
-  * must be installed unchanged, so later drift fails closed with the drifted collection and is never overwritten. The
-  * users validator is also installed at every start by `MongoHiringSetup`; the earlier proof of
+  * The completed proof is read-only and exact: every collection must hold the definition this step installed
+  * (`MongoOperationalValidators.installedBy025`, users V2 included) or its documented successor in
+  * `MongoOperationalValidators.all` (embedding work, search session work, interview workflows and the inbox were
+  * replaced by 027 to 030), so later drift fails closed with the drifted collection and is never overwritten. The users
+  * validator is also installed at every start by `MongoHiringSetup`; the earlier proof of
   * `016_candidate_residence_integrity` accepts it as the documented successor of its own definition.
   *
   * Recovery is forward-only. Stop every writer running an earlier binary before upgrading: it stores `null` optional
@@ -28,12 +30,25 @@ private[mongo] object MongoOperationalCollectionValidatorMigrations {
   private val Id: MigrationId = MigrationIds.OperationalCollectionValidators
   val MigrationId: String = Id.value
 
+  /** Each collection must hold the definition this step installed or its documented successor (the current one). */
   private def verifyCompleted(database: MongoHiringSetup.SetupDatabase): IO[CompletedProof] =
-    MongoHiringValidators.assertStrictValidators(database, MongoOperationalValidators.all).as(CompletedProof.Trusted)
+    MongoHiringValidators
+      .collectionOptions(database, MongoOperationalValidators.all.map(_._1))
+      .flatMap { options =>
+        MongoOperationalValidators.all.zip(MongoOperationalValidators.installedBy025).traverse_ {
+          case ((name, current), (_, installed)) =>
+            val stored = options.get(name)
+            IO.raiseUnless(
+              MongoHiringValidators.strictValidatorMatches(stored, installed) ||
+                MongoHiringValidators.strictValidatorMatches(stored, current)
+            )(MigrationError.ValidatorMismatch(name))
+        }
+      }
+      .as(CompletedProof.Trusted)
 
   /** Fails with the first collection holding a row its validator rejects; the error names the collection only. */
   private def audit(run: MigrationRun): IO[Unit] =
-    MongoOperationalValidators.all.traverse_ { case (name, validator) =>
+    MongoOperationalValidators.installedBy025.traverse_ { case (name, validator) =>
       run.database
         .getCollection(name)
         .find(new Document("$nor", List(validator).asJava))
@@ -46,7 +61,7 @@ private[mongo] object MongoOperationalCollectionValidatorMigrations {
     for {
       _ <- MongoMigrationLedger.requireComplete(run.database, MigrationIds.OptionalFieldAbsence)
       _ <- audit(run)
-      _ <- MongoOperationalValidators.all.traverse_ { case (name, validator) =>
+      _ <- MongoOperationalValidators.installedBy025.traverse_ { case (name, validator) =>
         MongoHiringValidators.install(run.database, name, validator)
       }
       _ <- audit(run)

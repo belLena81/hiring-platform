@@ -47,7 +47,7 @@ final class InterviewCancellationAccessIntegrationSpec extends MongoIntegrationS
     s.applied(
       InterviewLifecycleEvent
         .Propose(replacement.startsAt, replacement.endsAt, s.workflow.recruiterId, now, InterviewProposalTtl.Default),
-      s.actor(UserRole.Recruiter, s.workflow.recruiterId, input = "propose"),
+      s.actor(UserRole.Recruiter, s.workflow.recruiterId),
       0L,
       now
     )
@@ -55,7 +55,7 @@ final class InterviewCancellationAccessIntegrationSpec extends MongoIntegrationS
   private def requested(s: InterviewLifecycleScenario): IO[InterviewWorkflow] =
     s.applied(
       InterviewLifecycleEvent.RequestReschedule(now),
-      s.actor(UserRole.Candidate, s.workflow.candidateId, input = "request"),
+      s.actor(UserRole.Candidate, s.workflow.candidateId),
       0L,
       now
     )
@@ -89,7 +89,7 @@ final class InterviewCancellationAccessIntegrationSpec extends MongoIntegrationS
         case other => other
       }
       for {
-        outcome <- s.apply(tailored, s.actor(role, intruder, input = s"$name-by-stranger"), expected, now)
+        outcome <- s.apply(tailored, s.actor(role, intruder), expected, now)
         after <- footprint(s)
       } yield {
         assertEquals(outcome, Right(InterviewLifecycleOutcome.NotVisible), s"$name by a stranger")
@@ -121,7 +121,7 @@ final class InterviewCancellationAccessIntegrationSpec extends MongoIntegrationS
   ): IO[Unit] =
     attempts.traverse_ { (name, role, actor, event) =>
       for {
-        outcome <- s.apply(event, s.actor(role, actor, input = s"$name-denied"), expected, now)
+        outcome <- s.apply(event, s.actor(role, actor), expected, now)
         after <- footprint(s)
       } yield {
         assertEquals(outcome, Left(RepositoryError.InvalidEvent), name)
@@ -241,7 +241,7 @@ final class InterviewCancellationAccessIntegrationSpec extends MongoIntegrationS
           .traverse(_ =>
             s.apply(
               InterviewLifecycleEvent.RequestReschedule(now),
-              s.actor(UserRole.Candidate, s.workflow.candidateId, UUID.randomUUID(), "request-again"),
+              s.actor(UserRole.Candidate, s.workflow.candidateId),
               flagged.revision,
               now
             )

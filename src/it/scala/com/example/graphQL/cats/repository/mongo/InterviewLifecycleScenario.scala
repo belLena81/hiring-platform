@@ -149,12 +149,7 @@ private[mongo] final case class InterviewLifecycleScenario(
         )
       )
 
-  def actor(role: UserRole, user: UserId, key: UUID = UUID.randomUUID(), input: String = "action") =
-    InterviewLifecycleOrigin.Actor(
-      InterviewWorkflowAccess(user, role),
-      key,
-      MutationReceiptFingerprint.fromCanonicalInput(input)
-    )
+  def actor(role: UserRole, user: UserId) = InterviewLifecycleOrigin.Actor(InterviewWorkflowAccess(user, role))
 
   def apply(
       event: InterviewLifecycleEvent,
@@ -439,9 +434,8 @@ private[mongo] object InterviewLifecycleScenario {
           repository.create(
             base,
             InterviewWorkflow.initialCommand(base),
-            UUID.randomUUID(),
-            MutationReceiptFingerprint.fromCanonicalInput("arrangement"),
-            at
+            at,
+            MutationWriteContext.directWrite
           )
         )
         faults <- InterviewProviderFaults.create

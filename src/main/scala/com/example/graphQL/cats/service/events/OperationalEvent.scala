@@ -129,6 +129,14 @@ object OperationalEvents {
       )
     )
 
+  /** The identity of the `SearchPerformed` event of a search: one event per search, whoever rebuilds it. */
+  def searchPerformedEventId(searchId: UUID): UUID =
+    com.example.graphQL.cats.shared.StableIds.uuid(s"search-performed:$searchId")
+
+  /** The `SearchPerformed` event derived from the stored session; it is never persisted beside the session. */
+  def searchPerformed(session: SearchSession): Either[OperationalEventContractError, OperationalEventEnvelope] =
+    searchPerformed(searchPerformedEventId(session.id), session)
+
   def searchPerformed(
       eventId: UUID,
       session: SearchSession

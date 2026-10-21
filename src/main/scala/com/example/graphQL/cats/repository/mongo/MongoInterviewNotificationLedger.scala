@@ -36,13 +36,11 @@ final class MongoInterviewNotificationLedger(store: MongoInterviewWorkflowStore)
                 )
               )
               _ <- bumpProviderFence(session, workflow.id, workflow.phase)
-              receiptExists <- RepositoryF.lift(
-                MongoSessionOperations.findById(inbox, session, s"${workflow.id.value}:hiring")
-              )
+              hiringCommitted <- isHiringCommitted(session, workflow.id)
               // Only the scheduling notification requires the hiring commit; later kinds follow other durable events.
               _ <- MongoF.fromEither(
                 Either.cond(
-                  receipt.kind != InterviewNotificationKind.Scheduled || receiptExists.nonEmpty,
+                  receipt.kind != InterviewNotificationKind.Scheduled || hiringCommitted,
                   (),
                   RepositoryError.Conflict
                 )

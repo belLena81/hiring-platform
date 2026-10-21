@@ -12,8 +12,8 @@ import com.example.graphQL.cats.domain.workflow.*
 import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
 import com.example.graphQL.cats.service.auth.ActorAuthorization
 import com.example.graphQL.cats.service.port.*
-import com.example.graphQL.cats.service.RepositoryError
-import com.example.graphQL.cats.service.protocol.{UseCaseF}
+import com.example.graphQL.cats.service.mutation.Idempotent
+import com.example.graphQL.cats.service.protocol.{IdempotencyRequest, UseCaseF}
 import java.time.Instant
 import java.util.UUID
 import scala.concurrent.duration.FiniteDuration
@@ -23,6 +23,7 @@ final class InterviewSchedulingService[F[_]](using F: Monad[F], clock: Clock[F],
     jobs: JobRepository[F],
     applications: ApplicationRepository[F],
     workflows: InterviewWorkflowRepository[F],
+    idempotent: Idempotent[F],
     preCommitWindow: FiniteDuration,
     currentTime: F[Instant] = clock.realTimeInstant,
     nextWorkflowId: F[InterviewWorkflowId] = uuids.randomUUID.map(InterviewWorkflowId.apply),
@@ -31,67 +32,73 @@ final class InterviewSchedulingService[F[_]](using F: Monad[F], clock: Clock[F],
   private val authorization = ActorAuthorization(users)
   private val authorizedApplications = AuthorizedApplicationAccess(authorization, jobs, applications)
 
+  /** Interview requests share one idempotency namespace per actor, so a key reused for another operation or input is a
+    * conflict: the fingerprint starts with the action name (`schedule` or the lifecycle action). The receipt shares the
+    * transaction of the write it guards.
+    */
+  private val IdempotencyOperation = "interviewWorkflow"
+
+  private def workflowReference(workflow: InterviewWorkflow): MutationEntityReference =
+    MutationEntityReference.of("interviewWorkflow", workflow.id.value)
+
+  private def replayWorkflow(actor: ActorContext): MutationEntityReference => UseCaseF[F, InterviewWorkflow] =
+    Idempotent.replayById[F, InterviewWorkflowId, InterviewWorkflow]("interviewWorkflow", InterviewWorkflowId.apply)(
+      id => authorization.resolve(actor).flatMap(visibleTo(_, id))
+    )
+
   def schedule(
       actor: ActorContext,
       applicationId: ApplicationId,
       startsAt: Instant,
       endsAt: Instant,
       idempotencyKey: UUID
-  ): UseCaseF[F, InterviewWorkflow] =
-    for {
-      managed <- authorizedApplications.manage(actor, applicationId)
-      ManagedApplication(user, application, job) = managed
-      canonicalStart = InterviewInterval.canonical(startsAt)
-      canonicalEnd = InterviewInterval.canonical(endsAt)
-      fingerprint = MutationReceiptFingerprint.fromCanonicalInput(
-        s"${applicationId.value}|$canonicalStart|$canonicalEnd"
+  ): UseCaseF[F, InterviewWorkflow] = {
+    val canonicalStart = InterviewInterval.canonical(startsAt)
+    val canonicalEnd = InterviewInterval.canonical(endsAt)
+    val request =
+      IdempotencyRequest.fromCanonicalInput(
+        idempotencyKey,
+        s"schedule|${applicationId.value}|$canonicalStart|$canonicalEnd"
       )
-      replay <- UseCaseF.repository(workflows.findRequest(user.id, idempotencyKey, fingerprint))
-      saved <- replay match {
-        case Some(existing) => EitherT.rightT[F, UseCaseError](existing)
-        case None           =>
-          for {
-            now <- EitherT.liftF(currentTime)
-            interval <- EitherT.fromEither[F](
-              InterviewInterval
-                .validate(startsAt, endsAt, now)
-                .leftMap(UseCaseError.InterviewRule(_))
+    idempotent.executeFor(actor, IdempotencyOperation, request, workflowReference, replayWorkflow(actor)) { context =>
+      for {
+        managed <- authorizedApplications.manage(actor, applicationId)
+        ManagedApplication(user, application, job) = managed
+        now <- EitherT.liftF(currentTime)
+        interval <- EitherT.fromEither[F](
+          InterviewInterval
+            .validate(startsAt, endsAt, now)
+            .leftMap(UseCaseError.InterviewRule(_))
+        )
+        id <- EitherT.liftF(nextWorkflowId)
+        acceptedDeadline = now.plusMillis(preCommitWindow.toMillis)
+        deadline = if (acceptedDeadline.isBefore(interval.startsAt)) acceptedDeadline else interval.startsAt
+        workflow <- EitherT.fromEither[F](
+          InterviewWorkflow
+            .create(
+              id,
+              application.id,
+              application.candidateId,
+              job.recruiterId,
+              interval,
+              deadline,
+              idempotencyKey,
+              application.status,
+              Some(user.id),
+              Some(user.role)
             )
-            id <- EitherT.liftF(nextWorkflowId)
-            acceptedDeadline = now.plusMillis(preCommitWindow.toMillis)
-            deadline = if (acceptedDeadline.isBefore(interval.startsAt)) acceptedDeadline else interval.startsAt
-            workflow <- EitherT.fromEither[F](
-              InterviewWorkflow
-                .create(
-                  id,
-                  application.id,
-                  application.candidateId,
-                  job.recruiterId,
-                  interval,
-                  deadline,
-                  idempotencyKey,
-                  application.status,
-                  Some(user.id),
-                  Some(user.role)
-                )
-                .leftMap(_ =>
-                  UseCaseError.Domain(
-                    DomainError.InvalidStatusTransition(application.status, ApplicationStatus.Interview)
-                  )
-                )
+            .leftMap(_ =>
+              UseCaseError.Domain(
+                DomainError.InvalidStatusTransition(application.status, ApplicationStatus.Interview)
+              )
             )
-            result <- UseCaseF.repository(
-              workflows.create(workflow, InterviewWorkflow.initialCommand(workflow), idempotencyKey, fingerprint, now)
-            )
-            saved <- result match {
-              case InterviewWorkflowAdvanceResult.Applied             => EitherT.rightT[F, UseCaseError](workflow)
-              case InterviewWorkflowAdvanceResult.Duplicate(existing) => EitherT.rightT[F, UseCaseError](existing)
-              case InterviewWorkflowAdvanceResult.StaleRevision       =>
-                EitherT.leftT[F, InterviewWorkflow](UseCaseError.Repository(RepositoryError.Conflict))
-            }
-          } yield saved
-      }
-    } yield saved
+        )
+        _ <- UseCaseF.repository(
+          workflows.create(workflow, InterviewWorkflow.initialCommand(workflow), now, context)
+        )
+      } yield workflow
+    }
+  }
 
   def inspect(actor: ActorContext, id: InterviewWorkflowId): UseCaseF[F, InterviewWorkflow] =
     authorization.resolve(actor).flatMap(visibleTo(_, id))
@@ -248,23 +255,26 @@ final class InterviewSchedulingService[F[_]](using F: Monad[F], clock: Clock[F],
       canonicalInput: String
   )(
       event: (ActorRecord, Instant) => InterviewLifecycleEvent
-  ): UseCaseF[F, InterviewWorkflow] =
-    for {
-      user <- authorization.resolve(actor)
-      _ <- visibleTo(user, id)
-      now <- EitherT.liftF[F, UseCaseError, Instant](currentTime)
-      decided = event(user, now)
-      _ <- UseCaseF.forbidUnless[F](InterviewActorPolicy.permits(user.role, user.id, decided))
-      origin = InterviewLifecycleOrigin.Actor(
-        InterviewWorkflowAccess(user.id, user.role),
-        idempotencyKey,
-        MutationReceiptFingerprint.fromCanonicalInput(
-          s"${action.name}|${id.value}|$expectedRevision|$canonicalInput"
+  ): UseCaseF[F, InterviewWorkflow] = {
+    val request = IdempotencyRequest.fromCanonicalInput(
+      idempotencyKey,
+      s"${action.name}|${id.value}|$expectedRevision|$canonicalInput"
+    )
+    idempotent.executeFor(actor, IdempotencyOperation, request, workflowReference, replayWorkflow(actor)) { context =>
+      for {
+        user <- authorization.resolve(actor)
+        _ <- visibleTo(user, id)
+        now <- EitherT.liftF[F, UseCaseError, Instant](currentTime)
+        decided = event(user, now)
+        _ <- UseCaseF.forbidUnless[F](InterviewActorPolicy.permits(user.role, user.id, decided))
+        origin = InterviewLifecycleOrigin.Actor(InterviewWorkflowAccess(user.id, user.role))
+        outcome <- UseCaseF.repository(
+          workflows.applyLifecycle(id, expectedRevision, decided, origin, now, None, context)
         )
-      )
-      outcome <- UseCaseF.repository(workflows.applyLifecycle(id, expectedRevision, decided, origin, now, None))
-      workflow <- EitherT.fromEither[F](outcomeToWorkflow(action, outcome))
-    } yield workflow
+        workflow <- EitherT.fromEither[F](outcomeToWorkflow(action, outcome))
+      } yield workflow
+    }
+  }
 
   private def outcomeToWorkflow(
       action: InterviewAction,

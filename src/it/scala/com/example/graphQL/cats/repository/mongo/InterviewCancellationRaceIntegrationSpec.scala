@@ -36,7 +36,7 @@ final class InterviewCancellationRaceIntegrationSpec extends MongoIntegrationSui
       case UserRole.Candidate => (InterviewCancellationInitiator.Candidate, s.workflow.candidateId)
       case _                  => (InterviewCancellationInitiator.Recruiter, s.workflow.recruiterId)
     }
-    s.apply(InterviewLifecycleEvent.Cancel(initiator, now), s.actor(role, user, input = "cancel"), expected, now)
+    s.apply(InterviewLifecycleEvent.Cancel(initiator, now), s.actor(role, user), expected, now)
   }
 
   private def proposeBy(s: InterviewLifecycleScenario, expected: Long, interval: InterviewInterval): IO[Outcome] =
@@ -48,7 +48,7 @@ final class InterviewCancellationRaceIntegrationSpec extends MongoIntegrationSui
         now,
         InterviewProposalTtl.Default
       ),
-      s.actor(UserRole.Recruiter, s.workflow.recruiterId, input = s"propose-${interval.startsAt}"),
+      s.actor(UserRole.Recruiter, s.workflow.recruiterId),
       expected,
       now
     )
@@ -86,7 +86,7 @@ final class InterviewCancellationRaceIntegrationSpec extends MongoIntegrationSui
               now,
               InterviewProposalTtl.Default
             ),
-            s.actor(UserRole.Recruiter, s.workflow.recruiterId, input = "propose"),
+            s.actor(UserRole.Recruiter, s.workflow.recruiterId),
             0L,
             now
           )
@@ -95,13 +95,13 @@ final class InterviewCancellationRaceIntegrationSpec extends MongoIntegrationSui
             cancelBy(s, UserRole.Recruiter, expected),
             s.apply(
               InterviewLifecycleEvent.AcceptProposal(now),
-              s.actor(UserRole.Candidate, s.workflow.candidateId, input = "accept"),
+              s.actor(UserRole.Candidate, s.workflow.candidateId),
               expected,
               now
             ),
             s.apply(
               InterviewLifecycleEvent.WithdrawProposal(now),
-              s.actor(UserRole.Recruiter, s.workflow.recruiterId, input = "withdraw"),
+              s.actor(UserRole.Recruiter, s.workflow.recruiterId),
               expected,
               now
             )
@@ -210,7 +210,7 @@ final class InterviewCancellationRaceIntegrationSpec extends MongoIntegrationSui
               now,
               InterviewProposalTtl.Default
             ),
-            s.actor(UserRole.Recruiter, s.workflow.recruiterId, input = "propose"),
+            s.actor(UserRole.Recruiter, s.workflow.recruiterId),
             0L,
             now
           )
@@ -218,7 +218,7 @@ final class InterviewCancellationRaceIntegrationSpec extends MongoIntegrationSui
           outcomes <- List(
             s.apply(
               InterviewLifecycleEvent.AcceptProposal(due.minusMillis(1)),
-              s.actor(UserRole.Candidate, s.workflow.candidateId, input = "accept"),
+              s.actor(UserRole.Candidate, s.workflow.candidateId),
               proposed.revision,
               now
             ),
@@ -272,66 +272,6 @@ final class InterviewCancellationRaceIntegrationSpec extends MongoIntegrationSui
         assertEquals(staleLosers(outcomes), 1, clue(outcomes))
         assertEquals(third, Right(InterviewLifecycleOutcome.Rejected(InterviewWorkflowError.ProposalAlreadyOpen)))
         assertEquals(after.phase, InterviewWorkflowPhase.ProposalPending)
-      }
-    }
-  }
-
-  test("DHW-23 the same request sent in parallel returns one workflow and writes one rejection") {
-    scenario { s =>
-      val key = UUID.randomUUID()
-      val origin = s.actor(UserRole.Candidate, s.workflow.candidateId, key, "cancel")
-      val request = s.apply(
-        InterviewLifecycleEvent.Cancel(InterviewCancellationInitiator.Candidate, now),
-        origin,
-        0L,
-        now
-      )
-      for {
-        outcomes <- List.fill(6)(request).parSequence
-        history <- s.count(MongoCollections.ApplicationEvents)
-        outbox <- s.count(MongoCollections.EventOutbox)
-        rows <- s.commandRows
-        later <- request
-        stored <- s.current
-      } yield {
-        val workflows = outcomes.map {
-          case Right(InterviewLifecycleOutcome.Applied(w))   => w
-          case Right(InterviewLifecycleOutcome.Duplicate(w)) => w
-          case other                                         => fail(s"unexpected $other")
-        }
-        assertEquals(workflows.distinct.size, 1)
-        assertEquals(workflows.head, stored)
-        assertEquals(later, Right(InterviewLifecycleOutcome.Duplicate(stored)))
-        assertEquals((history, outbox), (1L, 1L))
-        assertEquals(rows.count(_.command.isInstanceOf[InterviewLifecycleCommand.CancelCalendarSlot]), 1)
-      }
-    }
-  }
-
-  test("DHW-23 a key reused for another operation or input is a conflict that changes nothing") {
-    scenario { s =>
-      val key = UUID.randomUUID()
-      for {
-        first <- s.apply(
-          InterviewLifecycleEvent.RequestReschedule(now),
-          s.actor(UserRole.Candidate, s.workflow.candidateId, key, "request"),
-          0L,
-          now
-        )
-        sameKeyOtherOperation <- s.apply(
-          InterviewLifecycleEvent.Cancel(InterviewCancellationInitiator.Candidate, now),
-          s.actor(UserRole.Candidate, s.workflow.candidateId, key, "cancel"),
-          1L,
-          now
-        )
-        status <- s.applicationStatus
-        after <- s.current
-      } yield {
-        assert(first.exists(_.isInstanceOf[InterviewLifecycleOutcome.Applied]))
-        assertEquals(sameKeyOtherOperation, Left(RepositoryError.Conflict))
-        assertEquals(status, Some("Interview"))
-        assertEquals(after.phase, InterviewWorkflowPhase.Completed)
-        assertEquals(after.revision, 1L)
       }
     }
   }

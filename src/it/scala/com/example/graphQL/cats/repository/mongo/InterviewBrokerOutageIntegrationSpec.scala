@@ -64,7 +64,16 @@ final class InterviewBrokerOutageIntegrationSpec extends MongoIntegrationSuite {
           cats.effect.Clock[IO],
           cats.effect.std.UUIDGen[IO]
         )
-        val scheduling = new InterviewSchedulingService[IO](users, jobs, applications, repository, 3.minutes)
+        val scheduling = new InterviewSchedulingService[IO](
+          users,
+          jobs,
+          applications,
+          repository,
+          Idempotent(
+            MongoMutationReceiptRepository.transactional(fixture.database, fixture.client, Diagnostics.noop[IO])
+          ),
+          3.minutes
+        )
         val worker = new InterviewWorkflowWorker[IO](
           repository,
           LedgerInterviewCalendarProvider.durable(repository),
@@ -218,13 +227,20 @@ final class InterviewBrokerOutageIntegrationSpec extends MongoIntegrationSuite {
           )
           requestReceipts <- MongoRepositoryTestSupport.count(
             fixture.database,
+            MongoCollections.MutationReceipts,
+            Filters.eq("operation", "interviewWorkflow")
+          )
+          legacyRequestReceipts <- MongoRepositoryTestSupport.count(
+            fixture.database,
             MongoCollections.InterviewWorkflows,
             Filters.eq("documentType", "requestReceipt")
           )
+          _ <- ApplicationStatusInvariant.assertAgrees(fixture.database, template.applicationId)
         } yield {
           assertEquals(finalState.map(_.phase), Some(InterviewWorkflowPhase.Completed))
           assertEquals(workflowCount, 1L)
           assertEquals(requestReceipts, 1L)
+          assertEquals(legacyRequestReceipts, 0L)
           assertEquals(reservations, 1L)
           assertEquals(notifications, 2L)
           assertEquals(history, 2L)

@@ -197,14 +197,6 @@ class OperationalTelemetryServiceSpec extends CatsEffectSuite {
       sessions: Ref[IO, Map[UUID, SearchSession]],
       storedEvents: Ref[IO, Vector[OperationalEventEnvelope]]
   ) extends SearchSessionRepository[IO] {
-    override def save(session: SearchSession, event: OperationalEventEnvelope): RepositoryF[IO, Unit] =
-      com.example.graphQL.cats.service.port.RepositoryF.fromFEither(
-        IO.defer {
-          val _ = event
-          sessions.update(_ + (session.id -> session)).as(Right(()))
-        }
-      )
-
     override def find(id: UUID): RepositoryF[IO, Option[SearchSession]] =
       com.example.graphQL.cats.service.port.RepositoryF.fromFEither(sessions.get.map(values => Right(values.get(id))))
 

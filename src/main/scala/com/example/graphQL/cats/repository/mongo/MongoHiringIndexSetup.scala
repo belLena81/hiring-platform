@@ -48,24 +48,6 @@ private[mongo] object MongoHiringIndexSetup {
     new IndexOptions().name(InterviewWorkflowCommandDue)
   )
 
-  /** Request receipts live beside their workflow and name it in `requestWorkflowId`; retention and cleanup find them
-    * through this sparse index instead of scanning the collection. Introduced by `019_interview_request_receipt_index`.
-    */
-  val interviewRequestReceiptIndex: IndexSpec = IndexSpec(
-    MongoCollections.InterviewWorkflows,
-    Indexes.ascending("requestWorkflowId"),
-    new IndexOptions().name(InterviewWorkflowRequestReceipt).sparse(true)
-  )
-
-  /** Erasure finds a subject's hiring receipts here, including receipts whose workflow already expired. */
-  val interviewHiringReceiptSubjectsIndex: IndexSpec = IndexSpec(
-    MongoCollections.InterviewWorkflowInbox,
-    Indexes.ascending(MongoFields.SubjectIds),
-    new IndexOptions()
-      .name(InterviewWorkflowInboxHiringSubjects)
-      .partialFilterExpression(Filters.eq(MongoFields.DocumentType, MongoInterviewFields.HiringReceiptType))
-  )
-
   private val indexSpecs: List[IndexSpec] = List(
     IndexSpec(
       MongoCollections.InterviewSubjectCleanup,
@@ -355,7 +337,7 @@ private[mongo] object MongoHiringIndexSetup {
       new IndexOptions().name(InterviewWorkflowRecruiter)
     ),
     // One workflow per application, enforced by the store: an application enters `Interview` once and never leaves it
-    // for another scheduling. Request receipts carry no `applicationId` and are excluded by the partial filter.
+    // for another scheduling. The partial filter keeps the index to workflow documents.
     // `findByApplication` reads through this index.
     IndexSpec(
       MongoCollections.InterviewWorkflows,
@@ -366,8 +348,6 @@ private[mongo] object MongoHiringIndexSetup {
         .partialFilterExpression(Filters.eq(MongoFields.DocumentType, "workflow"))
     ),
     interviewCommandDueIndex,
-    interviewRequestReceiptIndex,
-    interviewHiringReceiptSubjectsIndex,
     IndexSpec(
       MongoCollections.InterviewWorkflowCommands,
       Indexes.ascending("commandState", "claimUntil", MongoFields.Id),
