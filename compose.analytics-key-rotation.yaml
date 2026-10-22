@@ -1,0 +1,25 @@
+# Analytics HMAC key-rotation overlay for compose.yaml: also gives the analytics workers the previous key, as a secret
+# file, while pseudonyms from the previous key window are still being retired. Omit this overlay outside a rotation.
+# Usage: docker compose -f compose.yaml -f compose.analytics-key-rotation.yaml --profile analytics run --rm analytics-batch
+# Requires HIRING_ANALYTICS_HMAC_PREVIOUS_KEY_ID and the secret file .local/config/secrets/analytics_previous_hmac_secret_base64.
+x-previous-key-environment: &previous-key-environment
+  HIRING_ANALYTICS_HMAC_PREVIOUS_KEY_ID: ${HIRING_ANALYTICS_HMAC_PREVIOUS_KEY_ID:?Set the previous HMAC key ID}
+  HIRING_ANALYTICS_HMAC_PREVIOUS_SECRET_BASE64_FILE: /run/secrets/analytics_previous_hmac_secret_base64
+
+services:
+  analytics-batch:
+    environment: *previous-key-environment
+    secrets: [kafka_reader_password, analytics_hmac_secret_base64, analytics_previous_hmac_secret_base64]
+
+  analytics-streaming:
+    environment: *previous-key-environment
+    secrets: [kafka_reader_password, analytics_hmac_secret_base64, analytics_previous_hmac_secret_base64]
+
+  analytics-erasure-worker:
+    environment: *previous-key-environment
+    secrets:
+      [kafka_reader_password, kafka_fencer_password, analytics_hmac_secret_base64, analytics_previous_hmac_secret_base64]
+
+secrets:
+  analytics_previous_hmac_secret_base64:
+    file: ./.local/config/secrets/analytics_previous_hmac_secret_base64

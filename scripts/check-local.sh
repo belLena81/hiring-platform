@@ -5,6 +5,7 @@ project_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$project_root"
 
 python3 scripts/check-skills.py
+scripts/check-container-runtime.sh
 
 java_command="${JAVA_HOME:+$JAVA_HOME/bin/}java"
 java_version="$("$java_command" -XshowSettings:properties -version 2>&1 | awk '/java.specification.version =/ { print $3 }')"

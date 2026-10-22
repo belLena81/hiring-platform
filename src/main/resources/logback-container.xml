@@ -1,0 +1,22 @@
+<configuration>
+  <!-- Container variant of logback.xml: same loggers, written to stdout so the container runtime collects and rotates them. -->
+  <statusListener class="ch.qos.logback.core.status.NopStatusListener"/>
+  <appender name="HIRING-PLATFORM" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder>
+      <pattern>%msg%n</pattern>
+    </encoder>
+  </appender>
+  <appender name="HIRING-PLATFORM-ASYNC" class="ch.qos.logback.classic.AsyncAppender">
+    <queueSize>256</queueSize>
+    <discardingThreshold>0</discardingThreshold>
+    <neverBlock>false</neverBlock>
+    <appender-ref ref="HIRING-PLATFORM"/>
+  </appender>
+  <logger name="hiring.foundation" level="INFO" additivity="false">
+    <appender-ref ref="HIRING-PLATFORM-ASYNC"/>
+  </logger>
+  <logger name="org.http4s" level="OFF"/>
+  <logger name="org.typelevel" level="OFF"/>
+  <logger name="org.mongodb.driver" level="OFF"/>
+  <root level="OFF"/>
+</configuration>

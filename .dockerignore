@@ -11,3 +11,17 @@
 .metals
 __pycache__
 **/__pycache__
+_logs
+**/_logs
+docs
+posts
+.claude
+.github
+# Machine-specific or credential-shaped files anywhere in the tree (the root-only patterns above miss nested paths).
+**/local.conf
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/*.jks
+**/*.p12

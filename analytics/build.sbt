@@ -22,6 +22,9 @@ lazy val munitScalaCheckVersion = "1.3.1"
 lazy val archUnitVersion = "1.5.1"
 lazy val IntegrationTest = config("it") extend Test
 
+lazy val stageContainerRuntime =
+  taskKey[File]("Stages the application jar, its runtime dependency jars and a Java classpath argfile for the image.")
+
 lazy val analytics = (project in file("."))
   .enablePlugins(JacocoItPlugin)
   .configs(IntegrationTest)
@@ -33,6 +36,25 @@ lazy val analytics = (project in file("."))
       .get("hiring.test.buildRoot")
       .fold(baseDirectory.value / "target")(path => file(path) / "target"),
     publish / skip := true,
+    // Dependencies and the application jar are staged separately so the image keeps them in separate cached layers;
+    // classpath.args preserves the sbt classpath order, with paths relative to the image working directory.
+    stageContainerRuntime := {
+      val stageDirectory = target.value / "container-runtime"
+      val applicationJar = (Compile / packageBin).value
+      val dependencyJars = (Runtime / dependencyClasspathAsJars).value.map(_.data).filterNot(_ == applicationJar)
+      IO.delete(stageDirectory)
+      IO.copyFile(applicationJar, stageDirectory / "app" / applicationJar.getName)
+      val dependencyPaths = dependencyJars.zipWithIndex.map { case (jar, index) =>
+        val stagedName = f"$index%04d-${jar.getName}"
+        IO.copyFile(jar, stageDirectory / "lib" / stagedName, preserveLastModified = true)
+        s"lib/$stagedName"
+      }
+      IO.write(
+        stageDirectory / "classpath.args",
+        (s"app/${applicationJar.getName}" +: dependencyPaths).mkString("-cp ", ":", "\n")
+      )
+      stageDirectory
+    },
     Compile / run / fork := true,
     Test / fork := true,
     Test / jacocoReportSettings := JacocoReportSettings()

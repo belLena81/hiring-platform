@@ -1,3 +1,69 @@
+# Local hiring stack: MongoDB replica set, SASL Kafka, and opt-in API and analytics profiles.
+# Secrets are files in the ignored .local/config/secrets/ directory (directory 0700, files 0644, one value per file);
+# containers read them from /run/secrets and the images export them as environment variables only inside the process.
+# See README "Container runtime" for creating them.
+
+x-rotated-logs: &rotated-logs
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "3"
+
+x-least-privilege: &least-privilege
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+
+# Images built from this repository: read-only root filesystem with an executable /tmp (JNA and Spark extract native
+# libraries there; Docker mounts tmpfs noexec by default).
+x-hiring-image-runtime: &hiring-image-runtime
+  <<: *least-privilege
+  read_only: true
+  tmpfs:
+    - /tmp:rw,exec,nosuid,nodev,size=512m
+  logging: *rotated-logs
+
+x-analytics-environment: &analytics-environment
+  SPARK_MASTER: ${SPARK_MASTER:-local[2]}
+  ANALYTICS_SPARK_LOCAL_DIRECTORY: /var/lib/hiring-analytics/spark-temp
+  ANALYTICS_BOOTSTRAP_SERVERS: kafka:9092
+  # Local Compose broker only: credentials are unencrypted on this private Compose network.
+  ANALYTICS_KAFKA_SECURITY_PROTOCOL: SASL_PLAINTEXT
+  ANALYTICS_KAFKA_ALLOW_PLAINTEXT: "true"
+  ANALYTICS_KAFKA_USERNAME: analytics_reader
+  ANALYTICS_KAFKA_PASSWORD_FILE: /run/secrets/kafka_reader_password
+  ANALYTICS_LAKEHOUSE_ROOT: file:///var/lib/hiring-analytics/lakehouse
+  ANALYTICS_TOPIC: ${ANALYTICS_TOPIC:-hiring.operational-events}
+  HIRING_ANALYTICS_HMAC_SECRET_BASE64_FILE: /run/secrets/analytics_hmac_secret_base64
+  HIRING_ANALYTICS_HMAC_KEY_ID: ${HIRING_ANALYTICS_HMAC_KEY_ID:-hmac-v1}
+  # The previous HMAC key is supplied only during a rotation window, through compose.analytics-key-rotation.yaml.
+  MONGODB_URI: ${MONGODB_URI:-mongodb://mongodb:27017/?replicaSet=rs0&directConnection=true}
+  MONGODB_DATABASE: ${MONGODB_DATABASE:-hiring}
+
+x-analytics-worker: &analytics-worker
+  <<: *hiring-image-runtime
+  build:
+    context: .
+    dockerfile: analytics/Dockerfile
+    # Run as the owner of the bind-mounted .local/data/analytics; set these when your host uid/gid is not 1000.
+    args:
+      RUNTIME_UID: ${HIRING_HOST_UID:-1000}
+      RUNTIME_GID: ${HIRING_HOST_GID:-1000}
+  image: hiring-analytics:local
+  depends_on:
+    kafka:
+      condition: service_healthy
+    kafka-acl-init:
+      condition: service_completed_successfully
+    mongodb:
+      condition: service_healthy
+  secrets: [kafka_reader_password, analytics_hmac_secret_base64]
+  volumes:
+    - ./.local/data/analytics:/var/lib/hiring-analytics
+  mem_limit: 4g
+  cpus: 2
+  pids_limit: 2048
+  stop_grace_period: 60s
+
 services:
   mongodb:
     image: mongo:8.0.32-noble@sha256:01354084d2ae665d2e79b79b0cdc50c2c0c98873618912d9a2c8c9cb5c3d24e6
@@ -6,6 +72,12 @@ services:
       - "127.0.0.1:27017:27017"
     volumes:
       - ./.local/data/mongodb:/data/db
+    # The image entrypoint starts as root and drops to the mongodb user, so it keeps the default capability set.
+    security_opt: [no-new-privileges:true]
+    mem_limit: 2g
+    cpus: 2
+    pids_limit: 1024
+    logging: *rotated-logs
     healthcheck:
       test: ["CMD", "mongosh", "--quiet", "--eval", "const hello = db.hello(); if (hello.isWritablePrimary) quit(0); try { rs.initiate({_id: 'rs0', members: [{_id: 0, host: 'localhost:27017'}]}); } catch (error) { if (error.codeName !== 'AlreadyInitialized') throw error; } quit(1);"]
       interval: 5s
@@ -25,6 +97,7 @@ services:
       - /data/configdb:mode=1777
       - /data/mongot:mode=1777
     mem_limit: 3g
+    logging: *rotated-logs
     healthcheck:
       test: ["CMD", "mongosh", "--quiet", "--eval", "db.hello().isWritablePrimary ? quit(0) : quit(1)"]
       interval: 5s
@@ -34,6 +107,8 @@ services:
 
   kafka:
     image: apache/kafka:3.9.2@sha256:05b4616e0702ef2729327705d54ad6b50ea70b271c4b730fabd2320789fb7b02
+    # Builds the SASL/PLAIN JAAS settings from the secret files inside the container, then runs the image entrypoint.
+    entrypoint: ["/opt/hiring/broker-entrypoint.sh"]
     environment:
       KAFKA_NODE_ID: "1"
       KAFKA_PROCESS_ROLES: "broker,controller"
@@ -46,10 +121,6 @@ services:
       KAFKA_SASL_ENABLED_MECHANISMS: "PLAIN"
       KAFKA_SASL_MECHANISM_INTER_BROKER_PROTOCOL: "PLAIN"
       KAFKA_SASL_MECHANISM_CONTROLLER_PROTOCOL: "PLAIN"
-      KAFKA_SASL_JAAS_CONFIG: "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"broker\" password=\"${KAFKA_BROKER_PASSWORD:?Set KAFKA_BROKER_PASSWORD in ignored .env}\";"
-      KAFKA_LISTENER_NAME_INTERNAL_PLAIN_SASL_JAAS_CONFIG: "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"broker\" password=\"${KAFKA_BROKER_PASSWORD:?Set KAFKA_BROKER_PASSWORD in ignored .env}\" user_broker=\"${KAFKA_BROKER_PASSWORD:?Set KAFKA_BROKER_PASSWORD in ignored .env}\" user_hiring_publisher_v2=\"${KAFKA_PUBLISHER_V2_PASSWORD:?Set KAFKA_PUBLISHER_V2_PASSWORD in ignored .env}\" user_analytics_reader=\"${KAFKA_READER_PASSWORD:?Set KAFKA_READER_PASSWORD in ignored .env}\" user_analytics_fencer=\"${KAFKA_FENCER_PASSWORD:?Set KAFKA_FENCER_PASSWORD in ignored .env}\" user_interview_command_publisher=\"${KAFKA_INTERVIEW_ORCHESTRATOR_PASSWORD:?Set KAFKA_INTERVIEW_ORCHESTRATOR_PASSWORD in ignored .env}\" user_interview_result_publisher=\"${KAFKA_INTERVIEW_WORKER_PASSWORD:?Set KAFKA_INTERVIEW_WORKER_PASSWORD in ignored .env}\" user_interview_fencer=\"${KAFKA_INTERVIEW_FENCER_PASSWORD:?Set KAFKA_INTERVIEW_FENCER_PASSWORD in ignored .env}\";"
-      KAFKA_LISTENER_NAME_EXTERNAL_PLAIN_SASL_JAAS_CONFIG: "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"broker\" password=\"${KAFKA_BROKER_PASSWORD:?Set KAFKA_BROKER_PASSWORD in ignored .env}\" user_broker=\"${KAFKA_BROKER_PASSWORD:?Set KAFKA_BROKER_PASSWORD in ignored .env}\" user_hiring_publisher_v2=\"${KAFKA_PUBLISHER_V2_PASSWORD:?Set KAFKA_PUBLISHER_V2_PASSWORD in ignored .env}\" user_analytics_reader=\"${KAFKA_READER_PASSWORD:?Set KAFKA_READER_PASSWORD in ignored .env}\" user_analytics_fencer=\"${KAFKA_FENCER_PASSWORD:?Set KAFKA_FENCER_PASSWORD in ignored .env}\" user_interview_command_publisher=\"${KAFKA_INTERVIEW_ORCHESTRATOR_PASSWORD:?Set KAFKA_INTERVIEW_ORCHESTRATOR_PASSWORD in ignored .env}\" user_interview_result_publisher=\"${KAFKA_INTERVIEW_WORKER_PASSWORD:?Set KAFKA_INTERVIEW_WORKER_PASSWORD in ignored .env}\" user_interview_fencer=\"${KAFKA_INTERVIEW_FENCER_PASSWORD:?Set KAFKA_INTERVIEW_FENCER_PASSWORD in ignored .env}\";"
-      KAFKA_LISTENER_NAME_CONTROLLER_PLAIN_SASL_JAAS_CONFIG: "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"broker\" password=\"${KAFKA_BROKER_PASSWORD:?Set KAFKA_BROKER_PASSWORD in ignored .env}\" user_broker=\"${KAFKA_BROKER_PASSWORD:?Set KAFKA_BROKER_PASSWORD in ignored .env}\" user_hiring_publisher_v2=\"${KAFKA_PUBLISHER_V2_PASSWORD:?Set KAFKA_PUBLISHER_V2_PASSWORD in ignored .env}\" user_analytics_reader=\"${KAFKA_READER_PASSWORD:?Set KAFKA_READER_PASSWORD in ignored .env}\" user_analytics_fencer=\"${KAFKA_FENCER_PASSWORD:?Set KAFKA_FENCER_PASSWORD in ignored .env}\" user_interview_command_publisher=\"${KAFKA_INTERVIEW_ORCHESTRATOR_PASSWORD:?Set KAFKA_INTERVIEW_ORCHESTRATOR_PASSWORD in ignored .env}\" user_interview_result_publisher=\"${KAFKA_INTERVIEW_WORKER_PASSWORD:?Set KAFKA_INTERVIEW_WORKER_PASSWORD in ignored .env}\" user_interview_fencer=\"${KAFKA_INTERVIEW_FENCER_PASSWORD:?Set KAFKA_INTERVIEW_FENCER_PASSWORD in ignored .env}\";"
       KAFKA_AUTHORIZER_CLASS_NAME: "org.apache.kafka.metadata.authorizer.StandardAuthorizer"
       KAFKA_SUPER_USERS: "User:broker"
       KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND: "false"
@@ -59,177 +130,129 @@ services:
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
       KAFKA_LOG_RETENTION_HOURS: "168"
       KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_HEAP_OPTS: -Xms512m -Xmx512m
+    secrets:
+      - kafka_broker_password
+      - kafka_publisher_password
+      - kafka_reader_password
+      - kafka_fencer_password
+      - kafka_interview_orchestrator_password
+      - kafka_interview_worker_password
+      - kafka_interview_fencer_password
     ports:
       - "127.0.0.1:9092:29092"
     volumes:
       - ./.local/data/kafka:/var/lib/kafka/data
+      - ./docker/kafka/broker-entrypoint.sh:/opt/hiring/broker-entrypoint.sh:ro
+    <<: *least-privilege
+    mem_limit: 1g
+    cpus: 2
+    pids_limit: 1024
+    logging: *rotated-logs
+    # Listener readiness without starting a JVM per probe; kafka-acl-init retries until the broker accepts requests.
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9092"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 15s
 
   kafka-acl-init:
     image: apache/kafka:3.9.2@sha256:05b4616e0702ef2729327705d54ad6b50ea70b271c4b730fabd2320789fb7b02
     depends_on:
       kafka:
-        condition: service_started
-    entrypoint: ["/bin/bash", "-ec"]
-    command:
-      - |
-        trap 'rm -f /tmp/admin.properties' EXIT
-        cat > /tmp/admin.properties <<EOF
-        security.protocol=SASL_PLAINTEXT
-        sasl.mechanism=PLAIN
-        sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required username="broker" password="$${KAFKA_BROKER_PASSWORD}";
-        EOF
-        until /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --create --if-not-exists --topic "$${KAFKA_TOPIC:-hiring.operational-events}" --partitions "$${KAFKA_TOPIC_PARTITIONS:-1}" --replication-factor 1 >/dev/null 2>&1; do sleep 2; done
-        /opt/kafka/bin/kafka-configs.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --entity-type topics --entity-name "$${KAFKA_TOPIC:-hiring.operational-events}" --alter --add-config max.message.bytes=1048576
-        /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --add --allow-principal User:hiring_publisher_v2 --operation WRITE --operation DESCRIBE --topic "$${KAFKA_TOPIC:-hiring.operational-events}"
-        /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --add --allow-principal User:hiring_publisher_v2 --operation IdempotentWrite --cluster
-        /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --add --allow-principal User:hiring_publisher_v2 --operation WRITE --operation DESCRIBE --transactional-id hiring-publisher- --resource-pattern-type prefixed
-        /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --remove --force --allow-principal User:publisher --operation WRITE --operation DESCRIBE --topic "$${KAFKA_TOPIC:-hiring.operational-events}"
-        /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --remove --force --allow-principal User:publisher --operation WRITE --operation DESCRIBE --topic hiring.phase6.runtime
-        /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --remove --force --allow-principal User:publisher --operation IdempotentWrite --cluster
-        /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --remove --force --allow-principal User:publisher --operation WRITE --operation DESCRIBE --transactional-id hiring-publisher- --resource-pattern-type prefixed
-        /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --add --allow-principal User:analytics_fencer --operation WRITE --operation DESCRIBE --transactional-id hiring-publisher- --resource-pattern-type prefixed
-        /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --add --allow-principal User:analytics_fencer --operation IdempotentWrite --cluster
-        /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --add --allow-principal User:analytics_reader --operation READ --operation DESCRIBE --topic "$${KAFKA_TOPIC:-hiring.operational-events}"
-        /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --add --allow-principal User:analytics_reader --operation DESCRIBE --cluster
-        /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --add --allow-principal User:analytics_reader --operation READ --group hiring-analytics-batch
-        /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --add --allow-principal User:analytics_reader --operation READ --group hiring-analytics-streaming-v1
-        /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --add --allow-principal User:analytics_reader --operation READ --group hiring-operational-events-local
-        /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --add --allow-principal User:analytics_reader --operation READ --group hiring-operational-events-integration
-        # Credential cutover: previous nontransactional publishers cannot retain topic-write authority.
-        for principal in interview_orchestrator interview_worker; do
-          for topic in hiring.interview-commands hiring.interview-results; do
-            /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --remove --force --allow-principal "User:$${principal}" --operation WRITE --topic "$${topic}"
-          done
-        done
-        # Interview principals can only send commands/read results or read commands/send results.
-        for topic in hiring.interview-commands hiring.interview-results; do
-          /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --create --if-not-exists --topic "$${topic}" --partitions 1 --replication-factor 1 --config min.insync.replicas=1 --config cleanup.policy=delete --config retention.ms=604800000 --config max.message.bytes=65536
-          /opt/kafka/bin/kafka-configs.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --entity-type topics --entity-name "$${topic}" --alter --add-config min.insync.replicas=1,cleanup.policy=delete,retention.ms=604800000,max.message.bytes=65536
-        done
-        /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --add --allow-principal User:interview_command_publisher --operation WRITE --operation DESCRIBE --topic hiring.interview-commands
-        /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --add --allow-principal User:interview_command_publisher --operation READ --operation DESCRIBE --topic hiring.interview-results
-        /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --add --allow-principal User:interview_command_publisher --operation READ --group hiring-interview-orchestrator
-        /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --add --allow-principal User:interview_result_publisher --operation READ --operation DESCRIBE --topic hiring.interview-commands
-        /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --add --allow-principal User:interview_result_publisher --operation WRITE --operation DESCRIBE --topic hiring.interview-results
-        /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --add --allow-principal User:interview_result_publisher --operation READ --group hiring-interview-workers
-        /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --add --allow-principal User:interview_command_publisher --operation WRITE --operation DESCRIBE --transactional-id hiring-interview-orchestrator- --resource-pattern-type prefixed
-        /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --add --allow-principal User:interview_result_publisher --operation WRITE --operation DESCRIBE --transactional-id hiring-interview-worker- --resource-pattern-type prefixed
-        for prefix in hiring-interview-orchestrator- hiring-interview-worker-; do
-          /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --add --allow-principal User:interview_fencer --operation WRITE --operation DESCRIBE --transactional-id "$${prefix}" --resource-pattern-type prefixed
-        done
-        for principal in interview_command_publisher interview_result_publisher interview_fencer; do
-          /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --add --allow-principal "User:$${principal}" --operation IdempotentWrite --cluster
-        done
+        condition: service_healthy
+    entrypoint: ["/opt/hiring/provision-access.sh"]
     environment:
-      KAFKA_BROKER_PASSWORD: ${KAFKA_BROKER_PASSWORD:?Set KAFKA_BROKER_PASSWORD in ignored .env}
-      KAFKA_FENCER_PASSWORD: ${KAFKA_FENCER_PASSWORD:?Set KAFKA_FENCER_PASSWORD in ignored .env}
       KAFKA_TOPIC: ${KAFKA_TOPIC:-hiring.operational-events}
+    secrets: [kafka_broker_password]
+    volumes:
+      - ./docker/kafka/provision-access.sh:/opt/hiring/provision-access.sh:ro
+    <<: *least-privilege
+    mem_limit: 512m
+    logging: *rotated-logs
     restart: "no"
 
-  analytics-batch:
-    profiles: ["analytics"]
+  # Opt-in hiring API: docker compose --profile api up -d --build api
+  # Kafka publication stays disabled here: the API accepts SASL without TLS only for loopback brokers.
+  api:
+    profiles: ["api"]
+    <<: *hiring-image-runtime
     build:
       context: .
-      dockerfile: analytics/Dockerfile
+      dockerfile: Dockerfile
+    image: hiring-api:local
     depends_on:
-      kafka:
-        condition: service_started
-      kafka-acl-init:
-        condition: service_completed_successfully
       mongodb:
         condition: service_healthy
     environment:
-      ANALYTICS_RUN_ID: ${ANALYTICS_RUN_ID:-}
+      MONGODB_URI: mongodb://mongodb:27017/?replicaSet=rs0&directConnection=true
+      AUTH_JWT_HS256_SECRET_FILE: /run/secrets/auth_jwt_hs256_secret
+      AUTH_RECEIPT_FP_SECRET_FILE: /run/secrets/auth_receipt_fp_secret
+      KAFKA_ENABLED: "false"
+    secrets: [auth_jwt_hs256_secret, auth_receipt_fp_secret]
+    ports:
+      - "127.0.0.1:8080:8080"
+    mem_limit: 1g
+    cpus: 2
+    pids_limit: 1024
+    stop_grace_period: 30s
+
+  analytics-batch:
+    <<: *analytics-worker
+    profiles: ["analytics"]
+    environment:
+      <<: *analytics-environment
       SPARK_MASTER: ${SPARK_MASTER:-local[*]}
-      ANALYTICS_SPARK_LOCAL_DIRECTORY: /var/lib/hiring-analytics/spark-temp
-      ANALYTICS_BOOTSTRAP_SERVERS: kafka:9092
-      # Local Compose broker only: credentials are unencrypted on this private Compose network.
-      ANALYTICS_KAFKA_SECURITY_PROTOCOL: SASL_PLAINTEXT
-      ANALYTICS_KAFKA_ALLOW_PLAINTEXT: "true"
-      ANALYTICS_KAFKA_USERNAME: analytics_reader
-      ANALYTICS_KAFKA_PASSWORD: ${KAFKA_READER_PASSWORD:?Set KAFKA_READER_PASSWORD in ignored .env}
-      ANALYTICS_LAKEHOUSE_ROOT: file:///var/lib/hiring-analytics/lakehouse
-      ANALYTICS_TOPIC: ${ANALYTICS_TOPIC:-hiring.operational-events}
+      ANALYTICS_RUN_ID: ${ANALYTICS_RUN_ID:-}
       ANALYTICS_PARTITION: ${ANALYTICS_PARTITION:-}
       ANALYTICS_START_OFFSET: ${ANALYTICS_START_OFFSET:-}
       ANALYTICS_END_OFFSET_EXCLUSIVE: ${ANALYTICS_END_OFFSET_EXCLUSIVE:-}
-      HIRING_ANALYTICS_HMAC_SECRET_BASE64: ${HIRING_ANALYTICS_HMAC_SECRET_BASE64:-}
-      HIRING_ANALYTICS_HMAC_KEY_ID: ${HIRING_ANALYTICS_HMAC_KEY_ID:-hmac-v1}
-      HIRING_ANALYTICS_HMAC_PREVIOUS_KEY_ID: ${HIRING_ANALYTICS_HMAC_PREVIOUS_KEY_ID:-}
-      HIRING_ANALYTICS_HMAC_PREVIOUS_SECRET_BASE64: ${HIRING_ANALYTICS_HMAC_PREVIOUS_SECRET_BASE64:-}
-      MONGODB_URI: ${MONGODB_URI:-mongodb://mongodb:27017/?replicaSet=rs0&directConnection=true}
-      MONGODB_DATABASE: ${MONGODB_DATABASE:-hiring}
-    volumes:
-      - ./.local/data/analytics:/var/lib/hiring-analytics
+    command: ["com.example.hiring.analytics.cli.HiringAnalyticsBatchMain"]
 
   analytics-streaming:
+    <<: *analytics-worker
     profiles: ["analytics-streaming"]
-    build:
-      context: .
-      dockerfile: analytics/Dockerfile
-    depends_on:
-      kafka:
-        condition: service_started
-      kafka-acl-init:
-        condition: service_completed_successfully
-      mongodb:
-        condition: service_healthy
     environment:
-      JAVA_TOOL_OPTIONS: -Dconfig.file=/var/lib/hiring-analytics/config/analytics-streaming.conf
-      SPARK_MASTER: ${SPARK_MASTER:-local[2]}
-      ANALYTICS_SPARK_LOCAL_DIRECTORY: /var/lib/hiring-analytics/spark-temp
-      ANALYTICS_BOOTSTRAP_SERVERS: kafka:9092
-      # Local Compose broker only: credentials are unencrypted on this private Compose network.
-      ANALYTICS_KAFKA_SECURITY_PROTOCOL: SASL_PLAINTEXT
-      ANALYTICS_KAFKA_ALLOW_PLAINTEXT: "true"
-      ANALYTICS_KAFKA_USERNAME: analytics_reader
-      ANALYTICS_KAFKA_PASSWORD: ${KAFKA_READER_PASSWORD:?Set KAFKA_READER_PASSWORD in ignored .env}
-      ANALYTICS_LAKEHOUSE_ROOT: file:///var/lib/hiring-analytics/lakehouse
-      ANALYTICS_TOPIC: ${ANALYTICS_TOPIC:-hiring.operational-events}
-      HIRING_ANALYTICS_HMAC_SECRET_BASE64: ${HIRING_ANALYTICS_HMAC_SECRET_BASE64:?Set HIRING_ANALYTICS_HMAC_SECRET_BASE64 in ignored .env}
-      HIRING_ANALYTICS_HMAC_KEY_ID: ${HIRING_ANALYTICS_HMAC_KEY_ID:-hmac-v1}
-      HIRING_ANALYTICS_HMAC_PREVIOUS_KEY_ID: ${HIRING_ANALYTICS_HMAC_PREVIOUS_KEY_ID:-}
-      HIRING_ANALYTICS_HMAC_PREVIOUS_SECRET_BASE64: ${HIRING_ANALYTICS_HMAC_PREVIOUS_SECRET_BASE64:-}
-      MONGODB_URI: ${MONGODB_URI:-mongodb://mongodb:27017/?replicaSet=rs0&directConnection=true}
-      MONGODB_DATABASE: ${MONGODB_DATABASE:-hiring}
+      <<: *analytics-environment
     volumes:
       - ./.local/data/analytics:/var/lib/hiring-analytics
       - ./.local/config/analytics-streaming.conf:/var/lib/hiring-analytics/config/analytics-streaming.conf:ro
-    entrypoint: ["sbt"]
-    command: ["runMain", "com.example.hiring.analytics.cli.HiringAnalyticsStreamingMain"]
+    command:
+      - -Dconfig.file=/var/lib/hiring-analytics/config/analytics-streaming.conf
+      - com.example.hiring.analytics.cli.HiringAnalyticsStreamingMain
 
   analytics-erasure-worker:
+    <<: *analytics-worker
     profiles: ["analytics-erasure"]
-    build:
-      context: .
-      dockerfile: analytics/Dockerfile.erasure
-    depends_on:
-      kafka:
-        condition: service_started
-      kafka-acl-init:
-        condition: service_completed_successfully
-      mongodb:
-        condition: service_healthy
     environment:
-      ANALYTICS_JOB: erasure-worker
+      <<: *analytics-environment
       SPARK_MASTER: ${SPARK_MASTER:-local[*]}
-      ANALYTICS_SPARK_LOCAL_DIRECTORY: /var/lib/hiring-analytics/spark-temp
-      ANALYTICS_BOOTSTRAP_SERVERS: kafka:9092
-      # Local Compose broker only: credentials are unencrypted on this private Compose network.
-      ANALYTICS_KAFKA_SECURITY_PROTOCOL: SASL_PLAINTEXT
-      ANALYTICS_KAFKA_ALLOW_PLAINTEXT: "true"
-      ANALYTICS_KAFKA_USERNAME: analytics_reader
-      ANALYTICS_KAFKA_PASSWORD: ${KAFKA_READER_PASSWORD:?Set KAFKA_READER_PASSWORD in ignored .env}
+      ANALYTICS_JOB: erasure-worker
       ANALYTICS_KAFKA_FENCER_USERNAME: analytics_fencer
-      ANALYTICS_KAFKA_FENCER_PASSWORD: ${KAFKA_FENCER_PASSWORD:?Set KAFKA_FENCER_PASSWORD in ignored .env}
-      ANALYTICS_LAKEHOUSE_ROOT: file:///var/lib/hiring-analytics/lakehouse
-      ANALYTICS_TOPIC: ${ANALYTICS_TOPIC:-hiring.operational-events}
-      HIRING_ANALYTICS_HMAC_SECRET_BASE64: ${HIRING_ANALYTICS_HMAC_SECRET_BASE64:?Set HIRING_ANALYTICS_HMAC_SECRET_BASE64 in ignored .env}
-      HIRING_ANALYTICS_HMAC_KEY_ID: ${HIRING_ANALYTICS_HMAC_KEY_ID:-hmac-v1}
-      HIRING_ANALYTICS_HMAC_PREVIOUS_KEY_ID: ${HIRING_ANALYTICS_HMAC_PREVIOUS_KEY_ID:-}
-      HIRING_ANALYTICS_HMAC_PREVIOUS_SECRET_BASE64: ${HIRING_ANALYTICS_HMAC_PREVIOUS_SECRET_BASE64:-}
-      MONGODB_URI: ${MONGODB_URI:-mongodb://mongodb:27017/?replicaSet=rs0&directConnection=true}
-      MONGODB_DATABASE: ${MONGODB_DATABASE:-hiring}
-    volumes:
-      - ./.local/data/analytics:/var/lib/hiring-analytics
+      ANALYTICS_KAFKA_FENCER_PASSWORD_FILE: /run/secrets/kafka_fencer_password
+    secrets: [kafka_reader_password, kafka_fencer_password, analytics_hmac_secret_base64]
+    command: ["com.example.hiring.analytics.cli.AnalyticsErasureWorkerMain"]
     restart: unless-stopped
+
+secrets:
+  kafka_broker_password:
+    file: ./.local/config/secrets/kafka_broker_password
+  kafka_publisher_password:
+    file: ./.local/config/secrets/kafka_publisher_password
+  kafka_reader_password:
+    file: ./.local/config/secrets/kafka_reader_password
+  kafka_fencer_password:
+    file: ./.local/config/secrets/kafka_fencer_password
+  kafka_interview_orchestrator_password:
+    file: ./.local/config/secrets/kafka_interview_orchestrator_password
+  kafka_interview_worker_password:
+    file: ./.local/config/secrets/kafka_interview_worker_password
+  kafka_interview_fencer_password:
+    file: ./.local/config/secrets/kafka_interview_fencer_password
+  analytics_hmac_secret_base64:
+    file: ./.local/config/secrets/analytics_hmac_secret_base64
+  auth_jwt_hs256_secret:
+    file: ./.local/config/secrets/auth_jwt_hs256_secret
+  auth_receipt_fp_secret:
+    file: ./.local/config/secrets/auth_receipt_fp_secret
