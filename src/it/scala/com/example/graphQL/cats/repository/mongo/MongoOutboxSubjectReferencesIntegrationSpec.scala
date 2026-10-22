@@ -366,6 +366,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
                   new Document("_id", "delete-subject-event")
                     .append("subjectIds", List(deletedUser.value.toString).asJava)
                     .append("subjectRefsVersion", Integer.valueOf(1))
+                    .append(MongoFields.EnvelopeBytes, new org.bson.types.Binary(Array[Byte](1)))
                 )
             )
             purged <- erasures.purgeSubjectOutbox(deletedUser).value

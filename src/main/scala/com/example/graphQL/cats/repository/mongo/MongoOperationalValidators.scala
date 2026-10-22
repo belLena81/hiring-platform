@@ -184,25 +184,43 @@ private[mongo] object MongoOperationalValidators {
 
   def searchSessionsValidator: Document = validator(SessionRequired, properties(sessionProperties*), closed = false)
 
-  /** The work row holds the session only; its `SearchPerformed` event is derived when the work completes. */
-  def searchSessionWorkValidator: Document = searchSessionWorkSchema(withEvent = false)
+  /** The work row holds the session only; its `SearchPerformed` event is derived when the work completes (`031`). */
+  def searchSessionWorkValidator: Document = searchSessionWorkSchema(None)
 
-  /** The definition migration 025 installed, which also required a stored copy of the event. */
-  def searchSessionWorkValidatorThrough025: Document = searchSessionWorkSchema(withEvent = true)
+  /** The definition migration 025 installed: the embedded event still carries the `payload` copy. */
+  def searchSessionWorkValidatorThrough025: Document = searchSessionWorkSchema(Some(EventCopy.WithPayload))
 
-  private def searchSessionWorkSchema(withEvent: Boolean): Document = {
+  /** The definition `026_outbox_envelope_source` installed: `event.envelopeBytes` is the only copy of the event body,
+    * but the row still stores the event.
+    */
+  def searchSessionWorkValidatorThrough026: Document = searchSessionWorkSchema(Some(EventCopy.EnvelopeOnly))
+
+  /** What a stored work row may still carry of its event. */
+  private enum EventCopy {
+    case WithPayload, EnvelopeOnly
+  }
+
+  private def searchSessionWorkSchema(eventCopy: Option[EventCopy]): Document = {
     val queryFreeSession = objectSchema(SessionRequired, properties(sessionProperties*))
       .append("not", new Document("required", List(MongoFields.Query).asJava))
-    val event = objectSchema(
-      List(MongoFields.Id, MongoFields.Payload, MongoFields.EnvelopeBytes),
-      properties(
-        MongoFields.Id -> stringUuid,
-        MongoFields.Payload -> text,
-        MongoFields.EnvelopeBytes -> binary
-      )
-    )
+    def event(copy: EventCopy): Document = copy match {
+      case EventCopy.EnvelopeOnly =>
+        objectSchema(
+          List(MongoFields.Id, MongoFields.EnvelopeBytes),
+          properties(MongoFields.Id -> stringUuid, MongoFields.EnvelopeBytes -> binary)
+        ).append("not", new Document("required", List(MongoFields.Payload).asJava))
+      case EventCopy.WithPayload =>
+        objectSchema(
+          List(MongoFields.Id, MongoFields.Payload, MongoFields.EnvelopeBytes),
+          properties(
+            MongoFields.Id -> stringUuid,
+            MongoFields.Payload -> text,
+            MongoFields.EnvelopeBytes -> binary
+          )
+        )
+    }
     validator(
-      List(MongoFields.Id, MongoFields.ActorId, MongoFields.Session) ++ Option.when(withEvent)(MongoFields.Event) ++
+      List(MongoFields.Id, MongoFields.ActorId, MongoFields.Session) ++ eventCopy.map(_ => MongoFields.Event) ++
         List(
           MongoFields.State,
           MongoFields.Attempts,
@@ -215,7 +233,7 @@ private[mongo] object MongoOperationalValidators {
           MongoFields.Id -> stringUuid,
           MongoFields.ActorId -> stringUuid,
           MongoFields.Session -> queryFreeSession
-        ) ++ Option.when(withEvent)(MongoFields.Event -> event).toList ++ List(
+        ) ++ eventCopy.map(copy => MongoFields.Event -> event(copy)).toList ++ List(
           MongoFields.State -> enumSchema(SearchSessionWorkStates*),
           MongoFields.Attempts -> nonNegativeInt,
           MongoFields.AvailableAt -> date,
@@ -284,13 +302,13 @@ private[mongo] object MongoOperationalValidators {
     )
   }
 
-  /** Workflows only, each recording the role of its initiator (`032`). */
+  /** Workflows only, each recording the role of its initiator (`034`). */
   def interviewWorkflowsValidator: Document = interviewWorkflowsSchema(withRequestReceipts = false, roleRequired = true)
 
-  /** The definition `028` installed: workflows only (interview request idempotency is a `mutation_receipts` row), the
+  /** The definition `030` installed: workflows only (interview request idempotency is a `mutation_receipts` row), the
     * initiator's role still optional.
     */
-  def interviewWorkflowsValidatorThrough028: Document =
+  def interviewWorkflowsValidatorThrough030: Document =
     interviewWorkflowsSchema(withRequestReceipts = false, roleRequired = false)
 
   /** The definition migration 025 installed, which also accepted the request receipt document type. */
@@ -464,42 +482,44 @@ private[mongo] object MongoOperationalValidators {
     closed = true
   )
 
-  /** The current definitions, in installation order; the users definition is `MongoHiringValidators.userValidator`. */
-  def all: List[(String, Document)] = List(
-    MongoCollections.Users -> MongoHiringValidators.userValidator,
-    MongoCollections.Applications -> applicationsValidator,
-    MongoCollections.ApplicationEvents -> applicationEventsValidator,
-    MongoCollections.EmbeddingWork -> embeddingWorkValidator,
-    MongoCollections.SearchSessions -> searchSessionsValidator,
-    MongoCollections.SearchSessionWork -> searchSessionWorkValidator,
-    MongoCollections.MutationReceipts -> mutationReceiptsValidator,
-    MongoCollections.ConsumerReceipts -> consumerReceiptsValidator,
-    MongoCollections.InterviewWorkflows -> interviewWorkflowsValidator,
-    MongoCollections.InterviewWorkflowInbox -> interviewWorkflowInboxValidator,
-    MongoCollections.InterviewCalendarReservations -> interviewCalendarReservationsValidator,
-    MongoCollections.InterviewNotificationReceipts -> interviewNotificationReceiptsValidator
+  /** One generation history per collection, oldest first: the head is what migration 025 installed and the last entry
+    * is the definition in force after every migration. A later generation is installed by the step that retires the
+    * earlier shape (search session work `026` and `031`, inbox `029`, workflows `030` and `034`, embedding work `032`,
+    * application events `033`, users `028`), so the completed proof of 025 accepts any generation of the history and
+    * fails closed on any other drift.
+    */
+  private def history: List[(String, List[Document])] = List(
+    MongoCollections.Users -> MongoHiringValidators.userValidatorHistory.drop(1),
+    MongoCollections.Applications -> List(applicationsValidator),
+    MongoCollections.ApplicationEvents -> List(applicationEventsValidatorThrough025, applicationEventsValidator),
+    MongoCollections.EmbeddingWork -> List(embeddingWorkValidatorThrough025, embeddingWorkValidator),
+    MongoCollections.SearchSessions -> List(searchSessionsValidator),
+    MongoCollections.SearchSessionWork -> List(
+      searchSessionWorkValidatorThrough025,
+      searchSessionWorkValidatorThrough026,
+      searchSessionWorkValidator
+    ),
+    MongoCollections.MutationReceipts -> List(mutationReceiptsValidator),
+    MongoCollections.ConsumerReceipts -> List(consumerReceiptsValidator),
+    MongoCollections.InterviewWorkflows -> List(
+      interviewWorkflowsValidatorThrough025,
+      interviewWorkflowsValidatorThrough030,
+      interviewWorkflowsValidator
+    ),
+    MongoCollections.InterviewWorkflowInbox -> List(
+      interviewWorkflowInboxValidatorThrough025,
+      interviewWorkflowInboxValidator
+    ),
+    MongoCollections.InterviewCalendarReservations -> List(interviewCalendarReservationsValidator),
+    MongoCollections.InterviewNotificationReceipts -> List(interviewNotificationReceiptsValidator)
   )
 
-  /** The definitions migration 025 installed. Later migrations replaced five of them (application events, embedding
-    * work, search session work, interview workflows and the inbox); 025 installs these and its completed proof accepts
-    * either generation.
-    */
-  /** Definitions that `all` replaced after 028 and 029 to 031 had run: a database that completed those steps but not
-    * `032` still holds them, and the proof of 025 accepts them.
-    */
-  def supersededByLaterSteps: Map[String, Document] =
-    Map(MongoCollections.InterviewWorkflows -> interviewWorkflowsValidatorThrough028)
+  /** The current definitions, in installation order; the users definition is `MongoHiringValidators.userValidator`. */
+  def all: List[(String, Document)] = history.map { case (name, generations) => name -> generations.last }
 
-  def installedBy025: List[(String, Document)] = all.map {
-    case (MongoCollections.ApplicationEvents, _) =>
-      MongoCollections.ApplicationEvents -> applicationEventsValidatorThrough025
-    case (MongoCollections.EmbeddingWork, _)     => MongoCollections.EmbeddingWork -> embeddingWorkValidatorThrough025
-    case (MongoCollections.SearchSessionWork, _) =>
-      MongoCollections.SearchSessionWork -> searchSessionWorkValidatorThrough025
-    case (MongoCollections.InterviewWorkflows, _) =>
-      MongoCollections.InterviewWorkflows -> interviewWorkflowsValidatorThrough025
-    case (MongoCollections.InterviewWorkflowInbox, _) =>
-      MongoCollections.InterviewWorkflowInbox -> interviewWorkflowInboxValidatorThrough025
-    case entry => entry
-  }
+  /** The definitions migration 025 installed (users V2). */
+  def installedBy025: List[(String, Document)] = history.map { case (name, generations) => name -> generations.head }
+
+  /** Every generation the completed proof of 025 accepts per collection: what 025 installed and each successor. */
+  def acceptedByCompletedProof: List[(String, List[Document])] = history
 }

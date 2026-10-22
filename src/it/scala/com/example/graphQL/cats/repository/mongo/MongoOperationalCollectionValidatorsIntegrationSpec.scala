@@ -31,8 +31,13 @@ final class MongoOperationalCollectionValidatorsIntegrationSpec extends MongoInt
   private val Absence = MigrationIds.OptionalFieldAbsence
   private val Validators = MigrationIds.OperationalCollectionValidators
 
-  /** The steps after 025 that replace six of its validators; a database at 023 has not run them either. */
+  /** The steps after 025 (the three of the outbox, job filters and binary vectors, and the six that retire a stored
+    * shape); a database at 023 has not run them either.
+    */
   private val Successors = List(
+    MigrationIds.OutboxEnvelopeSource,
+    MigrationIds.JobCanonicalFilters,
+    MigrationIds.BinaryEmbeddingVectors,
     MigrationIds.InterviewHiringReceiptRemoval,
     MigrationIds.InterviewRequestReceiptRemoval,
     MigrationIds.SearchSessionWorkSingleCopy,
@@ -83,6 +88,8 @@ final class MongoOperationalCollectionValidatorsIntegrationSpec extends MongoInt
         setup.runCommand(new Document("collMod", name).append("validator", new Document()))
       }
       _ <- MongoHiringValidators.install(setup, MongoCollections.Users, MongoHiringValidators.userValidatorV1)
+      _ <- MongoHiringValidators.install(setup, MongoCollections.EventOutbox, MongoHiringValidators.outboxValidatorV1)
+      _ <- MongoHiringValidators.install(setup, MongoCollections.Jobs, MongoHiringValidators.jobValidatorV2)
       rows <- collection(database, MongoCollections.HiringMigrationLedger)
       _ <- rows.deleteMany(
         Filters.in(
@@ -403,13 +410,13 @@ final class MongoOperationalCollectionValidatorsIntegrationSpec extends MongoInt
     }
   }
 
-  /** Seeds one row of every shape migration 024 repairs, plus a hiring receipt that 024 keeps and 027 later removes. */
+  /** Seeds one row of every shape migration 024 repairs, plus a hiring receipt that 024 keeps and 029 later removes. */
   private def seedLegacyShapes(database: MongoDatabase[IO], users: Int): IO[Unit] = {
     val actor = UserId(UUID.randomUUID())
     val session = searchSession(actor)
     val work = MongoSearchSessionWorkCodecs
       .work(PendingSearchSessionWork(session), now)
-      // The shape of a database at 023: the work row still carries a copy of its event (removed by migration 029).
+      // The shape of a database at 023: the work row still carries a copy of its event (removed by migration 031).
       .append(
         MongoFields.Event,
         new Document(MongoFields.Id, UUID.randomUUID().toString)
@@ -534,7 +541,7 @@ final class MongoOperationalCollectionValidatorsIntegrationSpec extends MongoInt
       assertEquals(nulls, List(0L, 0L, 0L, 0L))
       assertEquals(workflowSubjects, 0L)
       assertEquals(notificationSubjects, 0L)
-      // Migration 027 follows 024 and 025 in the same start and removes the hiring receipt.
+      // Migration 029 follows 024 and 025 in the same start and removes the hiring receipt.
       assertEquals(hiring, 0L)
       assertEquals(withoutUpdatedAt, 0L)
       assertEquals(equalDates, users)
@@ -624,7 +631,12 @@ final class MongoOperationalCollectionValidatorsIntegrationSpec extends MongoInt
       val late = MongoHiringCodecs.outboxRecord(event(actor), now).fold(message => fail(message), identity)
       for {
         _ <- init(fixture.database)
-        _ <- insert(fixture.database, MongoCollections.EventOutbox, late.append(MongoFields.LeaseOwner, null))
+        // The outbox validator rejects a null lease, so an earlier binary's write is simulated past validation.
+        _ <- MongoRepositoryTestSupport.insertUnvalidated(
+          fixture.database,
+          MongoCollections.EventOutbox,
+          late.append(MongoFields.LeaseOwner, null)
+        )
         _ <- init(fixture.database)
         row <- find(fixture.database, MongoCollections.EventOutbox, late.getString(MongoFields.Id))
         state <- ledgerRow(fixture.database, Absence)
@@ -666,7 +678,7 @@ final class MongoOperationalCollectionValidatorsIntegrationSpec extends MongoInt
           MongoHiringValidators.userValidatorV1
         )
         _ <- init(fixture.database)
-        v2Installed <- MongoHiringValidators.validatorMatches(
+        currentInstalled <- MongoHiringValidators.validatorMatches(
           setup,
           MongoCollections.Users,
           MongoHiringValidators.userValidator
@@ -677,7 +689,7 @@ final class MongoOperationalCollectionValidatorsIntegrationSpec extends MongoInt
         drifted <- init(fixture.database).attempt
       } yield {
         assert(v1Installed)
-        assert(v2Installed)
+        assert(currentInstalled)
         assertEquals(drifted, Left(MigrationError.ValidatorMismatch(MongoCollections.Users)))
       }
     }

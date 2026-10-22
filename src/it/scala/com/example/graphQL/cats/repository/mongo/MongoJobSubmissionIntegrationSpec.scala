@@ -25,7 +25,7 @@ import java.util.UUID
 final class MongoJobSubmissionIntegrationSpec extends MongoIntegrationSuite {
   private val id = JobId(UUID.fromString("00000000-0000-0000-0000-000000000007"))
 
-  test("submission reads only identity status revision without aggregate or embedding hydration") {
+  test("submission reads only identity and status without aggregate or embedding hydration") {
     mongoResource.use { fixture =>
       val repository = MongoJobRepository.transactional(
         fixture.database,
@@ -48,16 +48,16 @@ final class MongoJobSubmissionIntegrationSpec extends MongoIntegrationSuite {
         commands <- fixture.commands.snapshot
         full <- repository.findVersioned(id).value
       } yield {
-        assertEquals(result, Right(Some(JobSubmissionSnapshot(id, JobStatus.Open, 7L))))
+        assertEquals(result, Right(Some(JobSubmissionSnapshot(id, JobStatus.Open))))
         val projections = commands.filter(_.containsKey("find")).map(_.getDocument("projection").keySet())
         assertEquals(projections.size, 1)
-        assertEquals(projections.head, java.util.Set.of("_id", "status", "version"))
+        assertEquals(projections.head, java.util.Set.of("_id", "status"))
         assertEquals(full, Left(RepositoryError.InvalidStoredData))
       }
     }
   }
 
-  test("missing and malformed revision fail closed while absent job stays absent") {
+  test("malformed status fails closed while absent job stays absent") {
     mongoResource.use { fixture =>
       val repository = MongoJobRepository.transactional(
         fixture.database,
@@ -70,7 +70,7 @@ final class MongoJobSubmissionIntegrationSpec extends MongoIntegrationSuite {
         _ <- MongoRepositoryTestSupport.insertOne(
           fixture.database,
           MongoCollections.Jobs,
-          new Document("_id", id.value.toString).append("status", "Open").append("version", -1L)
+          new Document("_id", id.value.toString).append("status", "Unknown")
         )
         malformed <- repository.findSubmissionSnapshot(id).value
       } yield {
@@ -80,7 +80,7 @@ final class MongoJobSubmissionIntegrationSpec extends MongoIntegrationSuite {
     }
   }
 
-  test("projected snapshot preserves closure duplicate and atomic revision guards") {
+  test("projected snapshot preserves closure and duplicate guards") {
     mongoResource.use { fixture =>
       val jobs = MongoJobRepository.transactional(
         fixture.database,
@@ -188,7 +188,7 @@ final class MongoJobSubmissionIntegrationSpec extends MongoIntegrationSuite {
       } yield {
         assertEquals(first, Right(()))
         assertEquals(duplicate, Left(RepositoryError.DuplicateApplication))
-        assertEquals(afterDuplicate.map(_.map(_.revision)), Right(Some(0L)))
+        assertEquals(afterDuplicate.map(_.map(_.status)), Right(Some(JobStatus.Open)))
         assertEquals(closed, Left(RepositoryError.Conflict))
         assertEquals(count, 1L)
         assertEquals(history, 1L)

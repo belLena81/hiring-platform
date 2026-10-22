@@ -55,6 +55,14 @@ final class MongoLexicalFallbackSpec extends FunSuite {
     )
   }
 
+  test("MSC-08.1 the in-application eligibility recheck compares canonical city and skills") {
+    val eligibility = JobSearchEligibility(openJob, None)
+    assert(SearchEligibilityPolicy.jobLexical(eligibility, JobSearchFilter(Some("kyiv"), Set("scala"), None)))
+    assert(SearchEligibilityPolicy.jobLexical(eligibility, JobSearchFilter(Some(" KYIV "), Set(" SCALA "), None)))
+    assert(!SearchEligibilityPolicy.jobLexical(eligibility, JobSearchFilter(Some("kyi"), Set("scala"), None)))
+    assert(!SearchEligibilityPolicy.jobLexical(eligibility, JobSearchFilter(None, Set("scala", "kafka"), None)))
+  }
+
   test("AIR-05 lexical eligibility ignores embedding freshness but keeps the live open and filter checks") {
     val noEmbedding = JobSearchEligibility(openJob, None)
     assert(SearchEligibilityPolicy.jobLexical(noEmbedding, JobSearchFilter(Some("Kyiv"), Set("Scala"), None)))

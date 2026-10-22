@@ -32,7 +32,7 @@ The diagram expresses references, not SQL foreign keys. MongoDB indexes, transac
 | `Location`, `GeoPoint` | Country, optional city, remote flag and optional latitude/longitude. Coordinate validation rejects non-finite values and values outside latitude ±90 / longitude ±180. | [Job.scala](../../src/main/scala/com/example/graphQL/cats/domain/model/Job.scala) |
 | `Application` | Candidate/job reference pair, current status and creation/update times. Creation always starts at `Created`. | [Application.scala](../../src/main/scala/com/example/graphQL/cats/domain/model/Application.scala) |
 | `ApplicationEvent` | History identity, application, optional previous status, new status, actor, UTC occurrence time, feedback and reason. Initial history has no previous status. | [Application.scala](../../src/main/scala/com/example/graphQL/cats/domain/model/Application.scala) |
-| `JobSubmissionSnapshot` | Minimal job identity/status/revision required to decide submission and guard it against concurrent job changes. | [JobSubmissionSnapshot.scala](../../src/main/scala/com/example/graphQL/cats/domain/model/JobSubmissionSnapshot.scala) |
+| `JobSubmissionSnapshot` | Minimal job identity and status required to decide submission. | [JobSubmissionSnapshot.scala](../../src/main/scala/com/example/graphQL/cats/domain/model/JobSubmissionSnapshot.scala) |
 
 ### Accounts, identifiers and validation
 

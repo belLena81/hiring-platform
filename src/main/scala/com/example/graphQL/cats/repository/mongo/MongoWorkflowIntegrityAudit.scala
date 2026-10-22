@@ -65,7 +65,7 @@ object MongoWorkflowIntegrityAudit extends IOApp {
               ).void
             )
           else {
-            val invalid = new Document("$nor", List(MongoHiringValidators.outboxValidator).asJava)
+            val invalid = new Document("$nor", List(MongoHiringValidators.outboxValidatorV1).asJava)
             collection
               .flatMap(
                 _.find(Filters.and(Filters.in(MongoFields.Id, rows.map(_.get(MongoFields.Id))*), invalid))

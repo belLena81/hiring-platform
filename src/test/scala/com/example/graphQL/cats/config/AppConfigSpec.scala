@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.config
 
+import io.github.iltotore.iron.autoRefine
 import com.example.graphQL.cats.domain.pagination.PageSize
 import com.comcast.ip4s.{Host, Port as Ip4sPort}
 import munit.FunSuite
@@ -221,7 +222,7 @@ class AppConfigSpec extends FunSuite {
     val config =
       """http {
         |  host = "::1"
-        |  port = 65535
+        |  port = 32767
         |  admission-permits = 64
         |  request-timeout-ms = 5000
         |  trusted-proxy-cidrs = []
@@ -317,7 +318,7 @@ class AppConfigSpec extends FunSuite {
       Right(
         AppConfig(
           Host.fromString("::1").get,
-          Ip4sPort.fromInt(65535).get,
+          Ip4sPort.fromInt(32767).get,
           64,
           5.seconds,
           TrustedProxyConfig(Nil),
@@ -377,7 +378,7 @@ class AppConfigSpec extends FunSuite {
         |""".stripMargin
     val result = AppConfigFixtures.fromConfig(raw + local, Map.empty)
     assertEquals(
-      result.map(config => (config.host.toString, config.port.value, config.admissionPermits, config.mongoUri)),
+      result.map(config => (config.host.toString, config.port.value, config.admissionPermits.toInt, config.mongoUri)),
       Right(("127.0.0.1", 8080, 16, "mongodb://127.0.0.1:27017"))
     )
   }
@@ -414,7 +415,7 @@ class AppConfigSpec extends FunSuite {
       )
     )
     assertEquals(
-      result.map(config => (config.host.toString, config.port.value, config.admissionPermits, config.mongoUri)),
+      result.map(config => (config.host.toString, config.port.value, config.admissionPermits.toInt, config.mongoUri)),
       Right(("::1", 9090, 96, "mongodb://127.0.0.1:27018"))
     )
     assertEquals(result.map(_.requestTimeout), Right(30.seconds))
@@ -562,7 +563,7 @@ class AppConfigSpec extends FunSuite {
     assertEquals(
       AppConfigFixtures
         .fromConfig(defaults + local, Map.empty)
-        .map(config => (config.host.toString, config.port.value, config.admissionPermits, config.mongoUri)),
+        .map(config => (config.host.toString, config.port.value, config.admissionPermits.toInt, config.mongoUri)),
       Right(("127.42.10.8", 9091, 16, "mongodb://127.0.0.1:27018"))
     )
   }
@@ -581,7 +582,7 @@ class AppConfigSpec extends FunSuite {
   test("P1-AC01 rejects invalid values without returning their contents") {
     val invalid = List(
       ("http.host", List("not-an-ip"), ConfigError.InvalidHost),
-      ("http.port", List("0", "65536", "-1", "2147483648"), ConfigError.InvalidPort),
+      ("http.port", List("0", "1023", "32768", "65535", "-1", "2147483648"), ConfigError.InvalidPort),
       ("http.admission-permits", List("0", "1025", "-1", "synthetic-secret"), ConfigError.InvalidAdmissionPermits),
       (
         "mongo.uri",
@@ -594,7 +595,7 @@ class AppConfigSpec extends FunSuite {
         ),
         ConfigError.InvalidMongoUri
       ),
-      ("mongo.database", List("a/b", "a.b", "a b", "a$b", "a" * 64), ConfigError.InvalidMongoDatabase)
+      ("mongo.database", List("", "a/b", "a.b", "a b", "a$b", "a" * 64), ConfigError.InvalidMongoDatabase)
     )
     invalid.foreach { case (key, values, error) =>
       values.foreach { value =>
@@ -625,7 +626,7 @@ class AppConfigSpec extends FunSuite {
   }
 
   test("P1-AC01 accepts boundary ports without application logging levels") {
-    List("1", "65535").foreach { port =>
+    List("1024", "32767").foreach { port =>
       assert(AppConfigFixtures.fromConfig(defaultConfig + s"http.port = $port\n", Map.empty).isRight)
     }
     List("1", "1024").foreach { permits =>
@@ -768,8 +769,8 @@ class AppConfigSpec extends FunSuite {
     assert(!defaultJwtAuth.copy(receiptFingerprintSecret = Some(strong)).toString.contains(strong))
   }
 
-  test("HGQL-AC02 cursor JWT TTL is bounded and defaults to fifteen minutes") {
-    assertEquals(AppConfigFixtures.fromConfig(defaultConfig, Map.empty).map(_.jwtAuth.cursorTtlSeconds), Right(86400L))
+  test("HGQL-AC02 cursor JWT TTL is bounded and defaults to the largest allowed value (one day)") {
+    assertEquals(AppConfigFixtures.fromConfig(defaultConfig, Map.empty).map(_.jwtAuth.cursorTtl), Right(86400.seconds))
     assertContainsError(
       AppConfigFixtures
         .fromConfig(defaultConfig.replace("cursor-ttl-seconds = 86400", "cursor-ttl-seconds = 59"), Map.empty),
@@ -941,12 +942,26 @@ class AppConfigSpec extends FunSuite {
       ("mongo.discovery.max-roots = 0", ConfigError.InvalidDiscoveryMaxRoots),
       ("mongo.discovery.max-roots = 65", ConfigError.InvalidDiscoveryMaxRoots),
       ("mongo.discovery.max-time-millis = 99", ConfigError.InvalidDiscoveryMaxTime),
+      ("mongo.discovery.max-time-millis = 60001", ConfigError.InvalidDiscoveryMaxTime),
       ("mongo.discovery.max-time-millis = \"fast\"", ConfigError.InvalidDiscoveryMaxTime),
       ("mongo.discovery.max-time-millis = 5000", ConfigError.InvalidDiscoveryDeadline)
     ).foreach { case (setting, expected) =>
       assertContainsError(AppConfigFixtures.fromConfig(defaultConfig + setting + "\n", Map.empty), expected)
     }
-    assert(AppConfigFixtures.fromConfig(defaultConfig + "mongo.discovery.max-time-millis = 4999\n", Map.empty).isRight)
+    List("100", "4999").foreach { value =>
+      assert(
+        AppConfigFixtures.fromConfig(defaultConfig + s"mongo.discovery.max-time-millis = $value\n", Map.empty).isRight
+      )
+    }
+    assert(
+      AppConfigFixtures
+        .fromConfig(
+          defaultConfig.replace("request-timeout-ms = 5000", "request-timeout-ms = 60000") +
+            "mongo.discovery.max-time-millis = 59999\n",
+          Map.empty
+        )
+        .isRight
+    )
     assertEquals(
       AppConfigFixtures
         .fromConfig(defaultConfig + "mongo.discovery { permits = 0, max-roots = 65 }\n", Map.empty)
@@ -958,14 +973,14 @@ class AppConfigSpec extends FunSuite {
 
   test("HDQ-12 lexical facet match limit defaults to 1000 and is validated to 1..5000") {
     assertEquals(
-      AppConfigFixtures.fromConfig(defaultConfig, Map.empty).map(_.discovery.lexicalFacetMatchLimit),
+      AppConfigFixtures.fromConfig(defaultConfig, Map.empty).map(_.discovery.lexicalFacetMatchLimit.toInt),
       Right(1000)
     )
     List(1, 5000).foreach { value =>
       assertEquals(
         AppConfigFixtures
           .fromConfig(defaultConfig + s"mongo.discovery.lexical-facet-match-limit = $value\n", Map.empty)
-          .map(_.discovery.lexicalFacetMatchLimit),
+          .map(_.discovery.lexicalFacetMatchLimit.toInt),
         Right(value)
       )
     }

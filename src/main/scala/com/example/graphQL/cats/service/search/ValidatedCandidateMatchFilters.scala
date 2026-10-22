@@ -2,9 +2,8 @@ package com.example.graphQL.cats.service.search
 
 import cats.data.ValidatedNec
 import cats.syntax.all.*
-import com.example.graphQL.cats.domain.model.{CandidateAvailabilityStatus, FieldLimits}
+import com.example.graphQL.cats.domain.model.{CandidateAvailabilityStatus, FieldLimits, SearchTerm}
 import com.example.graphQL.cats.service.SearchError
-import java.util.Locale
 
 /** Canonical criteria shared by retrieval and authoritative eligibility. Construction validates raw requests. */
 final class ValidatedCandidateMatchFilters private (
@@ -26,7 +25,7 @@ final class ValidatedCandidateMatchFilters private (
 object ValidatedCandidateMatchFilters {
   val empty: ValidatedCandidateMatchFilters = new ValidatedCandidateMatchFilters(Nil, None, None, None)
 
-  private[search] def canonical(value: String): String = value.trim.toLowerCase(Locale.ROOT)
+  private[search] def canonical(value: String): String = SearchTerm.canonical(value)
 
   def from(value: CandidateMatchFilters): ValidatedNec[SearchError, ValidatedCandidateMatchFilters] = {
     val skills = value.requiredSkills.map(_.trim)

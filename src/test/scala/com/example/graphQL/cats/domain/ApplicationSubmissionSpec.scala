@@ -41,7 +41,7 @@ class ApplicationSubmissionSpec extends FunSuite {
     Some(UserProfile.Recruiter(RecruiterProfile("Acme", None))),
     now
   )
-  private val openJob = JobSubmissionSnapshot(jobId, JobStatus.Open, 0L)
+  private val openJob = JobSubmissionSnapshot(jobId, JobStatus.Open)
 
   test("candidate can create an application for an open job") {
     val result = ApplicationSubmission.create(candidate.id, candidate.role, openJob, applicationId, now)

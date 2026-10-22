@@ -48,6 +48,33 @@ private[mongo] object MongoHiringIndexSetup {
     new IndexOptions().name(InterviewWorkflowCommandDue)
   )
 
+  /** Open jobs of one canonical city in page order (list and discovery filters). Replaces `jobs_open_city_created_id`,
+    * which keyed the display city; created and the old index dropped by `027_job_canonical_filters`.
+    */
+  val jobOpenCityIndex: IndexSpec = IndexSpec(
+    MongoCollections.Jobs,
+    Indexes.compoundIndex(
+      Indexes.ascending(MongoFields.Status, MongoFields.LocationCityCanonical),
+      Indexes.descending(MongoFields.CreatedAt, MongoFields.Id)
+    ),
+    new IndexOptions().name(JobsOpenCityCreated)
+  )
+
+  /** Embedding-model, status, canonical city and recruiter predicates of the search recheck. Replaces
+    * `jobs_embedding_meta_filters`; created and the old index dropped by `027_job_canonical_filters`.
+    */
+  val jobEmbeddingMetaIndex: IndexSpec = IndexSpec(
+    MongoCollections.Jobs,
+    Indexes.ascending(
+      MongoFields.EmbeddingMetaModel,
+      MongoFields.Status,
+      MongoFields.LocationCityCanonical,
+      MongoFields.RecruiterId
+    ),
+    new IndexOptions().name(JobsEmbeddingMeta)
+  )
+
+  val jobCanonicalFilterIndexes: List[IndexSpec] = List(jobOpenCityIndex, jobEmbeddingMetaIndex)
   private val indexSpecs: List[IndexSpec] = List(
     IndexSpec(
       MongoCollections.InterviewSubjectCleanup,
@@ -144,29 +171,13 @@ private[mongo] object MongoHiringIndexSetup {
       ),
       new IndexOptions().name(JobsOpenCreated)
     ),
-    IndexSpec(
-      MongoCollections.Jobs,
-      Indexes.compoundIndex(
-        Indexes.ascending(MongoFields.Status, MongoFields.LocationCity),
-        Indexes.descending(MongoFields.CreatedAt, MongoFields.Id)
-      ),
-      new IndexOptions().name(JobsOpenCityCreated)
-    ),
+    jobOpenCityIndex,
     IndexSpec(
       MongoCollections.Jobs,
       Indexes.geo2dsphere(MongoFields.LocationPoint),
       new IndexOptions().name(JobsLocationPoint)
     ),
-    IndexSpec(
-      MongoCollections.Jobs,
-      Indexes.ascending(
-        MongoFields.EmbeddingMetaModel,
-        MongoFields.Status,
-        MongoFields.LocationCity,
-        MongoFields.RecruiterId
-      ),
-      new IndexOptions().name(JobsEmbeddingMeta)
-    ),
+    jobEmbeddingMetaIndex,
     IndexSpec(
       MongoCollections.Applications,
       Indexes.ascending(MongoFields.CandidateId, MongoFields.JobId),

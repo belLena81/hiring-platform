@@ -290,9 +290,10 @@ class MongoSearchFusionPipelineSpec extends FunSuite {
     val clauses = job.get("compound", classOf[Document]).getList("filter", classOf[Document]).asScala.toList
     val skills = clauses
       .flatMap(clause => Option(clause.get("equals", classOf[Document])))
-      .filter(_.getString("path") == "skills")
+      .filter(_.getString("path") == "skillsCanonical")
       .map(_.getString("value"))
-    assertEquals(skills, List("Kafka", "Scala"))
+    // MSC-08.1: the filter compares canonical (trimmed, lower-cased) values.
+    assertEquals(skills, List("kafka", "scala"))
     val candidate = repo.candidateLexicalFilter(searchQuery)
     val top = candidate.get("compound", classOf[Document]).getList("filter", classOf[Document]).asScala.toList
     val consent = top.last.get("compound", classOf[Document])
@@ -322,7 +323,12 @@ class MongoSearchFusionPipelineSpec extends FunSuite {
     )
     assert(!MongoAtlasSearchSetup.validLexical(new Document("latestDefinition", old), jobs))
     val fields = jobs.get("mappings", classOf[Document]).get("fields", classOf[Document])
-    assertEquals(fields.get("skills", classOf[java.util.List[Document]]).get(1).getString("normalizer"), "none")
+    val canonical = fields.get("skillsCanonical", classOf[Document])
+    assertEquals(canonical.getString("type"), "token")
+    assertEquals(canonical.getString("normalizer"), "none")
+    val city = fields.get("location", classOf[Document]).get("fields", classOf[Document])
+    assertEquals(city.get("cityCanonical", classOf[Document]).getString("type"), "token")
+    assertEquals(fields.get("skills", classOf[Document]).getString("type"), "string")
   }
 
   test("retrieval branches return only typed identity, score and embedding metadata") {

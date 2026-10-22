@@ -60,7 +60,8 @@ private[mongo] object JobFields {
     MongoFields.ClosedAt,
     MongoFields.Embedding,
     MongoFields.EmbeddingMeta,
-    MongoFields.AdmissionFence
+    MongoFields.AdmissionFence,
+    MongoFields.SkillsCanonical
   )
 
   /** The derived search-index state; it never advances the content revision. */

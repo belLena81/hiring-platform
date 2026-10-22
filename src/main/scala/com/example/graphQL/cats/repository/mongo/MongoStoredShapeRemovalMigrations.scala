@@ -8,10 +8,10 @@ import org.bson.Document
 import org.bson.conversions.Bson
 import scala.jdk.CollectionConverters.*
 
-/** The ledger steps that retire a stored shape: `027_interview_hiring_receipt_removal`,
-  * `028_interview_request_receipt_removal`, `029_search_session_work_single_copy`,
-  * `030_embedding_work_key_from_identity`, `031_application_event_actor_role` and
-  * `032_interview_workflow_initiator_role`. Each one follows the same contract, parameterised by what it removes:
+/** The ledger steps that retire a stored shape: `029_interview_hiring_receipt_removal`,
+  * `030_interview_request_receipt_removal`, `031_search_session_work_single_copy`,
+  * `032_embedding_work_key_from_identity`, `033_application_event_actor_role` and
+  * `034_interview_workflow_initiator_role`. Each one follows the same contract, parameterised by what it removes:
   *
   *   - Expand: the writers already stopped producing the shape (it is derived from another fact, see the owning
   *     capability), so this step only removes what earlier binaries left behind.
@@ -161,7 +161,7 @@ private[mongo] object MongoStoredShapeRemovalMigrations {
 
   private def anyField(fields: List[String]): Bson = Filters.or(fields.map(Filters.exists(_, true))*)
 
-  /** `027`: the hiring commit is evidenced by its deterministic `application_events` row, so the inbox receipt that
+  /** `029`: the hiring commit is evidenced by its deterministic `application_events` row, so the inbox receipt that
     * duplicated it (ids `<workflowId>:hiring`, subject-attributed by `022`) and its erasure index are removed.
     */
   val hiringReceipts: MongoMigrationStep = step(
@@ -177,7 +177,7 @@ private[mongo] object MongoStoredShapeRemovalMigrations {
     )
   )
 
-  /** `028`: interview request idempotency is a `mutation_receipts` row, so the request receipts stored beside the
+  /** `030`: interview request idempotency is a `mutation_receipts` row, so the request receipts stored beside the
     * workflows (ids `request:<actor>:<key>`) and the sparse index that served them are removed.
     */
   val requestReceipts: MongoMigrationStep = step(
@@ -188,13 +188,13 @@ private[mongo] object MongoStoredShapeRemovalMigrations {
       row => Option(row.getString(MongoFields.Id)).exists(_.startsWith("request:")),
       deleteWhere(ofType(MongoInterviewFields.RetiredRequestReceiptType)),
       List(MongoIndexNames.InterviewWorkflowRequestReceipt),
-      MongoOperationalValidators.interviewWorkflowsValidatorThrough028,
+      MongoOperationalValidators.interviewWorkflowsValidatorThrough030,
       List(MigrationIds.InterviewRequestReceiptIndex, MigrationIds.OperationalCollectionValidators),
       laterGenerations = List(MongoOperationalValidators.interviewWorkflowsValidator)
     )
   )
 
-  /** `029`: the search session work row holds the session only; the stored copy of its `SearchPerformed` event is
+  /** `031`: the search session work row holds the session only; the stored copy of its `SearchPerformed` event is
     * removed because the event is derived from the session when the work completes.
     */
   val searchSessionWork: MongoMigrationStep = step(
@@ -213,7 +213,7 @@ private[mongo] object MongoStoredShapeRemovalMigrations {
 
   private val EmbeddingWorkKeyFields = List(MongoFields.Kind, MongoFields.WorkEntityId)
 
-  /** `030`: an embedding work row's kind and entity are the two parts of its `_id`; the stored copies are removed. */
+  /** `032`: an embedding work row's kind and entity are the two parts of its `_id`; the stored copies are removed. */
   val embeddingWork: MongoMigrationStep = step(
     Removal(
       MigrationIds.EmbeddingWorkKeyFromIdentity,
@@ -228,7 +228,7 @@ private[mongo] object MongoStoredShapeRemovalMigrations {
     )
   )
 
-  /** `031`: an application event always records the role its actor acted in, so an event without `actorRole` is the
+  /** `033`: an application event always records the role its actor acted in, so an event without `actorRole` is the
     * retired shape. The role cannot be reconstructed (it may have been an Admin acting on a job, or a user whose role
     * is not recorded elsewhere), so the step never rewrites such a row: it fails closed on the first one, naming the
     * collection only, and installs the successor validator, which requires the field, only when none exists. Pre-MVP
@@ -247,9 +247,9 @@ private[mongo] object MongoStoredShapeRemovalMigrations {
     )
   )
 
-  /** `032`: an interview workflow always records the role of its initiator, which the hiring status change copies into
+  /** `034`: an interview workflow always records the role of its initiator, which the hiring status change copies into
     * the append-only history as its actor role. A workflow row without `initiatedByRole` is the retired shape; the role
-    * cannot be inferred (an Admin can own a job), so the step fails closed on the first one like `031`.
+    * cannot be inferred (an Admin can own a job), so the step fails closed on the first one like `033`.
     */
   val interviewWorkflowInitiatorRole: MongoMigrationStep = step(
     Removal(

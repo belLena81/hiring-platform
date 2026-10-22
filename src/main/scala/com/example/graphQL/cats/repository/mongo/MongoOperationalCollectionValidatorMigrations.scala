@@ -14,10 +14,9 @@ import scala.jdk.CollectionConverters.*
   * which a writer could have stored an invalid row between the first audit and the install. Nothing is rewritten, so
   * there is no checkpoint; the whole step is idempotent and a restart reruns the same three phases.
   *
-  * The completed proof is read-only and exact: every collection must hold the definition this step installed
-  * (`MongoOperationalValidators.installedBy025`, users V2 included) or its documented successor in
-  * `MongoOperationalValidators.all` (application events, embedding work, search session work, interview workflows and
-  * the inbox were replaced by 027 to 032), so later drift fails closed with the drifted collection and is never
+  * The completed proof is read-only and exact: every collection must hold one generation of its history in
+  * `MongoOperationalValidators.acceptedByCompletedProof` (what this step installed, users V2 included, or a documented
+  * successor installed by a later step), so later drift fails closed with the drifted collection and is never
   * overwritten. The users validator is also installed at every start by `MongoHiringSetup`; the earlier proof of
   * `016_candidate_residence_integrity` accepts it as the documented successor of its own definition.
   *
@@ -32,21 +31,10 @@ private[mongo] object MongoOperationalCollectionValidatorMigrations {
 
   /** Each collection must hold the definition this step installed or its documented successor (the current one). */
   private def verifyCompleted(database: MongoHiringSetup.SetupDatabase): IO[CompletedProof] =
-    MongoHiringValidators
-      .collectionOptions(database, MongoOperationalValidators.all.map(_._1))
-      .flatMap { options =>
-        MongoOperationalValidators.all.zip(MongoOperationalValidators.installedBy025).traverse_ {
-          case ((name, current), (_, installed)) =>
-            val stored = options.get(name)
-            IO.raiseUnless(
-              MongoHiringValidators.strictValidatorMatches(stored, installed) ||
-                MongoHiringValidators.strictValidatorMatches(stored, current) ||
-                MongoOperationalValidators.supersededByLaterSteps
-                  .get(name)
-                  .exists(MongoHiringValidators.strictValidatorMatches(stored, _))
-            )(MigrationError.ValidatorMismatch(name))
-        }
-      }
+    // Later steps replace the definitions of six collections with their documented successors; the proof accepts
+    // any generation of the history and fails closed on any other drift.
+    MongoOperationalValidators.acceptedByCompletedProof
+      .traverse_ { case (name, accepted) => MongoHiringValidators.assertAnyStrictValidator(database, name, accepted) }
       .as(CompletedProof.Trusted)
 
   /** Fails with the first collection holding a row its validator rejects; the error names the collection only. */

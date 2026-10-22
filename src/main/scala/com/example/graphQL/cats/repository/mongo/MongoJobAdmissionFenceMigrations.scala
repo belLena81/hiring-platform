@@ -21,15 +21,16 @@ private[mongo] object MongoJobAdmissionFenceMigrations {
   private val Id: MigrationId = MigrationIds.JobAdmissionFence
   val MigrationId: String = Id.value
 
+  /** The proof accepts the validator this step installed and its documented successors (`027`, `028`). */
   private def verifyCompleted(database: MongoHiringSetup.SetupDatabase): IO[CompletedProof] =
     MongoHiringValidators
-      .assertStrictValidators(database, List(MongoCollections.Jobs -> MongoHiringValidators.jobValidator))
+      .assertAnyStrictValidator(database, MongoCollections.Jobs, MongoHiringValidators.jobValidatorHistory)
       .as(CompletedProof.Trusted)
 
   private def cutover(run: MigrationRun): IO[Unit] = {
     val jobs = run.database.getCollection(MongoCollections.Jobs)
     for {
-      _ <- MongoHiringValidators.install(run.database, MongoCollections.Jobs, MongoHiringValidators.jobValidator)
+      _ <- MongoHiringValidators.install(run.database, MongoCollections.Jobs, MongoHiringValidators.jobValidatorV2)
       // Only the new field is audited: other legacy job defects keep their own typed errors (the geo-point proof).
       invalid <- jobs
         .find(
@@ -41,7 +42,10 @@ private[mongo] object MongoJobAdmissionFenceMigrations {
         .limit(1)
         .first
       _ <- IO.raiseUnless(invalid.isEmpty)(MigrationError.StepFailed(run.id, "stored job verification failed"))
-      _ <- verifyCompleted(run.database)
+      _ <- MongoHiringValidators.assertStrictValidators(
+        run.database,
+        List(MongoCollections.Jobs -> MongoHiringValidators.jobValidatorV2)
+      )
     } yield ()
   }
 

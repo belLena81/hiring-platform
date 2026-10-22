@@ -258,7 +258,7 @@ final class MongoAnalyticsErasureProgress[F[_]: Async] private (
 object MongoAnalyticsErasureProgress {
 
   /** The analytics build alone writes and reads this collection, so it owns the request lookup index. */
-  val DeltaEvidenceRequestIndex = "analytics_erasure_delta_files_request_v1"
+  val DeltaEvidenceRequestIndex = AnalyticsCollections.IndexNames.ErasureDeltaFilesRequest
 
   /** Idempotent index provisioning; call outside any transaction. */
   def ensureRequestIndex[F[_]: Async](

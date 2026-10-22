@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
-import cats.data.ValidatedNel
+import cats.data.{Validated, ValidatedNel}
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.*
@@ -9,8 +9,6 @@ import com.example.graphQL.cats.service.events.*
 import com.example.graphQL.cats.service.port.Versioned
 import MongoHiringPersistenceCodecs.*
 import com.example.graphQL.cats.infrastructure.events.{OperationalEventWireCodec, SearchFilterWireCodec}
-import io.circe.Json
-import io.circe.parser.parse
 import org.bson.Document
 
 import java.time.Instant
@@ -28,18 +26,46 @@ private[mongo] object MongoHiringCodecs {
   import StoredDocumentError.*
 
   def userWithPassword(value: User, passwordHash: PasswordHash, version: Long = 0L): Document =
-    MongoHiringPersistenceCodecs.user(storedUser(value, Some(passwordHash.encoded), version))
+    withEmbedding(
+      MongoHiringPersistenceCodecs.user(storedUser(value, Some(passwordHash.encoded), version)),
+      value.embedding
+    )
 
   def user(value: User, version: Long = 0L): Document =
-    MongoHiringPersistenceCodecs.user(storedUser(value, None, version))
+    withEmbedding(MongoHiringPersistenceCodecs.user(storedUser(value, None, version)), value.embedding)
+
+  /** The vector is the one field the generated codecs do not carry: it is stored as a float32 BSON vector. */
+  private def withEmbedding(document: Document, embedding: Option[EntityEmbedding]): Document = {
+    embedding.foreach(value => document.put(MongoFields.Embedding, MongoEmbeddingVectors.encode(value.values)))
+    document
+  }
+
+  private def withoutEmbedding(document: Document): Document =
+    if (!document.containsKey(MongoFields.Embedding)) document
+    else {
+      val copy = new Document(document)
+      copy.remove(MongoFields.Embedding)
+      copy
+    }
+
+  private def storedVector(document: Document): ValidatedNel[StoredDocumentError, Option[List[Float]]] =
+    Option(document.get(MongoFields.Embedding)).traverse(raw =>
+      MongoEmbeddingVectors.decode(raw).toValidNel(InvalidField(MongoFields.Embedding))
+    )
 
   def readUser(document: Document): ValidatedNel[StoredDocumentError, User] =
     readVersionedUser(document).map(_.value)
 
   def readVersionedUser(document: Document): ValidatedNel[StoredDocumentError, Versioned[User]] =
-    decode(document, storedUserFields)(MongoHiringPersistenceCodecs.decodeUser).andThen(readVersionedUser)
+    (
+      decode(withoutEmbedding(document), storedUserFields)(MongoHiringPersistenceCodecs.decodeUser),
+      storedVector(document)
+    ).tupled.andThen { case (stored, vector) => readVersionedUser(stored, vector) }
 
-  private def readVersionedUser(value: StoredUser): ValidatedNel[StoredDocumentError, Versioned[User]] =
+  private def readVersionedUser(
+      value: StoredUser,
+      vector: Option[List[Float]]
+  ): ValidatedNel[StoredDocumentError, Versioned[User]] =
     (
       uuid(MongoFields.Id, value._id).toValidatedNel.map(UserId.apply),
       value.email.traverse(email =>
@@ -49,7 +75,7 @@ private[mongo] object MongoHiringCodecs {
       enumValue(MongoFields.Role, value.role, UserRole.values).toValidatedNel,
       readUserProfile(value.profile),
       value.createdAt.toInstant.validNel,
-      readEmbedding(value.embedding, value.embeddingMeta),
+      readEmbedding(vector, value.embeddingMeta),
       enumValue(MongoFields.AccountStatus, value.accountStatus, AccountStatus.values)
         .flatMap(accountState(_, value.deletedAt.map(_.toInstant)))
         .toValidatedNel
@@ -84,19 +110,26 @@ private[mongo] object MongoHiringCodecs {
   private[mongo] val SingletonAdminMarker = "singleton-admin"
 
   def readCredentials(document: Document): ValidatedNel[StoredDocumentError, Option[AccountCredentials]] =
-    decode(document, storedUserFields)(MongoHiringPersistenceCodecs.decodeUser).andThen { value =>
+    (
+      decode(withoutEmbedding(document), storedUserFields)(MongoHiringPersistenceCodecs.decodeUser),
+      storedVector(document)
+    ).tupled.andThen { case (value, vector) =>
       value.passwordHash.fold(None.validNel)(hash =>
-        readVersionedUser(value).map(v => AccountCredentials(v.value, PasswordHash.fromEncoded(hash)).some)
+        readVersionedUser(value, vector).map(v => AccountCredentials(v.value, PasswordHash.fromEncoded(hash)).some)
       )
     }
 
-  def job(job: Job, version: Long = 0L): Document = MongoHiringPersistenceCodecs.job(storedJob(job, version))
+  def job(job: Job, version: Long = 0L): Document =
+    withEmbedding(MongoHiringPersistenceCodecs.job(storedJob(job, version)), job.embedding)
 
   def readJob(document: Document): ValidatedNel[StoredDocumentError, Job] =
     readVersionedJob(document).map(_.value)
 
   def readVersionedJob(document: Document): ValidatedNel[StoredDocumentError, Versioned[Job]] =
-    decode(document, storedJobFields)(MongoHiringPersistenceCodecs.decodeJob).andThen(readVersionedJob)
+    (
+      decode(withoutEmbedding(document), storedJobFields)(MongoHiringPersistenceCodecs.decodeJob),
+      storedVector(document)
+    ).tupled.andThen { case (stored, vector) => readVersionedJob(stored, vector) }
 
   /** A job read with the given projection: a summary read leaves out the posting text, which the decoded job then
     * carries as empty (`description` blank, `requirements` empty). Only a caller that selected neither may use it.
@@ -114,7 +147,10 @@ private[mongo] object MongoHiringCodecs {
     completed
   }
 
-  private def readVersionedJob(value: StoredJob): ValidatedNel[StoredDocumentError, Versioned[Job]] =
+  private def readVersionedJob(
+      value: StoredJob,
+      vector: Option[List[Float]]
+  ): ValidatedNel[StoredDocumentError, Versioned[Job]] =
     (
       uuid(MongoFields.Id, value._id).toValidatedNel.map(JobId.apply),
       uuid(MongoFields.RecruiterId, value.recruiterId).toValidatedNel.map(UserId.apply),
@@ -128,7 +164,7 @@ private[mongo] object MongoHiringCodecs {
         .toValidatedNel,
       value.createdAt.toInstant.validNel,
       value.updatedAt.toInstant.validNel,
-      readEmbedding(value.embedding, value.embeddingMeta)
+      readEmbedding(vector, value.embeddingMeta)
     ).mapN(Job.apply).map(Versioned(_, value.version)).andThen { job =>
       Either.cond(job.version >= 0L, job, InvalidField(MongoFields.Version)).toValidatedNel
     }
@@ -199,12 +235,12 @@ private[mongo] object MongoHiringCodecs {
   def operationalEvent(value: OperationalEventEnvelope): Document =
     MongoHiringPersistenceCodecs.operationalEvent(storedOperationalEvent(value))
 
-  // Envelope size is enforced at write (`outboxRecord`) and claim time, so this stored read does not re-measure it.
+  // Envelope size is enforced at write (`outboxRecord`); `OperationalEventWireCodec.decode` re-checks it on this read.
   def readOperationalEvent(document: Document): ValidatedNel[StoredDocumentError, OperationalEventEnvelope] = {
     val eventDocument = if (isOutbox(document)) projectOperationalEvent(document) else document
-    val fields = if (isOutbox(document)) OutboxFields else OperationalEventFields
+    val fields = if (isOutbox(document)) OutboxFields else StoredEventFields
     noUnexpectedFields(document, fields)
-      .andThen(_ => decode(eventDocument, OperationalEventFields)(MongoHiringPersistenceCodecs.decodeOperationalEvent))
+      .andThen(_ => decode(eventDocument, StoredEventFields)(MongoHiringPersistenceCodecs.decodeOperationalEvent))
       .andThen(readOperationalEvent)
   }
 
@@ -229,28 +265,34 @@ private[mongo] object MongoHiringCodecs {
     OperationalEventFields.foreach(field => Option(document.get(field)).foreach(value => event.put(field, value)))
     event
 
+  /** The envelope bytes are the single stored copy of the event; the top-level fields only serve queries and must agree
+    * with them.
+    */
   private def readOperationalEvent(
       value: StoredOperationalEvent
   ): ValidatedNel[StoredDocumentError, OperationalEventEnvelope] =
     (
       uuid(MongoFields.Id, value._id).toValidatedNel,
       enumValue(MongoFields.EventType, value.eventType, OperationalEventType.values).toValidatedNel,
-      value.occurredAt.toInstant.validNel,
       enumValue(MongoFields.AggregateType, value.aggregateType, OperationalAggregateType.values).toValidatedNel,
-      value.aggregateId.validNel,
-      uuid(MongoFields.ActorId, value.actorId).toValidatedNel.map(UserId.apply),
-      parseJson(MongoFields.Payload, value.payload).toValidatedNel
+      uuid(MongoFields.ActorId, value.actorId).toValidatedNel
     ).tupled
-      .andThen { case (eventId, eventType, occurredAt, aggregateType, aggregateId, actorId, payloadJson) =>
+      .andThen { _ =>
         OperationalEventWireCodec
-          .decodePayload(eventType, payloadJson)
-          .leftMap(_ => InvalidField(MongoFields.Payload))
+          .decode(value.envelopeBytes)
+          .leftMap(_ => InvalidField(MongoFields.EnvelopeBytes))
           .toValidatedNel
-          .map(OperationalEventEnvelope(eventId, eventType, occurredAt, aggregateType, aggregateId, actorId, _))
       }
-      .andThen(event =>
-        OperationalEventContract.validate(event).leftMap(_ => InvalidField(MongoFields.Payload)).toValidatedNel
-      )
+      .andThen { event =>
+        val consistent = event.eventId.toString == value._id &&
+          event.eventType.toString == value.eventType &&
+          event.occurredAt.toDate == value.occurredAt &&
+          event.aggregateType.toString == value.aggregateType &&
+          event.aggregateId == value.aggregateId &&
+          event.actorId.value.toString == value.actorId &&
+          event.partitionKey == value.partitionKey
+        Validated.condNel(consistent, event, InconsistentDocument)
+      }
 
   def outboxRecord(
       value: OperationalEventEnvelope,
@@ -278,7 +320,6 @@ private[mongo] object MongoHiringCodecs {
         event.actorId,
         Some(subjectIds),
         Some(1),
-        event.payload,
         event.envelopeBytes,
         event.partitionKey,
         "Retryable",
@@ -360,11 +401,13 @@ private[mongo] object MongoHiringCodecs {
     MongoFields.AggregateType,
     MongoFields.AggregateId,
     MongoFields.ActorId,
-    MongoFields.Payload,
     MongoFields.EnvelopeBytes,
     MongoFields.PartitionKey
   )
-  private val OutboxFields = OperationalEventFields ++ Set(
+  // Migration 026 removes `payload`; readers tolerate (and ignore) it until that proof holds, so migration 003's
+  // backfill still decodes a row that has not been rewritten yet.
+  private val StoredEventFields = OperationalEventFields + MongoFields.Payload
+  private val OutboxFields = StoredEventFields ++ Set(
     MongoFields.State,
     MongoFields.Attempts,
     MongoFields.AvailableAt,
@@ -420,7 +463,6 @@ private[mongo] object MongoHiringCodecs {
     * eligibility filter read; the profile document and the whole user document are both built from it.
     */
   private def storedProfile(value: UserProfile): StoredProfile = {
-    def lower(text: String): String = text.trim.toLowerCase(java.util.Locale.ROOT)
     value match {
       case UserProfile.Candidate(candidate) =>
         StoredProfile(
@@ -434,13 +476,13 @@ private[mongo] object MongoHiringCodecs {
             MongoHiringPersistenceCodecs.StoredCandidateResidence(
               residence.country,
               residence.city,
-              lower(residence.country),
-              residence.city.map(lower)
+              SearchTerm.canonical(residence.country),
+              residence.city.map(SearchTerm.canonical)
             )
           ),
           candidate.availabilityStatus.map(_.toString),
           Some(candidate.recruiterSearchOptIn),
-          Some(candidate.skills.toList.map(lower).sorted)
+          Some(candidate.skills.toList.map(SearchTerm.canonical).sorted)
         )
       case UserProfile.Recruiter(recruiter) =>
         StoredProfile(
@@ -484,7 +526,7 @@ private[mongo] object MongoHiringCodecs {
     value.fold(MissingField(field).invalidNel)(_.validNel)
 
   private def readEmbedding(
-      values: Option[List[Double]],
+      values: Option[List[Float]],
       meta: Option[StoredEmbeddingMeta]
   ): ValidatedNel[StoredDocumentError, Option[EntityEmbedding]] =
     (values, meta) match {
@@ -492,21 +534,22 @@ private[mongo] object MongoHiringCodecs {
       case (Some(numbers), Some(value)) =>
         Some(
           EntityEmbedding(
-            numbers.map(_.toFloat),
+            numbers,
             EmbeddingMeta(value.model, value.sourceHash, value.updatedAt.toInstant)
           )
         ).validNel
       case _ => InconsistentDocument.invalidNel
     }
 
+  /** The `embedding` vector and `embeddingMeta` fields written by the derived-data (embedding) update. */
   def embeddingDocument(embedding: EntityEmbedding): Document =
-    MongoHiringPersistenceCodecs.embedding(storedEmbedding(embedding))
-
-  private def storedEmbedding(embedding: EntityEmbedding): StoredEmbeddingFields =
-    StoredEmbeddingFields(
-      embedding.values.map(_.toDouble),
-      StoredEmbeddingMeta(embedding.meta.model, embedding.meta.sourceHash, embedding.meta.updatedAt.toDate)
+    withEmbedding(
+      MongoHiringPersistenceCodecs.embedding(StoredEmbeddingFields(storedEmbeddingMeta(embedding))),
+      Some(embedding)
     )
+
+  private def storedEmbeddingMeta(embedding: EntityEmbedding): StoredEmbeddingMeta =
+    StoredEmbeddingMeta(embedding.meta.model, embedding.meta.sourceHash, embedding.meta.updatedAt.toDate)
 
   private def isOutbox(document: Document): Boolean =
     document.keySet.asScala.exists(
@@ -532,12 +575,9 @@ private[mongo] object MongoHiringCodecs {
   ): Either[StoredDocumentError, Option[A]] =
     value.traverse(enumValue(field, _, values))
 
-  private def parseJson(field: String, value: String): Either[StoredDocumentError, Json] =
-    parse(value).leftMap(_ => InvalidField(field))
-
   private def storedUser(value: User, passwordHash: Option[String], version: Long): StoredUser = {
     val emailCanonical = value.email.map(email => AccountName.canonical(email.value))
-    val embedding = value.embedding.map(storedEmbedding)
+    val embeddingMeta = value.embedding.map(storedEmbeddingMeta)
     StoredUser(
       value.id.value.toString,
       version,
@@ -553,13 +593,13 @@ private[mongo] object MongoHiringCodecs {
       value.deletedAt.map(Date.from),
       Option.when(value.role == UserRole.Admin)(SingletonAdminMarker),
       passwordHash,
-      embedding.map(_.embedding),
-      embedding.map(_.embeddingMeta)
+      embeddingMeta
     )
   }
 
   private def storedJob(value: Job, version: Long): StoredJob = {
-    val embedding = value.embedding.map(storedEmbedding)
+    val embeddingMeta = value.embedding.map(storedEmbeddingMeta)
+    val skills = value.skills.toList.sorted
     StoredJob(
       value.id.value.toString,
       version,
@@ -567,19 +607,20 @@ private[mongo] object MongoHiringCodecs {
       value.title,
       value.description,
       value.requirements,
-      value.skills.toList.sorted,
+      skills,
       StoredLocation(
         value.location.country,
         value.location.city,
         value.location.remote,
-        value.location.coordinates.map(point => StoredGeoPoint("Point", List(point.longitude, point.latitude)))
+        value.location.coordinates.map(point => StoredGeoPoint("Point", List(point.longitude, point.latitude))),
+        value.location.city.map(SearchTerm.canonical)
       ),
       value.status.toString,
       value.createdAt.toDate,
       value.updatedAt.toDate,
       value.closedAt.map(Date.from),
-      embedding.map(_.embedding),
-      embedding.map(_.embeddingMeta)
+      embeddingMeta,
+      skillsCanonical = Some(skills.map(SearchTerm.canonical))
     )
   }
 
@@ -592,7 +633,6 @@ private[mongo] object MongoHiringCodecs {
       value.aggregateType.toString,
       value.aggregateId,
       value.actorId.value.toString,
-      OperationalEventWireCodec.payloadJson(value.payload).noSpaces,
       OperationalEventWireCodec.bytes(value),
       value.partitionKey
     )

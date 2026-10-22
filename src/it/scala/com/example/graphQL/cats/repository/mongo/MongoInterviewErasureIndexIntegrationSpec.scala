@@ -22,7 +22,7 @@ import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
 /** Interview erasure and consumer-receipt identity: every purge query is index-served, migration 022 still attributes
-  * the hiring receipts of an older database (its successor 027 then removes them), and the redundant receipt index is
+  * the hiring receipts of an older database (its successor 029 then removes them), and the redundant receipt index is
   * retired (migration 023).
   */
 final class MongoInterviewErasureIndexIntegrationSpec extends MongoIntegrationSuite {
@@ -39,7 +39,7 @@ final class MongoInterviewErasureIndexIntegrationSpec extends MongoIntegrationSu
   private def setup(database: mongo4cats.database.MongoDatabase[IO]): IO[Unit] =
     MongoHiringSetup.initialize(database, Diagnostics.noop[IO])
 
-  /** Migration 022 alone: a full start would also run its successor 027, which deletes the receipts 022 attributes. */
+  /** Migration 022 alone: a full start would also run its successor 029, which deletes the receipts 022 attributes. */
   private def attribution(database: mongo4cats.database.MongoDatabase[IO]): IO[Unit] =
     MongoHiringSetup
       .setupDatabase(database)

@@ -10,6 +10,7 @@ import io.github.iltotore.iron.constraint.numeric.*
 import io.github.iltotore.iron.constraint.string.*
 import org.http4s.Uri
 import _root_.pureconfig.ConfigReader
+import scala.concurrent.duration.*
 
 /** Startup configuration failures. `key` is the public, loggable identity; `paths` are the HOCON settings whose
   * decoding failure maps to this error, so pureconfig/iron field failures need no separate lookup table.
@@ -293,8 +294,8 @@ final case class JwtAuthConfig(
     hmacSecret: String,
     issuer: String,
     audience: String,
-    accessTokenSeconds: Long = 900L,
-    cursorTtlSeconds: Long = 86400L,
+    accessToken: FiniteDuration = 15.minutes,
+    cursorTtl: FiniteDuration = 86400.seconds,
     receiptFingerprintSecret: Option[String] = None
 ) {
 
@@ -305,14 +306,23 @@ final case class JwtAuthConfig(
   def receiptSecret: String = receiptFingerprintSecret.getOrElse(hmacSecret)
   override def toString: String = s"JwtAuthConfig($issuer, $audience, [REDACTED])"
 }
-final case class PasswordHashConfig(iterations: Int = 2, memoryKilobytes: Int = 19456, parallelism: Int = 1)
+final case class PasswordHashConfig(
+    iterations: PasswordHashIterations = 2,
+    memoryKilobytes: PasswordHashMemoryKib = 19456,
+    parallelism: PasswordHashParallelism = 1
+)
 
 /** Allowance of `attempts` per `windowSeconds`, tracked in at most `maxBuckets` buckets. Used for authentication
   * attempts and for per-actor interview cancel and reschedule actions. `overflowBuckets` is the number of shared
   * counters that serve unseen keys once `maxBuckets` are tracked (interview actions); the packaged configuration sets
   * it, the constructor default only spares test fixtures.
   */
-final case class RateLimitConfig(windowSeconds: Int, attempts: Int, maxBuckets: Int, overflowBuckets: Int = 256)
+final case class RateLimitConfig(
+    windowSeconds: AuthRateWindowSeconds,
+    attempts: AuthRateAttempts,
+    maxBuckets: AuthRateBuckets,
+    overflowBuckets: AuthRateOverflowBuckets = 256
+)
 
 /** Query cost budget: at most `maxCost` GraphQL complexity per actor or client per `windowSeconds`. Authenticated
   * actors and anonymous clients are tracked in separate caches of `maxActorBuckets` and `maxClientBuckets`; once a
@@ -320,11 +330,11 @@ final case class RateLimitConfig(windowSeconds: Int, attempts: Int, maxBuckets: 
   * the packaged `application.conf` for an absent section, as for the resilience settings.
   */
 final case class CostBudgetConfig(
-    windowSeconds: Int = 60,
-    maxCost: Int = 10000,
-    maxActorBuckets: Int = 10000,
-    maxClientBuckets: Int = 10000,
-    overflowBuckets: Int = 256
+    windowSeconds: CostBudgetWindowSeconds = 60,
+    maxCost: CostBudgetMaxCost = 10000,
+    maxActorBuckets: CostBudgetBuckets = 10000,
+    maxClientBuckets: CostBudgetBuckets = 10000,
+    overflowBuckets: CostBudgetOverflowBuckets = 256
 )
 
 object GraphQLConfig {
@@ -395,7 +405,10 @@ object KafkaConfig {
   inline val DefaultRestartMaxDelaySeconds = 30
 }
 
-type Port = Int :| Interval.Closed[1, 65535]
+/** Bindable by a non-root service: ports below 1024 need `CAP_NET_BIND_SERVICE`, and ports above 32767 fall inside the
+  * default Linux ephemeral range (`net.ipv4.ip_local_port_range`), where an outgoing connection may already hold them.
+  */
+type Port = Int :| Interval.Closed[1024, 32767]
 type AdmissionPermits = Int :| Interval.Closed[1, 1024]
 type NonBlank128 = String :| (Not[Blank] & MaxLength[128])
 type NonBlankStr = String :| Not[Blank]
@@ -429,11 +442,34 @@ type HttpsUrl = String :| StartWith["https://"]
 type RerankModel = String :| In[("rerank-2.5", "rerank-2.5-lite", "rerank-2", "rerank-2-lite")]
 type KafkaRestartMaxDelaySeconds = Int :| Interval.Closed[1, 300]
 type PartitionConcurrency = Int :| Interval.Closed[1, 64]
-type DiscoveryMaxTimeMs = Int :| GreaterEqual[100]
+type DiscoveryMaxTimeMs = Int :| Interval.Closed[100, 60000]
 type DiscoveryPermits = Int :| Interval.Closed[1, 64]
 type DiscoveryMaxRoots = Int :| Interval.Closed[1, 64]
 type DiscoveryLexicalFacetMatchLimit = Int :| Interval.Closed[1, 5000]
 type EmbeddingDurableRetryAttempts = Int :| Interval.Closed[1, 100]
+type ReadinessSeconds = Int :| Interval.Closed[1, 604800]
+type ReadinessCacheMillis = Int :| Interval.Closed[100, 10000]
+type CostBudgetWindowSeconds = Int :| Interval.Closed[1, 3600]
+// The floor at the per-query cap is a relation between two settings, checked by `GraphQLConfigValidation`.
+type CostBudgetMaxCost = Int :| Interval.Closed[1, 1000000]
+type CostBudgetBuckets = Int :| Interval.Closed[1, 100000]
+type CostBudgetOverflowBuckets = Int :| Interval.Closed[1, 4096]
+
+/** MongoDB database-name rules: non-empty, under 64 UTF-8 bytes, and free of the characters MongoDB forbids. Byte
+  * length is not constant-foldable, so this constraint is applied to decoded values only, never to literals.
+  */
+final class ValidMongoDatabaseName
+object ValidMongoDatabaseName {
+  private val Forbidden = "/\\.\"$*<>:|?"
+  def test(value: String): Boolean =
+    value.nonEmpty && value.getBytes(java.nio.charset.StandardCharsets.UTF_8).length < 64 &&
+      !value.exists(c => c.isWhitespace || c.isControl || Forbidden.contains(c))
+  given Constraint[String, ValidMongoDatabaseName] with {
+    override inline def test(inline value: String): Boolean = ValidMongoDatabaseName.test(value)
+    override inline def message: String = "Should be a valid MongoDB database name"
+  }
+}
+type MongoDatabaseName = String :| ValidMongoDatabaseName
 type EmbeddingDurableRetryMs = Int :| Interval.Closed[100, 3600000]
 type EmbeddingWorkerRestartDelayMs = Int :| Interval.Closed[100, 60000]
 type InterviewMaxAttempts = Int :| Interval.Closed[1, 100]
@@ -481,11 +517,14 @@ final case class InterviewRuntimeConfig(
   def proposalTtl: java.time.Duration = java.time.Duration.ofSeconds(proposalTtlSeconds.toLong)
 }
 
+/** Atlas discovery limits. `maxTime` is bounded by `DiscoveryMaxTimeMs` at decode time and must stay below the HTTP
+  * request timeout; the relation is checked by `HttpMongoConfigValidation`, not by the field types.
+  */
 final case class DiscoveryConfig(
-    maxTimeMillis: Int = 2000,
-    permits: Int = 4,
-    maxRoots: Int = 4,
-    lexicalFacetMatchLimit: Int = 1000
+    maxTime: FiniteDuration = 2.seconds,
+    permits: DiscoveryPermits = 4,
+    maxRoots: DiscoveryMaxRoots = 4,
+    lexicalFacetMatchLimit: DiscoveryLexicalFacetMatchLimit = 1000
 )
 
 final case class AdminSeedConfig(

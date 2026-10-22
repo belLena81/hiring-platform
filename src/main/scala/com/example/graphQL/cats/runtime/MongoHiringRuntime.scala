@@ -106,10 +106,10 @@ object MongoHiringRuntime {
       heartbeats <- Resource.eval(WorkerHeartbeats.create[IO])
       // An idle worker reports at least three times per staleness window.
       alive = (component: ReadinessComponent) =>
-        heartbeats.alive(component, (config.readiness.workerStalenessSeconds.seconds / 3).max(1.second))
+        heartbeats.alive(component, (config.readiness.workerStaleness / 3).max(1.second))
       discoveryPolicy <- Resource.eval(
         DiscoveryQueryPolicy.create(
-          config.discovery.maxTimeMillis.millis,
+          config.discovery.maxTime,
           config.discovery.permits,
           breakers.atlasSearch
         )
@@ -327,10 +327,10 @@ object MongoHiringRuntime {
           UUIDGen[IO],
           lexicalMatcher = lexicalMatcher,
           lexicalFacetMatchLimit = facetLimit,
-          lexicalFacetDeadline = Some(config.discovery.maxTimeMillis.millis)
+          lexicalFacetDeadline = Some(config.discovery.maxTime)
         ),
         new ApplicationService(users, jobs, applications, readModel, idempotent, clock, UUIDGen[IO]),
-        CursorCodec.keyFromSecret(config.jwtAuth.hmacSecret, config.jwtAuth.cursorTtlSeconds),
+        CursorCodec.keyFromSecret(config.jwtAuth.hmacSecret, config.jwtAuth.cursorTtl.toSeconds),
         accountService,
         new OperationalTelemetryService(users, jobs, searchSessions, searchSessionWork, idempotent, clock),
         SearchSessionRecording(searchSessionHandoff, searchSessions)(using cats.Monad[IO], clock, UUIDGen[IO]),
@@ -383,9 +383,9 @@ object MongoHiringRuntime {
         DegradedComponents.create[IO](
           heartbeats,
           ReadinessThresholds(
-            config.readiness.workerStalenessSeconds.seconds,
-            config.readiness.maxOutboxAgeSeconds.seconds,
-            config.readiness.maxClosureWorkAgeSeconds.seconds
+            config.readiness.workerStaleness,
+            config.readiness.maxOutboxAge,
+            config.readiness.maxClosureWorkAge
           ),
           embeddingHealth.get,
           now => outbox.oldestDueAge(now),

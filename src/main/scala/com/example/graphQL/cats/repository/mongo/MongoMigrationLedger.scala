@@ -42,12 +42,15 @@ private[mongo] object MigrationIds {
   val ConsumerReceiptIdentity = MigrationId("023_consumer_receipt_identity")
   val OptionalFieldAbsence = MigrationId("024_optional_field_absence")
   val OperationalCollectionValidators = MigrationId("025_operational_collection_validators")
-  val InterviewHiringReceiptRemoval = MigrationId("027_interview_hiring_receipt_removal")
-  val InterviewRequestReceiptRemoval = MigrationId("028_interview_request_receipt_removal")
-  val SearchSessionWorkSingleCopy = MigrationId("029_search_session_work_single_copy")
-  val EmbeddingWorkKeyFromIdentity = MigrationId("030_embedding_work_key_from_identity")
-  val ApplicationEventActorRole = MigrationId("031_application_event_actor_role")
-  val InterviewWorkflowInitiatorRole = MigrationId("032_interview_workflow_initiator_role")
+  val OutboxEnvelopeSource = MigrationId("026_outbox_envelope_source")
+  val JobCanonicalFilters = MigrationId("027_job_canonical_filters")
+  val BinaryEmbeddingVectors = MigrationId("028_binary_embedding_vectors")
+  val InterviewHiringReceiptRemoval = MigrationId("029_interview_hiring_receipt_removal")
+  val InterviewRequestReceiptRemoval = MigrationId("030_interview_request_receipt_removal")
+  val SearchSessionWorkSingleCopy = MigrationId("031_search_session_work_single_copy")
+  val EmbeddingWorkKeyFromIdentity = MigrationId("032_embedding_work_key_from_identity")
+  val ApplicationEventActorRole = MigrationId("033_application_event_actor_role")
+  val InterviewWorkflowInitiatorRole = MigrationId("034_interview_workflow_initiator_role")
 }
 
 /** Typed setup failures. They remain Throwables so the setup lifecycle boundary keeps one failure channel, while

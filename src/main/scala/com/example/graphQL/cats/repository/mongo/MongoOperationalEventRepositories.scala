@@ -8,7 +8,6 @@ import cats.effect.std.UUIDGen
 import cats.syntax.all.*
 import mongo4cats.client.{ClientSession, MongoClient}
 import mongo4cats.database.MongoDatabase
-import com.example.graphQL.cats.infrastructure.events.OperationalEventWireCodec
 import com.example.graphQL.cats.service.events.{OperationalEventEnvelope, SearchSession}
 import com.example.graphQL.cats.service.port.{
   ClaimedOperationalEvent,
@@ -624,15 +623,10 @@ final class MongoOperationalEventOutboxRepository(
       ClaimedOperationalEvent(event, bytes, key, token, attempts, subjects)
     ).toEither
       .flatMap { claim =>
-        val invalid = NonEmptyList.one(MongoHiringCodecs.StoredDocumentError.InconsistentDocument)
-        OperationalEventWireCodec.decode(claim.envelopeBytes).leftMap(_ => invalid).flatMap { wire =>
-          // BSON dates have millisecond precision; the immutable wire bytes retain the original Instant.
-          val storedTime = wire.occurredAt.truncatedTo(java.time.temporal.ChronoUnit.MILLIS)
-          val consistent = wire.copy(occurredAt = storedTime) == claim.event &&
-            claim.partitionKey == wire.partitionKey &&
-            MongoHiringCodecs.outboxSubjectIds(wire).contains(claim.subjectIds.sorted)
-          Either.cond(consistent, claim.copy(event = wire), invalid)
-        }
+        // `readOperationalEvent` decoded the immutable envelope bytes and matched the queried top-level fields to them.
+        val consistent = claim.partitionKey == claim.event.partitionKey &&
+          MongoHiringCodecs.outboxSubjectIds(claim.event).contains(claim.subjectIds.sorted)
+        Either.cond(consistent, claim, NonEmptyList.one(MongoHiringCodecs.StoredDocumentError.InconsistentDocument))
       }
 
   private def envelopeBytes(document: Document): Either[MongoHiringCodecs.StoredDocumentError, Array[Byte]] =

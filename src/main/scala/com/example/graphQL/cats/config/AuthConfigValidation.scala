@@ -3,6 +3,7 @@ package com.example.graphQL.cats.config
 import cats.data.ValidatedNel
 import cats.syntax.all.*
 import java.nio.charset.StandardCharsets
+import scala.concurrent.duration.*
 
 private[config] object AuthConfigValidation {
   def read(auth: RawAuthConfig): ValidatedNel[ConfigError, AuthSettings] =
@@ -16,7 +17,7 @@ private[config] object AuthConfigValidation {
           secret,
           auth.jwt.issuer,
           auth.jwt.audience,
-          cursorTtlSeconds = auth.jwt.cursorTtlSeconds.toLong,
+          cursorTtl = auth.jwt.cursorTtlSeconds.seconds,
           receiptFingerprintSecret = receiptSecret
         ),
         auth.passwordHash.getOrElse(PasswordHashConfig()),

@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.runtime
 
+import io.github.iltotore.iron.autoRefine
 import cats.effect.{Deferred, IO, Ref, Resource}
 import com.comcast.ip4s.{Host, Port}
 import com.example.graphQL.cats.api.graphql.TestGraphQLSupport

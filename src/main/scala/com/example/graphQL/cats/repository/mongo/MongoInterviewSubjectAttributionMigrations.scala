@@ -29,7 +29,7 @@ private[mongo] object MongoInterviewSubjectAttributionMigrations {
   private val Id: MigrationId = MigrationIds.InterviewSubjectAttribution
   val MigrationId: String = Id.value
 
-  /** The `documentType` this step wrote; `027_interview_hiring_receipt_removal` later deleted these documents. */
+  /** The `documentType` this step wrote; `029_interview_hiring_receipt_removal` later deleted these documents. */
   private val HiringReceiptType = MongoInterviewFields.RetiredHiringReceiptType
 
   private val Unattributed: Bson = Filters.exists(MongoFields.DocumentType, false)

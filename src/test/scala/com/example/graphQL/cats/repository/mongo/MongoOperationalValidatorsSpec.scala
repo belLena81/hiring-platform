@@ -131,6 +131,7 @@ final class MongoOperationalValidatorsSpec extends FunSuite {
 
   test("AC-04.2 AC-05.1 the validators replaced after migration 025 differ from the generation 025 installed") {
     val replaced = Set(
+      MongoCollections.Users,
       MongoCollections.ApplicationEvents,
       MongoCollections.EmbeddingWork,
       MongoCollections.SearchSessionWork,
@@ -142,6 +143,31 @@ final class MongoOperationalValidatorsSpec extends FunSuite {
         assertEquals(name, installedName)
         assertEquals(current != installed, replaced(name), name)
     }
+  }
+
+  test("AC-04.2 AC-05.1 the completed proof of 025 accepts every generation of a replaced validator, oldest first") {
+    val accepted = MongoOperationalValidators.acceptedByCompletedProof.toMap
+    assertEquals(
+      accepted(MongoCollections.SearchSessionWork),
+      List(
+        MongoOperationalValidators.searchSessionWorkValidatorThrough025,
+        MongoOperationalValidators.searchSessionWorkValidatorThrough026,
+        MongoOperationalValidators.searchSessionWorkValidator
+      )
+    )
+    assertEquals(
+      accepted(MongoCollections.InterviewWorkflows),
+      List(
+        MongoOperationalValidators.interviewWorkflowsValidatorThrough025,
+        MongoOperationalValidators.interviewWorkflowsValidatorThrough030,
+        MongoOperationalValidators.interviewWorkflowsValidator
+      )
+    )
+    assertEquals(
+      accepted(MongoCollections.Users),
+      List(MongoHiringValidators.userValidatorV2, MongoHiringValidators.userValidator)
+    )
+    assertEquals(accepted.values.map(_.distinct.size).toList, accepted.values.map(_.size).toList)
   }
 
   test("AC-05.1 the search session work validator no longer knows an event copy") {

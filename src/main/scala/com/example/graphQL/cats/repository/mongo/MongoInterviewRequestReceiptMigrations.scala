@@ -45,7 +45,7 @@ private[mongo] object MongoInterviewRequestReceiptMigrations {
       }
     }
 
-  /** Documented successor: once `028_interview_request_receipt_removal` completed, request receipts and their index are
+  /** Documented successor: once `030_interview_request_receipt_removal` completed, request receipts and their index are
     * gone by design, so the index is no longer part of this proof.
     */
   private def verifyCompleted(database: MongoHiringSetup.SetupDatabase): IO[CompletedProof] =

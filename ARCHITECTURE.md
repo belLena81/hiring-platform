@@ -340,7 +340,7 @@ The default rule is:
     recruiterSearchOptIn: true
   },
 
-  embedding: [...],                 // optional candidate vector; removed on account deletion
+  embedding: BinData(9, ...),       // optional candidate vector: BSON binary vector, float32 (migration 028); removed on account deletion
   embeddingMeta: {                  // present with embedding
     model: "...",
     sourceHash: "...",
@@ -407,15 +407,21 @@ Do not create indexes for fields merely because they exist.
     "Functional programming"
   ],
 
-  skills: [                         // stored sorted
+  skills: [                         // display values, stored sorted
     "Cats Effect",
     "MongoDB",
     "Scala"
   ],
+  skillsCanonical: [                // one per skill, same order: trim + lower-case (SearchTerm.canonical); every job skill filter compares these
+    "cats effect",
+    "mongodb",
+    "scala"
+  ],
 
   location: {
     country: "Ukraine",
-    city: "Kyiv",                   // optional
+    city: "Kyiv",                   // optional, display value
+    cityCanonical: "kyiv",          // present exactly when city is; every job city filter compares this
     remote: true,
     point: {                        // optional GeoJSON Point, [longitude, latitude]
       type: "Point",
@@ -429,7 +435,7 @@ Do not create indexes for fields merely because they exist.
   updatedAt: ISODate(...),
   closedAt: ISODate(...),           // optional
 
-  embedding: [...],                 // optional job vector
+  embedding: BinData(9, ...),       // optional job vector: BSON binary vector, float32 (migration 028)
   embeddingMeta: {                  // present with embedding
     model: "...",
     sourceHash: "...",
@@ -478,12 +484,14 @@ query {
 }
 ```
 
+The city filter is case-insensitive: it compares the canonical form (trimmed, lower-cased), and the same rule applies to the `skills` filter (`$all` over `skillsCanonical`).
+
 Primary index:
 
 ```javascript
 {
   status: 1,
-  "location.city": 1,
+  "location.cityCanonical": 1,
   createdAt: -1,
   _id: -1
 }
@@ -514,9 +522,9 @@ Complete job index set (`MongoHiringIndexSetup`):
 { recruiterId: 1, createdAt: -1, _id: -1 }                                // jobs_recruiter_created_id
 { createdAt: -1, _id: -1 }                                                // jobs_created_id
 { status: 1, createdAt: -1, _id: -1 }                                     // jobs_open_created_id
-{ status: 1, "location.city": 1, createdAt: -1, _id: -1 }                 // jobs_open_city_created_id
+{ status: 1, "location.cityCanonical": 1, createdAt: -1, _id: -1 }        // jobs_open_city_canonical_created_id
 { "location.point": "2dsphere" }                                          // jobs_location_point_2dsphere
-{ "embeddingMeta.model": 1, status: 1, "location.city": 1, recruiterId: 1 } // jobs_embedding_meta_filters
+{ "embeddingMeta.model": 1, status: 1, "location.cityCanonical": 1, recruiterId: 1 } // jobs_embedding_meta_canonical_filters
 ```
 
 Avoid building separate indexes such as:
@@ -694,7 +702,7 @@ Document:
   newStatus: "Interview",
 
   actorId: "<user-uuid>",
-  actorRole: "Recruiter",   // stored Scala enum name; required (ledger step 031 and the validator). Not exposed by GraphQL as an identifier.
+  actorRole: "Recruiter",   // stored Scala enum name; required (ledger step 033 and the validator). Not exposed by GraphQL as an identifier.
 
   // feedback and reason are present only when supplied.
   // previousStatus is absent on the initial CREATED event.
@@ -1041,9 +1049,11 @@ Jobs contain their searchable embedding:
   requirements: [...],
   skills: [...],
 
-  embedding: [...]
+  embedding: BinData(9, ...)        // float32 BSON binary vector
 }
 ```
+
+Embeddings are stored as BSON binary vectors (binData subtype 9, float32) rather than float64 arrays: the element type in the domain is `Float`, so the stored form is exact and about a third of the size (0.31 measured for 1000 × 1024-dimension vectors). The Atlas vector index keeps `path: embedding`, `numDimensions` and `similarity`; job vector and lexical indexes carry the canonical filter paths (`location.cityCanonical`, `skillsCanonical`) under the configured names (defaults `jobs_embedding_vector_canonical_v1`, `jobs_text_search_canonical_v1`).
 
 The embedding represents canonical searchable text:
 
@@ -1123,7 +1133,7 @@ Store enough metadata to determine whether an embedding is stale.
 
 ```javascript
 {
-  embedding: [...],
+  embedding: BinData(9, ...),
 
   embeddingMeta: {
     model: "...",

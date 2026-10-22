@@ -17,7 +17,8 @@ private[mongo] object MongoHiringPersistenceCodecs {
       country: String,
       city: Option[String],
       remote: Boolean,
-      point: Option[StoredGeoPoint] = None
+      point: Option[StoredGeoPoint] = None,
+      cityCanonical: Option[String] = None
   )
   final case class StoredCandidateResidence(
       country: String,
@@ -38,7 +39,7 @@ private[mongo] object MongoHiringPersistenceCodecs {
       skillsCanonical: Option[List[String]] = None
   )
   final case class StoredEmbeddingMeta(model: String, sourceHash: String, updatedAt: Date)
-  final case class StoredEmbeddingFields(embedding: List[Double], embeddingMeta: StoredEmbeddingMeta)
+  final case class StoredEmbeddingFields(embeddingMeta: StoredEmbeddingMeta)
 
   final case class StoredUser(
       _id: String,
@@ -55,7 +56,6 @@ private[mongo] object MongoHiringPersistenceCodecs {
       deletedAt: Option[Date],
       adminSingletonKey: Option[String],
       passwordHash: Option[String],
-      embedding: Option[List[Double]],
       embeddingMeta: Option[StoredEmbeddingMeta]
   )
 
@@ -72,9 +72,9 @@ private[mongo] object MongoHiringPersistenceCodecs {
       createdAt: Date,
       updatedAt: Date,
       closedAt: Option[Date],
-      embedding: Option[List[Double]],
       embeddingMeta: Option[StoredEmbeddingMeta],
-      admissionFence: Option[Long] = None
+      admissionFence: Option[Long] = None,
+      skillsCanonical: Option[List[String]] = None
   )
 
   final case class StoredApplication(
@@ -106,7 +106,6 @@ private[mongo] object MongoHiringPersistenceCodecs {
       aggregateType: String,
       aggregateId: String,
       actorId: String,
-      payload: String,
       envelopeBytes: Array[Byte],
       partitionKey: String
   )
@@ -121,7 +120,6 @@ private[mongo] object MongoHiringPersistenceCodecs {
       actorId: String,
       subjectIds: Option[List[String]],
       subjectRefsVersion: Option[Int],
-      payload: String,
       envelopeBytes: Array[Byte],
       partitionKey: String,
       state: String,

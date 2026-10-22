@@ -117,16 +117,20 @@ final class MongoJobDiscoveryIntegrationSpec extends MongoJobDiscoveryFixture {
         collection <- MongoRepositoryTestSupport.collection(fixture.database, MongoCollections.Jobs)
         _ <- collection.updateOne(
           Filters.eq("_id", job(1).id.value.toString),
-          Updates.set("skills", List("Scala", "Scala", "Skill1").asJava)
+          Updates.combine(
+            Updates.set("skills", List("Scala", "Scala", "Skill1").asJava),
+            Updates.set("skillsCanonical", List("scala", "scala", "skill1").asJava)
+          )
         )
         all <- success(repository.jobDiscoveryFacets(scope, JobFacetQuery(filter, None), None, None))
-        _ = assertEquals(all.skills.head, JobFacetBucket("Scala", 26L))
+        // Facet skills report the canonical spelling, and a job listing a skill twice still counts once.
+        _ = assertEquals(all.skills.head, JobFacetBucket("scala", 26L))
         _ = assertEquals(all.skills.size, 20)
         _ = assert(all.truncated)
         nearby <- success(
           repository.jobDiscoveryFacets(scope, JobFacetQuery(filter, Some(NearbyRadius(center, 10d))), None, None)
         )
-        _ = assertEquals(nearby.skills.head, JobFacetBucket("Scala", 24L))
+        _ = assertEquals(nearby.skills.head, JobFacetBucket("scala", 24L))
         _ = assertEquals(nearby.remote, List(JobFacetBucket("false", 24L)))
         filtered <- success(
           repository.jobDiscoveryFacets(
@@ -203,10 +207,10 @@ final class MongoJobDiscoveryIntegrationSpec extends MongoJobDiscoveryFixture {
             repository.jobDiscoveryFacets(scope, JobFacetQuery(filter, Some(NearbyRadius(origin, radius))), None, None)
           )
           _ = assertEquals(hits.map(_.job.id), values.take(2).map(_.id))
-          _ = assertEquals(facets.skills.find(_.value == "Scala").map(_.count), Some(hits.size.toLong))
+          _ = assertEquals(facets.skills.find(_.value == "scala").map(_.count), Some(hits.size.toLong))
           _ = assertEquals(
             facets.skills.toSet,
-            Set(JobFacetBucket("Scala", 2L), JobFacetBucket("Skill1", 1L), JobFacetBucket("Skill2", 1L))
+            Set(JobFacetBucket("scala", 2L), JobFacetBucket("skill1", 1L), JobFacetBucket("skill2", 1L))
           )
           _ = assertEquals(facets.remote, List(JobFacetBucket("false", 2L)))
           _ = assertEquals(facets.cities, List(JobFacetBucket("Nicosia", 2L)))
@@ -246,7 +250,7 @@ final class MongoJobDiscoveryIntegrationSpec extends MongoJobDiscoveryFixture {
         )
         _ = assertEquals(hits.map(_.job.id), values.map(_.id))
         _ = assert(hits.forall(_.distanceKm == 0d))
-        _ = assertEquals(facets.skills.find(_.value == "Scala").map(_.count), Some(24L))
+        _ = assertEquals(facets.skills.find(_.value == "scala").map(_.count), Some(24L))
       } yield ()
     }
   }

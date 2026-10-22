@@ -241,6 +241,89 @@ class MongoHiringCodecsSpec extends FunSuite {
     assertEquals(result.map(_.embedding).toEither, Right(Some(embedding)))
   }
 
+  private def vectorJob(values: List[Float]): Job =
+    Job(
+      jobId,
+      recruiterId,
+      "Senior Scala Developer",
+      "Build services",
+      List("Scala"),
+      Set("Cats Effect", "scala"),
+      Location("Cyprus", Some(" Nicosia "), remote = true),
+      JobState.Open,
+      now,
+      later,
+      embedding = Some(EntityEmbedding(values, EmbeddingMeta("voyage-4-lite", "source-hash", later)))
+    )
+
+  private val exactnessProbe: List[Float] =
+    List(0.1f, -0.2f, 1e-30f, 3.4028235e38f, java.lang.Float.MIN_VALUE, 1.17549435e-38f, 0f, 123456.789f, 1f / 3f)
+
+  test("MSC-09.1 job and user vectors are stored as float32 binary vectors and read back exactly") {
+    val job = MongoHiringCodecs.job(vectorJob(exactnessProbe))
+    val stored = job.get("embedding")
+    assert(stored.isInstanceOf[org.bson.BinaryVector], clue(stored))
+    assertEquals(stored.asInstanceOf[org.bson.BinaryVector].asFloat32Vector().getData.toList, exactnessProbe)
+    assertEquals(MongoHiringCodecs.readJob(job).toEither.map(_.embedding.map(_.values)), Right(Some(exactnessProbe)))
+
+    val candidate = User(
+      candidateId,
+      Some(email("candidate@example.com")),
+      "Candidate",
+      UserRole.Candidate,
+      Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None))),
+      now,
+      embedding = Some(EntityEmbedding(exactnessProbe, EmbeddingMeta("m", "h", later)))
+    )
+    val user = MongoHiringCodecs.user(candidate)
+    assert(user.get("embedding").isInstanceOf[org.bson.BinaryVector])
+    assertEquals(MongoHiringCodecs.readUser(user).toEither.map(_.embedding.map(_.values)), Right(Some(exactnessProbe)))
+  }
+
+  test("MSC-09.1 a vector read back from the database as a binary subtype 9 value decodes exactly") {
+    val written = new org.bson.BsonBinary(org.bson.BinaryVector.floatVector(exactnessProbe.toArray))
+    val asRead = new org.bson.types.Binary(written.getType, written.getData)
+    val document = MongoHiringCodecs.job(vectorJob(List(1f)))
+    document.put("embedding", asRead)
+    assertEquals(
+      MongoHiringCodecs.readJob(document).toEither.map(_.embedding.map(_.values)),
+      Right(Some(exactnessProbe))
+    )
+    document.put("embedding", written)
+    assertEquals(
+      MongoHiringCodecs.readJob(document).toEither.map(_.embedding.map(_.values)),
+      Right(Some(exactnessProbe))
+    )
+  }
+
+  test("MSC-09.1 a vector stored in any other form fails closed with a field-only error") {
+    val wrongSubtype = new org.bson.types.Binary(0.toByte, Array[Byte](1, 2, 3, 4))
+    val int8 = new org.bson.BsonBinary(org.bson.BinaryVector.int8Vector(Array[Byte](1, 2)))
+    List[Any](wrongSubtype, int8, List(0.5d).asJava, "text").foreach { form =>
+      val document = MongoHiringCodecs.job(vectorJob(List(1f)))
+      document.put("embedding", form)
+      assertEquals(
+        MongoHiringCodecs.readJob(document).toEither,
+        Left(NonEmptyList.one(MongoHiringCodecs.StoredDocumentError.InvalidField("embedding"))),
+        clue(form)
+      )
+    }
+  }
+
+  test("MSC-08.1 a job stores canonical sidecars derived from its display fields") {
+    val document = MongoHiringCodecs.job(vectorJob(List(1f)))
+    assertEquals(document.getList("skills", classOf[String]).asScala.toList, List("Cats Effect", "scala"))
+    assertEquals(document.getList("skillsCanonical", classOf[String]).asScala.toList, List("cats effect", "scala"))
+    val location = document.get("location", classOf[Document])
+    assertEquals(location.getString("city"), " Nicosia ")
+    assertEquals(location.getString("cityCanonical"), "nicosia")
+    val remote = MongoHiringCodecs.job(
+      vectorJob(List(1f)).copy(location = Location("Cyprus", None, remote = true))
+    )
+    assert(!remote.get("location", classOf[Document]).containsKey("cityCanonical"))
+    assertEquals(MongoHiringCodecs.readJob(document).toEither.map(_.skills), Right(Set("Cats Effect", "scala")))
+  }
+
   test("job codec preserves the storage revision without adding it to the domain value") {
     val job = Job(
       jobId,
@@ -283,7 +366,10 @@ class MongoHiringCodecsSpec extends FunSuite {
         )
       )
       .append("embedding", List("not-a-number").asJava)
-      .append("embeddingMeta", new Document("model", "model"))
+      .append(
+        "embeddingMeta",
+        new Document("model", "model").append("sourceHash", "hash").append("updatedAt", java.util.Date.from(now))
+      )
 
     assertEquals(
       MongoHiringCodecs.readUser(missingName).toEither,
@@ -295,7 +381,7 @@ class MongoHiringCodecsSpec extends FunSuite {
     )
     assertEquals(
       MongoHiringCodecs.readJob(invalidEmbedding).toEither,
-      Left(NonEmptyList.one(MongoHiringCodecs.StoredDocumentError.InvalidField("document")))
+      Left(NonEmptyList.one(MongoHiringCodecs.StoredDocumentError.InvalidField("embedding")))
     )
     assertEquals(
       MongoStoredDocumentDecoding.repository(MongoHiringCodecs.readUser(missingName)),
@@ -425,6 +511,24 @@ class MongoHiringCodecsSpec extends FunSuite {
         )
       },
       Right((Right(operational), List(candidateId.value.toString)))
+    )
+    // MSC-06.1: the envelope bytes are the single stored copy of the event body.
+    val stored = MongoHiringCodecs.outboxRecord(operational, now).toOption.get
+    assert(!stored.containsKey(MongoFields.Payload) && stored.containsKey(MongoFields.EnvelopeBytes))
+    assert(!MongoHiringCodecs.operationalEvent(operational).containsKey(MongoFields.Payload))
+    // A row that migration 026 has not rewritten yet still reads through the envelope; the payload copy is ignored.
+    assertEquals(
+      MongoHiringCodecs.readOperationalEvent(new Document(stored).append(MongoFields.Payload, "{}")).toEither,
+      Right(operational)
+    )
+    // A queried top-level field that disagrees with the envelope is rejected.
+    assert(
+      MongoHiringCodecs.readOperationalEvent(new Document(stored).append(MongoFields.AggregateId, "other")).isInvalid
+    )
+    assert(
+      MongoHiringCodecs
+        .readOperationalEvent(new Document(stored).append(MongoFields.EnvelopeBytes, Array[Byte](1, 2, 3)))
+        .isInvalid
     )
     assertEquals(MongoHiringCodecs.readSearchSession(MongoHiringCodecs.searchSession(search)).toEither, Right(search))
     assert(

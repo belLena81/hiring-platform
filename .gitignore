@@ -64,3 +64,6 @@ __pycache__/
 
 ### Spark local warehouse created by analytics sessions ###
 spark-warehouse/
+
+# Personal article drafts
+/posts/

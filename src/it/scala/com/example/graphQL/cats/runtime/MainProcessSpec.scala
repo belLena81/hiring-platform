@@ -29,9 +29,24 @@ class MainProcessSpec extends CatsEffectSuite {
   }
 
   private def listeningSocket(host: String = "127.0.0.1"): Resource[IO, ServerSocket] =
-    Resource.make(IO.blocking(new ServerSocket(0, 1, InetAddress.getByName(host)))) { socket =>
+    Resource.make(IO.blocking(bindInConfigurablePortRange(host))) { socket =>
       IO.blocking(socket.close())
     }
+
+  // The HTTP bind port is restricted to 1024..32767, below the Linux ephemeral range that port 0 allocates from.
+  private val configurablePortRange = 1024 to 32767
+  private val maxPortAttempts = 200
+
+  private def bindInConfigurablePortRange(host: String): ServerSocket = {
+    val address = InetAddress.getByName(host)
+    val start = scala.util.Random.nextInt(configurablePortRange.size)
+    val candidates =
+      Iterator.range(0, maxPortAttempts).map(i => configurablePortRange((start + i) % configurablePortRange.size))
+    candidates
+      .flatMap(port => scala.util.Try(new ServerSocket(port, 1, address)).toOption)
+      .nextOption()
+      .getOrElse(throw new java.io.IOException(s"No free port found in $configurablePortRange"))
+  }
 
   private def outputDirectory: Resource[IO, Path] =
     Resource.make(IO.blocking(Files.createTempDirectory("hiring-main-process-"))) { directory =>

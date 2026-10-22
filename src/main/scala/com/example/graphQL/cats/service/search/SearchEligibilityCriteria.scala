@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.service.search
 
-import com.example.graphQL.cats.domain.model.{AccountStatus, UserRole}
+import com.example.graphQL.cats.domain.model.{AccountStatus, SearchTerm, UserRole}
 import java.time.Instant
 
 /** One pure eligibility decision rendered independently for operational and indexed selection. */
@@ -31,8 +31,8 @@ object SearchEligibilityCriteria {
     Equal(JobStatus, Text(com.example.graphQL.cats.domain.model.JobStatus.Open.toString))
 
   private def jobFilter(filter: JobSearchFilter): List[SearchEligibilityCriteria] =
-    filter.city.toList.map(city => Equal(JobCity, Text(city))) ++
-      filter.skills.toList.sorted.map(skill => Equal(JobSkill, Text(skill))) ++
+    filter.city.toList.map(city => Equal(JobCity, Text(SearchTerm.canonical(city)))) ++
+      SearchTerm.canonicalSorted(filter.skills).map(skill => Equal(JobSkill, Text(skill))) ++
       filter.createdAfter.toList.map(AtLeast(JobCreatedAt, _))
 
   def jobs(model: String, filter: JobSearchFilter): SearchEligibilityCriteria =

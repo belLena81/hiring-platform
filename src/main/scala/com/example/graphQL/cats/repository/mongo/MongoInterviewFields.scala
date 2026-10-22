@@ -13,7 +13,7 @@ private[mongo] object MongoInterviewFields {
     */
   val WorkflowType = "workflow"
 
-  /** Document types that earlier binaries stored and that migrations 027 and 028 removed; kept for the validators of
+  /** Document types that earlier binaries stored and that migrations 029 and 030 removed; kept for the validators of
     * the earlier generation, migration 022 and the two removal steps.
     */
   val RetiredHiringReceiptType = "hiringReceipt"

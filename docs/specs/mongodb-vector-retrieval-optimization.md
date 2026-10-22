@@ -240,6 +240,36 @@ Parent criteria MVR-04..10 close only when both `.L` and `.C` are recorded; unti
 4. Per filter bucket (broad/selective/empty) and concurrency record Recall@7 versus ENN, ANN p50/p95/p99, errors, index build time and bytes where available, and write p95 if an index change is involved.
 5. Decision: a setting is a candidate for cloud confirmation only if every bucket and concurrency meets Recall@7 >= 0.95 and ANN p95 <= baseline p95 + 10%, and it improves at least one measured dimension (latency, index bytes or build time) over current. Otherwise the outcome is "retain current settings". Write the outcome in this spec with record paths and `local-container` labels.
 
+### Canonical job filters and binary vectors: Atlas Local gates (MSC-08, MSC-09)
+
+[Hiring MongoDB schema consolidation](hiring-mongo-schema-consolidation.md) migrations `027_job_canonical_filters` and `028_binary_embedding_vectors` change what the job Atlas indexes read: the vector filter paths become `location.cityCanonical` and `skillsCanonical`, the lexical definition maps `skillsCanonical` and `location.cityCanonical` as tokens, the default index names change (`jobs_embedding_vector_canonical_v1`, `jobs_text_search_canonical_v1`) and the indexed `embedding` becomes a float32 binData vector. They are adopted on Atlas only with Atlas Local evidence under the decision-4 limits. The isolated-stack evidence is in the consolidation spec; **the rows below are pending a user run** (`ATLAS_TEST_URI` absent for the author; the project guard forbids agents from starting `compose.atlas-local.yaml`).
+
+| ID | Given / When / Then | Run | Evidence |
+|---|---|---|---|
+| MVR-04.L (MSC-08.1) | Given jobs stored by the new writers, when vector, hybrid and lexical job branches run with filters `TORONTO`/`SCALA` against a job stored as `Toronto`/`scala`, then the job is returned and a different city returns none; the consent truth table of the existing test still holds. | `AtlasHiringSearchIntegrationSpec` (tests `MVR-04.L MVR-05.L ...` and `MSC-08.1 MVR-04.L ...`) and `AtlasLexicalQueryFacetsIntegrationSpec` | Pending user run |
+| MVR-09.L | Given the job vector and lexical indexes created from the new definitions on Atlas Local, when setup waits for them, then both become queryable with binData documents and the definition check (canonical paths, `numDimensions`, `similarity`) passes; confirms Atlas Local accepts binData vectors under the unchanged definition. | Index provisioning inside every Atlas spec (`MongoHiringSetup.initialize` with `Some(indexes)`) | Pending user run |
+| MVR-07.L | Given the same seed, corpus, filters and model, when ANN and ENN are paired at concurrency 1 and 8 with float64-array storage (baseline) and float32-binary storage (candidate), then per-bucket Recall@7, ANN p50/p95/p99, errors, index bytes where available and write p95 are recorded for both, labelled `local-container`. | `SearchEvaluationAtlasRunner --vector-storage float64-array|float32-binary` | Pending user run |
+
+Commands (run from the repository root; Docker required; nothing here is committed or provisioned by agents):
+
+```
+docker compose -f compose.atlas-local.yaml up -d --wait
+export ATLAS_TEST_URI='mongodb://127.0.0.1:27018/?directConnection=true' ATLAS_TEST_DISPOSABLE=true ATLAS_TEST_ALLOWED_HOSTS=127.0.0.1:27018
+sbt 'IntegrationTest/testOnly *AtlasHiringSearchIntegrationSpec *AtlasLexicalQueryFacetsIntegrationSpec'
+for storage in float64-array float32-binary; do
+  for concurrency in 1 8; do
+    for temperature in cold warm; do
+      sbt "IntegrationTest / runMain com.example.graphQL.cats.repository.mongo.SearchEvaluationAtlasRunner --source-revision <working-tree-id> --database search_evaluation_binary_vectors --output .local/data/search-evaluation --documents 10000 --queries 100 --dimensions 1024 --num-candidates 100 --branch-limit 100 --page-size 7 --concurrency $concurrency --temperature $temperature --seed 20261005 --vector-storage $storage"
+    done
+  done
+done
+docker compose -f compose.atlas-local.yaml down --volumes
+```
+
+Post-gate operator step: once the canonical job indexes are verified queryable and the gates pass, drop the superseded Atlas search indexes `jobs_embedding_vector` and `jobs_text_search` (for example `db.jobs.dropSearchIndex("jobs_embedding_vector")` and `db.jobs.dropSearchIndex("jobs_text_search")` in mongosh against the same deployment). The application never drops or replaces a search index.
+
+Reading the result: the `float64-array` runs are the baseline and the `float32-binary` runs the candidate (same seed, corpus, `--num-candidates 100`). For every filter bucket (broad, selective, empty) and concurrency the candidate must meet **Recall@7 against ENN >= 0.95** and **ANN p95 <= baseline p95 + 10%**; write p95 regression must stay <= 10%. The runner does not time writes; the paired insert-batch timings printed by `MongoBinaryEmbeddingVectorIntegrationSpec` (isolated stack, not an Atlas figure) are the write evidence, and the user may rerun that spec on the same host. Storage is a benefit to report, not a gate: the isolated-stack `size` ratio is 0.312 (`MongoBinaryEmbeddingVectorIntegrationSpec`); record the Atlas Local vector index bytes if `$listSearchIndexes`/`collStats` expose them, otherwise "unavailable". If any limit fails, the outcome is "retain current settings" for the Atlas side; applied migrations are never edited, so the repair is a new forward migration that converts the vectors back to arrays (the embedding worker can also regenerate them). All figures are `local-container` and are not Atlas acceptance (`.C` rows stay DEFERRED).
+
 ### Cloud runbook for `.C` rows (deferred)
 
 Authorization required before any run, none implied by this spec: a named disposable cloud Atlas deployment (isolated, with version and tier recorded), an explicit budget ceiling and cleanup owner, and credentials supplied only through the environment variable the runner reads (via `DisposableAtlas.authorizedUri`), never committed or logged. `.C` runs must use the direct cloud URI, never a loopback tunnel or port-forward: loopback hosts are labelled `local-container`, which skips the native `$rerank` gate and would mislabel cloud evidence. Absent these, `.C` rows stay DEFERRED.

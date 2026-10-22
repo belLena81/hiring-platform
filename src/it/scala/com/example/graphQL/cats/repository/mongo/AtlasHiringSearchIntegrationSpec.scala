@@ -275,6 +275,57 @@ final class AtlasHiringSearchIntegrationSpec extends CatsEffectSuite {
     }
   }
 
+  test(
+    "MSC-08.1 MVR-04.L job vector, hybrid and lexical branches match the canonical city and skills ignoring case"
+  ) {
+    live { (db, policy) =>
+      val upper = JobSearchFilter(Some(" TORONTO "), Set("SCALA"), None)
+      val elsewhere = JobSearchFilter(Some("Ottawa"), Set("scala"), None)
+      def lexicalQuery(filter: JobSearchFilter) = LexicalSearchQuery(
+        "scala",
+        filter,
+        page,
+        UUID.randomUUID(),
+        ValidatedCandidateMatchFilters.from(filters).fold(errors => fail(errors.toString), identity)
+      )
+      def eventually[A](attempts: Int)(read: IO[Either[?, List[A]]])(done: List[A] => Boolean): IO[List[A]] =
+        read.flatMap {
+          case Right(hits) if done(hits) => IO.pure(hits)
+          case _ if attempts > 0         => IO.sleep(500.millis) *> eventually(attempts - 1)(read)(done)
+          case other => IO.raiseError(new AssertionError(s"Atlas canonical filter did not match: $other"))
+        }
+      for {
+        _ <- MongoHiringSetup.initialize(db, Some(indexes), Diagnostics.noop[IO])
+        seeded <- fixture(db)
+        (job, expected) = seeded
+        repo = repository(db, SearchFusionStrategy.ApplicationRrf, policy)
+        _ <- awaitIngestion(db, job, expected, policy)
+        vectorHits <- eventually(120)(repo.searchJobs(query(job, false).copy(filter = upper)).value)(
+          _.exists(_.id == job.id)
+        )
+        hybridHits <- eventually(120)(repo.searchJobs(query(job, true).copy(filter = upper)).value)(
+          _.exists(_.id == job.id)
+        )
+        lexicalHits <- eventually(120)(repo.lexicalJobs(lexicalQuery(upper)).value)(_.exists(_.id == job.id))
+        vectorMiss <- repo.searchJobs(query(job, false).copy(filter = elsewhere)).value
+        lexicalMiss <- repo.lexicalJobs(lexicalQuery(elsewhere)).value
+        // The in-application recheck is the same canonical comparison.
+        _ = assert(
+          SearchEligibilityPolicy.jobLexical(
+            JobSearchEligibility.fromJob(job),
+            upper.copy(city = upper.city.map(_.trim))
+          )
+        )
+      } yield {
+        assertEquals(vectorHits.map(_.id), List(job.id))
+        assertEquals(hybridHits.map(_.id), List(job.id))
+        assertEquals(lexicalHits.map(_.id), List(job.id))
+        assertEquals(vectorMiss.map(_.map(_.id)), Right(Nil))
+        assertEquals(lexicalMiss.map(_.map(_.id)), Right(Nil))
+      }
+    }
+  }
+
   test("AIR-07.1 $search lexical fallback ranks open jobs and eligible candidates while the provider is down") {
     live { (db, policy) =>
       val lexicalQuery = LexicalSearchQuery(

@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.api.http
 
+import io.github.iltotore.iron.autoRefine
 import cats.effect.{IO, Ref}
 import cats.syntax.all.*
 import com.comcast.ip4s.{Cidr, SocketAddress}

@@ -269,7 +269,7 @@ private[cats] object ServiceFixtures {
         .fromFEither(findOne(id).map(value => Right(value.map(Versioned(_, 0L)))))
 
     override def findSubmissionSnapshot(id: JobId): RepositoryF[IO, Option[JobSubmissionSnapshot]] =
-      findVersioned(id).map(_.map(job => JobSubmissionSnapshot(job.value.id, job.value.status, job.version)))
+      findVersioned(id).map(_.map(job => JobSubmissionSnapshot(job.value.id, job.value.status)))
 
     /** Records the list read a use case issued, so a test can see which projection it asked for. */
     private def recorded[A](page: JobPageRequest)(read: RepositoryF[IO, A]): RepositoryF[IO, A] =

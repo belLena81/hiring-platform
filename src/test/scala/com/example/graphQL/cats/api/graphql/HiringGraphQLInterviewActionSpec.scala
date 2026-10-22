@@ -1,9 +1,10 @@
 package com.example.graphQL.cats.api.graphql
 
+import io.github.iltotore.iron.autoRefine
 import cats.effect.{IO, Ref}
 import cats.syntax.all.*
 import com.example.graphQL.cats.api.admission.InterviewActionRateLimiter
-import com.example.graphQL.cats.config.RateLimitConfig
+import com.example.graphQL.cats.config.{AuthRateAttempts, RateLimitConfig}
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.workflow.*
@@ -652,7 +653,9 @@ final class HiringGraphQLInterviewActionSpec extends CatsEffectSuite {
       )
       .mkString("mutation { ", "\n", " }")
 
-  private def limiter(attempts: Int): IO[UserId => IO[Either[InterviewActionRateLimiter.RateLimited, Unit]]] =
+  private def limiter(
+      attempts: AuthRateAttempts
+  ): IO[UserId => IO[Either[InterviewActionRateLimiter.RateLimited, Unit]]] =
     InterviewActionRateLimiter
       .create(RateLimitConfig(60, attempts, 100))
       .map(limiter => (id: UserId) => limiter.permit(id).map(_.map(_ => ())))

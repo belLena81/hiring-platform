@@ -17,10 +17,10 @@ import java.util.{Date, UUID}
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
-/** Ledger steps 027 to 031: each retires a stored shape (hiring receipts, request receipts, the event copy of a search
-  * session work row, the kind and entity of an embedding work row, an application event without its actor's role).
-  * Every step is exercised the way an operator meets it: upgrade from 025, restart, concurrent start, fail closed with
-  * a checkpoint, resume and reopen.
+/** Ledger steps 029 to 034: each retires a stored shape (hiring receipts, request receipts, the event copy of a search
+  * session work row, the kind and entity of an embedding work row, an application event or interview workflow without
+  * its actor's role). Every step is exercised the way an operator meets it: upgrade from 025, restart, concurrent
+  * start, fail closed with a checkpoint, resume and reopen.
   */
 final class MongoStoredShapeRemovalIntegrationSpec extends MongoIntegrationSuite {
   override val munitIOTimeout: FiniteDuration = 15.minutes
@@ -55,15 +55,16 @@ final class MongoStoredShapeRemovalIntegrationSpec extends MongoIntegrationSuite
   private def installed(database: MongoDatabase[IO], name: String, expected: Document): IO[Boolean] =
     MongoHiringSetup.setupDatabase(database).flatMap(MongoHiringValidators.validatorMatches(_, name, expected))
 
-  /** The database an upgrade from 025 finds: the generation of validators 025 installed, the two receipt indexes, and
-    * no proof of the later steps.
+  /** The database an upgrade from 025 finds: the generation of validators 025 installed (the users definition stays
+    * current, it is installed at every start), the two receipt indexes, and no proof of the later steps that rebuild a
+    * validator installed here (the outbox envelope step 026 and the six steps under test).
     */
   private def atTwentyFive(database: MongoDatabase[IO]): IO[Unit] =
     for {
       _ <- init(database)
       setup <- MongoHiringSetup.setupDatabase(database)
-      _ <- MongoOperationalValidators.installedBy025.traverse_ { case (name, validator) =>
-        MongoHiringValidators.install(setup, name, validator)
+      _ <- MongoOperationalValidators.installedBy025.filterNot(_._1 == MongoCollections.Users).traverse_ {
+        case (name, validator) => MongoHiringValidators.install(setup, name, validator)
       }
       inbox <- documents(database, MongoCollections.InterviewWorkflowInbox)
       _ <- inbox.createIndex(
@@ -78,7 +79,9 @@ final class MongoStoredShapeRemovalIntegrationSpec extends MongoIntegrationSuite
         new IndexOptions().name(MongoIndexNames.InterviewWorkflowRequestReceipt).sparse(true)
       )
       ledger <- documents(database, MongoCollections.HiringMigrationLedger)
-      _ <- ledger.deleteMany(Filters.in(MongoFields.Id, Retired.map(_.value)*))
+      _ <- ledger.deleteMany(
+        Filters.in(MongoFields.Id, (MigrationIds.OutboxEnvelopeSource :: Retired).map(_.value)*)
+      )
     } yield ()
 
   private def dataWrites(names: Set[String])(fixture: MongoAccessEvaluationSupport.Fixture): IO[List[String]] =
@@ -90,7 +93,7 @@ final class MongoStoredShapeRemovalIntegrationSpec extends MongoIntegrationSuite
     )
 
   // ---------------------------------------------------------------------------------------------------------------
-  // 027 and 028: a document type disappears
+  // 029 and 030: a document type disappears
   // ---------------------------------------------------------------------------------------------------------------
 
   private final case class DocumentTypeRemoval(
@@ -273,7 +276,7 @@ final class MongoStoredShapeRemovalIntegrationSpec extends MongoIntegrationSuite
     }
   }
 
-  test("AC-04.2 migration 028 leaves mutation receipts, workflows and the other inbox types alone") {
+  test("AC-04.2 migration 030 leaves mutation receipts, workflows and the other inbox types alone") {
     mongoResource.use { fixture =>
       val database = fixture.database
       val receipt = new Document(MongoFields.Id, UUID.randomUUID().toString)
@@ -299,7 +302,7 @@ final class MongoStoredShapeRemovalIntegrationSpec extends MongoIntegrationSuite
     }
   }
 
-  test("AC-04.2 migration 019 still creates its index on a database before it, and 028 retires it in the same start") {
+  test("AC-04.2 migration 019 still creates its index on a database before it, and 030 retires it in the same start") {
     mongoResource.use { fixture =>
       val database = fixture.database
       for {
@@ -311,17 +314,17 @@ final class MongoStoredShapeRemovalIntegrationSpec extends MongoIntegrationSuite
         _ <- init(database)
         after <- indexNames(database, MongoCollections.InterviewWorkflows)
         row019 <- ledgerRow(database, MigrationIds.InterviewRequestReceiptIndex)
-        row028 <- ledgerRow(database, MigrationIds.InterviewRequestReceiptRemoval)
+        row030 <- ledgerRow(database, MigrationIds.InterviewRequestReceiptRemoval)
       } yield {
         assert(!after.contains(MongoIndexNames.InterviewWorkflowRequestReceipt), clue(after))
         assertEquals(row019.map(_.getString(MongoFields.State)), Some("Complete"))
-        assertEquals(row028.map(_.getString(MongoFields.State)), Some("Complete"))
+        assertEquals(row030.map(_.getString(MongoFields.State)), Some("Complete"))
       }
     }
   }
 
   // ---------------------------------------------------------------------------------------------------------------
-  // 029 and 030: redundant fields of a work row disappear
+  // 031 and 032: redundant fields of a work row disappear
   // ---------------------------------------------------------------------------------------------------------------
 
   private final case class FieldRemoval(
@@ -477,7 +480,7 @@ final class MongoStoredShapeRemovalIntegrationSpec extends MongoIntegrationSuite
   }
 
   // ---------------------------------------------------------------------------------------------------------------
-  // 031: an application event always records the role its actor acted in
+  // 033: an application event always records the role its actor acted in
   // ---------------------------------------------------------------------------------------------------------------
 
   private def eventDocument(index: Int, withRole: Boolean): Document = {
@@ -500,7 +503,7 @@ final class MongoStoredShapeRemovalIntegrationSpec extends MongoIntegrationSuite
 
   private val withoutRole: Bson = Filters.exists(MongoFields.ActorRole, false)
 
-  test("MR-09.6 migration 031 installs the successor validator over events that all record a role, writing nothing") {
+  test("MR-09.6 migration 033 installs the successor validator over events that all record a role, writing nothing") {
     mongoResource.use { fixture =>
       val database = fixture.database
       for {
@@ -542,7 +545,7 @@ final class MongoStoredShapeRemovalIntegrationSpec extends MongoIntegrationSuite
     }
   }
 
-  test("MR-09.6 migration 031 fails closed on an event without a role, rewrites nothing and completes once repaired") {
+  test("MR-09.6 migration 033 fails closed on an event without a role, rewrites nothing and completes once repaired") {
     mongoResource.use { fixture =>
       val database = fixture.database
       val rows = (0 until 600).toList.map(eventDocument(_, withRole = true))
@@ -583,7 +586,7 @@ final class MongoStoredShapeRemovalIntegrationSpec extends MongoIntegrationSuite
     }
   }
 
-  test("MR-09.6 migration 031 reopens when an earlier binary stores an event without a role again") {
+  test("MR-09.6 migration 033 reopens when an earlier binary stores an event without a role again") {
     mongoResource.use { fixture =>
       val database = fixture.database
       for {
@@ -615,7 +618,7 @@ final class MongoStoredShapeRemovalIntegrationSpec extends MongoIntegrationSuite
   }
 
   // ---------------------------------------------------------------------------------------------------------------
-  // 032: an interview workflow always records the role of its initiator
+  // 034: an interview workflow always records the role of its initiator
   // ---------------------------------------------------------------------------------------------------------------
 
   private def workflowDocument(index: Int, withRole: Boolean): Document = {
@@ -638,7 +641,7 @@ final class MongoStoredShapeRemovalIntegrationSpec extends MongoIntegrationSuite
     Filters.and(Filters.eq(MongoFields.DocumentType, "workflow"), Filters.exists("initiatedByRole", false))
 
   test(
-    "MR-09.7 migration 032 installs the successor validator over workflows that all record a role, writing nothing"
+    "MR-09.7 migration 034 installs the successor validator over workflows that all record a role, writing nothing"
   ) {
     mongoResource.use { fixture =>
       val database = fixture.database
@@ -676,7 +679,7 @@ final class MongoStoredShapeRemovalIntegrationSpec extends MongoIntegrationSuite
   }
 
   test(
-    "MR-09.7 migration 032 fails closed on a workflow without a role, rewrites nothing and completes once repaired"
+    "MR-09.7 migration 034 fails closed on a workflow without a role, rewrites nothing and completes once repaired"
   ) {
     mongoResource.use { fixture =>
       val database = fixture.database

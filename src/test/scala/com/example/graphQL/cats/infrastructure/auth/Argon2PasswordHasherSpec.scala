@@ -2,6 +2,7 @@ package com.example.graphQL.cats.infrastructure.auth
 
 import cats.effect.IO
 import cats.effect.std.Semaphore
+import io.github.iltotore.iron.autoRefine
 import com.example.graphQL.cats.config.PasswordHashConfig
 import munit.CatsEffectSuite
 
@@ -23,9 +24,6 @@ final class Argon2PasswordHasherSpec extends CatsEffectSuite {
     }
   }
 
-  test("an unusable hashing configuration fails at creation, not on the first unknown-user check") {
-    Semaphore[IO](1).flatMap(permits => Argon2PasswordHasher.create(PasswordHashConfig(0, 0, 0), permits).attempt).map {
-      result => assert(result.isLeft)
-    }
-  }
+  // An unusable hashing configuration (zero iterations, memory or parallelism) is unrepresentable: the refined
+  // `PasswordHashConfig` fields reject it at decode time, covered by `AppConfigSpec`.
 }

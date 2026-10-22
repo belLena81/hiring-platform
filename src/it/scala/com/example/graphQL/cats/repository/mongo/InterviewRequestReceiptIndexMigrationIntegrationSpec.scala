@@ -10,8 +10,8 @@ import org.bson.Document
 import java.util.UUID
 import scala.concurrent.duration.*
 
-/** `019_interview_request_receipt_index` and its successor `028_interview_request_receipt_removal`: 019 still records
-  * its proof, the index it created is retired by 028, and retention stays index-served without it.
+/** `019_interview_request_receipt_index` and its successor `030_interview_request_receipt_removal`: 019 still records
+  * its proof, the index it created is retired by 030, and retention stays index-served without it.
   */
 final class InterviewRequestReceiptIndexMigrationIntegrationSpec extends MongoIntegrationSuite {
   override val munitIOTimeout: FiniteDuration = 5.minutes
@@ -27,7 +27,7 @@ final class InterviewRequestReceiptIndexMigrationIntegrationSpec extends MongoIn
       .collection(database, MongoCollections.InterviewWorkflows)
       .flatMap(_.listIndexes[Document].map(_.toList))
 
-  test("a fresh start records the proof of 019 and ends without the request index that 028 retires") {
+  test("a fresh start records the proof of 019 and ends without the request index that 030 retires") {
     mongoResource.use { fixture =>
       for {
         _ <- initialize(fixture.database)

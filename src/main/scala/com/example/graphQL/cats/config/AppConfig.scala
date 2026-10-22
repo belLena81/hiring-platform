@@ -9,7 +9,7 @@ import scala.concurrent.duration.FiniteDuration
 final case class AppConfig(
     host: Host,
     port: Ip4sPort,
-    admissionPermits: Int,
+    admissionPermits: AdmissionPermits,
     requestTimeout: FiniteDuration,
     trustedProxy: TrustedProxyConfig,
     mongoUri: String,

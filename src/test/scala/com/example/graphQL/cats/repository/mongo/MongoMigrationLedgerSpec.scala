@@ -87,13 +87,15 @@ final class MongoMigrationLedgerSpec extends FunSuite {
       "023_consumer_receipt_identity",
       "024_optional_field_absence",
       "025_operational_collection_validators",
-      // 026 is reserved for the outbox envelope migration of the schema consolidation.
-      "027_interview_hiring_receipt_removal",
-      "028_interview_request_receipt_removal",
-      "029_search_session_work_single_copy",
-      "030_embedding_work_key_from_identity",
-      "031_application_event_actor_role",
-      "032_interview_workflow_initiator_role"
+      "026_outbox_envelope_source",
+      "027_job_canonical_filters",
+      "028_binary_embedding_vectors",
+      "029_interview_hiring_receipt_removal",
+      "030_interview_request_receipt_removal",
+      "031_search_session_work_single_copy",
+      "032_embedding_work_key_from_identity",
+      "033_application_event_actor_role",
+      "034_interview_workflow_initiator_role"
     )
     val actual = List(
       MigrationIds.UserJobRevisions,
@@ -121,6 +123,9 @@ final class MongoMigrationLedgerSpec extends FunSuite {
       MigrationIds.ConsumerReceiptIdentity,
       MigrationIds.OptionalFieldAbsence,
       MigrationIds.OperationalCollectionValidators,
+      MigrationIds.OutboxEnvelopeSource,
+      MigrationIds.JobCanonicalFilters,
+      MigrationIds.BinaryEmbeddingVectors,
       MigrationIds.InterviewHiringReceiptRemoval,
       MigrationIds.InterviewRequestReceiptRemoval,
       MigrationIds.SearchSessionWorkSingleCopy,
@@ -145,6 +150,7 @@ final class MongoMigrationLedgerSpec extends FunSuite {
       MongoOperationalCollectionValidatorMigrations.MigrationId,
       MigrationIds.OperationalCollectionValidators.value
     )
+    assertEquals(MongoOutboxEnvelopeSourceMigrations.MigrationId, MigrationIds.OutboxEnvelopeSource.value)
     assertEquals(
       MongoInterviewSubjectAttributionMigrations.MigrationId,
       MigrationIds.InterviewSubjectAttribution.value

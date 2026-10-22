@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.api.http
 
+import io.github.iltotore.iron.autoRefine
 import cats.effect.{Deferred, IO, Ref, Resource}
 import cats.syntax.all.*
 import com.example.graphQL.cats.api.auth.JwtActorAuthenticator

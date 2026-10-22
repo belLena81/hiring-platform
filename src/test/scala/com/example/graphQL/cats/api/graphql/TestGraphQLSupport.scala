@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.api.graphql
 
+import io.github.iltotore.iron.autoRefine
 import cats.data.EitherT
 import cats.data.Kleisli
 import cats.effect.{IO, Resource}

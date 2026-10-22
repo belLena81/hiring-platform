@@ -6,6 +6,7 @@ import com.mongodb.ConnectionString
 import io.github.iltotore.iron.pureconfig.given
 import _root_.pureconfig.*
 import _root_.pureconfig.error.CannotConvert
+import scala.concurrent.duration.*
 
 /** Value-level readers: a failed conversion reports the setting's path, which `ConfigError.forPath` maps to its key. */
 private object HttpMongoReaders {
@@ -14,10 +15,9 @@ private object HttpMongoReaders {
     ConfigReader[String].emap(value =>
       IpAddress.fromString(value).toRight(CannotConvert(value, "IpAddress", "invalid"))
     )
+  // The bindable range is owned by the `Port` refinement; ip4s only re-expresses an already valid value.
   given ConfigReader[Ip4sPort] =
-    ConfigReader[Int].emap(value =>
-      Ip4sPort.fromInt(value).filter(_.value > 0).toRight(CannotConvert(value.toString, "Port", "invalid"))
-    )
+    ConfigReader[Port].emap(value => Ip4sPort.fromInt(value).toRight(CannotConvert(value.toString, "Port", "invalid")))
   // The URI may embed credentials, so it never appears in the failure. Repository results are trusted only when the
   // write concern acknowledges them, so an unacknowledged (w=0) concern is rejected at the configuration boundary.
   given ConfigReader[ConnectionString] =
@@ -37,7 +37,7 @@ private object HttpMongoReaders {
       ) =>
         val defaults = DiscoveryConfig()
         DiscoveryConfig(
-          maxTime.getOrElse(defaults.maxTimeMillis),
+          maxTime.fold(defaults.maxTime)(_.millis),
           permits.getOrElse(defaults.permits),
           roots.getOrElse(defaults.maxRoots),
           facetLimit.getOrElse(defaults.lexicalFacetMatchLimit)
@@ -64,7 +64,7 @@ private[config] final case class RawHttpConfig(
 ) derives ConfigReader
 private[config] final case class RawMongoConfig(
     uri: ConnectionString,
-    database: String,
+    database: MongoDatabaseName,
     resetOnStart: Option[Boolean],
     discovery: Option[DiscoveryConfig]
 ) derives ConfigReader
