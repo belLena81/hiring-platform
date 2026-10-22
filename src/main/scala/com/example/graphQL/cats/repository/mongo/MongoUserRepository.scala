@@ -203,7 +203,7 @@ final class MongoUserRepository(
       passwordHash: PasswordHash,
       context: MutationWriteContext
   ): RepositoryF[IO, Unit] =
-    if (!user.roleProfileIsValid || user.role != UserRole.Admin || !user.adminSingleton)
+    if (!user.roleProfileIsValid || user.role != UserRole.Admin)
       EitherT.leftT[IO, Unit](RepositoryError.Conflict)
     else
       MongoMutationWriteContext

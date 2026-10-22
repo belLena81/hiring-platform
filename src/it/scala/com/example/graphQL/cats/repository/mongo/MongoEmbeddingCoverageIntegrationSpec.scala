@@ -54,10 +54,9 @@ final class MongoEmbeddingCoverageIntegrationSpec extends MongoIntegrationSuite 
       List("Cats Effect"),
       Set("Scala"),
       Location("Cyprus", Some("Nicosia"), remote = true),
-      status,
+      JobState.requested(status, now.minusSeconds(1800)),
       now.minusSeconds(3600),
-      now.minusSeconds(1800),
-      Option.when(status == JobStatus.Closed)(now.minusSeconds(1800))
+      now.minusSeconds(1800)
     )
     val hash = SourceHash.sha256(SearchableText.job(base))
     base.copy(embedding = embedding.map { case (model, fresh) =>

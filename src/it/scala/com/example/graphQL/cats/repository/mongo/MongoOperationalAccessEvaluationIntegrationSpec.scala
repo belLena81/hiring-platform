@@ -51,8 +51,7 @@ final class MongoOperationalAccessEvaluationIntegrationSpec extends MongoIntegra
         case UserRole.Recruiter => Some(UserProfile.Recruiter(RecruiterProfile("Synthetic organization", None)))
         case UserRole.Admin     => None
       },
-      now,
-      adminSingleton = role == UserRole.Admin
+      now
     )
 
   private val candidates = (0 until 32).toList.map(user(_, UserRole.Candidate))
@@ -67,7 +66,7 @@ final class MongoOperationalAccessEvaluationIntegrationSpec extends MongoIntegra
       List("Bounded fixture"),
       if (index % 3 == 0) Set("Scala", "MongoDB") else Set("Scala"),
       Location("Cyprus", Some(if (index % 2 == 0) "Nicosia" else "Limassol"), remote = false),
-      if (index % 4 == 3) JobStatus.Closed else JobStatus.Open,
+      if (index % 4 == 3) JobState.Closed(now) else JobState.Open,
       now.minusSeconds((index / 8).toLong),
       now
     )
@@ -93,7 +92,7 @@ final class MongoOperationalAccessEvaluationIntegrationSpec extends MongoIntegra
         now.minusSeconds(index.toLong),
         None,
         None,
-        None
+        UserRole.Candidate
       )
     }
   }
@@ -587,7 +586,7 @@ final class MongoOperationalAccessEvaluationIntegrationSpec extends MongoIntegra
               )
             )
           ),
-          accountStatus = status
+          state = com.example.graphQL.cats.service.ServiceFixtures.accountStateOf(status)
         )
         val document = MongoHiringCodecs.user(value)
         if (!consentPresent) { val _ = document.get("profile", classOf[Document]).remove("recruiterSearchOptIn") }

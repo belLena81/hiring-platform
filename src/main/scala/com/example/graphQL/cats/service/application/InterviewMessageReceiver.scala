@@ -19,7 +19,7 @@ private[application] final class InterviewMessageReceiver[F[_]: Temporal](
     currentTime: F[java.time.Instant],
     executor: InterviewProviderExecutor[F]
 ) {
-  import reporter.report
+  import reporter.{failed, report}
 
   private val scheduling = InterviewSchedulingOrchestrator(repository)
 
@@ -169,10 +169,10 @@ private[application] final class InterviewMessageReceiver[F[_]: Temporal](
       case Right(InterviewMessagePolicy.LifecycleReplayFailure.Notification) =>
         settled(
           command.fold(Applicative[F].pure(false))(record =>
-            repository
-              .settleNotificationResult(record, InterviewNotificationSettlement.Exhausted(step), now)
-              .value
-              .map(_.isRight)
+            reporter.succeeded(
+              repository.settleNotificationResult(record, InterviewNotificationSettlement.Exhausted(step), now),
+              "interviewWorkflow.settleNotification"
+            )
           )
         )
       case Right(InterviewMessagePolicy.LifecycleReplayFailure.Workflow(event)) =>
@@ -180,11 +180,14 @@ private[application] final class InterviewMessageReceiver[F[_]: Temporal](
           workflow.fold(Applicative[F].pure(false))(current =>
             repository
               .applyLifecycle(current.id, current.revision, event, InterviewLifecycleOrigin.Internal(cause), now, None)
-              .value
-              .map {
-                case Right(InterviewLifecycleOutcome.Applied(_) | InterviewLifecycleOutcome.Duplicate(_)) => true
-                case _                                                                                    => false
-              }
+              .foldF(
+                error => failed("interviewWorkflow.applyLifecycle", error).as(false),
+                {
+                  case InterviewLifecycleOutcome.Applied(_) | InterviewLifecycleOutcome.Duplicate(_) =>
+                    Applicative[F].pure(true)
+                  case _ => Applicative[F].pure(false)
+                }
+              )
           )
         )
     }
@@ -205,29 +208,28 @@ private[application] final class InterviewMessageReceiver[F[_]: Temporal](
                 claimAt.plusMillis(settings.claimLease.toMillis),
                 settings.maxAttempts
               )
-              .value
-              .flatMap {
-                case Left(_)                                    => report("interviewWorkflow.claimExecution").as(false)
-                case Right(InterviewExecutionClaimOutcome.Busy) => Applicative[F].pure(false)
-                case Right(
-                      InterviewExecutionClaimOutcome.AlreadyHandled |
+              .foldF(
+                error => failed("interviewWorkflow.claimExecution", error).as(false),
+                {
+                  case InterviewExecutionClaimOutcome.Busy => Applicative[F].pure(false)
+                  case InterviewExecutionClaimOutcome.AlreadyHandled |
                       InterviewExecutionClaimOutcome.ReconciliationQueued |
-                      InterviewExecutionClaimOutcome.RepairRequired
-                    ) =>
-                  Applicative[F].pure(true)
-                case Right(InterviewExecutionClaimOutcome.Acquired(claim)) =>
-                  executor
-                    .execute(workflow, command.command, claim)
-                    .timeoutTo(settings.providerTimeout, Applicative[F].pure(InterviewResult.OutcomeUnknown))
-                    .flatMap(result =>
-                      currentTime.flatMap(at =>
-                        reporter.succeeded(
-                          repository.recordResult(claim, result, at),
-                          "interviewWorkflow.recordResult"
+                      InterviewExecutionClaimOutcome.RepairRequired =>
+                    Applicative[F].pure(true)
+                  case InterviewExecutionClaimOutcome.Acquired(claim) =>
+                    executor
+                      .execute(workflow, command.command, claim)
+                      .timeoutTo(settings.providerTimeout, Applicative[F].pure(InterviewResult.OutcomeUnknown))
+                      .flatMap(result =>
+                        currentTime.flatMap(at =>
+                          reporter.succeeded(
+                            repository.recordResult(claim, result, at),
+                            "interviewWorkflow.recordResult"
+                          )
                         )
                       )
-                    )
-              }
+                }
+              )
           }
       }
     }

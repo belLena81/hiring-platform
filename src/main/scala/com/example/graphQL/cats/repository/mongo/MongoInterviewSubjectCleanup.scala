@@ -22,7 +22,8 @@ import com.example.graphQL.cats.service.port.{
   InterviewCleanupPage,
   RepositoryF
 }
-import com.example.graphQL.cats.service.{RepositoryError, Diagnostics}
+import com.example.graphQL.cats.service.{Diagnostics, LogEvent, RepositoryError}
+import com.example.graphQL.cats.service.RepositoryReporting.orReport
 import mongo4cats.client.ClientSession
 import mongo4cats.database.MongoDatabase
 import org.bson.Document
@@ -129,15 +130,13 @@ final class MongoInterviewSubjectCleanup(
   }
 
   /** Malformed evidence cannot certify public deletion completion. */
-  def complete(subject: UserId): IO[Boolean] = find(subject).value.map {
-    case Right(None)        => true
-    case Right(Some(value)) =>
-      value.state match {
+  def complete(subject: UserId): IO[Boolean] =
+    find(subject)
+      .map(_.forall(_.state match {
         case InterviewCleanupState.Complete(_) => true
         case _                                 => false
-      }
-    case Left(_) => false
-  }
+      }))
+      .orReport(diagnostics, LogEvent.MongoRepositoryFailed)(false)
 
   override def pendingPage(
       cursor: Option[InterviewCleanupCursor],
@@ -394,12 +393,14 @@ final class MongoInterviewSubjectCleanup(
       RepositoryF
         .lift(clock.realTimeInstant)
         .flatMap { now =>
-          RepositoryF.fromFEither(holds.cancel(hold, now).value.map {
-            case Right(InterviewCalendarCancellation.Cancelled(at))        => Right(at)
-            case Right(InterviewCalendarCancellation.AlreadyCancelled(at)) => Right(at)
-            case Right(InterviewCalendarCancellation.UnknownReservation)   => Left(RepositoryError.Conflict)
-            case Left(_)                                                   => Left(RepositoryError.Unavailable)
-          })
+          holds
+            .cancel(hold, now)
+            .leftMap(_ => RepositoryError.Unavailable)
+            .subflatMap {
+              case InterviewCalendarCancellation.Cancelled(at)        => Right(at)
+              case InterviewCalendarCancellation.AlreadyCancelled(at) => Right(at)
+              case InterviewCalendarCancellation.UnknownReservation   => Left(RepositoryError.Conflict)
+            }
         }
         .flatMap(at =>
           // Mirrors the confirmed release locally; only a still-held row changes, so a replay is a no-op.

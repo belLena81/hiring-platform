@@ -6,10 +6,14 @@ import com.example.graphQL.cats.config.AppConfig
 import com.example.graphQL.cats.infrastructure.kafka.KafkaProducerGenerationRetirement
 import com.example.graphQL.cats.infrastructure.logging.SafeDiagnostics
 import com.example.graphQL.cats.runtime.HiringLogValues
+import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogFields, RepositoryError}
 import io.circe.Json
 
 /** Inventory is read-only; retirement requires stopping the selected publisher before invoking its exact ID. */
 object ProducerGenerationRetirementMain extends IOApp {
+  private def failed(diagnostics: Diagnostics[IO])(error: RepositoryError): IO[ExitCode] =
+    diagnostics.emit(LogEvent.MongoRepositoryFailed, fields = LogFields.repositoryFailure(error)).as(ExitCode.Error)
+
   override def run(args: List[String]): IO[ExitCode] = {
     val operation: Option[Either[Option[String], String]] = args match {
       case "list" :: Nil                                                              => Some(Left(None))
@@ -34,23 +38,22 @@ object ProducerGenerationRetirementMain extends IOApp {
                 )
                 selected match {
                   case Left(cursor) =>
-                    maintenance.inventory(cursor).value.flatMap {
-                      case Left(_)     => IO.pure(ExitCode.Error)
-                      case Right(page) =>
-                        IO.println(
-                          Json
-                            .obj(
-                              "transactionalIds" -> Json.arr(page.transactionalIds.map(Json.fromString)*),
-                              "nextCursor" -> page.nextCursor.fold(Json.Null)(Json.fromString)
-                            )
-                            .noSpaces
-                        ).as(ExitCode.Success)
-                    }
+                    maintenance
+                      .inventory(cursor)
+                      .foldF(
+                        failed(diagnostics),
+                        page =>
+                          IO.println(
+                            Json
+                              .obj(
+                                "transactionalIds" -> Json.arr(page.transactionalIds.map(Json.fromString)*),
+                                "nextCursor" -> page.nextCursor.fold(Json.Null)(Json.fromString)
+                              )
+                              .noSpaces
+                          ).as(ExitCode.Success)
+                      )
                   case Right(id) =>
-                    maintenance.retire(id).value.map {
-                      case Right(_) => ExitCode.Success
-                      case Left(_)  => ExitCode.Error
-                    }
+                    maintenance.retire(id).foldF(failed(diagnostics), _ => IO.pure(ExitCode.Success))
                 }
               }
             }

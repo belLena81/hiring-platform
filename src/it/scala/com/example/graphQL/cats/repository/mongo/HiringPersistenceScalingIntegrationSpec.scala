@@ -67,7 +67,7 @@ final class HiringPersistenceScalingIntegrationSpec extends MongoIntegrationSuit
         remote = false,
         coordinates = Some(GeoPoint(center.latitude + (index % 20) * 0.00001d, center.longitude))
       ),
-      JobStatus.Open,
+      JobState.Open,
       now.minusSeconds(index.toLong),
       now
     )
@@ -225,7 +225,7 @@ final class HiringPersistenceScalingIntegrationSpec extends MongoIntegrationSuit
           now,
           None,
           None,
-          None
+          UserRole.Candidate
         )
         applicant = candidate.copy(id = application.candidateId, name = s"Synthetic applicant $index")
         _ <- MongoRepositoryTestSupport.insertOne(
@@ -381,7 +381,7 @@ final class HiringPersistenceScalingIntegrationSpec extends MongoIntegrationSuit
               now.minusMillis(index.toLong),
               None,
               None,
-              None
+              UserRole.Candidate
             )
             MongoHiringCodecs
               .outboxRecord(OperationalEvents.statusChanged(event.id.value, application, event), now.minusSeconds(1))

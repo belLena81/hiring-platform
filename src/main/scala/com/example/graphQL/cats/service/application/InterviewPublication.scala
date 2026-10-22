@@ -17,7 +17,7 @@ private[application] final class InterviewPublication[F[_]: Temporal](
     reporter: InterviewWorkerReporter[F],
     currentTime: F[java.time.Instant]
 ) {
-  import reporter.{observe, report}
+  import reporter.{failed, observe}
 
   private enum PublicationOutcome {
     case Published, LeaseLost, CoordinationUnavailable
@@ -94,38 +94,42 @@ private[application] final class InterviewPublication[F[_]: Temporal](
         "interviewWorkflow.deferPublication"
       ).as(false)
     )
+    def publishAuthorized: F[Boolean] =
+      publishWithLease(transport, message, claim).attempt.flatMap {
+        case Right(PublicationOutcome.Published) =>
+          currentTime.flatMap(at =>
+            reporter.succeeded(repository.markPublished(claim, at), "interviewWorkflow.markPublished")
+          )
+        case Right(PublicationOutcome.LeaseLost)                                     => Applicative[F].pure(false)
+        case Right(PublicationOutcome.CoordinationUnavailable)                       => deferCoordination
+        case Left(fenced: InterviewProducerGenerationFenced)                         => Temporal[F].raiseError(fenced)
+        case Left(_) if claim.record.publicationAttempts + 1 >= settings.maxAttempts => finish
+        case Left(_)                                                                 =>
+          currentTime.flatMap { at =>
+            val delay = RetryBackoff.exponentialMillis(
+              claim.record.publicationAttempts + 1,
+              settings.initialBackoff.toMillis,
+              settings.maxBackoff.toMillis
+            )
+            observe(
+              repository.retry(claim, at, at.plusMillis(delay), InterviewFailureCode.PublicationUnavailable),
+              "interviewWorkflow.retryPublication"
+            ).as(false)
+          }
+      }
     if (claim.record.publicationAttempts >= settings.maxAttempts) finish
     else
-      currentTime
-        .flatMap(checkedAt => repository.authorizePublication(claim, transport.generationFor(message), checkedAt).value)
-        .flatMap {
-          case Left(RepositoryError.Unavailable) => deferCoordination
-          case Left(_)                           => report("interviewWorkflow.authorizePublication").as(false)
-          case Right(false)                      => Applicative[F].pure(false)
-          case Right(true)                       =>
-            publishWithLease(transport, message, claim).attempt.flatMap {
-              case Right(PublicationOutcome.Published) =>
-                currentTime.flatMap(at =>
-                  reporter.succeeded(repository.markPublished(claim, at), "interviewWorkflow.markPublished")
-                )
-              case Right(PublicationOutcome.LeaseLost)               => Applicative[F].pure(false)
-              case Right(PublicationOutcome.CoordinationUnavailable) => deferCoordination
-              case Left(fenced: InterviewProducerGenerationFenced)   => Temporal[F].raiseError(fenced)
-              case Left(_) if claim.record.publicationAttempts + 1 >= settings.maxAttempts => finish
-              case Left(_)                                                                 =>
-                currentTime.flatMap { at =>
-                  val delay = RetryBackoff.exponentialMillis(
-                    claim.record.publicationAttempts + 1,
-                    settings.initialBackoff.toMillis,
-                    settings.maxBackoff.toMillis
-                  )
-                  observe(
-                    repository.retry(claim, at, at.plusMillis(delay), InterviewFailureCode.PublicationUnavailable),
-                    "interviewWorkflow.retryPublication"
-                  ).as(false)
-                }
-            }
-        }
+      currentTime.flatMap(checkedAt =>
+        repository
+          .authorizePublication(claim, transport.generationFor(message), checkedAt)
+          .foldF(
+            {
+              case RepositoryError.Unavailable => deferCoordination
+              case error                       => failed("interviewWorkflow.authorizePublication", error).as(false)
+            },
+            authorized => if (authorized) publishAuthorized else Applicative[F].pure(false)
+          )
+      )
   }
 
   private def publishWithLease(
@@ -134,11 +138,12 @@ private[application] final class InterviewPublication[F[_]: Temporal](
       claim: ClaimedInterviewWorkflowCommand
   ): F[PublicationOutcome] = {
     val renew: F[Either[LeaseLost, Unit]] = currentTime.flatMap { now =>
-      repository.renewPublication(claim, now, now.plusMillis(settings.claimLease.toMillis)).value.map {
-        case Right(true)  => Right(())
-        case Right(false) => Left(LeaseLost.Expired)
-        case Left(_)      => Left(LeaseLost.Unavailable)
-      }
+      repository
+        .renewPublication(claim, now, now.plusMillis(settings.claimLease.toMillis))
+        .fold[Either[LeaseLost, Unit]](
+          _ => Left(LeaseLost.Unavailable),
+          renewed => Either.cond(renewed, (), LeaseLost.Expired)
+        )
     }
     // Loading and authorization can consume most of the original claim lease, so it is renewed before publishing.
     LeaseHeartbeat.guard(settings.claimLease)(renew)(transport.publish(message)).map {

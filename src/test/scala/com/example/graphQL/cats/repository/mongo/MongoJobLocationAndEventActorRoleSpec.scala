@@ -6,7 +6,7 @@ import com.example.graphQL.cats.domain.model.{
   ApplicationEvent,
   ApplicationStatus,
   Job,
-  JobStatus,
+  JobState,
   Location,
   SearchableText,
   UserRole
@@ -35,12 +35,12 @@ class MongoJobLocationAndEventActorRoleSpec extends FunSuite {
     List("Cats Effect"),
     Set("Scala"),
     Location("Cyprus", city, remote = true),
-    JobStatus.Open,
+    JobState.Open,
     now,
     now
   )
 
-  private def event(role: Option[UserRole]) = ApplicationEvent(
+  private def event(role: UserRole) = ApplicationEvent(
     eventId,
     applicationId,
     Some(ApplicationStatus.Interview),
@@ -80,25 +80,24 @@ class MongoJobLocationAndEventActorRoleSpec extends FunSuite {
   }
 
   test("AC-08.2 status event stores the acting role and reads it back") {
-    val document = MongoHiringCodecs.event(event(Some(UserRole.Admin)))
+    val document = MongoHiringCodecs.event(event(UserRole.Admin))
     assertEquals(document.getString("actorRole"), "Admin")
-    assertEquals(MongoHiringCodecs.readEvent(document).toEither, Right(event(Some(UserRole.Admin))))
+    assertEquals(MongoHiringCodecs.readEvent(document).toEither, Right(event(UserRole.Admin)))
   }
 
-  test("AC-08.2 scheduled interview workflow stores the scheduler's role and old documents read without one") {
+  test("AC-08.2 scheduled interview workflow stores the scheduler's role and a workflow without one fails closed") {
     import com.example.graphQL.cats.domain.InterviewLifecycleFixtures.workflowIn
     val workflow = workflowIn(com.example.graphQL.cats.domain.workflow.InterviewWorkflowPhase.ReservationPending)
-    val scheduled = workflow.copy(initiatedByRole = Some(UserRole.Admin))
+    val scheduled = workflow.copy(initiatedByRole = UserRole.Admin)
     val document = MongoInterviewWorkflowCodec.workflowDocument(scheduled)
     assertEquals(document.getString("initiatedByRole"), "Admin")
     assertEquals(MongoInterviewWorkflowCodec.decodeWorkflow(document), Right(scheduled))
-    val legacy = MongoInterviewWorkflowCodec.workflowDocument(workflow.copy(initiatedByRole = None))
-    assert(!legacy.containsKey("initiatedByRole"))
-    assertEquals(MongoInterviewWorkflowCodec.decodeWorkflow(legacy).map(_.initiatedByRole), Right(None))
+    document.remove("initiatedByRole")
+    assertEquals(MongoInterviewWorkflowCodec.decodeWorkflow(document), Left(RepositoryError.InvalidStoredData))
   }
 
   test("AC-08.3 stored event with an unknown actor role fails closed") {
-    val document = MongoHiringCodecs.event(event(Some(UserRole.Admin)))
+    val document = MongoHiringCodecs.event(event(UserRole.Admin))
     document.put("actorRole", "Superuser")
     assertEquals(
       MongoHiringCodecs.readEvent(document).toEither.leftMap(_.toList),
@@ -115,22 +114,25 @@ class MongoJobLocationAndEventActorRoleSpec extends FunSuite {
     assertEquals(MongoInterviewWorkflowCodec.decodeWorkflow(document), Left(RepositoryError.InvalidStoredData))
   }
 
-  test("AC-08.3 pre-existing event document without a role still decodes with no role") {
-    val document = MongoHiringCodecs.event(event(None))
-    assert(!document.containsKey("actorRole"))
-    assertEquals(MongoHiringCodecs.readEvent(document).toEither, Right(event(None)))
+  test("MR-09 stored event without a role fails closed") {
+    val document = MongoHiringCodecs.event(event(UserRole.Admin))
+    document.remove("actorRole")
+    assertEquals(
+      MongoHiringCodecs.readEvent(document).toEither.leftMap(_.toList),
+      Left(List(MongoHiringCodecs.StoredDocumentError.MissingField("actorRole")))
+    )
   }
 
-  test("AC-08.5 operational envelope is identical whether or not the event records an actor role") {
+  test("AC-08.5 operational envelope is identical whichever role the event records") {
     val application = Application.create(applicationId, candidateId, jobId, now)
-    val withRole = OperationalEvents.statusChanged(eventId.value, application, event(Some(UserRole.Admin)))
-    val withoutRole = OperationalEvents.statusChanged(eventId.value, application, event(None))
+    val withRole = OperationalEvents.statusChanged(eventId.value, application, event(UserRole.Admin))
+    val withoutRole = OperationalEvents.statusChanged(eventId.value, application, event(UserRole.Recruiter))
     assertEquals(withRole, withoutRole)
     assertEquals(withRole.actorId, recruiterId)
-    val hired = event(Some(UserRole.Admin)).copy(newStatus = ApplicationStatus.Hired)
+    val hired = event(UserRole.Admin).copy(newStatus = ApplicationStatus.Hired)
     assertEquals(
       OperationalEvents.candidateHired(eventId.value, application, hired),
-      OperationalEvents.candidateHired(eventId.value, application, hired.copy(actorRole = None))
+      OperationalEvents.candidateHired(eventId.value, application, hired.copy(actorRole = UserRole.Recruiter))
     )
   }
 }

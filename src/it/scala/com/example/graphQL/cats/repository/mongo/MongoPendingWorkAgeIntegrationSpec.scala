@@ -26,7 +26,7 @@ final class MongoPendingWorkAgeIntegrationSpec extends MongoIntegrationSuite {
       List("Age requirement"),
       Set("Scala"),
       Location("Cyprus", Some("Nicosia"), remote = false),
-      JobStatus.Closed,
+      JobState.Closed(now.minusSeconds(86400)),
       now.minusSeconds(86400),
       now.minusSeconds(86400)
     )

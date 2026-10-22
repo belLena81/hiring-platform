@@ -85,14 +85,20 @@ private[mongo] object MongoOperationalValidators {
     closed = true
   )
 
-  def applicationEventsValidator: Document = validator(
+  /** An event always records the role its actor acted in: the history is evidence of who was authorized. */
+  def applicationEventsValidator: Document = applicationEventsSchema(withActorRole = true)
+
+  /** The definition migration 025 installed, which still allowed an event without the actor's role. */
+  def applicationEventsValidatorThrough025: Document = applicationEventsSchema(withActorRole = false)
+
+  private def applicationEventsSchema(withActorRole: Boolean): Document = validator(
     List(
       MongoFields.Id,
       MongoFields.ApplicationId,
       MongoFields.NewStatus,
       MongoFields.ActorId,
       MongoFields.OccurredAt
-    ),
+    ) ++ Option.when(withActorRole)(MongoFields.ActorRole).toList,
     properties(
       MongoFields.Id -> stringUuid,
       MongoFields.ApplicationId -> stringUuid,
@@ -278,13 +284,20 @@ private[mongo] object MongoOperationalValidators {
     )
   }
 
-  /** Workflows only: interview request idempotency is a `mutation_receipts` row. */
-  def interviewWorkflowsValidator: Document = interviewWorkflowsSchema(withRequestReceipts = false)
+  /** Workflows only, each recording the role of its initiator (`032`). */
+  def interviewWorkflowsValidator: Document = interviewWorkflowsSchema(withRequestReceipts = false, roleRequired = true)
+
+  /** The definition `028` installed: workflows only (interview request idempotency is a `mutation_receipts` row), the
+    * initiator's role still optional.
+    */
+  def interviewWorkflowsValidatorThrough028: Document =
+    interviewWorkflowsSchema(withRequestReceipts = false, roleRequired = false)
 
   /** The definition migration 025 installed, which also accepted the request receipt document type. */
-  def interviewWorkflowsValidatorThrough025: Document = interviewWorkflowsSchema(withRequestReceipts = true)
+  def interviewWorkflowsValidatorThrough025: Document =
+    interviewWorkflowsSchema(withRequestReceipts = true, roleRequired = false)
 
-  private def interviewWorkflowsSchema(withRequestReceipts: Boolean): Document = polymorphic(
+  private def interviewWorkflowsSchema(withRequestReceipts: Boolean, roleRequired: Boolean): Document = polymorphic(
     List(
       (
         MongoInterviewFields.WorkflowType,
@@ -301,12 +314,12 @@ private[mongo] object MongoOperationalValidators {
           MongoInterviewFields.RevisionField,
           "phase",
           "notified"
-        ),
+        ) ++ Option.when(roleRequired)("initiatedByRole").toList,
         properties(
           MongoFields.Id -> stringUuid,
           MongoFields.ApplicationId -> stringUuid,
           "initiatedBy" -> stringUuid,
-          "initiatedByRole" -> text,
+          "initiatedByRole" -> enumSchema(UserRoles*),
           MongoFields.CandidateId -> stringUuid,
           MongoFields.RecruiterId -> stringUuid,
           MongoInterviewFields.StartField -> date,
@@ -467,10 +480,19 @@ private[mongo] object MongoOperationalValidators {
     MongoCollections.InterviewNotificationReceipts -> interviewNotificationReceiptsValidator
   )
 
-  /** The definitions migration 025 installed. Later migrations replaced four of them (embedding work, search session
-    * work, interview workflows and the inbox); 025 installs these and its completed proof accepts either generation.
+  /** The definitions migration 025 installed. Later migrations replaced five of them (application events, embedding
+    * work, search session work, interview workflows and the inbox); 025 installs these and its completed proof accepts
+    * either generation.
     */
+  /** Definitions that `all` replaced after 028 and 029 to 031 had run: a database that completed those steps but not
+    * `032` still holds them, and the proof of 025 accepts them.
+    */
+  def supersededByLaterSteps: Map[String, Document] =
+    Map(MongoCollections.InterviewWorkflows -> interviewWorkflowsValidatorThrough028)
+
   def installedBy025: List[(String, Document)] = all.map {
+    case (MongoCollections.ApplicationEvents, _) =>
+      MongoCollections.ApplicationEvents -> applicationEventsValidatorThrough025
     case (MongoCollections.EmbeddingWork, _)     => MongoCollections.EmbeddingWork -> embeddingWorkValidatorThrough025
     case (MongoCollections.SearchSessionWork, _) =>
       MongoCollections.SearchSessionWork -> searchSessionWorkValidatorThrough025

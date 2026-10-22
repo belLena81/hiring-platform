@@ -39,7 +39,11 @@ final class SemanticSearchLexicalFallbackSpec extends CatsEffectSuite {
   private def jobNumber(n: Int): JobId = JobId(new UUID(0L, 0x1000L + n))
   private def userNumber(n: Int): UserId = UserId(new UUID(0L, 0x2000L + n))
   private def jobIn(n: Int, city: String, status: JobStatus = JobStatus.Open): Job =
-    openJob.copy(id = jobNumber(n), location = Location("Ukraine", Some(city), remote = false), status = status)
+    openJob.copy(
+      id = jobNumber(n),
+      location = Location("Ukraine", Some(city), remote = false),
+      state = JobState.requested(status, now)
+    )
 
   private def candidateUser(
       n: Int,
@@ -51,7 +55,7 @@ final class SemanticSearchLexicalFallbackSpec extends CatsEffectSuite {
       id = userNumber(n),
       name = s"Candidate $n",
       role = role,
-      accountStatus = status,
+      state = accountStateOf(status),
       profile = Some(UserProfile.Candidate(profile))
     )
 
@@ -273,7 +277,8 @@ final class SemanticSearchLexicalFallbackSpec extends CatsEffectSuite {
         List(skilledCandidate),
         List(stays, closes),
         lexicalJobIds = List(closes.id, stays.id),
-        afterLexicalRetrieval = jobs => jobs.update(_.updated(closes.id, closes.copy(status = JobStatus.Closed)))
+        afterLexicalRetrieval =
+          jobs => jobs.update(_.updated(closes.id, closes.copy(state = JobState.Closed(java.time.Instant.EPOCH))))
       )
       result <- h.service
         .semanticJobSearch(candidateActor, "scala", noFilter, pageSize, searchId)

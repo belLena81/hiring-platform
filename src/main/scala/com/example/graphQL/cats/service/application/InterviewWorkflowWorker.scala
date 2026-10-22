@@ -4,7 +4,7 @@ import cats.MonadThrow
 import cats.effect.{Resource, Temporal}
 import cats.syntax.all.*
 import com.example.graphQL.cats.service.port.*
-import com.example.graphQL.cats.service.{BackgroundWorker, Diagnostics, LogEvent, LogField, RepositoryError}
+import com.example.graphQL.cats.service.{BackgroundWorker, Diagnostics, LogEvent, LogField, LogFields, RepositoryError}
 import scala.concurrent.duration.*
 
 enum InterviewPublicationPass {
@@ -42,8 +42,15 @@ private[application] final class InterviewWorkerReporter[F[_]: MonadThrow](diagn
   def report(operation: String): F[Unit] =
     diagnostics.emit(LogEvent.MongoRepositoryFailed, fields = Map(LogField.SpanName -> operation))
 
+  /** Reports a typed repository failure with its safe error code, so the cause is not lost with the operation name. */
+  def failed(operation: String, error: RepositoryError): F[Unit] =
+    diagnostics.emit(
+      LogEvent.MongoRepositoryFailed,
+      fields = LogFields.repositoryFailure(error) + (LogField.SpanName -> operation)
+    )
+
   def observe[A](operation: RepositoryF[F, A], name: String): F[Option[A]] =
-    operation.map(_.some).valueOrF(_ => report(name).as(none[A]))
+    operation.map(_.some).valueOrF(error => failed(name, error).as(none[A]))
 
   /** `true` when the repository accepted the call; a failure is reported and answers `false`. */
   def succeeded(operation: RepositoryF[F, ?], name: String): F[Boolean] = observe(operation, name).map(_.isDefined)

@@ -6,8 +6,10 @@ import com.example.graphQL.cats.domain.model.{
   ApplicationEvent,
   ApplicationStatus,
   Job,
+  JobState,
   JobStatus,
-  Location
+  Location,
+  UserRole
 }
 import com.example.graphQL.cats.service.events.OperationalEventPayload.{JobKind, SearchKind}
 import com.example.graphQL.cats.service.events.{
@@ -41,7 +43,7 @@ class OperationalEventWireContractSpec extends FunSuite {
       Nil,
       skills,
       Location("CY", Some("Nicosia"), remote = false),
-      status,
+      JobState.requested(status, now),
       now,
       now
     )
@@ -57,7 +59,7 @@ class OperationalEventWireContractSpec extends FunSuite {
       now,
       None,
       None,
-      None
+      UserRole.Candidate
     )
   private def session(kind: SearchKind, results: List[SearchSessionResult]) =
     SearchSession(searchId, actor, kind, None, SearchFilterSnapshot.Unfiltered, None, results, now, now.plusSeconds(60))

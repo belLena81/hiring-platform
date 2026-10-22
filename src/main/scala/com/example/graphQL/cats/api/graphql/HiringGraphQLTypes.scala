@@ -403,7 +403,8 @@ private[graphql] object HiringGraphQLTypes {
         simple("id", applicationEventIdType)(_.id),
         simple("previousStatus", OptionType(applicationStatus))(_.previousStatus),
         simple("newStatus", applicationStatus)(_.newStatus),
-        simple("actorRole", OptionType(userRole))(_.actorRole),
+        // Always present in the domain; the field stays nullable so the published schema does not change.
+        simple[ApplicationEvent, Option[UserRole]]("actorRole", OptionType(userRole))(event => Some(event.actorRole)),
         instantField("occurredAt", _.occurredAt),
         simple("feedback", OptionType(StringType))(_.feedback),
         simple("reason", OptionType(StringType))(_.reason)

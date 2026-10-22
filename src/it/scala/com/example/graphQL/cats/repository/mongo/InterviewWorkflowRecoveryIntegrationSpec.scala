@@ -38,8 +38,11 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
         ),
         now.plusSeconds(300),
         UUID.randomUUID(),
-        ApplicationStatus.Accepted
+        ApplicationStatus.Accepted,
+        UserId(UUID.randomUUID()),
+        com.example.graphQL.cats.domain.model.UserRole.Recruiter
       )
+      .map(workflow => workflow.copy(initiatedBy = workflow.recruiterId))
       .fold(error => fail(s"Invalid fixture: $error"), identity)
 
   private def drive(
@@ -319,8 +322,7 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
           "Recovery admin",
           UserRole.Admin,
           None,
-          now,
-          adminSingleton = true
+          now
         )
         _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- InterviewSchedulingFixtures.seed(fixture.database, List(value), now)

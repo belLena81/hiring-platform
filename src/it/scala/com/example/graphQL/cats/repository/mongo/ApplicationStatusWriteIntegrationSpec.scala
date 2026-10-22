@@ -47,7 +47,7 @@ final class ApplicationStatusWriteIntegrationSpec extends MongoIntegrationSuite 
       List("Scala"),
       Set("Scala"),
       Location("Cyprus", Some("Nicosia"), remote = false),
-      JobStatus.Open,
+      JobState.Open,
       at,
       at
     )
@@ -74,7 +74,7 @@ final class ApplicationStatusWriteIntegrationSpec extends MongoIntegrationSuite 
               at,
               None,
               None,
-              Some(UserRole.Candidate)
+              UserRole.Candidate
             )
           )
         )
@@ -97,7 +97,7 @@ final class ApplicationStatusWriteIntegrationSpec extends MongoIntegrationSuite 
         when,
         feedback,
         None,
-        Some(UserRole.Recruiter)
+        UserRole.Recruiter
       )
       applications
         .updateStatusWithEvents(

@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.api.graphql
 
+import com.example.graphQL.cats.domain.model.{AccountState}
 import cats.effect.{IO, Ref}
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.{AccountStatus, GeoPoint, Location, Application, ApplicationEvent}
@@ -276,7 +277,7 @@ final class HiringGraphQLDiscoveryContractSpec extends CatsEffectSuite {
   test("executed discovery authorizes active candidates and singleton admin and denies restricted accounts") {
     val operation = "query { jobDiscoveryFacets { ... on JobDiscoveryFacets { truncated } ... on UserError { code } } }"
     val active = List(candidate, ServiceFixtures.admin)
-    val denied = List(ServiceFixtures.recruiter, candidate.copy(accountStatus = AccountStatus.Deleted))
+    val denied = List(ServiceFixtures.recruiter, candidate.copy(state = AccountState.Deleted(java.time.Instant.EPOCH)))
     active.traverse_ { user =>
       JobDiscoveryTestSupport.fixture(List(user)).flatMap { fixture =>
         execute(operation, Json.obj(), fixture, Some(ActorContext(user.id, user.role)))

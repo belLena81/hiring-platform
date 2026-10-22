@@ -144,8 +144,11 @@ final class InterviewPublicationFencingIntegrationSpec extends KafkaIntegrationS
           InterviewInterval(now.plusSeconds(172800), now.plusSeconds(176400)),
           now.plusSeconds(3600),
           UUID.randomUUID(),
-          ApplicationStatus.Accepted
+          ApplicationStatus.Accepted,
+          UserId(UUID.randomUUID()),
+          com.example.graphQL.cats.domain.model.UserRole.Recruiter
         )
+        .map(workflow => workflow.copy(initiatedBy = workflow.recruiterId))
         .fold(error => fail(s"Invalid fixture: $error"), identity)
       _ <- InterviewSchedulingFixtures.seed(database, List(value), now)
       _ <- success(

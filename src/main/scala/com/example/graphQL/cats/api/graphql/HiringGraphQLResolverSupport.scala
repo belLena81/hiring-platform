@@ -41,7 +41,7 @@ private[graphql] object HiringGraphQLResolverSupport {
       fieldPath: InputFieldPaths.Path = InputFieldPaths.none,
       authorizationRefusalAsData: Boolean = false
   ): HiringGraphQLResult[MutationOutcome[A]] =
-    EitherT(value.value.map {
+    value.transform {
       case Right(result)                               => Right(result)
       case Left(UseCaseError.ValidationFailed(errors)) => Right(validationError(errors, fieldPath))
       case Left(error)                                 =>
@@ -50,7 +50,7 @@ private[graphql] object HiringGraphQLResolverSupport {
         if ((failure.exceptional && !refusedAsData) || GraphQLFailureCatalog.isAuthenticationFailure(error))
           Left(HiringGraphQLFailure.UseCase(error))
         else Right(DomainError(failure.code, failure.message))
-    })
+    }
 
   /** A rate-limit refusal as data: the code and message come from the failure, and the delay is carried (whole seconds,
     * clamped to `Int`) so the client knows when to retry.
@@ -68,7 +68,7 @@ private[graphql] object HiringGraphQLResolverSupport {
       value: HiringGraphQLResult[A],
       fieldPath: InputFieldPaths.Path
   ): HiringGraphQLResult[SearchOutcome[A]] =
-    EitherT(value.value.map {
+    value.transform {
       case Right(result)                                   => Right(result)
       case Left(HiringGraphQLFailure.RateLimited(seconds)) =>
         Right(rateLimitedRefusal(GraphQLFailureCatalog.requestRateLimited, seconds))
@@ -80,17 +80,17 @@ private[graphql] object HiringGraphQLResolverSupport {
             )
           refusal.toRight(failure)
         }
-    })
+    }
 
   /** The facets root has no business-rule member, so only unavailability and invalid input become data. */
   def facetsResult[A](
       value: HiringGraphQLResult[A],
       fieldPath: InputFieldPaths.Path
   ): HiringGraphQLResult[FacetsOutcome[A]] =
-    EitherT(value.value.map {
+    value.transform {
       case Right(result) => Right(result)
       case Left(failure) => searchRefusal(failure).flatMap(dataRefusal(_, fieldPath).toRight(failure))
-    })
+    }
 
   private def searchRefusal(failure: HiringGraphQLFailure): Either[HiringGraphQLFailure, GraphQLFailure] =
     failure match {
@@ -172,19 +172,23 @@ private[graphql] object HiringGraphQLResolverSupport {
         )
         .value
         .attempt
-        .flatMap {
-          case Right(Right(()))   => IO.unit
-          case Right(Left(error)) =>
-            reportFailure(
-              requestContext,
-              hiring,
-              actorId,
-              kind,
-              searchId,
-              Right(GraphQLFailureCatalog.classify(error).code)
+        .flatMap(
+          _.fold(
+            error => reportFailure(requestContext, hiring, actorId, kind, searchId, Left(error)),
+            _.fold(
+              error =>
+                reportFailure(
+                  requestContext,
+                  hiring,
+                  actorId,
+                  kind,
+                  searchId,
+                  Right(GraphQLFailureCatalog.classify(error).code)
+                ),
+              _ => IO.unit
             )
-          case Left(error) => reportFailure(requestContext, hiring, actorId, kind, searchId, Left(error))
-        }
+          )
+        )
     )
 
   /** Logs the failed recording and publishes its operational event. Publishing is best-effort too: a failure to emit it

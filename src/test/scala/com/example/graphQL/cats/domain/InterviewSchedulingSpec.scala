@@ -30,7 +30,9 @@ class InterviewSchedulingSpec extends FunSuite {
         InterviewInterval(Instant.parse("2026-10-04T12:00:00Z"), Instant.parse("2026-10-04T13:00:00Z")),
         Instant.parse("2026-10-01T12:05:00Z"),
         idempotencyKey,
-        status
+        status,
+        recruiterId,
+        com.example.graphQL.cats.domain.model.UserRole.Recruiter
       )
     )
 
@@ -78,7 +80,9 @@ class InterviewSchedulingSpec extends FunSuite {
         InterviewInterval(now.plusSeconds(60), now.plusSeconds(120)),
         now.plusSeconds(30),
         idempotencyKey,
-        ApplicationStatus.Created
+        ApplicationStatus.Created,
+        recruiterId,
+        com.example.graphQL.cats.domain.model.UserRole.Recruiter
       ),
       Left(InterviewWorkflowError.ApplicationMustBeAccepted)
     )

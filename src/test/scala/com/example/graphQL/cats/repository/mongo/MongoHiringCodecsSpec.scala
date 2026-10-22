@@ -15,7 +15,8 @@ import com.example.graphQL.cats.domain.model.{
   EntityEmbedding,
   GeoPoint,
   Job,
-  JobStatus,
+  JobState,
+
   Location,
   PasswordHash,
   RecruiterProfile,
@@ -181,10 +182,9 @@ class MongoHiringCodecsSpec extends FunSuite {
       List("Scala"),
       Set("Cats Effect"),
       Location("Cyprus", Some("Nicosia"), remote = true),
-      JobStatus.Closed,
+      JobState.Closed(later),
       now,
-      later,
-      Some(later)
+      later
     )
 
     val document = MongoHiringCodecs.job(job)
@@ -204,7 +204,7 @@ class MongoHiringCodecsSpec extends FunSuite {
       List("Scala"),
       Set("Cats Effect"),
       Location("Cyprus", Some("Nicosia"), remote = false, Some(point)),
-      JobStatus.Open,
+      JobState.Open,
       now,
       later
     )
@@ -227,7 +227,7 @@ class MongoHiringCodecsSpec extends FunSuite {
       List("Scala"),
       Set("Cats Effect"),
       Location("Cyprus", Some("Nicosia"), remote = true),
-      JobStatus.Open,
+      JobState.Open,
       now,
       later,
       embedding = Some(embedding)
@@ -250,7 +250,7 @@ class MongoHiringCodecsSpec extends FunSuite {
       List("Scala"),
       Set("Cats Effect"),
       Location("Cyprus", Some("Nicosia"), remote = true),
-      JobStatus.Open,
+      JobState.Open,
       now,
       later
     )
@@ -277,7 +277,7 @@ class MongoHiringCodecsSpec extends FunSuite {
           Nil,
           Set.empty,
           Location("Cyprus", Some("Nicosia"), true),
-          JobStatus.Open,
+          JobState.Open,
           now,
           now
         )
@@ -341,8 +341,7 @@ class MongoHiringCodecsSpec extends FunSuite {
         "Admin",
         UserRole.Admin,
         None,
-        now,
-        adminSingleton = true
+        now
       )
     )
     adminWithoutSingleton.remove("adminSingletonKey")
@@ -382,7 +381,7 @@ class MongoHiringCodecsSpec extends FunSuite {
         now,
         None,
         None,
-        None
+        UserRole.Candidate
       )
     val operational = OperationalEventEnvelope(
       UUID.fromString("00000000-0000-0000-0000-000000000207"),

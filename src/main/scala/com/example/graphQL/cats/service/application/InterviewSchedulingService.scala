@@ -84,8 +84,8 @@ final class InterviewSchedulingService[F[_]](using F: Monad[F], clock: Clock[F],
               deadline,
               idempotencyKey,
               application.status,
-              Some(user.id),
-              Some(user.role)
+              user.id,
+              user.role
             )
             .leftMap(_ =>
               UseCaseError.Domain(

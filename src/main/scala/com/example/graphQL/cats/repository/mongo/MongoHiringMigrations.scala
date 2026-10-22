@@ -105,6 +105,8 @@ private[mongo] object MongoHiringMigrations {
           run(MongoStoredShapeRemovalMigrations.requestReceipts),
           run(MongoStoredShapeRemovalMigrations.searchSessionWork),
           run(MongoStoredShapeRemovalMigrations.embeddingWork),
+          run(MongoStoredShapeRemovalMigrations.applicationEventActorRole),
+          run(MongoStoredShapeRemovalMigrations.interviewWorkflowInitiatorRole),
           createAccountRegistry(database)
         ).sequence_
       }

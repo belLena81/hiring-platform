@@ -9,8 +9,9 @@ import org.bson.conversions.Bson
 import scala.jdk.CollectionConverters.*
 
 /** The ledger steps that retire a stored shape: `027_interview_hiring_receipt_removal`,
-  * `028_interview_request_receipt_removal`, `029_search_session_work_single_copy` and
-  * `030_embedding_work_key_from_identity`. Each one follows the same contract, parameterised by what it removes:
+  * `028_interview_request_receipt_removal`, `029_search_session_work_single_copy`,
+  * `030_embedding_work_key_from_identity`, `031_application_event_actor_role` and
+  * `032_interview_workflow_initiator_role`. Each one follows the same contract, parameterised by what it removes:
   *
   *   - Expand: the writers already stopped producing the shape (it is derived from another fact, see the owning
   *     capability), so this step only removes what earlier binaries left behind.
@@ -48,7 +49,9 @@ private[mongo] object MongoStoredShapeRemovalMigrations {
         * unset itself would be refused until it is replaced. A document removal installs it last: its retired rows
         * would not satisfy the successor.
         */
-      installFirst: Boolean = false
+      installFirst: Boolean = false,
+      /** Later generations of the validator that the completed proof also accepts. */
+      laterGenerations: List[Document] = Nil
   )
 
   private def page(run: MigrationRun, removal: Removal, after: Option[String]): IO[List[Document]] =
@@ -90,9 +93,23 @@ private[mongo] object MongoStoredShapeRemovalMigrations {
 
   private def verifyCompleted(removal: Removal)(database: MongoHiringSetup.SetupDatabase): IO[CompletedProof] =
     MongoHiringValidators
-      .assertStrictValidators(database, List(removal.collection -> removal.successor))
+      .collectionOptions(database, List(removal.collection))
+      .flatMap { options =>
+        val stored = options.get(removal.collection)
+        IO.raiseUnless(
+          (removal.successor :: removal.laterGenerations)
+            .exists(MongoHiringValidators.strictValidatorMatches(stored, _))
+        )(
+          MigrationError.ValidatorMismatch(removal.collection)
+        )
+      }
       .productR(remaining(database, removal))
       .map(present => if (present) CompletedProof.Reopen else CompletedProof.Trusted)
+
+  private def laterGenerationInPlace(database: MongoHiringSetup.SetupDatabase, removal: Removal): IO[Boolean] =
+    MongoHiringValidators.collectionOptions(database, List(removal.collection)).map { options =>
+      removal.laterGenerations.exists(MongoHiringValidators.strictValidatorMatches(options.get(removal.collection), _))
+    }
 
   private def step(removal: Removal): MongoMigrationStep = {
     def scan(run: MigrationRun): IO[Unit] =
@@ -111,7 +128,10 @@ private[mongo] object MongoStoredShapeRemovalMigrations {
         _ <- remaining(run.database, removal).flatMap(IO.whenA(_)(rescan(run)))
         _ <- remaining(run.database, removal).flatMap(IO.whenA(_)(run.fail("rows of the retired shape remain")))
         _ <- removal.droppedIndexes.traverse_(dropIndex(run.database, removal.collection, _))
-        _ <- IO.unlessA(removal.installFirst)(
+        // A later step's definition already in place is a successor of this one: it is audited by that step, not
+        // replaced by this one.
+        laterInPlace <- laterGenerationInPlace(run.database, removal)
+        _ <- IO.unlessA(removal.installFirst || laterInPlace)(
           audit(run, removal) *> MongoHiringValidators.install(run.database, removal.collection, removal.successor)
         )
         _ <- audit(run, removal)
@@ -168,8 +188,9 @@ private[mongo] object MongoStoredShapeRemovalMigrations {
       row => Option(row.getString(MongoFields.Id)).exists(_.startsWith("request:")),
       deleteWhere(ofType(MongoInterviewFields.RetiredRequestReceiptType)),
       List(MongoIndexNames.InterviewWorkflowRequestReceipt),
-      MongoOperationalValidators.interviewWorkflowsValidator,
-      List(MigrationIds.InterviewRequestReceiptIndex, MigrationIds.OperationalCollectionValidators)
+      MongoOperationalValidators.interviewWorkflowsValidatorThrough028,
+      List(MigrationIds.InterviewRequestReceiptIndex, MigrationIds.OperationalCollectionValidators),
+      laterGenerations = List(MongoOperationalValidators.interviewWorkflowsValidator)
     )
   )
 
@@ -204,6 +225,42 @@ private[mongo] object MongoStoredShapeRemovalMigrations {
       MongoOperationalValidators.embeddingWorkValidator,
       List(MigrationIds.OperationalCollectionValidators),
       installFirst = true
+    )
+  )
+
+  /** `031`: an application event always records the role its actor acted in, so an event without `actorRole` is the
+    * retired shape. The role cannot be reconstructed (it may have been an Admin acting on a job, or a user whose role
+    * is not recorded elsewhere), so the step never rewrites such a row: it fails closed on the first one, naming the
+    * collection only, and installs the successor validator, which requires the field, only when none exists. Pre-MVP
+    * the remedy for a failed step is to reset the local database.
+    */
+  val applicationEventActorRole: MongoMigrationStep = step(
+    Removal(
+      MigrationIds.ApplicationEventActorRole,
+      MongoCollections.ApplicationEvents,
+      Filters.exists(MongoFields.ActorRole, false),
+      _ => false,
+      (_, _) => IO.unit,
+      Nil,
+      MongoOperationalValidators.applicationEventsValidator,
+      List(MigrationIds.OperationalCollectionValidators)
+    )
+  )
+
+  /** `032`: an interview workflow always records the role of its initiator, which the hiring status change copies into
+    * the append-only history as its actor role. A workflow row without `initiatedByRole` is the retired shape; the role
+    * cannot be inferred (an Admin can own a job), so the step fails closed on the first one like `031`.
+    */
+  val interviewWorkflowInitiatorRole: MongoMigrationStep = step(
+    Removal(
+      MigrationIds.InterviewWorkflowInitiatorRole,
+      MongoCollections.InterviewWorkflows,
+      Filters.and(ofType(MongoInterviewFields.WorkflowType), Filters.exists("initiatedByRole", false)),
+      _ => false,
+      (_, _) => IO.unit,
+      Nil,
+      MongoOperationalValidators.interviewWorkflowsValidator,
+      List(MigrationIds.InterviewRequestReceiptRemoval, MigrationIds.OperationalCollectionValidators)
     )
   )
 }

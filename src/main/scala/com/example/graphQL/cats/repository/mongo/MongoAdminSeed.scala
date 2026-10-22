@@ -47,35 +47,48 @@ object MongoAdminSeed {
           }
           def reconcile: IO[Unit] = for {
             state <- registryState
-            account <- accounts.findByCanonicalName(canonical).value
+            account <- accounts
+              .findByCanonicalName(canonical)
+              .valueOrF(_ => IO.raiseError(MongoSetupError("Admin seed account lookup unavailable")))
             _ <- (state, account) match {
-              case (Some(document), Right(Some(credentials)))
+              case (Some(document), Some(credentials))
                   if document.getString(MongoFields.State) == "Initialized" &&
                     document.getString(MongoFields.AdminId) == credentials.user.id.value.toString &&
-                    credentials.user.role == UserRole.Admin && credentials.user.adminSingleton &&
+                    credentials.user.role == UserRole.Admin &&
                     credentials.user.accountStatus == AccountStatus.Active =>
                 IO.unit
               case _ => rejected
             }
           } yield ()
-          accounts.initialized.value.flatMap {
-            case Right(true)  => existing
-            case Right(false) =>
-              for {
-                now <- clock.realTimeInstant
-                id <- uuidGen.randomUUID.map(UserId.apply)
-                hash <- hasher.hash(password)
-                user = User(id, None, Normalizer.normalize(name.trim, Normalizer.Form.NFKC), UserRole.Admin, None, now)
-                  .copy(adminSingleton = true)
-                result <- accounts.bootstrap(user, hash, MutationWriteContext.directWrite).value
-                _ <- result match {
-                  case Right(_)                       => reconcile
-                  case Left(RepositoryError.Conflict) => reconcile
-                  case Left(_) => IO.raiseError(MongoSetupError("Admin seed persistence unavailable"))
-                }
-              } yield ()
-            case Left(_) => IO.raiseError(MongoSetupError("Admin seed registry unavailable"))
-          }
+          accounts.initialized.foldF(
+            _ => IO.raiseError(MongoSetupError("Admin seed registry unavailable")),
+            {
+              case true  => existing
+              case false =>
+                for {
+                  now <- clock.realTimeInstant
+                  id <- uuidGen.randomUUID.map(UserId.apply)
+                  hash <- hasher.hash(password)
+                  user = User(
+                    id,
+                    None,
+                    Normalizer.normalize(name.trim, Normalizer.Form.NFKC),
+                    UserRole.Admin,
+                    None,
+                    now
+                  )
+                  _ <- accounts
+                    .bootstrap(user, hash, MutationWriteContext.directWrite)
+                    .foldF(
+                      {
+                        case RepositoryError.Conflict => reconcile
+                        case _ => IO.raiseError(MongoSetupError("Admin seed persistence unavailable"))
+                      },
+                      _ => reconcile
+                    )
+                } yield ()
+            }
+          )
         case _ => IO.raiseError(MongoSetupError("Admin seed credentials are required"))
       }
 }

@@ -424,8 +424,11 @@ private[mongo] object InterviewLifecycleScenario {
               held,
               at.plusSeconds(300),
               UUID.randomUUID(),
-              ApplicationStatus.Accepted
+              ApplicationStatus.Accepted,
+              UserId(UUID.randomUUID()),
+              com.example.graphQL.cats.domain.model.UserRole.Recruiter
             )
+            .map(workflow => workflow.copy(initiatedBy = workflow.recruiterId))
             .leftMap(error => new AssertionError(s"invalid workflow $error"))
         )
         _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])

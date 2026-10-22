@@ -148,7 +148,9 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
             com.example.graphQL.cats.domain.workflow.InterviewInterval(starts, ends),
             at.plusSeconds(300),
             UUID.randomUUID(),
-            ApplicationStatus.Accepted
+            ApplicationStatus.Accepted,
+            recruiterId,
+            com.example.graphQL.cats.domain.model.UserRole.Recruiter
           )
           .fold(error => fail(s"Invalid workflow: $error"), identity)
         val users = MongoUserRepository.transactional(
@@ -276,7 +278,7 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
     database.use { case (db, transactions) =>
       val users = new MongoUserRepository(db, transactions, MongoEmbeddingWorkEnqueuer.disabled, Diagnostics.noop[IO])
       val work = new MongoEmbeddingWorkRepository(db, Diagnostics.noop[IO])
-      val admin = User(UserId(UUID.randomUUID()), None, "Admin", UserRole.Admin, None, now, adminSingleton = true)
+      val admin = User(UserId(UUID.randomUUID()), None, "Admin", UserRole.Admin, None, now)
       val candidate = User(
         UserId(UUID.randomUUID()),
         Some(email(s"${UUID.randomUUID()}@example.com")),
@@ -446,7 +448,7 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
         List("Cats Effect"),
         Set("Scala"),
         Location("Cyprus", Some("Nicosia"), remote = true),
-        JobStatus.Open,
+        JobState.Open,
         now,
         now
       )

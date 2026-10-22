@@ -1,14 +1,15 @@
 package com.example.graphQL.cats.service.auth
 
+import com.example.graphQL.cats.domain.model.{AccountState}
 import cats.effect.IO
-import com.example.graphQL.cats.domain.model.{AccountStatus, EntityEmbedding, User, UserRole}
+import com.example.graphQL.cats.domain.model.{EntityEmbedding, User, UserRole}
 import com.example.graphQL.cats.service.port.{ActorRecord, RepositoryF, UserRepository}
 import com.example.graphQL.cats.service.{ActorContext, AuthenticationError, ServiceFixtures, UseCaseError}
 import munit.CatsEffectSuite
 
 final class ActorAuthorizationSpec extends CatsEffectSuite {
   private val activeUser = ServiceFixtures.recruiter
-  private val deletedUser = activeUser.copy(accountStatus = AccountStatus.Deleted, profile = None)
+  private val deletedUser = activeUser.copy(profile = None, state = AccountState.Deleted(java.time.Instant.EPOCH))
 
   test("resolve rejects a deleted user even when the actor role matches") {
     val authorization = ActorAuthorization(repository(Map(deletedUser.id -> deletedUser)))

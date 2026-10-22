@@ -72,7 +72,7 @@ final class HiringGraphQLGraphAccessSpec extends CatsEffectSuite {
       now.plusSeconds(n),
       None,
       None,
-      Some(UserRole.Candidate)
+      UserRole.Candidate
     )
   private val events: Vector[ApplicationEvent] = Vector(
     event(1, anaApplication, candidateId, ApplicationStatus.Created),
@@ -92,7 +92,8 @@ final class HiringGraphQLGraphAccessSpec extends CatsEffectSuite {
       1L,
       InterviewWorkflowPhase.Completed,
       Set(InterviewParticipant.Candidate, InterviewParticipant.Recruiter),
-      recruiter
+      recruiter,
+      initiatedByRole = com.example.graphQL.cats.domain.model.UserRole.Recruiter
     )
 
   private enum Call { case Users(keys: Int); case Jobs(keys: Int) }

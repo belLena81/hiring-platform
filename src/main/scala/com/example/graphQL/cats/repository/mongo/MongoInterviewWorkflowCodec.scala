@@ -31,7 +31,7 @@ private[mongo] object MongoInterviewWorkflowCodec {
       .append(RevisionField, value.revision)
       .append("phase", value.phase.toString)
       .append("notified", value.notified.toList.map(_.toString).sorted.asJava)
-    val withRole = value.initiatedByRole.fold(base)(role => base.append("initiatedByRole", role.toString))
+    val withRole = base.append("initiatedByRole", value.initiatedByRole.toString)
     MongoInterviewWorkflowLifecycleCodec.insertFields(value).foldLeft(withRole) {
       case (document, (field, fieldValue)) => document.append(field, fieldValue)
     }
@@ -122,9 +122,9 @@ private[mongo] object MongoInterviewWorkflowCodec {
           .map(_.toSet)
       )
       lifecycle <- MongoInterviewWorkflowLifecycleCodec.decode(document, phase)
-      initiatorRole <- Option(document.get("initiatedByRole")).traverse {
-        case name: String => named(UserRole.values)(name)
-        case _            => Left(RepositoryError.InvalidStoredData)
+      initiatorRole <- Option(document.get("initiatedByRole")) match {
+        case Some(name: String) => named(UserRole.values)(name)
+        case _                  => Left(RepositoryError.InvalidStoredData)
       }
       _ <- Either.cond(
         revision >= 0L && (!Set(InterviewWorkflowPhase.Completed, InterviewWorkflowPhase.Cancelled)(phase) ||

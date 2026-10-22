@@ -110,7 +110,7 @@ final class MongoJobSubmissionIntegrationSpec extends MongoIntegrationSuite {
         now,
         None,
         None,
-        None
+        UserRole.Candidate
       )
       val readSnapshot = jobs
         .findSubmissionSnapshot(id)

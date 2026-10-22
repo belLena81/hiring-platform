@@ -55,18 +55,12 @@ private[graphql] object HiringGraphQLApplicationResolvers {
   ): HiringGraphQLResult[Option[Application]] =
     authenticated(context) { case (actor, hiring) =>
       val applicationId = context.value.applicationId
-      EitherT(
-        raiseOnUseCaseError(hiring.readModel.canViewApplication(actor, applicationId))
-          .flatMap(_ => raiseOnUseCaseError(hiring.readModel.application(applicationId)))
-          .value
-          .map {
-            case Left(
-                  HiringGraphQLFailure.UseCase(UseCaseError.Domain(DomainError.Forbidden | DomainError.NotFound(_)))
-                ) =>
-              Right(None)
-            case other => other
-          }
-      )
+      raiseOnUseCaseError(hiring.readModel.canViewApplication(actor, applicationId))
+        .flatMap(_ => raiseOnUseCaseError(hiring.readModel.application(applicationId)))
+        .recover {
+          case HiringGraphQLFailure.UseCase(UseCaseError.Domain(DomainError.Forbidden | DomainError.NotFound(_))) =>
+            None
+        }
     }
 
   private def ownApplications(context: Context[RequestContext, ?]): HiringGraphQLResult[Connection[Application]] =

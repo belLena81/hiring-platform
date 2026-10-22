@@ -147,7 +147,7 @@ The API owns GraphQL, HTTP, and authentication adapters. It talks to service use
 
 Domain objects must not represent MongoDB documents or GraphQL types directly.
 
-Abbreviated example (the current `Job` also carries optional `closedAt` and `embedding`):
+Abbreviated example (the current `Job` also carries an optional `embedding`; its `state` is a `JobState`, `Draft`, `Open` or `Closed(at)`, so a closed job always has its closing instant, and `status` and `closedAt` are derived from it):
 
 ```scala
 final case class Job(
@@ -158,7 +158,7 @@ final case class Job(
   requirements: List[String],
   skills: Set[String],
   location: Location,
-  status: JobStatus,
+  state: JobState,
   createdAt: Instant,
   updatedAt: Instant
 )
@@ -352,7 +352,7 @@ The default rule is:
 }
 ```
 
-A Deleted account keeps a tombstone (`accountStatus`, `deletedAt`, a tombstone `name` and `nameCanonical`); its email, password hash, profile and embedding fields are removed.
+A Deleted account keeps a tombstone (`accountStatus`, `deletedAt`, a tombstone `name` and `nameCanonical`); its email, password hash, profile and embedding fields are removed. In the domain the pair is one value, `AccountState.Deleted(at)`; the codec rejects a stored `Deleted` without `deletedAt`.
 
 Recruiters and candidates share one collection.
 
@@ -694,7 +694,7 @@ Document:
   newStatus: "Interview",
 
   actorId: "<user-uuid>",
-  actorRole: "Recruiter",   // stored Scala enum name; optional, absent on events stored before the role was recorded. Not exposed by GraphQL as an identifier.
+  actorRole: "Recruiter",   // stored Scala enum name; required (ledger step 031 and the validator). Not exposed by GraphQL as an identifier.
 
   // feedback and reason are present only when supplied.
   // previousStatus is absent on the initial CREATED event.

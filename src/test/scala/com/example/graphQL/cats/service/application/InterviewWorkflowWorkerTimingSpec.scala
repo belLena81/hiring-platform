@@ -25,7 +25,8 @@ final class InterviewWorkflowWorkerTimingSpec extends CatsEffectSuite {
     0L,
     InterviewWorkflowPhase.ReservationPending,
     Set.empty,
-    UserId(new UUID(0L, 4L))
+    UserId(new UUID(0L, 4L)),
+    initiatedByRole = com.example.graphQL.cats.domain.model.UserRole.Recruiter
   )
   private val command = InterviewWorkflowCommandRecord(
     workflow.id,

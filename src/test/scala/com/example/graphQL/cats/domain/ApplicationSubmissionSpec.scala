@@ -6,6 +6,7 @@ import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, 
 import com.example.graphQL.cats.domain.model.{
   CandidateProfile,
   JobSubmissionSnapshot,
+
   JobStatus,
   RecruiterProfile,
   User,

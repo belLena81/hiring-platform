@@ -42,11 +42,12 @@ private[graphql] object HiringGraphQLInterviewResolvers {
   def interviewWorkflow(context: Context[RequestContext, Unit]): HiringGraphQLResult[Option[InterviewWorkflow]] =
     authenticated(context) { case (actor, hiring) =>
       available(hiring).flatMap(service =>
-        EitherT(service.inspect(actor, context.arg(workflowIdArgument)).value.map {
-          case Right(workflow) => Right(Some(workflow))
-          case Left(UseCaseError.Domain(com.example.graphQL.cats.domain.error.DomainError.NotFound(_))) => Right(None)
-          case Left(error) => Left(HiringGraphQLFailure.UseCase(error))
-        })
+        raiseOnUseCaseError(service.inspect(actor, context.arg(workflowIdArgument)).map(Option(_))).recover {
+          case HiringGraphQLFailure.UseCase(
+                UseCaseError.Domain(com.example.graphQL.cats.domain.error.DomainError.NotFound(_))
+              ) =>
+            None
+        }
       )
     }
 

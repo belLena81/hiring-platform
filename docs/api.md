@@ -69,7 +69,7 @@ The report separates two dimensions. `freshness` (`CURRENT`, `CONTENT_CHANGED`, 
 - `updateJob(input: UpdateJobInput!)` takes `{ idempotencyKey, id, job }`. `job` replaces the whole content of the job; there is no partial update.
 - `recordJobView` and `recordSearchResultClick` return `InteractionSuccess { eventId: UUID! }` as their success member, alongside the typed `ValidationError` and `DomainError` members.
 - `Location.city` is nullable. A job created without a city has `location.city: null`, city-less jobs are excluded from city facets, and a stored empty city reads as null.
-- `ApplicationEvent` (application history) exposes `actorRole: UserRole`, which is null for events recorded before the role was stored. Actor identifiers are not exposed.
+- `ApplicationEvent` (application history) exposes `actorRole: UserRole`, the role the actor acted in. Every stored event records it; the field stays nullable in the schema so the published contract does not change. Actor identifiers are not exposed.
 - `ValidationError { code, message, field }`: `field` is the GraphQL input path of the first violated rule (for example `profile.candidate.residence.country`, or `job.title` for `updateJob`), or null when that rule has no input counterpart; `message` joins every violated rule and uses domain field names.
 
 - `DomainError.retryAfterSeconds` is set only for an interview-action `RATE_LIMITED` refusal and is null otherwise.

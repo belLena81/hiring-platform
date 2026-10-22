@@ -55,7 +55,7 @@ final class HiringGeographicDiscoveryEvaluationIntegrationSpec extends MongoInte
         remote = index % 11 == 0,
         coordinates = Option.when(index % 13 != 0)(GeoPoint(center.latitude + index * 0.0001d, center.longitude))
       ),
-      if (index % 7 == 0) JobStatus.Closed else JobStatus.Open,
+      if (index % 7 == 0) JobState.Closed(now) else JobState.Open,
       now.minusSeconds(index.toLong),
       now
     )

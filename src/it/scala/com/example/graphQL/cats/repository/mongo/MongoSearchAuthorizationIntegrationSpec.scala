@@ -73,7 +73,7 @@ final class MongoSearchAuthorizationIntegrationSpec extends MongoIntegrationSuit
         _ <- List("ownership", "actor", "closed", "source", "model").traverse_ { mutation =>
           val mutatedJob = mutation match {
             case "ownership" => queryJob.copy(recruiterId = candidateUser.id)
-            case "closed"    => queryJob.copy(status = JobStatus.Closed)
+            case "closed"    => queryJob.copy(state = JobState.Closed(java.time.Instant.EPOCH))
             case "source"    => queryJob.copy(description = "Changed after precheck")
             case "model"     =>
               queryJob.copy(embedding = queryJob.embedding.map(e => e.copy(meta = e.meta.copy(model = "other"))))
@@ -85,7 +85,7 @@ final class MongoSearchAuthorizationIntegrationSpec extends MongoIntegrationSuit
               MongoCollections.Users,
               MongoHiringCodecs.user(
                 if (mutation == "actor")
-                  recruiter.copy(accountStatus = AccountStatus.Deleted, profile = None, email = None)
+                  recruiter.copy(state = AccountState.Deleted(java.time.Instant.EPOCH), profile = None, email = None)
                 else recruiter
               )
             )
@@ -100,7 +100,12 @@ final class MongoSearchAuthorizationIntegrationSpec extends MongoIntegrationSuit
           db,
           MongoCollections.Users,
           MongoHiringCodecs.user(
-            candidateUser.copy(accountStatus = AccountStatus.Deleted, profile = None, email = None, embedding = None)
+            candidateUser.copy(
+              state = AccountState.Deleted(java.time.Instant.EPOCH),
+              profile = None,
+              email = None,
+              embedding = None
+            )
           )
         )
         deniedJobs <- search.authorizedJobEligibility(candidateScope, List(queryJob.id), None).value

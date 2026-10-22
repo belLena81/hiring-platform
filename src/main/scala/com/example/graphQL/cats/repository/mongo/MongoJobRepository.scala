@@ -393,8 +393,8 @@ final class MongoJobRepository(
       filter,
       MongoFields.CreatedAt,
       page.pageSize,
-      Some(MongoReadProjections.jobDisplay)
-    )(MongoHiringCodecs.readJob)(diagnostics)
+      Some(MongoReadProjections.jobList(page.projection))
+    )(MongoHiringCodecs.readJob(_, page.projection))(diagnostics)
 
   private def baseSearchFilter(filter: JobSearchFilter, page: JobPageRequest): MongoFilter =
     baseJobFilter(

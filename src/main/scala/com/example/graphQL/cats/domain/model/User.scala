@@ -11,8 +11,27 @@ enum UserRole {
   case Candidate, Recruiter, Admin
 }
 
+/** The closed set of account states as a label: what a client filters and a store compares. */
 enum AccountStatus {
   case Active, Deleted
+}
+
+/** The state of a [[User]] account. A deleted account always carries the instant of its deletion, so the pair (status,
+  * deletedAt) cannot disagree; [[AccountStatus]] is its label.
+  */
+enum AccountState {
+  case Active
+  case Deleted(at: Instant)
+
+  def status: AccountStatus = this match {
+    case Active     => AccountStatus.Active
+    case Deleted(_) => AccountStatus.Deleted
+  }
+
+  def deletedAt: Option[Instant] = this match {
+    case Active      => None
+    case Deleted(at) => Some(at)
+  }
 }
 
 enum CandidateAvailabilityStatus {
@@ -107,22 +126,23 @@ final case class User(
     role: UserRole,
     profile: Option[UserProfile],
     createdAt: Instant,
-    adminSingleton: Boolean = false,
     embedding: Option[EntityEmbedding] = None,
-    accountStatus: AccountStatus = AccountStatus.Active,
-    deletedAt: Option[Instant] = None
+    state: AccountState = AccountState.Active
 ) {
+  def accountStatus: AccountStatus = state.status
+
+  def deletedAt: Option[Instant] = state.deletedAt
+
   def candidateProfile: Option[CandidateProfile] =
     profile.collect { case UserProfile.Candidate(value) => value }
 
+  /** The only Admin is the singleton, so the role alone says whether this account is it: the stored unique-index marker
+    * is derived from the role by the persistence codec and is not part of the domain.
+    */
   def roleProfileIsValid: Boolean =
-    accountStatus match {
-      case AccountStatus.Deleted => profile.isEmpty
-      case AccountStatus.Active  =>
-        role match {
-          case UserRole.Admin                          => adminSingleton && profile.isEmpty
-          case UserRole.Candidate | UserRole.Recruiter => !adminSingleton && UserProfile.matchesRole(role, profile)
-        }
+    state match {
+      case AccountState.Deleted(_) => profile.isEmpty
+      case AccountState.Active     => UserProfile.matchesRole(role, profile)
     }
 }
 

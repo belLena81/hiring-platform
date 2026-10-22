@@ -477,7 +477,8 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       3L,
       InterviewWorkflowPhase.Completed,
       Set(InterviewParticipant.Candidate, InterviewParticipant.Recruiter),
-      ServiceFixtures.recruiterId
+      ServiceFixtures.recruiterId,
+      initiatedByRole = com.example.graphQL.cats.domain.model.UserRole.Recruiter
     )
     def action(alias: String, key: Long) =
       s"""$alias: requestInterviewReschedule(input: { workflowId: "${workflowId.value}", expectedRevision: 3, idempotencyKey: "${new java.util.UUID(

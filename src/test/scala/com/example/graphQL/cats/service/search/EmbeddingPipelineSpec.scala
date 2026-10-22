@@ -581,7 +581,8 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
                   usersRef.update(
                     _.updated(
                       id,
-                      candidate.copy(accountStatus = AccountStatus.Deleted, profile = None, embedding = None)
+                      candidate
+                        .copy(state = AccountState.Deleted(java.time.Instant.EPOCH), profile = None, embedding = None)
                     )
                   )
                 else usersRef.update(_ - id)

@@ -32,7 +32,8 @@ final class InterviewSchedulingServiceSpec extends CatsEffectSuite {
     0L,
     InterviewWorkflowPhase.ReservationPending,
     Set.empty,
-    recruiterId
+    recruiterId,
+    initiatedByRole = com.example.graphQL.cats.domain.model.UserRole.Recruiter
   )
 
   private def service(

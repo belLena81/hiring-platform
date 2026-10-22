@@ -19,7 +19,7 @@ import com.example.graphQL.cats.service.port.{
 }
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
-import com.example.graphQL.cats.domain.model.{Job, JobStatus, Location, UserRole}
+import com.example.graphQL.cats.domain.model.{Job, JobState, JobStatus, Location, UserRole}
 import com.example.graphQL.cats.service.events.OperationalEvents
 import com.example.graphQL.cats.service.events.OperationalEventPayload.JobKind
 import com.example.graphQL.cats.domain.policy.{JobLifecycle, LifecycleProgram}
@@ -129,6 +129,8 @@ final class JobService[F[_]: MonadThrow](
       _ <- UseCaseF.forbidUnless[F](authorization.canView(user, JobOwner.of(job)))
     } yield job
 
+  // For display only: under `JobProjection.Summary` the jobs carry a blank description and no requirements (the caller
+  // proved the client selected neither); never persist or re-derive anything from them.
   def searchOpenJobs(actor: ActorContext, filter: JobSearchFilter, page: JobPageRequest): UseCaseF[F, List[Job]] =
     authorization.resolve(actor) *> UseCaseF.repository(jobs.findOpen(filter, page))
 
@@ -199,6 +201,8 @@ final class JobService[F[_]: MonadThrow](
       UseCaseF.forbidUnless[F](user.role == UserRole.Candidate || user.role == UserRole.Admin).as(scope)
     }
 
+  // For display only: under `JobProjection.Summary` the jobs carry a blank description and no requirements (the caller
+  // proved the client selected neither); never persist or re-derive anything from them.
   def myJobs(actor: ActorContext, page: JobPageRequest): UseCaseF[F, List[Job]] =
     for {
       user <- authorization.resolve(actor)
@@ -249,7 +253,7 @@ final class JobService[F[_]: MonadThrow](
         input.requirements,
         input.skills,
         input.location,
-        input.status,
+        JobState.requested(input.status, now),
         now,
         now
       )
@@ -270,10 +274,9 @@ final class JobService[F[_]: MonadThrow](
         input.requirements,
         input.skills,
         input.location,
-        job.status,
+        job.state,
         job.createdAt,
-        now,
-        job.closedAt
+        now
       )
       .toEither
       .leftMap(UseCaseError.ValidationFailed.apply)

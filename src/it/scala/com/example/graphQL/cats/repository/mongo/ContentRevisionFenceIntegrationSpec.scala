@@ -57,7 +57,7 @@ final class ContentRevisionFenceIntegrationSpec extends MongoIntegrationSuite {
       List("Revision requirement"),
       Set("Scala"),
       Location("Cyprus", Some("Nicosia"), remote = false),
-      JobStatus.Open,
+      JobState.Open,
       fixtureTime,
       fixtureTime
     )

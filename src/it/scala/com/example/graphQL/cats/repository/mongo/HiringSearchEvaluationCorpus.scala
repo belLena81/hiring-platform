@@ -32,7 +32,7 @@ private[mongo] object HiringSearchEvaluationCorpus {
       description = entity.summary,
       requirements = entity.skills.toList.sorted,
       skills = entity.skills,
-      status = if (entity.active && !entity.deleted) JobStatus.Open else JobStatus.Closed
+      state = if (entity.active && !entity.deleted) JobState.Open else JobState.Closed(ServiceFixtures.now)
     )
     job.copy(embedding = Some(embedding(SearchableText.job(job), job.skills, entity.stale)))
   }

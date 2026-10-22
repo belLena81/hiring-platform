@@ -47,7 +47,7 @@ final class RecruiterJobClosureIntegrationSpec extends MongoIntegrationSuite {
       List("Closure requirement"),
       Set("Scala"),
       Location("Cyprus", Some("Nicosia"), remote = false),
-      JobStatus.Open,
+      JobState.Open,
       created.plusSeconds(index.toLong),
       created.plusSeconds(index.toLong)
     )
@@ -294,7 +294,7 @@ final class RecruiterJobClosureIntegrationSpec extends MongoIntegrationSuite {
           deletedAt,
           None,
           None,
-          Some(candidate.role)
+          candidate.role
         )
         attempt <- applications
           .createForOpenJobWithEvents(

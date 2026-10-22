@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.infrastructure.kafka
 
+import cats.data.EitherT
 import cats.effect.{IO, Resource}
 import cats.syntax.all.*
 import com.example.graphQL.cats.config.KafkaSaslSecurityProtocol
@@ -28,15 +29,14 @@ object InterviewProducerFencer {
     Resource.make(acquire)(admin => IO.blocking(admin.close(Duration.ofSeconds(CloseTimeoutSeconds)))).map { admin =>
       new InterviewPublisherFencer[IO] {
         override def fence(transactionalIds: Vector[String]): RepositoryF[IO, Unit] =
-          RepositoryF
-            .at[IO]
-            .fromEither(
+          EitherT
+            .fromEither[IO](
               InterviewSubjectCleanup
                 .validateProducerIds(transactionalIds)
                 .leftMap(_ => RepositoryError.InvalidStoredData)
             )
             .flatMap { ids =>
-              if (ids.isEmpty) ().pure[[A] =>> RepositoryF[IO, A]]
+              if (ids.isEmpty) RepositoryF.pure[IO, Unit](())
               else
                 RepositoryF.fromFEither(
                   IO.uncancelable { _ =>

@@ -81,7 +81,7 @@ private[mongo] final class MongoRecruiterJobClosurePages(
     if (versionedJobs.isEmpty) MongoF.pure(())
     else {
       val closedJobs =
-        versionedJobs.map(_.value.copy(status = JobStatus.Closed, closedAt = Some(closedAt), updatedAt = closedAt))
+        versionedJobs.map(_.value.copy(state = JobState.Closed(closedAt), updatedAt = closedAt))
       val writes = versionedJobs.zip(closedJobs).traverse_ { case (observed, closed) =>
         for {
           _ <- MongoF.fromEither(Versioned.nextVersion(observed.version).toRight(RepositoryError.Conflict))
@@ -199,11 +199,17 @@ final class MongoRecruiterJobClosure private[mongo] (
 
   private def closeRow(id: String, now: Instant): RepositoryF[IO, RecruiterJobClosureProgress] =
     RepositoryF.fromFEither(
-      transactionRunner.run(session => closeFor(id, now, session)).value.attempt.flatMap {
-        case Right(Right(progress)) => IO.pure(Right(progress))
-        case Right(Left(error))     => rotate(id, now).as(Left(error))
-        case Left(error)            => rotate(id, now) *> IO.raiseError(error)
-      }
+      transactionRunner
+        .run(session => closeFor(id, now, session))
+        .value
+        .attempt
+        .flatMap(
+          _.fold(
+            thrown => rotate(id, now) *> IO.raiseError(thrown),
+            // The row is rotated behind the others so one failing recruiter cannot starve the queue.
+            _.fold(error => rotate(id, now).as(Left(error)), progress => IO.pure(Right(progress)))
+          )
+        )
     )
 
   private def rotate(id: String, now: Instant): IO[Unit] =

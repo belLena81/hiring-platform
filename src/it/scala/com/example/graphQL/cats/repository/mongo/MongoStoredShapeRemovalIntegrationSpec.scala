@@ -3,6 +3,8 @@ package com.example.graphQL.cats.repository.mongo
 import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.InterviewLifecycleFixtures
+import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, UserId}
+import com.example.graphQL.cats.domain.model.{ApplicationEvent, ApplicationStatus, UserRole}
 import com.example.graphQL.cats.domain.workflow.InterviewWorkflowId
 import com.example.graphQL.cats.service.Diagnostics
 import com.mongodb.client.model.{Filters, IndexOptions, Indexes}
@@ -15,9 +17,10 @@ import java.util.{Date, UUID}
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
-/** Ledger steps 027 to 030: each retires a stored shape (hiring receipts, request receipts, the event copy of a search
-  * session work row, the kind and entity of an embedding work row). Every step is exercised the way an operator meets
-  * it: upgrade from 025, restart, concurrent start, fail closed with a checkpoint, resume and reopen.
+/** Ledger steps 027 to 031: each retires a stored shape (hiring receipts, request receipts, the event copy of a search
+  * session work row, the kind and entity of an embedding work row, an application event without its actor's role).
+  * Every step is exercised the way an operator meets it: upgrade from 025, restart, concurrent start, fail closed with
+  * a checkpoint, resume and reopen.
   */
 final class MongoStoredShapeRemovalIntegrationSpec extends MongoIntegrationSuite {
   override val munitIOTimeout: FiniteDuration = 15.minutes
@@ -27,7 +30,9 @@ final class MongoStoredShapeRemovalIntegrationSpec extends MongoIntegrationSuite
     MigrationIds.InterviewHiringReceiptRemoval,
     MigrationIds.InterviewRequestReceiptRemoval,
     MigrationIds.SearchSessionWorkSingleCopy,
-    MigrationIds.EmbeddingWorkKeyFromIdentity
+    MigrationIds.EmbeddingWorkKeyFromIdentity,
+    MigrationIds.ApplicationEventActorRole,
+    MigrationIds.InterviewWorkflowInitiatorRole
   )
 
   private def init(database: MongoDatabase[IO]): IO[Unit] = MongoHiringSetup.initialize(database, Diagnostics.noop[IO])
@@ -447,7 +452,7 @@ final class MongoStoredShapeRemovalIntegrationSpec extends MongoIntegrationSuite
     }
   }
 
-  test("AC-05.1 a database that never held the retired shapes finishes the four steps without any data write") {
+  test("AC-05.1 a database that never held the retired shapes finishes the six steps without any data write") {
     mongoResource.use { fixture =>
       val database = fixture.database
       for {
@@ -459,13 +464,246 @@ final class MongoStoredShapeRemovalIntegrationSpec extends MongoIntegrationSuite
             MongoCollections.InterviewWorkflowInbox,
             MongoCollections.InterviewWorkflows,
             MongoCollections.SearchSessionWork,
-            MongoCollections.EmbeddingWork
+            MongoCollections.EmbeddingWork,
+            MongoCollections.ApplicationEvents
           )
         )(fixture)
         rows <- Retired.traverse(ledgerRow(database, _))
       } yield {
         assertEquals(writes, Nil)
         assert(rows.forall(_.exists(_.getString(MongoFields.State) == "Complete")), clue(rows))
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------------------------------------------
+  // 031: an application event always records the role its actor acted in
+  // ---------------------------------------------------------------------------------------------------------------
+
+  private def eventDocument(index: Int, withRole: Boolean): Document = {
+    val document = MongoHiringCodecs.event(
+      ApplicationEvent(
+        ApplicationEventId(UUID.nameUUIDFromBytes(s"event-$index".getBytes)),
+        ApplicationId(UUID.nameUUIDFromBytes(s"application-$index".getBytes)),
+        None,
+        ApplicationStatus.Created,
+        UserId(UUID.nameUUIDFromBytes(s"actor-$index".getBytes)),
+        now,
+        None,
+        None,
+        UserRole.Candidate
+      )
+    )
+    if (!withRole) { val _ = document.remove(MongoFields.ActorRole) }
+    document
+  }
+
+  private val withoutRole: Bson = Filters.exists(MongoFields.ActorRole, false)
+
+  test("MR-09.6 migration 031 installs the successor validator over events that all record a role, writing nothing") {
+    mongoResource.use { fixture =>
+      val database = fixture.database
+      for {
+        _ <- atTwentyFive(database)
+        _ <- documents(database, MongoCollections.ApplicationEvents)
+          .flatMap(_.insertMany((0 until 1100).toList.map(eventDocument(_, withRole = true))))
+        before <- installed(
+          database,
+          MongoCollections.ApplicationEvents,
+          MongoOperationalValidators.applicationEventsValidatorThrough025
+        )
+        _ <- fixture.commands.clear
+        _ <- init(database)
+        writes <- dataWrites(Set(MongoCollections.ApplicationEvents))(fixture)
+        current <- installed(
+          database,
+          MongoCollections.ApplicationEvents,
+          MongoOperationalValidators.applicationEventsValidator
+        )
+        total <- count(database, MongoCollections.ApplicationEvents)
+        row <- ledgerRow(database, MigrationIds.ApplicationEventActorRole)
+        rejected <- MongoRepositoryTestSupport
+          .insertOne(database, MongoCollections.ApplicationEvents, eventDocument(5000, withRole = false))
+          .attempt
+        _ <- fixture.commands.clear
+        _ <- init(database)
+        restartWrites <- dataWrites(Set(MongoCollections.ApplicationEvents, MongoCollections.HiringMigrationLedger))(
+          fixture
+        )
+      } yield {
+        assert(before, "the database starts with the generation 025 installed")
+        assertEquals(writes, Nil)
+        assert(current)
+        assertEquals(total, 1100L)
+        assertEquals(row.map(_.getString(MongoFields.State)), Some("Complete"))
+        assert(rejected.isLeft, "the successor validator refuses an event without its role")
+        assertEquals(restartWrites, Nil)
+      }
+    }
+  }
+
+  test("MR-09.6 migration 031 fails closed on an event without a role, rewrites nothing and completes once repaired") {
+    mongoResource.use { fixture =>
+      val database = fixture.database
+      val rows = (0 until 600).toList.map(eventDocument(_, withRole = true))
+      val orphan = eventDocument(9000, withRole = false)
+      for {
+        _ <- atTwentyFive(database)
+        _ <- documents(database, MongoCollections.ApplicationEvents).flatMap(_.insertMany(orphan :: rows))
+        first <- init(database).attempt
+        second <- init(database).attempt
+        stillThere <- count(database, MongoCollections.ApplicationEvents, withoutRole)
+        earlier <- installed(
+          database,
+          MongoCollections.ApplicationEvents,
+          MongoOperationalValidators.applicationEventsValidatorThrough025
+        )
+        _ <- documents(database, MongoCollections.ApplicationEvents)
+          .flatMap(_.deleteOne(Filters.eq(MongoFields.Id, orphan.get(MongoFields.Id))))
+        repaired <- init(database).attempt
+        row <- ledgerRow(database, MigrationIds.ApplicationEventActorRole)
+        current <- installed(
+          database,
+          MongoCollections.ApplicationEvents,
+          MongoOperationalValidators.applicationEventsValidator
+        )
+      } yield {
+        val expected = MigrationError.StepFailed(
+          MigrationIds.ApplicationEventActorRole,
+          s"found an unrecognised row in ${MongoCollections.ApplicationEvents}"
+        )
+        assertEquals(first, Left(expected))
+        assertEquals(second, Left(expected))
+        assertEquals(stillThere, 1L, "the row is neither rewritten nor removed")
+        assert(earlier, "the validator is not replaced while a row would violate it")
+        assertEquals(repaired, Right(()))
+        assertEquals(row.map(_.getString(MongoFields.State)), Some("Complete"))
+        assert(current)
+      }
+    }
+  }
+
+  test("MR-09.6 migration 031 reopens when an earlier binary stores an event without a role again") {
+    mongoResource.use { fixture =>
+      val database = fixture.database
+      for {
+        _ <- atTwentyFive(database)
+        _ <- init(database)
+        _ <- MongoRepositoryTestSupport.insertUnvalidated(
+          database,
+          MongoCollections.ApplicationEvents,
+          eventDocument(1, withRole = false)
+        )
+        reopened <- init(database).attempt
+        _ <- documents(database, MongoCollections.ApplicationEvents).flatMap(_.deleteMany(withoutRole))
+        repaired <- init(database).attempt
+        row <- ledgerRow(database, MigrationIds.ApplicationEventActorRole)
+      } yield {
+        assertEquals(
+          reopened,
+          Left(
+            MigrationError.StepFailed(
+              MigrationIds.ApplicationEventActorRole,
+              s"found an unrecognised row in ${MongoCollections.ApplicationEvents}"
+            )
+          )
+        )
+        assertEquals(repaired, Right(()))
+        assertEquals(row.map(_.getString(MongoFields.State)), Some("Complete"))
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------------------------------------------
+  // 032: an interview workflow always records the role of its initiator
+  // ---------------------------------------------------------------------------------------------------------------
+
+  private def workflowDocument(index: Int, withRole: Boolean): Document = {
+    val base = InterviewLifecycleFixtures.workflowIn(
+      com.example.graphQL.cats.domain.workflow.InterviewWorkflowPhase.ReservationPending
+    )
+    val document = MongoInterviewWorkflowCodec.workflowDocument(
+      base.copy(
+        id = InterviewWorkflowId(UUID.nameUUIDFromBytes(s"workflow-role-$index".getBytes)),
+        applicationId = com.example.graphQL.cats.domain.model.Identifiers.ApplicationId(
+          UUID.nameUUIDFromBytes(s"application-role-$index".getBytes)
+        )
+      )
+    )
+    if (!withRole) { val _ = document.remove("initiatedByRole") }
+    document
+  }
+
+  private val workflowWithoutRole: Bson =
+    Filters.and(Filters.eq(MongoFields.DocumentType, "workflow"), Filters.exists("initiatedByRole", false))
+
+  test(
+    "MR-09.7 migration 032 installs the successor validator over workflows that all record a role, writing nothing"
+  ) {
+    mongoResource.use { fixture =>
+      val database = fixture.database
+      for {
+        _ <- atTwentyFive(database)
+        _ <- documents(database, MongoCollections.InterviewWorkflows)
+          .flatMap(_.insertMany((0 until 700).toList.map(workflowDocument(_, withRole = true))))
+        _ <- fixture.commands.clear
+        _ <- init(database)
+        writes <- dataWrites(Set(MongoCollections.InterviewWorkflows))(fixture)
+        current <- installed(
+          database,
+          MongoCollections.InterviewWorkflows,
+          MongoOperationalValidators.interviewWorkflowsValidator
+        )
+        row28 <- ledgerRow(database, MigrationIds.InterviewRequestReceiptRemoval)
+        row32 <- ledgerRow(database, MigrationIds.InterviewWorkflowInitiatorRole)
+        rejected <- MongoRepositoryTestSupport
+          .insertOne(database, MongoCollections.InterviewWorkflows, workflowDocument(9000, withRole = false))
+          .attempt
+        _ <- fixture.commands.clear
+        _ <- init(database)
+        restartWrites <- dataWrites(Set(MongoCollections.InterviewWorkflows, MongoCollections.HiringMigrationLedger))(
+          fixture
+        )
+      } yield {
+        assertEquals(writes, Nil)
+        assert(current)
+        assertEquals(row28.map(_.getString(MongoFields.State)), Some("Complete"))
+        assertEquals(row32.map(_.getString(MongoFields.State)), Some("Complete"))
+        assert(rejected.isLeft, "the successor validator refuses a workflow without its initiator's role")
+        assertEquals(restartWrites, Nil)
+      }
+    }
+  }
+
+  test(
+    "MR-09.7 migration 032 fails closed on a workflow without a role, rewrites nothing and completes once repaired"
+  ) {
+    mongoResource.use { fixture =>
+      val database = fixture.database
+      val orphan = workflowDocument(9001, withRole = false)
+      for {
+        _ <- atTwentyFive(database)
+        _ <- documents(database, MongoCollections.InterviewWorkflows)
+          .flatMap(_.insertMany(orphan :: (0 until 50).toList.map(workflowDocument(_, withRole = true))))
+        first <- init(database).attempt
+        stillThere <- count(database, MongoCollections.InterviewWorkflows, workflowWithoutRole)
+        _ <- documents(database, MongoCollections.InterviewWorkflows)
+          .flatMap(_.deleteOne(Filters.eq(MongoFields.Id, orphan.get(MongoFields.Id))))
+        repaired <- init(database).attempt
+        row <- ledgerRow(database, MigrationIds.InterviewWorkflowInitiatorRole)
+      } yield {
+        assertEquals(
+          first,
+          Left(
+            MigrationError.StepFailed(
+              MigrationIds.InterviewWorkflowInitiatorRole,
+              s"found an unrecognised row in ${MongoCollections.InterviewWorkflows}"
+            )
+          )
+        )
+        assertEquals(stillThere, 1L)
+        assertEquals(repaired, Right(()))
+        assertEquals(row.map(_.getString(MongoFields.State)), Some("Complete"))
       }
     }
   }

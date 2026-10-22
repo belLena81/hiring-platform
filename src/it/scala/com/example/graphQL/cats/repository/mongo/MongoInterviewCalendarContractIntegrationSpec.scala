@@ -42,7 +42,9 @@ final class MongoInterviewCalendarContractIntegrationSpec
                   interval,
                   now.plusSeconds(300),
                   UUID.randomUUID(),
-                  ApplicationStatus.Accepted
+                  ApplicationStatus.Accepted,
+                  recruiter,
+                  com.example.graphQL.cats.domain.model.UserRole.Recruiter
                 )
                 .leftMap(error => new AssertionError(s"Invalid workflow: $error"))
             )

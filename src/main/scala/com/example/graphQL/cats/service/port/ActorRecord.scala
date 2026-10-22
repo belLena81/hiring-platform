@@ -9,7 +9,7 @@ import com.example.graphQL.cats.domain.model.{AccountStatus, Job, JobStatus, Use
 final case class ActorRecord(id: UserId, role: UserRole, accountStatus: AccountStatus, adminSingleton: Boolean)
 
 object ActorRecord {
-  def of(user: User): ActorRecord = ActorRecord(user.id, user.role, user.accountStatus, user.adminSingleton)
+  def of(user: User): ActorRecord = ActorRecord(user.id, user.role, user.accountStatus, user.role == UserRole.Admin)
 }
 
 /** The ownership projection of a job: who manages it and whether it is open. It carries no description or embedding. */

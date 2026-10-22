@@ -87,7 +87,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     now
   )
   private val admin =
-    User(adminId, Some(email("admin@example.com")), "Admin", UserRole.Admin, None, now, adminSingleton = true)
+    User(adminId, Some(email("admin@example.com")), "Admin", UserRole.Admin, None, now)
   private val openJob = job(jobId, JobStatus.Open)
   private val closedJob = job(closedJobId, JobStatus.Closed)
   private val application = Application.create(applicationId, candidateId, jobId, now)
@@ -1367,7 +1367,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     ).map(result => assertEquals(result, Left(HiringGraphQLSchema.Failure.InvalidQuery)))
   }
 
-  private def historyEvent(id: Long, role: Option[UserRole]): ApplicationEvent =
+  private def historyEvent(id: Long, role: UserRole): ApplicationEvent =
     ApplicationEvent(
       Identifiers.ApplicationEventId(new UUID(0L, id)),
       applicationId,
@@ -1384,12 +1384,12 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     s"""query { applicationHistory(applicationId: "${applicationId.value}", first: 10) {
        |  edges { node { id newStatus actorRole } } } }""".stripMargin
 
-  test("AC-08.2 AC-08.3 application history exposes the actor's role and reads a stored event without one as null") {
-    val events = Vector(historyEvent(1, Some(UserRole.Recruiter)), historyEvent(2, None))
+  test("AC-08.2 application history exposes the role each actor acted in") {
+    val events = Vector(historyEvent(1, UserRole.Recruiter), historyEvent(2, UserRole.Candidate))
     executeWithUsers(historyQuery, Some(recruiterActor), List(candidate, recruiter), events = events).map { json =>
       val nodes = json.hcursor.downField("data").downField("applicationHistory").downField("edges").values.get.toList
       val roles = nodes.map(_.hcursor.downField("node").downField("actorRole").focus.get)
-      assertEquals(roles.toSet, Set(Json.fromString("RECRUITER"), Json.Null), clue(json))
+      assertEquals(roles.toSet, Set(Json.fromString("RECRUITER"), Json.fromString("CANDIDATE")), clue(json))
       assert(!json.noSpaces.contains(recruiterId.value.toString), "the actor's identifier is not exposed")
       assert(!outputFields("ApplicationEvent").contains("actorId"))
       assertEquals(
@@ -1401,7 +1401,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
 
   test("AC-08.4 a candidate cannot read the history of another candidate's application") {
     val stranger = candidate.copy(id = UserId(UUID.fromString("10000000-0000-0000-0000-0000000000f1")), name = "Other")
-    val events = Vector(historyEvent(1, Some(UserRole.Recruiter)))
+    val events = Vector(historyEvent(1, UserRole.Recruiter))
     executeWithUsers(
       historyQuery,
       Some(ActorContext(stranger.id, UserRole.Candidate)),
@@ -2218,7 +2218,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       List("Scala"),
       Set("Scala", "Cats Effect"),
       Location("Ukraine", Some("Kyiv"), remote = true),
-      status,
+      JobState.requested(status, now),
       now,
       now
     )

@@ -24,7 +24,7 @@ private[graphql] object HiringGraphQLJobResolvers {
           context.arg(firstArgument),
           context.arg(afterArgument),
           "open-jobs"
-        )((cursor, size) => JobPageRequest(None, cursor, size))(request =>
+        )((cursor, size) => JobPageRequest(None, cursor, size, HiringGraphQLJobProjection.of(context)))(request =>
           for {
             values <- raiseOnUseCaseError(hiring.jobService.searchOpenJobs(actor, filter, request))
             _ <- recordSearch(context.ctx, hiring, actor.userId, SearchKind.Jobs, searchId, filterSnapshot(filter))(
@@ -50,9 +50,11 @@ private[graphql] object HiringGraphQLJobResolvers {
         context.arg(firstArgument),
         context.arg(afterArgument),
         s"my-jobs:${context.arg(jobStatusArgument).fold("any")(_.toString)}"
-      )((cursor, size) => JobPageRequest(context.arg(jobStatusArgument), cursor, size))(request =>
-        raiseOnUseCaseError(hiring.jobService.myJobs(actor, request))
-      )(job => JobCursor(job.createdAt, job.id))
+      )((cursor, size) =>
+        JobPageRequest(context.arg(jobStatusArgument), cursor, size, HiringGraphQLJobProjection.of(context))
+      )(request => raiseOnUseCaseError(hiring.jobService.myJobs(actor, request)))(job =>
+        JobCursor(job.createdAt, job.id)
+      )
     }
 
   def createJob(context: Context[RequestContext, Unit]): HiringGraphQLResult[MutationOutcome[Job]] =

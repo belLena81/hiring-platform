@@ -51,7 +51,8 @@ final class InterviewCancellationServiceSpec extends CatsEffectSuite {
         3L,
         phase,
         bothNotified,
-        recruiterId
+        recruiterId,
+        initiatedByRole = com.example.graphQL.cats.domain.model.UserRole.Recruiter
       )
     )
 

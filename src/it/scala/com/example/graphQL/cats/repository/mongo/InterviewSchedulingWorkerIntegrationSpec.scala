@@ -276,7 +276,9 @@ final class InterviewSchedulingWorkerIntegrationSpec extends KafkaIntegrationSui
                   interval,
                   now.plusSeconds(300),
                   UUID.randomUUID(),
-                  ApplicationStatus.Accepted
+                  ApplicationStatus.Accepted,
+                  recruiter,
+                  com.example.graphQL.cats.domain.model.UserRole.Recruiter
                 )
                 .fold(error => fail(s"Invalid fixture workflow: $error"), identity)
             }

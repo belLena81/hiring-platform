@@ -230,7 +230,7 @@ final class MongoInterviewLifecycleStore(store: MongoInterviewWorkflowStore) {
         .changeStatus(
           ApplicationStatus.Rejected,
           access.actorId,
-          Some(access.role),
+          access.role,
           at,
           Some(InterviewCancellationFeedback.text(initiator)),
           None

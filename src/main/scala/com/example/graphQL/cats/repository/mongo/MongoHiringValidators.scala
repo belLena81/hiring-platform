@@ -111,15 +111,6 @@ private[mongo] object MongoHiringValidators {
   /** The current users validator: typed identity and date fields, and no personal data on a Deleted account. */
   def userValidator: Document = userSchema(successor = true)
 
-  private val deletedAccountPersonalFields: List[String] = List(
-    MongoFields.Email,
-    MongoFields.EmailCanonical,
-    MongoFields.PasswordHash,
-    MongoFields.Profile,
-    MongoFields.Embedding,
-    MongoFields.EmbeddingMeta
-  )
-
   private def userSchema(successor: Boolean): Document = {
     def active(role: String, required: String) = new Document("required", List(required).asJava).append(
       "properties",
@@ -186,7 +177,7 @@ private[mongo] object MongoHiringValidators {
           "not",
           new Document(
             "anyOf",
-            deletedAccountPersonalFields.map(field => new Document("required", List(field).asJava)).asJava
+            UserFields.erasedOnDeletion.map(field => new Document("required", List(field).asJava)).asJava
           )
         )
       else deletedProperties

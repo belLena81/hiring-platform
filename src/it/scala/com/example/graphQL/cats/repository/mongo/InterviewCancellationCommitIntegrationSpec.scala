@@ -54,8 +54,11 @@ final class InterviewCancellationCommitIntegrationSpec extends MongoIntegrationS
           held,
           Instant.now().plusSeconds(300),
           UUID.randomUUID(),
-          ApplicationStatus.Accepted
+          ApplicationStatus.Accepted,
+          UserId(UUID.randomUUID()),
+          com.example.graphQL.cats.domain.model.UserRole.Recruiter
         )
+        .map(workflow => workflow.copy(initiatedBy = workflow.recruiterId))
         .fold(error => fail(s"invalid workflow $error"), identity)
       for {
         _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
@@ -254,7 +257,7 @@ final class InterviewCancellationCommitIntegrationSpec extends MongoIntegrationS
         now,
         None,
         None,
-        None
+        UserRole.Candidate
       )
       for {
         _ <- MongoRepositoryTestSupport.insertOne(
@@ -493,7 +496,7 @@ final class InterviewCancellationCommitIntegrationSpec extends MongoIntegrationS
       .insertOne(
         a.fixture.database,
         MongoCollections.Users,
-        MongoHiringCodecs.user(User(id, None, s"Admin-${id.value}", UserRole.Admin, None, now, adminSingleton = true))
+        MongoHiringCodecs.user(User(id, None, s"Admin-${id.value}", UserRole.Admin, None, now))
       )
       .as(id)
   }

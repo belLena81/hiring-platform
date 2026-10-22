@@ -20,7 +20,7 @@ object ApplicationLifecycle {
   def changeStatus(
       target: ApplicationStatus,
       actorId: UserId,
-      actorRole: Option[UserRole],
+      actorRole: UserRole,
       now: Instant,
       feedback: Option[String],
       reason: Option[String]
@@ -63,7 +63,7 @@ final case class StatusChange(
     previousStatus: ApplicationStatus,
     newStatus: ApplicationStatus,
     actorId: UserId,
-    actorRole: Option[UserRole],
+    actorRole: UserRole,
     occurredAt: Instant,
     feedback: Option[String],
     reason: Option[String]

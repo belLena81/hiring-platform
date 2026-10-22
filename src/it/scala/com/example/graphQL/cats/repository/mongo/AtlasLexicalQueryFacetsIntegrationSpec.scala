@@ -83,10 +83,9 @@ final class AtlasLexicalQueryFacetsIntegrationSpec extends CatsEffectSuite {
       List("requirement"),
       skills,
       Location("Cyprus", Some(city), remote, Option.when(city == "Nicosia" && !remote)(nicosia)),
-      status,
+      JobState.requested(status, now),
       now,
-      now,
-      closedAt = Option.when(status == JobStatus.Closed)(now)
+      now
     )
 
   private def corpus(scalaJobs: Int, otherJobs: Int): List[Job] =

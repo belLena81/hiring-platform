@@ -159,7 +159,11 @@ final class InterviewSubjectCleanupWorkerSpec extends CatsEffectSuite {
         assert(recorded.forall(_._2.forall { case (field, value) => LogFields.validPublic(field, value) }))
         assert(!recorded.exists(_._2.values.exists(_.contains("private provider details"))))
         if (!unexpectedFailure)
-          assertEquals(recorded.map(_._2), Vector.fill(4)(Map(LogField.SpanName -> "interviewCleanup.process")))
+          // A typed failure keeps its safe error code, so the cause is not lost with the operation name.
+          assertEquals(
+            recorded.map(_._2.get(LogField.ErrorCode)),
+            Vector("UNAVAILABLE", "CONFLICT", "UNAVAILABLE", "CONFLICT").map(Some(_))
+          )
       }
     }
   }

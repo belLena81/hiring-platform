@@ -50,9 +50,9 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
     Some(UserProfile.Recruiter(RecruiterProfile("Acme", None))),
     now
   )
-  private val admin = User(userId, None, "Admin", UserRole.Admin, None, now, adminSingleton = true)
+  private val admin = User(userId, None, "Admin", UserRole.Admin, None, now)
   private val deletedRecruiter =
-    recruiter.copy(accountStatus = AccountStatus.Deleted, profile = None, deletedAt = Some(now))
+    recruiter.copy(profile = None, state = AccountState.Deleted(now))
   private val request = IdempotencyRequest.fromCanonicalInput(
     UUID.fromString("20000000-0000-0000-0000-000000000003"),
     "{}"

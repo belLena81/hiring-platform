@@ -93,8 +93,11 @@ final class InterviewBrokerOutageIntegrationSpec extends MongoIntegrationSuite {
               InterviewInterval(now.plusSeconds(3600), now.plusSeconds(3660)),
               now.plusSeconds(180),
               UUID.randomUUID(),
-              ApplicationStatus.Accepted
+              ApplicationStatus.Accepted,
+              UserId(UUID.randomUUID()),
+              com.example.graphQL.cats.domain.model.UserRole.Recruiter
             )
+            .map(workflow => workflow.copy(initiatedBy = workflow.recruiterId))
             .fold(error => fail(s"Invalid fixture: $error"), identity)
           _ <- InterviewSchedulingFixtures.seed(fixture.database, List(template), now)
           collection <- MongoRepositoryTestSupport.collection(fixture.database, MongoCollections.Applications)

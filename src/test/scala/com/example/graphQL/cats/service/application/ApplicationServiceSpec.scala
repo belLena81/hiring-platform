@@ -12,7 +12,7 @@ import com.example.graphQL.cats.service.port.ApplicationWriteActor
 import com.example.graphQL.cats.service.protocol.IdempotencyRequest
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.Identifiers.ApplicationEventId
-import com.example.graphQL.cats.domain.model.{ApplicationStatus, JobStatus, UserRole}
+import com.example.graphQL.cats.domain.model.{ApplicationStatus, UserRole, JobState}
 import com.example.graphQL.cats.service.events.OperationalEventType
 import java.util.UUID
 import munit.CatsEffectSuite
@@ -104,7 +104,7 @@ class ApplicationServiceSpec extends CatsEffectSuite {
 
   test("closed jobs reject submission without writing application history") {
     withServices(
-      Map(jobId -> openJob.copy(status = JobStatus.Closed)),
+      Map(jobId -> openJob.copy(state = JobState.Closed(java.time.Instant.EPOCH))),
       Map.empty,
       now,
       List(applicationId.value, eventId.value)

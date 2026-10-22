@@ -131,6 +131,7 @@ final class MongoOperationalValidatorsSpec extends FunSuite {
 
   test("AC-04.2 AC-05.1 the validators replaced after migration 025 differ from the generation 025 installed") {
     val replaced = Set(
+      MongoCollections.ApplicationEvents,
       MongoCollections.EmbeddingWork,
       MongoCollections.SearchSessionWork,
       MongoCollections.InterviewWorkflows,

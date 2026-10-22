@@ -204,10 +204,10 @@ final class SemanticSearchService[F[_]: Monad](
     * they are not degraded and keep their own reading through `asSearchFailure`.
     */
   private def degradable[A](retrieval: UseCaseF[F, A]): UseCaseF[F, Either[DegradedSearch, A]] =
-    EitherT(retrieval.value.map {
+    retrieval.transform {
       case Right(value) => Right(Right(value))
       case Left(error)  => error.degradation.map(Left(_)).toRight(error.asSearchFailure)
-    })
+    }
 
   /** A usable, bounded lexical query: trimmed, within the query limit, and non-empty. */
   private def lexicalFallbackText(text: Option[String]): Option[String] =

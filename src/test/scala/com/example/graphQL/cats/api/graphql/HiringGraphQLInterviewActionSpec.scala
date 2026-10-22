@@ -60,7 +60,8 @@ final class HiringGraphQLInterviewActionSpec extends CatsEffectSuite {
         revision,
         phase,
         bothNotified,
-        recruiterId
+        recruiterId,
+        initiatedByRole = com.example.graphQL.cats.domain.model.UserRole.Recruiter
       )
     )
 

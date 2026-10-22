@@ -16,9 +16,9 @@ import scala.jdk.CollectionConverters.*
   *
   * The completed proof is read-only and exact: every collection must hold the definition this step installed
   * (`MongoOperationalValidators.installedBy025`, users V2 included) or its documented successor in
-  * `MongoOperationalValidators.all` (embedding work, search session work, interview workflows and the inbox were
-  * replaced by 027 to 030), so later drift fails closed with the drifted collection and is never overwritten. The users
-  * validator is also installed at every start by `MongoHiringSetup`; the earlier proof of
+  * `MongoOperationalValidators.all` (application events, embedding work, search session work, interview workflows and
+  * the inbox were replaced by 027 to 032), so later drift fails closed with the drifted collection and is never
+  * overwritten. The users validator is also installed at every start by `MongoHiringSetup`; the earlier proof of
   * `016_candidate_residence_integrity` accepts it as the documented successor of its own definition.
   *
   * Recovery is forward-only. Stop every writer running an earlier binary before upgrading: it stores `null` optional
@@ -40,7 +40,10 @@ private[mongo] object MongoOperationalCollectionValidatorMigrations {
             val stored = options.get(name)
             IO.raiseUnless(
               MongoHiringValidators.strictValidatorMatches(stored, installed) ||
-                MongoHiringValidators.strictValidatorMatches(stored, current)
+                MongoHiringValidators.strictValidatorMatches(stored, current) ||
+                MongoOperationalValidators.supersededByLaterSteps
+                  .get(name)
+                  .exists(MongoHiringValidators.strictValidatorMatches(stored, _))
             )(MigrationError.ValidatorMismatch(name))
         }
       }

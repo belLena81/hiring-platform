@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.domain
 
+import com.example.graphQL.cats.domain.model.{JobState}
 import com.example.graphQL.cats.domain.error.DomainValidationError.{BlankField, EmptyCollection, InvalidCoordinates}
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.{GeoPoint, Job, JobStatus, Location, User, UserRole}
@@ -28,7 +29,7 @@ class DomainValidationSpec extends FunSuite {
       List(" ", ""),
       Set(" ", ""),
       location,
-      JobStatus.Open,
+      JobState.Open,
       now,
       now
     )
@@ -54,7 +55,7 @@ class DomainValidationSpec extends FunSuite {
       List("Scala"),
       Set("Cats Effect"),
       Location(" ", Some(""), remote = true),
-      JobStatus.Open,
+      JobState.Open,
       now,
       now
     )
@@ -88,7 +89,7 @@ class DomainValidationSpec extends FunSuite {
       List("Scala"),
       Set("Cats Effect"),
       Location("Cyprus", Some("Nicosia"), remote = false, Some(point)),
-      JobStatus.Open,
+      JobState.Open,
       now,
       now
     )
@@ -111,7 +112,7 @@ class DomainValidationSpec extends FunSuite {
         List("Scala"),
         Set("Cats Effect"),
         Location("Cyprus", Some("Nicosia"), remote = false, Some(point)),
-        JobStatus.Open,
+        JobState.Open,
         now,
         now
       )
@@ -129,7 +130,7 @@ class DomainValidationSpec extends FunSuite {
       List(" Scala ", "Cats Effect"),
       Set(" Scala ", " MongoDB "),
       location,
-      JobStatus.Open,
+      JobState.Open,
       now,
       now
     )

@@ -12,6 +12,7 @@ import com.example.graphQL.cats.domain.model.{
   AccountStatus,
   CandidateProfile,
   Job,
+  JobState,
   JobStatus,
   Location,
   RecruiterProfile,
@@ -56,7 +57,7 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends MongoIntegrationSu
       List("Cats Effect"),
       Set("Scala", "MongoDB"),
       Location("Cyprus", Some("Nicosia"), remote = true),
-      JobStatus.Open,
+      JobState.Open,
       now,
       now
     )
@@ -134,7 +135,7 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends MongoIntegrationSu
         LocalTestServices.database(client).use { database =>
           val legacyJob = MongoHiringCodecs.job(job(JobId(UUID.randomUUID()), UserId(UUID.randomUUID())))
           val legacyUser = MongoHiringCodecs.user(
-            User(UserId(UUID.randomUUID()), None, "Admin", UserRole.Admin, None, now, adminSingleton = true)
+            User(UserId(UUID.randomUUID()), None, "Admin", UserRole.Admin, None, now)
           )
           val legacyCandidate = MongoHiringCodecs.user(
             User(
@@ -540,8 +541,7 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends MongoIntegrationSu
           val firstOpen = job(JobId(UUID.randomUUID()), recruiterId)
           val secondOpen = job(JobId(UUID.randomUUID()), recruiterId).copy(title = "Platform Engineer")
           val alreadyClosed = job(JobId(UUID.randomUUID()), recruiterId).copy(
-            status = JobStatus.Closed,
-            closedAt = Some(now.minusSeconds(60)),
+            state = JobState.Closed(now.minusSeconds(60)),
             updatedAt = now.minusSeconds(60)
           )
           val deletionTime = now.plusSeconds(2)
@@ -723,7 +723,7 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends MongoIntegrationSu
             now
           )
           val otherCandidate = candidate.copy(id = UserId(UUID.randomUUID()), name = "Other candidate")
-          val admin = User(UserId(UUID.randomUUID()), None, "Admin", UserRole.Admin, None, now, adminSingleton = true)
+          val admin = User(UserId(UUID.randomUUID()), None, "Admin", UserRole.Admin, None, now)
           val original = job(JobId(UUID.randomUUID()), recruiter.id)
           val applicants = List(
             candidate,
@@ -743,7 +743,7 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends MongoIntegrationSu
               now,
               None,
               None,
-              None
+              UserRole.Candidate
             )
           )
           val users =

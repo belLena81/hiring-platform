@@ -11,21 +11,7 @@ import org.bson.Document
 
 /** Projected BSON is untrusted; malformed present values fail closed at this adapter. */
 private[mongo] object MongoSearchEligibilityCodecs {
-  val jobFields: List[String] = List(
-    MongoFields.Id,
-    MongoFields.Version,
-    MongoFields.RecruiterId,
-    MongoFields.Title,
-    MongoFields.Description,
-    MongoFields.Requirements,
-    MongoFields.Skills,
-    MongoFields.Location,
-    MongoFields.Status,
-    MongoFields.CreatedAt,
-    MongoFields.UpdatedAt,
-    MongoFields.ClosedAt,
-    MongoFields.EmbeddingMeta
-  )
+  val jobFields: List[String] = JobFields.eligibility
   val candidateFields: List[String] = List(
     MongoFields.Id,
     MongoFields.Name,

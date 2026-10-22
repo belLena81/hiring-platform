@@ -159,7 +159,7 @@ final class InterviewCancellationRaceIntegrationSpec extends MongoIntegrationSui
             now,
             None,
             None,
-            None
+            UserRole.Candidate
           )
           written <- applications
             .updateStatusWithEvents(

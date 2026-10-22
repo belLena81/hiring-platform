@@ -56,7 +56,9 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         interval,
         now.plusSeconds(300),
         UUID.randomUUID(),
-        ApplicationStatus.Accepted
+        ApplicationStatus.Accepted,
+        recruiter,
+        com.example.graphQL.cats.domain.model.UserRole.Recruiter
       )
       .fold(error => fail(s"Invalid test workflow: $error"), identity)
 
@@ -598,7 +600,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         assertEquals(scheduled.candidateId, own.candidateId)
         assertEquals(scheduled.recruiterId, own.recruiterId)
         assertEquals(scheduled.initiatedBy, own.recruiterId)
-        assertEquals(scheduled.initiatedByRole, Some(UserRole.Recruiter))
+        assertEquals(scheduled.initiatedByRole, UserRole.Recruiter)
         assertEquals(candidateView.map(_.id), Right(scheduled.id))
         assertEquals(strangerView, Left(UseCaseError.Domain(DomainError.NotFound("interviewWorkflow"))))
         assertEquals(recruiterRepair, Left(UseCaseError.Authentication(AuthenticationError.Unauthorized)))
@@ -620,10 +622,9 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         "Scheduling audit admin",
         UserRole.Admin,
         None,
-        now,
-        adminSingleton = true
+        now
       )
-      val initiated = target.copy(initiatedBy = admin.id, initiatedByRole = Some(UserRole.Admin))
+      val initiated = target.copy(initiatedBy = admin.id, initiatedByRole = UserRole.Admin)
       val eventId =
         UUID.nameUUIDFromBytes(s"${initiated.id.value}:status".getBytes(java.nio.charset.StandardCharsets.UTF_8))
       val calendar = LedgerInterviewCalendarProvider.durable(repository)
@@ -668,7 +669,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         )
         expected <- IO.fromEither(
           ApplicationLifecycle
-            .changeStatus(ApplicationStatus.Interview, admin.id, Some(UserRole.Admin), now, None, None)
+            .changeStatus(ApplicationStatus.Interview, admin.id, UserRole.Admin, now, None, None)
             .run(original)
             .leftMap(error => new AssertionError(s"Unexpected lifecycle rejection: $error"))
         )
@@ -977,8 +978,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         "Scheduling repair admin",
         UserRole.Admin,
         None,
-        now,
-        adminSingleton = true
+        now
       )
       val calendar = LedgerInterviewCalendarProvider.durable(repository)
       val notifications = LedgerInterviewNotificationProvider.durable(repository)

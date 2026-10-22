@@ -31,12 +31,14 @@ final class MongoOperationalCollectionValidatorsIntegrationSpec extends MongoInt
   private val Absence = MigrationIds.OptionalFieldAbsence
   private val Validators = MigrationIds.OperationalCollectionValidators
 
-  /** The steps after 025 that replace four of its validators; a database at 023 has not run them either. */
+  /** The steps after 025 that replace six of its validators; a database at 023 has not run them either. */
   private val Successors = List(
     MigrationIds.InterviewHiringReceiptRemoval,
     MigrationIds.InterviewRequestReceiptRemoval,
     MigrationIds.SearchSessionWorkSingleCopy,
-    MigrationIds.EmbeddingWorkKeyFromIdentity
+    MigrationIds.EmbeddingWorkKeyFromIdentity,
+    MigrationIds.ApplicationEventActorRole,
+    MigrationIds.InterviewWorkflowInitiatorRole
   )
 
   private def init(database: MongoDatabase[IO]): IO[Unit] = MongoHiringSetup.initialize(database, Diagnostics.noop[IO])

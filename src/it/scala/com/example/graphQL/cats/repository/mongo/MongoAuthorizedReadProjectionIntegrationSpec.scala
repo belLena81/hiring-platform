@@ -4,7 +4,13 @@ import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
-import com.example.graphQL.cats.domain.pagination.{ApplicationPageRequest, PageSize}
+import com.example.graphQL.cats.domain.pagination.{
+  ApplicationPageRequest,
+  JobCursor,
+  JobPageRequest,
+  JobProjection,
+  PageSize
+}
 import com.example.graphQL.cats.service.{ActorContext, Diagnostics}
 import com.example.graphQL.cats.service.auth.ActorAuthorization
 import com.example.graphQL.cats.service.port.{ActorRecord, JobOwner, MutationWriteContext}
@@ -51,7 +57,7 @@ final class MongoAuthorizedReadProjectionIntegrationSpec extends MongoIntegratio
     List("Scala"),
     Set("Scala"),
     Location("Ukraine", Some("Kyiv"), remote = true),
-    JobStatus.Open,
+    JobState.Open,
     now,
     now,
     embedding = Some(vector)
@@ -192,6 +198,55 @@ final class MongoAuthorizedReadProjectionIntegrationSpec extends MongoIntegratio
             Set("embedding", "embeddingMeta")
           )
         )
+      }
+    }
+  }
+
+  test(
+    "AC-10.10 a summary list read transfers no posting text and no vector, and pages in the same order as a full read"
+  ) {
+    mongoResource.use { fixture =>
+      val jobs = repositories(fixture).jobs
+      val owner = recruiter("Summary owner")
+      val stored = (1 to 5).toList.map(n =>
+        job(owner.id)
+          .copy(title = s"Job $n", createdAt = now.plusSeconds(n.toLong), updatedAt = now.plusSeconds(n.toLong))
+      )
+      def page(projection: JobProjection, cursor: Option[JobCursor] = None) =
+        JobPageRequest(None, cursor, PageSize.fromInt(2).toOption.get, projection)
+      for {
+        _ <- stored.traverse_(insertJob(fixture, _))
+        _ <- fixture.commands.clear
+        summary <- jobs.findByRecruiter(owner.id, page(JobProjection.Summary)).value
+        full <- jobs.findByRecruiter(owner.id, page(JobProjection.Full)).value
+        finds <- issued(fixture, "find", MongoCollections.Jobs)
+        next <- jobs
+          .findByRecruiter(
+            owner.id,
+            page(
+              JobProjection.Summary,
+              summary.toOption.flatMap(_.lastOption).map(last => JobCursor(last.createdAt, last.id))
+            )
+          )
+          .value
+        everyone <- jobs.findAll(page(JobProjection.Summary)).value
+      } yield {
+        assertEquals(summary.map(_.map(_.title)), Right(List("Job 5", "Job 4")))
+        assertEquals(summary.map(_.map(_.description).distinct), Right(List("")))
+        assertEquals(summary.map(_.flatMap(_.requirements)), Right(Nil))
+        assertEquals(summary.map(_.flatMap(_.embedding)), Right(Nil))
+        assertEquals(summary.map(_.map(_.id)), full.map(_.map(_.id)))
+        assertEquals(full.map(_.map(_.description).distinct), Right(List("Build backend services")))
+        assertEquals(full.map(_.flatMap(_.requirements).distinct), Right(List("Scala")))
+        assertEquals(
+          finds.map(command => fieldNames(projectionOf(command))),
+          List(
+            Set("description", "requirements", "embedding", "embeddingMeta"),
+            Set("embedding", "embeddingMeta")
+          )
+        )
+        assertEquals(next.map(_.map(_.title)), Right(List("Job 3", "Job 2")))
+        assertEquals(everyone.map(_.map(_.description).distinct), Right(List("")))
       }
     }
   }

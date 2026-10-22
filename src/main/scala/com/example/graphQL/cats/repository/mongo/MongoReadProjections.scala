@@ -3,6 +3,7 @@ package com.example.graphQL.cats.repository.mongo
 import cats.data.ValidatedNel
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.{AccountStatus, JobStatus, UserRole}
+import com.example.graphQL.cats.domain.pagination.JobProjection
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.repository.mongo.MongoHiringCodecs.StoredDocumentError
 import com.example.graphQL.cats.service.port.{ActorRecord, JobOwner}
@@ -16,38 +17,42 @@ import org.bson.conversions.Bson
 private[mongo] object MongoReadProjections {
 
   /** A user with its profile, without credential and embedding. */
-  val userProfile: Bson =
-    Projections.exclude(MongoFields.PasswordHash, MongoFields.Embedding, MongoFields.EmbeddingMeta)
+  val userProfile: Bson = Projections.exclude(UserFields.hiddenFromProfile*)
 
   /** A user including its embedding, without the credential, for the embedding pipeline and search ranking. */
   val userWithEmbedding: Bson = Projections.exclude(MongoFields.PasswordHash)
 
   /** A job without its embedding. */
-  val jobDisplay: Bson = Projections.exclude(MongoFields.Embedding, MongoFields.EmbeddingMeta)
+  val jobDisplay: Bson = Projections.exclude(JobFields.hiddenFromDisplay*)
 
-  val actor: Bson =
-    Projections.include(MongoFields.Id, MongoFields.Role, MongoFields.AccountStatus, MongoFields.AdminSingletonKey)
+  /** A job without its posting text and embedding, for a list whose selection names neither. */
+  val jobSummary: Bson = Projections.exclude(JobFields.hiddenFromSummary*)
 
-  val jobOwner: Bson = Projections.include(MongoFields.Id, MongoFields.RecruiterId, MongoFields.Status)
+  /** The projection a list read of jobs issues for the requested level. */
+  def jobList(projection: JobProjection): Bson = projection match {
+    case JobProjection.Summary => jobSummary
+    case JobProjection.Full    => jobDisplay
+  }
+
+  val actor: Bson = Projections.include(UserFields.actor*)
+
+  val jobOwner: Bson = Projections.include(JobFields.owner*)
 
   /** Only the revision, for compare-and-set writes whose other inputs the caller already holds. */
   val revision: Bson = Projections.include(MongoFields.Id, MongoFields.Version)
 
   /** The same exclusions as an aggregation stage, for `$lookup` sub-pipelines. */
-  val userProfileStage: Document =
-    excludeStage(MongoFields.PasswordHash, MongoFields.Embedding, MongoFields.EmbeddingMeta)
-  val jobDisplayStage: Document = excludeStage(MongoFields.Embedding, MongoFields.EmbeddingMeta)
+  val userProfileStage: Document = excludeStage(UserFields.hiddenFromProfile)
+  val jobDisplayStage: Document = excludeStage(JobFields.hiddenFromDisplay)
 
-  private def excludeStage(fields: String*): Document =
+  private def excludeStage(fields: List[String]): Document =
     new Document("$project", fields.foldLeft(new Document())((projection, field) => projection.append(field, 0)))
 }
 
 /** Strict decoding of the minimal authorization projections: exactly the projected fields, nothing else. */
 private[mongo] object MongoAuthorizationProjectionCodecs {
-  private val actorFields =
-    Set(MongoFields.Id, MongoFields.Role, MongoFields.AccountStatus, MongoFields.AdminSingletonKey)
-  private val ownerFields = Set(MongoFields.Id, MongoFields.RecruiterId, MongoFields.Status)
-  private val singletonAdminKey = "singleton-admin"
+  private val actorFields = UserFields.actor.toSet
+  private val ownerFields = JobFields.owner.toSet
 
   def readActor(document: Document): ValidatedNel[StoredDocumentError, ActorRecord] =
     unexpected(document, actorFields).andThen { _ =>
@@ -60,7 +65,9 @@ private[mongo] object MongoAuthorizationProjectionCodecs {
           .requiredEnum(document, MongoFields.AccountStatus)(MongoDocumentFields.byName(AccountStatus.values))
           .toValidatedNel,
         MongoDocumentFields.optionalString(document, MongoFields.AdminSingletonKey).toValidatedNel
-      ).mapN((id, role, status, key) => ActorRecord(id, role, status, key.contains(singletonAdminKey)))
+      ).mapN((id, role, status, key) =>
+        ActorRecord(id, role, status, key.contains(MongoHiringCodecs.SingletonAdminMarker))
+      )
     }
 
   def readOwner(document: Document): ValidatedNel[StoredDocumentError, JobOwner] =

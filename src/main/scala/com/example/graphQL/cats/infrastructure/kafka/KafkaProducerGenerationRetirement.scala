@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.infrastructure.kafka
 
+import cats.data.EitherT
 import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.config.KafkaConfig
@@ -40,7 +41,7 @@ object KafkaProducerGenerationRetirement {
     }
 
   def fence(config: KafkaConfig, id: String): RepositoryF[IO, Unit] =
-    RepositoryF.at[IO].fromEither(credentials(config, id)).flatMap { case (user, password) =>
+    EitherT.fromEither[IO](credentials(config, id)).flatMap { case (user, password) =>
       val settings = ProducerSettings(Serializer[IO, String], Serializer[IO, Array[Byte]])
         .withBootstrapServers(config.bootstrapServers)
         .withProperties(KafkaClientSettings.security(Some(user), Some(password), config.saslSecurityProtocol))

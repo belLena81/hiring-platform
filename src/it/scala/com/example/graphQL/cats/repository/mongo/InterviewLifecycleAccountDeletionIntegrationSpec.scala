@@ -278,7 +278,7 @@ final class InterviewLifecycleAccountDeletionIntegrationSpec extends MongoIntegr
           s.fixture.database,
           MongoCollections.Users,
           MongoHiringCodecs.user(
-            User(admin, None, s"Admin-${admin.value}", UserRole.Admin, None, now, adminSingleton = true)
+            User(admin, None, s"Admin-${admin.value}", UserRole.Admin, None, now)
           )
         )
         _ <- cancelBy(s, UserRole.Admin, admin)
