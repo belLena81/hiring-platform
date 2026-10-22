@@ -1,6 +1,7 @@
 package com.example.hiring.analytics.adapter.spark
 
 import com.example.hiring.analytics.config.AnalyticsOperationalSettings
+import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.batch.{AnalyticsLakehousePaths, AnalyticsStoragePrivacy}
 
 import cats.effect.Async
@@ -21,6 +22,7 @@ private[analytics] final class AnalyticsDeltaRetention[F[_]: Async: UUIDGen](
     logger: Logger[F]
 ) {
   private val retention = operational.retention
+  private val DeletionVectorsProperty = "delta.enableDeletionVectors"
 
   /** Must run while the caller owns the shared lakehouse mutex. */
   def recoverAbandonedRewrites(spark: SparkSession): F[Unit] =
@@ -62,9 +64,13 @@ private[analytics] final class AnalyticsDeltaRetention[F[_]: Async: UUIDGen](
         // DESCRIBE DETAIL computes file counts and sizes even when only properties are selected.
         // Read the same fresh snapshot's metadata without reconstructing those unused statistics.
         val properties = DeltaLogFactory.system(spark, path).update().metadata.configuration
+        // Deletion vectors would keep purged rows in files that only REORG ... APPLY (PURGE) rewrites.
+        // An enabled table is never silently flipped: fail closed so an operator decides how to rewrite it.
+        if (properties.get(DeletionVectorsProperty).contains("true")) throw AnalyticsError.DeltaSchemaMismatch(path)
         val desired = Map(
           "delta.deletedFileRetentionDuration" -> desiredVacuumRetention,
-          "delta.logRetentionDuration" -> desiredLogRetention
+          "delta.logRetentionDuration" -> desiredLogRetention,
+          DeletionVectorsProperty -> "false"
         ) ++ (if (rawPaths.contains(path)) Map("delta.dataSkippingNumIndexedCols" -> "0") else Map.empty)
         val changes = desired.filter { case (key, value) => properties.get(key).forall(_ != value) }
         if (changes.nonEmpty) {

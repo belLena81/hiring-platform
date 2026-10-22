@@ -330,7 +330,7 @@ final class AnalyticsErasureWorkerSpec extends CatsEffectSuite {
       org.typelevel.log4cats.slf4j.Slf4jLogger.getLogger[IO],
       AnalyticsErasureWorkerPolicy(
         retention,
-        AnalyticsErasureWorkerTimings(leaseDuration, 1.second, 1.second)
+        AnalyticsErasureWorkerTimings(leaseDuration, 1.second, 1.second, 5.minutes)
       ),
       cats.effect.Clock[IO]
     )

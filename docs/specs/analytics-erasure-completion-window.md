@@ -74,11 +74,11 @@ Derived worst case with defaults, from the rule above: purge on day 0 at 10:00 U
 | Rule | Tag | Scenario |
 |---|---|---|
 | Delta deadline is the later of data and log deadlines, with the log deadline rounded to the next UTC day | AEC-01.1 | Given purge at 2026-03-02T10:00Z, vacuum 7 d, log 14 d, then deadline is 2026-03-17T00:00Z |
-| Same | AEC-01.2 | Given purge at 2026-03-02T23:59:59Z, vacuum 1 d, log 1 s, then deadline is 2026-03-04T00:00:01Z |
+| Same | AEC-01.2 | Given purge at 2026-03-02T23:59:59Z, vacuum 1 s, log 1 s, then deadline is 2026-03-03T00:00:01Z (the log deadline rounds up to the next UTC day) |
 | Same | AEC-01.3 | Given purge exactly at 2026-03-03T00:00Z, log 1 s, vacuum 1 s, then deadline is 2026-03-04T00:00:01Z (a purge at midnight still waits a full day) |
 | Worst-case completion must fit the budget | AEC-02.1 | Given defaults (log 14 d, vacuum 7 d, Kafka 7 d + 7 d), then worst case is 15 d from purge, under the 21 d budget, and the worker starts |
 | Same | AEC-02.2 | Given `delta-log-retention = 30 days`, then startup fails with one accumulated configuration problem naming the computed 31 d and the budget |
-| Same | AEC-02.3 | Given the budget is set to 10 d and defaults otherwise, then startup fails (budget below Kafka worst case) |
+| Same | AEC-02.3 | Given the budget is set to 10 d and defaults otherwise, then startup fails naming the computed 15 d worst case (max of Kafka 14 d, log 15 d, vacuum 7 d) and the 10 d budget, accumulated with any other configuration problem |
 | Existing lakehouse adopts the new default | AEC-03.1 | Given a Delta table with `logRetentionDuration = interval 30 days`, when the worker starts, then the property reads `interval 14 days` and the rule's deadline uses it |
 | Deletion vectors are pinned off | AEC-04.1 | Given a managed table without the property, when retention is configured, then `delta.enableDeletionVectors = false` is set; given a table where it is `true`, then startup fails closed with a schema/property mismatch |
 | Topic retention is explicit | AEC-05.1 | Given the local Compose broker, when the topic exists, then `kafka-configs --describe` shows the configured `retention.ms`, `segment.ms`, `cleanup.policy=delete` |

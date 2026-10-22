@@ -31,13 +31,16 @@ private[analytics] object AnalyticsTestOperationalConfig {
       publishedSnapshotDays = positive(30),
       deletionMarkerDays = positive(31),
       deltaVacuumSafety = 7.days,
-      deltaLogRetention = 30.days
+      deltaLogRetention = 14.days,
+      erasureCompletionBudget = 21.days,
+      kafkaRetention = 7.days,
+      kafkaSegmentRoll = 7.days
     ),
     reportReservationTtl = 90.days,
     mongoTransactionWindow = 120.seconds,
     maximumErasureEvidenceFiles = maximumEvidence(100000),
     mongoPublisherBufferSize = publisherBuffer(256),
-    erasureWorkerTimings = AnalyticsErasureWorkerTimings(90.seconds, 30.seconds, 5.seconds)
+    erasureWorkerTimings = AnalyticsErasureWorkerTimings(90.seconds, 30.seconds, 5.seconds, 5.minutes)
   )
 
   def streams: MongoPublisherStream = new MongoPublisherStream(operational)

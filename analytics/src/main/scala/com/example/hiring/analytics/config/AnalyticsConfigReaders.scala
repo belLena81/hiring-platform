@@ -98,42 +98,63 @@ private[analytics] object AnalyticsConfigReaders {
     )
 
   given ConfigReader[AnalyticsRetentionSettings] =
-    ConfigReader.forProduct7(
-      "bronze-days",
-      "quarantine-days",
-      "silver-days",
-      "published-snapshot-days",
-      "deletion-marker-days",
-      "delta-vacuum-safety",
-      "delta-log-retention"
-    )(
-      (
-          bronzeDays: AnalyticsPositiveInt,
-          quarantineDays: AnalyticsPositiveInt,
-          silverDays: AnalyticsPositiveInt,
-          publishedSnapshotDays: AnalyticsPositiveInt,
-          deletionMarkerDays: AnalyticsPositiveInt,
-          deltaVacuumSafety: AnalyticsPositiveDuration,
-          deltaLogRetention: AnalyticsPositiveDuration
-      ) =>
-        AnalyticsRetentionSettings(
-          bronzeDays,
-          quarantineDays,
-          silverDays,
-          publishedSnapshotDays,
-          deletionMarkerDays,
-          deltaVacuumSafety,
-          deltaLogRetention
+    ConfigReader
+      .forProduct10(
+        "bronze-days",
+        "quarantine-days",
+        "silver-days",
+        "published-snapshot-days",
+        "deletion-marker-days",
+        "delta-vacuum-safety",
+        "delta-log-retention",
+        "erasure-completion-budget",
+        "kafka-retention",
+        "kafka-segment-roll"
+      )(
+        (
+            bronzeDays: AnalyticsPositiveInt,
+            quarantineDays: AnalyticsPositiveInt,
+            silverDays: AnalyticsPositiveInt,
+            publishedSnapshotDays: AnalyticsPositiveInt,
+            deletionMarkerDays: AnalyticsPositiveInt,
+            deltaVacuumSafety: AnalyticsPositiveDuration,
+            deltaLogRetention: AnalyticsPositiveDuration,
+            erasureCompletionBudget: AnalyticsPositiveDuration,
+            kafkaRetention: AnalyticsPositiveDuration,
+            kafkaSegmentRoll: AnalyticsPositiveDuration
+        ) =>
+          AnalyticsRetentionSettings(
+            bronzeDays,
+            quarantineDays,
+            silverDays,
+            publishedSnapshotDays,
+            deletionMarkerDays,
+            deltaVacuumSafety,
+            deltaLogRetention,
+            erasureCompletionBudget,
+            kafkaRetention,
+            kafkaSegmentRoll
+          )
+      )
+      .emap { retention =>
+        val worstCase = retention.worstCaseErasureCompletion
+        Either.cond(
+          worstCase <= retention.erasureCompletionBudget,
+          retention,
+          UserValidationFailed(
+            s"worst-case erasure completion $worstCase exceeds erasure-completion-budget ${retention.erasureCompletionBudget}"
+          )
         )
-    )
+      }
 
   given ConfigReader[AnalyticsErasureWorkerTimings] =
-    ConfigReader.forProduct3("lease-duration", "delivery-timeout", "poll-interval")(
+    ConfigReader.forProduct4("lease-duration", "delivery-timeout", "poll-interval", "reclamation-recheck-interval")(
       (
           leaseDuration: AnalyticsMillisecondDuration,
           deliveryTimeout: AnalyticsMillisecondDuration,
-          pollInterval: AnalyticsMillisecondDuration
-      ) => AnalyticsErasureWorkerTimings(leaseDuration, deliveryTimeout, pollInterval)
+          pollInterval: AnalyticsMillisecondDuration,
+          reclamationRecheckInterval: AnalyticsMillisecondDuration
+      ) => AnalyticsErasureWorkerTimings(leaseDuration, deliveryTimeout, pollInterval, reclamationRecheckInterval)
     )
 
   given ConfigReader[AnalyticsOperationalSettings] =

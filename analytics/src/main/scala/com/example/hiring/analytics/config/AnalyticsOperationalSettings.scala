@@ -1,5 +1,7 @@
 package com.example.hiring.analytics.config
 
+import com.example.hiring.analytics.domain.{DeltaErasureHorizons, ErasureCompletionRule}
+
 import java.time.Instant
 import java.time.temporal.ChronoUnit
 import scala.concurrent.duration.*
@@ -17,8 +19,19 @@ final case class AnalyticsRetentionSettings(
     publishedSnapshotDays: AnalyticsPositiveInt,
     deletionMarkerDays: AnalyticsPositiveInt,
     deltaVacuumSafety: FiniteDuration,
-    deltaLogRetention: FiniteDuration
+    deltaLogRetention: FiniteDuration,
+    erasureCompletionBudget: FiniteDuration,
+    kafkaRetention: FiniteDuration,
+    kafkaSegmentRoll: FiniteDuration
 ) {
+  def deltaHorizons: DeltaErasureHorizons = DeltaErasureHorizons(deltaVacuumSafety, deltaLogRetention)
+
+  /** Kafka deletes whole closed segments, so a record can outlive `retention.ms` by one segment roll. */
+  def kafkaWorstCase: FiniteDuration = kafkaRetention + kafkaSegmentRoll
+
+  def worstCaseErasureCompletion: FiniteDuration =
+    ErasureCompletionRule.worstCaseCompletion(deltaHorizons, kafkaWorstCase)
+
   def deltaVacuumSafetyCheckEnabled: Boolean =
     deltaVacuumSafety >= AnalyticsRetentionSettings.DeltaMinimumSafeVacuum
 
@@ -44,7 +57,8 @@ final case class AnalyticsOperationalSettings(
 final case class AnalyticsErasureWorkerTimings(
     leaseDuration: FiniteDuration,
     deliveryTimeout: FiniteDuration,
-    pollInterval: FiniteDuration
+    pollInterval: FiniteDuration,
+    reclamationRecheckInterval: FiniteDuration
 )
 
 final case class AnalyticsErasureWorkerPolicy(

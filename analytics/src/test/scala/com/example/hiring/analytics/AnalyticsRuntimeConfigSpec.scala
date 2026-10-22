@@ -69,8 +69,14 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
     |      deletion-marker-days = ${?ANALYTICS_RETENTION_DELETION_MARKER_DAYS}
     |      delta-vacuum-safety = 7 days
     |      delta-vacuum-safety = ${?ANALYTICS_RETENTION_DELTA_VACUUM_SAFETY}
-    |      delta-log-retention = 30 days
+    |      delta-log-retention = 14 days
     |      delta-log-retention = ${?ANALYTICS_RETENTION_DELTA_LOG_RETENTION}
+    |      erasure-completion-budget = 21 days
+    |      erasure-completion-budget = ${?ANALYTICS_RETENTION_ERASURE_COMPLETION_BUDGET}
+    |      kafka-retention = 7 days
+    |      kafka-retention = ${?ANALYTICS_RETENTION_KAFKA_RETENTION}
+    |      kafka-segment-roll = 7 days
+    |      kafka-segment-roll = ${?ANALYTICS_RETENTION_KAFKA_SEGMENT_ROLL}
     |    }
     |    report-reservation-ttl = 90 days
     |    report-reservation-ttl = ${?ANALYTICS_REPORT_RESERVATION_TTL}
@@ -87,6 +93,8 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
 |      delivery-timeout = ${?ANALYTICS_ERASURE_DELIVERY_TIMEOUT}
 |      poll-interval = 5 seconds
 |      poll-interval = ${?ANALYTICS_ERASURE_POLL_INTERVAL}
+|      reclamation-recheck-interval = 5 minutes
+|      reclamation-recheck-interval = ${?ANALYTICS_ERASURE_RECLAMATION_RECHECK_INTERVAL}
 |    }
 |  }
 |  key-retirement-audit {
@@ -350,10 +358,40 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
       .getOrElse(fail("expected valid Delta vacuum config"))
     assertEquals(safeVacuum.retention.deltaVacuumSafetyCheckEnabled, true)
     assertEquals(safeVacuum.retention.deltaVacuumSafety, 7.days)
-    assertEquals(safeVacuum.retention.deltaLogRetention, 30.days)
+    assertEquals(safeVacuum.retention.deltaLogRetention, 14.days)
+    assertEquals(safeVacuum.retention.erasureCompletionBudget, 21.days)
+    assertEquals(safeVacuum.erasureWorkerTimings.reclamationRecheckInterval, 5.minutes)
     assertEquals(safeVacuum.erasureWorkerTimings.leaseDuration, 90.seconds)
     assertEquals(safeVacuum.erasureWorkerTimings.deliveryTimeout, 30.seconds)
     assertEquals(safeVacuum.erasureWorkerTimings.pollInterval, 5.seconds)
+  }
+
+  test("AEC-02.1 default retention horizons fit the erasure completion budget") {
+    val retention = operational(Map.empty).toOption.getOrElse(fail("expected default config")).retention
+    assertEquals(retention.worstCaseErasureCompletion, 15.days)
+    assert(retention.worstCaseErasureCompletion <= retention.erasureCompletionBudget)
+  }
+
+  test("AEC-02.2 a 30 day log retention fails with one problem naming the computed worst case and the budget") {
+    val failure = operational(Map("ANALYTICS_RETENTION_DELTA_LOG_RETENTION" -> "30 days")).swap.toOption
+      .getOrElse(fail("expected the over-long retention to be rejected"))
+    val message = failure.getMessage
+    assert(message.contains("31 days"), message)
+    assert(message.contains("21 days"), message)
+    assertEquals("exceeds erasure-completion-budget".r.findAllIn(message).size, 1, message)
+  }
+
+  test("AEC-02.3 a budget below the Kafka worst case fails startup and accumulates with other problems") {
+    val failure = operational(
+      Map(
+        "ANALYTICS_RETENTION_ERASURE_COMPLETION_BUDGET" -> "10 days",
+        "ANALYTICS_MONGO_TRANSACTION_WINDOW" -> "0 seconds"
+      )
+    ).swap.toOption.getOrElse(fail("expected the small budget to be rejected"))
+    val message = failure.getMessage
+    assert(message.contains("15 days"), message)
+    assert(message.contains("10 days"), message)
+    assert(message.contains("mongo-transaction-window"), message)
   }
 
   test("bounded operational refinements accept their limits and reject values outside them") {

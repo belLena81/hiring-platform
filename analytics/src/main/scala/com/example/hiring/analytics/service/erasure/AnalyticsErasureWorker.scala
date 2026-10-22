@@ -1,7 +1,7 @@
 package com.example.hiring.analytics.service.erasure
 
 import com.example.hiring.analytics.config.AnalyticsErasureWorkerPolicy
-import com.example.hiring.analytics.domain.RangeFingerprint
+import com.example.hiring.analytics.domain.{ErasureCompletionRule, RangeFingerprint}
 import com.example.hiring.analytics.domain.RunId
 import com.example.hiring.analytics.errors.{AnalyticsError, AnalyticsErrorText}
 import com.example.hiring.analytics.service.batch.ActiveDeletionMarkerSource
@@ -271,7 +271,7 @@ final class AnalyticsErasureWorker[F[_]: Async](
         progress.readDeltaPurgedAt(claim.requestId).flatMap(Async[F].fromOption(_, AnalyticsError.MalformedMarker))
       )
       ready <- lift(replayHorizonsPassed(barrier, purgedAt))
-      _ <- if (ready) EitherT.rightT(()) else defer(claim, 5.minutes)
+      _ <- if (ready) EitherT.rightT(()) else defer(claim, policy.timings.reclamationRecheckInterval)
       markerTokens <- lift(markers.activeSubjectTokens)
       _ <- lift(lakehouseLock.resource(paths.root).use { _ =>
         lakehouse.reclaimRetainedFiles *> lakehouse.verifyMarkedSubjectsAbsent(markerTokens)
@@ -289,14 +289,7 @@ final class AnalyticsErasureWorker[F[_]: Async](
     for {
       current <- now
       kafkaExpired <- kafka.retention.retentionPassed(barrier)
-      dataDeadline = deltaPurgedAt.plusMillis(retention.deltaVacuumSafety.toMillis)
-      // Delta truncates the log-cleanup cutoff to the start of a UTC day.
-      // A log written on purge day cannot be reclaimed until the next day plus retention.
-      logDeadline = deltaPurgedAt
-        .truncatedTo(java.time.temporal.ChronoUnit.DAYS)
-        .plus(1L, java.time.temporal.ChronoUnit.DAYS)
-        .plusMillis(retention.deltaLogRetention.toMillis)
-      deltaDeadline = if (dataDeadline.isAfter(logDeadline)) dataDeadline else logDeadline
+      deltaDeadline = ErasureCompletionRule.deltaDeadline(deltaPurgedAt, retention.deltaHorizons)
       deltaExpired = !current.isBefore(deltaDeadline)
     } yield kafkaExpired && deltaExpired
 

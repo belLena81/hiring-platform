@@ -85,12 +85,12 @@ final class AnalyticsPrivacyAndErasurePropertySpec extends ScalaCheckSuite {
        | hmac { secret-base64 = "$encodedKey", key-id = "hmac-v1" }
        | batch { run-id = "property-run", partition = "0", start-offset = "0", end-offset-exclusive = "1" }
        | operational {
-       |   retention { bronze-days = 7, quarantine-days = 7, silver-days = 30, published-snapshot-days = 30, deletion-marker-days = 31, delta-vacuum-safety = 7 days, delta-log-retention = 30 days }
+       |   retention { bronze-days = 7, quarantine-days = 7, silver-days = 30, published-snapshot-days = 30, deletion-marker-days = 31, delta-vacuum-safety = 7 days, delta-log-retention = 14 days, erasure-completion-budget = 21 days, kafka-retention = 7 days, kafka-segment-roll = 7 days }
        |   report-reservation-ttl = 90 days
        |   mongo-transaction-window = 120 seconds
        |   maximum-erasure-evidence-files = 100000
 |   mongo-publisher-buffer-size = 256
-|   erasure-worker { lease-duration = 90 seconds, delivery-timeout = 30 seconds, poll-interval = 5 seconds }
+|   erasure-worker { lease-duration = 90 seconds, delivery-timeout = 30 seconds, poll-interval = 5 seconds, reclamation-recheck-interval = 5 minutes }
 | }
        |}""".stripMargin
 
