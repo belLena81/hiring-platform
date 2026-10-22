@@ -96,5 +96,11 @@ Infrastructure only; no hiring context, aggregate or invariant is touched, and n
 - Not run (guard-denied to agents; user-run): `docker compose config` for `compose.yaml` with each overlay; starting `mongodb kafka kafka-acl-init`, `--profile api` and each analytics profile; `docker compose stop` signal check (AC-01.2); Trivy scan. Analytics `sbt test` is blocked by the concurrent analytics source edits.
 - Code Reviewer verdict, round 1: FAIL. Fixed: H1 data-directory ownership (D11), H2 warehouse dir (D11), M1 previous HMAC key (D12), M3 heap headroom (D13), L1 mtime preservation, L3 debug flag, L4 test gap. Documented: M2 (behaviour changes), the AC-04 MongoDB exception. M4 confirmed by inspect. Not changed: L2. The `filterNot(_ == applicationJar)` is required, because `Runtime / dependencyClasspathAsJars` includes the project jar (observed in the first staging run). Re-review: pending.
 - Security Engineer verdict, round 1: FAIL. Fixed: M1 `local.conf` in image (D13), L1 previous HMAC key (D12), L2 empty secrets (D12), L3 `..` paths (D12), the `IgnoreUnrecognizedVMOptions` flag and the trailing newline. Re-review: pending.
-- Final independent QA verdict: pending.
-- Next action: Code Reviewer and Security Engineer re-review, user-run Compose checks, then QA.
+- Round 2 (on 06f2b6f): Code Reviewer PASS and Security Engineer PASS, both static plus image inspection. The security reviewer's remaining low item, a root worker if `HIRING_HOST_UID=0`, is fixed by a build guard in `analytics/Dockerfile` that is not yet rebuilt.
+- Final independent QA verdict: CONDITIONAL PASS, with no defects found.
+  - Runtime-verified: AC-01.1, AC-02 and AC-03.1–AC-03.6, and root `sbt test` (1650 passed).
+  - Statically reviewed: AC-04–AC-08.
+  - Not run, user-run: AC-01.2 stop signal, `docker compose config` for each file and overlay, starting each profile, the Trivy scan, and a rebuild that exercises the uid-0 guard.
+  - Analytics `sbt test`: compiles again, but the run hit QA's 590 s timeout with 31 test classes finished and 0 failed, so it is incomplete.
+- Status remains in review until the user-run checks pass.
+- Next action (completed): Code Reviewer and Security Engineer re-review, user-run Compose checks, then QA.

@@ -19,7 +19,8 @@ FROM eclipse-temurin:17-jre-noble@sha256:07fa0356cf354c5252947575f42ed42aa6fd921
 # base image's uid 1000 user, is reused).
 ARG RUNTIME_UID=10001
 ARG RUNTIME_GID=10001
-RUN if ! getent group "$RUNTIME_GID" >/dev/null; then groupadd --system --gid "$RUNTIME_GID" hiring; fi \
+RUN if [ "$RUNTIME_UID" = 0 ] || [ "$RUNTIME_GID" = 0 ]; then echo "RUNTIME_UID/RUNTIME_GID must not be root" >&2; exit 1; fi \
+    && if ! getent group "$RUNTIME_GID" >/dev/null; then groupadd --system --gid "$RUNTIME_GID" hiring; fi \
     && if ! getent passwd "$RUNTIME_UID" >/dev/null; then \
          useradd --system --uid "$RUNTIME_UID" --gid "$RUNTIME_GID" --no-create-home --home-dir /nonexistent \
            --shell /usr/sbin/nologin hiring; \
