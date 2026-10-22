@@ -127,7 +127,7 @@ Reviews required: Code Reviewer (all), Security Engineer (AEC-05, 06, 07 touch r
 
 ## Checkpoint and review
 
-- Completed criteria and changed files: none; this document only.
+- Completed criteria and changed files: none for code. AEC-08.1 documentation (Technical Writer, 2026-10-22, not reviewed): `docs/big-data-architecture.md`, `docs/specs/hiring-analytics-lakehouse.md` (dated note), `docs/infrastructure-cost-and-sizing.md`, `docs/domain-language.md`. Slice 2 items (AEC-05–07) are documented as in progress until verified in source.
 - Latest commands/results: read-only architecture walk and source greps on branch `refactor` (clean tree); web check of Delta, Databricks, Kafka, EDPB and ICO guidance.
 - Blockers: decisions D1–D3.
 - Code Reviewer verdict: pending. Security Engineer verdict: pending. Final QA: pending.

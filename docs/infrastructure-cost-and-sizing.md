@@ -215,7 +215,7 @@ Do not partition tables at this size; the common guideline is to partition only 
 
 1. Keep partitions minimal; serverless products bill per partition-hour.
 2. Producer batching (`linger.ms`, `batch.size`) and compression (lz4 or zstd); whether a vendor bills compressed or uncompressed bytes varies.
-3. Retention of 7 days is also the erasure wait; shorter retention erases sooner but shortens replay.
+3. Kafka retention of 7 days is one input to the erasure completion budget, not the whole wait. The default worst case from the Delta purge is 15 days (Kafka 7 d + 7 d segment roll, Delta log 1 d + 14 d, vacuum 7 d), checked against a 21-day `erasure-completion-budget`. Shorter retention erases sooner but shortens replay; see [big-data architecture](big-data-architecture.md#erasure-and-limits).
 4. Tiered storage is not worth it at this volume.
 5. RF=3 with `min.insync.replicas=2` only when broker fault tolerance is required; cost rises to about $105+.
 

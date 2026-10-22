@@ -124,7 +124,7 @@ Gaps:
 **Enhancements**
 
 1. No `partitionBy` and no `OPTIMIZE`, compaction or `optimizeWrite`: each silver `MERGE ... ON eventId` scans the whole table and streaming will create small files. Partition by day and coordinate compaction with erasure (compaction extends the vacuum horizon).
-2. Bronze keeps `rawValue` until `expiresAt`; consider storing only the parsed form after validation.
+2. Bronze keeps `rawValue` until `expiresAt`; consider storing only the parsed form after validation. Resolved 2026-10-22: Bronze persists only the fingerprint, normalized fields and subject tokens (see [erasure completion window](specs/analytics-erasure-completion-window.md)).
 3. Gold is a full overwrite (capped at 10,000 rows); move to `replaceWhere` by day and add Delta CHECK constraints if it grows.
 4. Data quality lives in code only; add Delta constraints and quarantine-rate metrics.
 5. Record shuffle/spill counters and `PushedFilters` as Phase 15 evidence.
