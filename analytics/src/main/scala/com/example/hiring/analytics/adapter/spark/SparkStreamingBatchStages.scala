@@ -24,6 +24,24 @@ import java.time.Instant
   */
 private[analytics] object SparkStreamingBatchStages {
 
+  /** Event IDs whose Kafka coordinate is already in Bronze with a different envelope fingerprint. Stored Bronze keeps
+    * only the fingerprint, so the incoming in-memory envelope is hashed and compared with it.
+    */
+  private[analytics] def coordinateConflicts(incoming: DataFrame, storedBronze: DataFrame): DataFrame =
+    incoming
+      .select(Columns.EventId, Columns.Topic, Columns.Partition, Columns.Offset, Columns.RawValue)
+      .withColumn("incomingFingerprint", sha2(col(Columns.RawValue), 256))
+      .join(
+        storedBronze
+          .select(Columns.Topic, Columns.Partition, Columns.Offset, Columns.EventFingerprint)
+          .withColumnRenamed(Columns.EventFingerprint, "storedCoordinateFingerprint"),
+        Seq(Columns.Topic, Columns.Partition, Columns.Offset),
+        "inner"
+      )
+      .filter(col("incomingFingerprint") =!= col("storedCoordinateFingerprint"))
+      .select(Columns.EventId)
+      .distinct()
+
   /** Own only incoming, source-bounded frames for one admission phase; never reuse them after a sink mutation. */
   private[analytics] def cacheAdmissionFrames[F[_]: Async](
       frames: Vector[DataFrame],
@@ -399,19 +417,7 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
         .unionByName(activeLate.select(Columns.EventId, Columns.EventFingerprint))
         .distinct()
       val historicalConflicts = OperationalEventTransforms.historicalFingerprintConflicts(safe, persistedFingerprints)
-      val coordinateConflicts = safe
-        .select(Columns.EventId, Columns.Topic, Columns.Partition, Columns.Offset, Columns.RawValue)
-        .withColumn("incomingFingerprint", sha2(col(Columns.RawValue), 256))
-        .join(
-          storedBronze
-            .select(Columns.Topic, Columns.Partition, Columns.Offset, Columns.RawValue)
-            .withColumn("storedCoordinateFingerprint", sha2(col(Columns.RawValue), 256)),
-          Seq(Columns.Topic, Columns.Partition, Columns.Offset),
-          "inner"
-        )
-        .filter(col("incomingFingerprint") =!= col("storedCoordinateFingerprint"))
-        .select(Columns.EventId)
-        .distinct()
+      val coordinateConflicts = SparkStreamingBatchStages.coordinateConflicts(safe, storedBronze)
       val conflicts = localConflicts.unionByName(historicalConflicts).unionByName(coordinateConflicts).distinct()
       val incomingPairs = incomingSilver.select(Columns.EventId, Columns.EventFingerprint)
       val selectedValid = safe
@@ -426,8 +432,6 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
         .select(Columns.EventId)
         .distinct()
       val previouslyWrittenCoordinates = storedBronze
-        .select(Columns.Topic, Columns.Partition, Columns.Offset, Columns.RawValue)
-        .withColumn(Columns.EventFingerprint, sha2(col(Columns.RawValue), 256))
         .select(Columns.Topic, Columns.Partition, Columns.Offset, Columns.EventFingerprint)
         .distinct()
       val sourceCoordinates = watermarkFacts

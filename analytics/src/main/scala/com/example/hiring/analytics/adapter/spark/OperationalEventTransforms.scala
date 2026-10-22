@@ -115,8 +115,21 @@ object OperationalEventTransforms {
     )
   }
 
-  def bronze(records: DataFrame): DataFrame =
-    records.dropDuplicates(Columns.Topic, Columns.Partition, Columns.Offset)
+  /** Projects the tokenized in-memory frame to the persisted Bronze shape (without expiry columns). Raw envelope text,
+    * actor and candidate identifiers and search results stop here: Bronze keeps the envelope fingerprint, the
+    * normalized fields Silver uses, and subject tokens. The fingerprint equals the one Silver and late facts derive.
+    */
+  def bronze(tokenized: DataFrame): DataFrame =
+    tokenized
+      .dropDuplicates(Columns.Topic, Columns.Partition, Columns.Offset)
+      .withColumn(Columns.EventFingerprint, sha2(col(Columns.RawValue), 256))
+      .withColumn(Columns.ApplicationId, lower(col(Columns.PayloadApplicationId)))
+      .withColumn(Columns.JobId, lower(col(Columns.PayloadJobId)))
+      .withColumn(Columns.NewStatus, col(Columns.PayloadNewStatus))
+      .withColumn(Columns.JobSkills, col(Columns.PayloadJobSkills))
+      .select(
+        AnalyticsTableSchemas.bronze.map(_._1).filterNot(AnalyticsTableSchemas.expiry.map(_._1).contains).map(col)*
+      )
 
   def validEvents(parsed: DataFrame): DataFrame =
     parsed.filter(isValidEvent)

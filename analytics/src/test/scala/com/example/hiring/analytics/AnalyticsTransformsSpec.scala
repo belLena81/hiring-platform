@@ -127,7 +127,169 @@ class AnalyticsTransformsSpec extends FunSuite {
         ("hiring.operational-events", 0, 1L, event("981f76e8-8247-32ae-a9db-598865bf6ba5", "APPLICATION_CREATED"))
       )
     )
-    assertEquals(OperationalEventTransforms.bronze(source).count(), 1L)
+    val tokenized = AnalyticsSubjectPrivacy.withSubjectToken(
+      OperationalEventTransforms.validEvents(OperationalEventTransforms.parseKafkaRecords(source)),
+      pseudonymizer
+    )
+    assertEquals(OperationalEventTransforms.bronze(tokenized).count(), 1L)
+  }
+
+  private def bronzeStage(paths: AnalyticsLakehousePaths) = new AnalyticsBatchIngestionStage[IO](
+    paths,
+    pseudonymizer,
+    sparkExecution,
+    new AnalyticsRunManifestStore[IO] {
+      override def persist(
+          manifest: AnalyticsRunManifest,
+          status: AnalyticsManifestStatus,
+          updatedAt: Instant
+      ): IO[Unit] =
+        fail("parsed-frame ingestion must not create a batch manifest")
+    },
+    new DeltaBatchWriter[IO](paths, sparkExecution),
+    AnalyticsTestOperationalConfig.operational.retention,
+    cats.effect.Clock[IO]
+  )
+
+  private def ingestIntoBronze(paths: AnalyticsLakehousePaths, values: Seq[(String, Int, Long, String)]): DataFrame = {
+    val parsed = OperationalEventTransforms.parseKafkaRecords(records(values))
+    bronzeStage(paths)
+      .persistParsed(parsed, emptyMarkers, IO.unit, IO.pure(Instant.parse("2026-09-30T10:00:00Z")), _ => IO.unit)
+      .unsafeRunSync()
+    spark.read.format("delta").load(paths.bronze)
+  }
+
+  private def newLakehouse(prefix: String): AnalyticsLakehousePaths =
+    TestAnalyticsLakehousePaths.unsafe(Files.createTempDirectory(prefix).toUri.toString.stripSuffix("/"))
+
+  test("AEC-09.1 Bronze keeps tokens, fingerprint and normalized ids but no raw actor, candidate or envelope") {
+    val paths = newLakehouse("aec-09-1-")
+    val actor = "d3d4e2cb-8e0c-3a66-8cc2-1379ac3a7686"
+    val candidate = AnalyticsOperationalEventFixtures.id("aec-09-1-candidate")
+    val value = event(
+      "610cb653-75fc-3d31-b2c6-3cd8cee7cd4c",
+      "APPLICATION_CREATED",
+      actorId = actor,
+      payload = Some(s"""{"applicationId":"aec-09-1-application","candidateId":"$candidate","jobId":"aec-09-1-job"}""")
+    )
+    val bronze = ingestIntoBronze(paths, Seq(("hiring.operational-events", 0, 3L, value)))
+    assertEquals(bronze.columns.toVector, AnalyticsTableSchemas.bronze.map(_._1))
+    val row = bronze.head()
+    assertEquals(
+      row.getAs[String]("eventFingerprint"),
+      java.security.MessageDigest.getInstance("SHA-256").digest(value.getBytes("UTF-8")).map("%02x".format(_)).mkString
+    )
+    assertEquals(row.getAs[String]("applicationId"), AnalyticsOperationalEventFixtures.id("aec-09-1-application"))
+    assertEquals(row.getAs[String]("jobId"), AnalyticsOperationalEventFixtures.id("aec-09-1-job"))
+    assert(row.getAs[String]("subjectToken").nonEmpty)
+    assert(row.getAs[scala.collection.Seq[String]]("subjectTokens").nonEmpty)
+    val stored = bronze.toJSON.collect().mkString
+    Vector(actor, candidate, "candidateId", "actorId").foreach(sensitive =>
+      assert(!stored.contains(sensitive), s"Bronze must not hold $sensitive")
+    )
+    val storedTokens = row.getAs[scala.collection.Seq[String]]("subjectTokens").toSet
+    val eventFingerprintInSilver = silverFrame(
+      OperationalEventTransforms.validEvents(
+        OperationalEventTransforms.parseKafkaRecords(records(Seq(("hiring.operational-events", 0, 3L, value))))
+      ),
+      pseudonymizer,
+      emptyMarkers
+    ).head().getAs[String]("eventFingerprint")
+    assertEquals(row.getAs[String]("eventFingerprint"), eventFingerprintInSilver)
+    assert(storedTokens.contains(row.getAs[String]("subjectToken")))
+  }
+
+  test("AEC-09.3 a stored Bronze table that still has rawValue fails closed without being written") {
+    val paths = newLakehouse("aec-09-3-")
+    val oldShape = StructType(
+      AnalyticsTableSchemas.bronze
+        .map(_._1)
+        .filterNot(_ == "eventFingerprint")
+        .map(name => StructField(name, StringType, nullable = true)) :+ StructField(
+        "rawValue",
+        StringType,
+        nullable = true
+      )
+    )
+    spark.createDataFrame(java.util.Collections.emptyList[Row](), oldShape).write.format("delta").save(paths.bronze)
+    val before = org.apache.spark.sql.delta.DeltaLog.forTable(spark, paths.bronze).update().version
+    assert(
+      !AnalyticsTableSchemas.matches(spark.read.format("delta").load(paths.bronze).schema, AnalyticsTableSchemas.bronze)
+    )
+    val value = event("610cb653-75fc-3d31-b2c6-3cd8cee7cd4c", "APPLICATION_CREATED")
+    val failure = bronzeStage(paths)
+      .persistParsed(
+        OperationalEventTransforms.parseKafkaRecords(records(Seq(("hiring.operational-events", 0, 1L, value)))),
+        emptyMarkers,
+        IO.unit,
+        IO.pure(Instant.parse("2026-09-30T10:00:00Z")),
+        _ => IO.unit
+      )
+      .attempt
+      .unsafeRunSync()
+    assertEquals(
+      failure.left.toOption.collect { case AnalyticsError.DeltaSchemaMismatch(path) => path },
+      Some(paths.bronze)
+    )
+    assertEquals(org.apache.spark.sql.delta.DeltaLog.forTable(spark, paths.bronze).update().version, before)
+  }
+
+  test("AEC-09.4 a re-delivery at a stored Bronze coordinate with different bytes conflicts by stored fingerprint") {
+    val paths = newLakehouse("aec-09-4-")
+    val original = event("610cb653-75fc-3d31-b2c6-3cd8cee7cd4c", "APPLICATION_CREATED")
+    val changed = event(
+      "610cb653-75fc-3d31-b2c6-3cd8cee7cd4c",
+      "APPLICATION_CREATED",
+      payload = Some("""{"applicationId":"other","candidateId":"x","jobId":"j"}""")
+    )
+    val stored = ingestIntoBronze(paths, Seq(("hiring.operational-events", 0, 5L, original)))
+    def incoming(value: String, offset: Long) =
+      OperationalEventTransforms.parseKafkaRecords(records(Seq(("hiring.operational-events", 0, offset, value))))
+    val id = incoming(original, 5L).head().getAs[String]("eventId")
+    assertEquals(
+      SparkStreamingBatchStages
+        .coordinateConflicts(incoming(changed, 5L), stored)
+        .collect()
+        .map(_.getString(0))
+        .toVector,
+      Vector(id)
+    )
+    assertEquals(SparkStreamingBatchStages.coordinateConflicts(incoming(original, 5L), stored).count(), 0L)
+    assertEquals(SparkStreamingBatchStages.coordinateConflicts(incoming(changed, 6L), stored).count(), 0L)
+  }
+
+  test("AEC-09.2 Bronze holds candidate search result tokens and no raw result ids, ranks or scores") {
+    val paths = newLakehouse("aec-09-2-")
+    val results = (1 to 3).map(index => AnalyticsOperationalEventFixtures.id(s"aec-09-2-candidate-$index"))
+    val search = event(
+      "81bff5a2-0b1d-3f25-9edb-6d9f2b8bd6a4",
+      "SEARCH_PERFORMED",
+      aggregateType = "Search",
+      aggregateId = "aec-09-2-search",
+      payload = Some(
+        s"""{"searchKind":"candidateMatches","results":[${results
+            .map(id => s"""{"resultId":"$id","score":0.987654}""")
+            .mkString(",")}]}"""
+      )
+    )
+    val bronze = ingestIntoBronze(paths, Seq(("hiring.operational-events", 0, 0L, search)))
+    val row = bronze.head()
+    val tokens = row.getAs[scala.collection.Seq[String]]("subjectTokens")
+    assert(tokens.size >= 3, tokens.toString)
+    val expected = AnalyticsSubjectPrivacy
+      .withSubjectToken(
+        OperationalEventTransforms.validEvents(
+          OperationalEventTransforms.parseKafkaRecords(records(Seq(("hiring.operational-events", 0, 0L, search))))
+        ),
+        pseudonymizer
+      )
+      .head()
+      .getAs[scala.collection.Seq[String]]("subjectTokens")
+    assertEquals(tokens.toSet, expected.toSet)
+    assert(Vector("results", "resultId", "rank", "score", "payload").forall(name => !bronze.columns.contains(name)))
+    val stored = bronze.toJSON.collect().mkString
+    results.foreach(id => assert(!stored.contains(id), "Bronze must not hold a raw result id"))
+    assert(!stored.contains("0.987654"), "Bronze must not hold search scores")
   }
 
   test("parsed-frame ingestion persists Bronze coordinates without a batch manifest") {
@@ -806,7 +968,7 @@ class AnalyticsTransformsSpec extends FunSuite {
     )
   }
 
-  test("new raw Delta tables retain replay bytes without copying raw values into transaction log statistics") {
+  test("new subject-attributed Delta tables keep tokens and fingerprints out of transaction log statistics") {
     val lakehouse = Files.createTempDirectory("hiring-analytics-private-delta-stats").toUri.toString.stripSuffix("/")
     val paths = TestAnalyticsLakehousePaths.unsafe(lakehouse)
     val sensitiveMarker = AnalyticsOperationalEventFixtures.id("raw-log-personal-sentinel-8f17c2")
@@ -835,8 +997,9 @@ class AnalyticsTransformsSpec extends FunSuite {
       .run(spark, DataFrameBatchSource[IO](input), manifest)
       .unsafeRunSync()
 
-    val rawBronze = spark.read.format("delta").load(paths.bronze).select("rawValue").head().getString(0)
-    assert(rawBronze.contains(sensitiveMarker), "Bronze must retain bounded replay bytes")
+    val storedBronze = spark.read.format("delta").load(paths.bronze)
+    assert(!storedBronze.columns.contains("rawValue"), "Bronze must not retain the raw envelope")
+    assert(!storedBronze.toJSON.collect().mkString.contains(sensitiveMarker), "Bronze must not hold raw identifiers")
     val logDirectory = new org.apache.hadoop.fs.Path(s"${paths.bronze}/_delta_log")
     val fileSystem = logDirectory.getFileSystem(spark.sparkContext.hadoopConfiguration)
     val jsonLogs =
@@ -852,7 +1015,7 @@ class AnalyticsTransformsSpec extends FunSuite {
       contents.flatMap { content =>
         content.linesIterator.flatMap(line => Option(mapper.readTree(line).get("add"))).toVector
       }
-    def rawValueStats(
+    def columnStatistics(
         actions: Vector[com.fasterxml.jackson.databind.JsonNode]
     ): Vector[com.fasterxml.jackson.databind.JsonNode] =
       actions.flatMap(action => Option(action.get("stats")).filterNot(_.isNull)).map { statsNode =>
@@ -860,10 +1023,12 @@ class AnalyticsTransformsSpec extends FunSuite {
       }
     val addActions = addFileActions(logContents.toVector)
     assert(addActions.nonEmpty, "the log fixture must contain AddFile actions")
-    val statistics = rawValueStats(addActions)
+    val statistics = columnStatistics(addActions)
     assert(
-      statistics.forall(stats => !stats.path("minValues").has("rawValue") && !stats.path("maxValues").has("rawValue")),
-      "rawValue statistics must be disabled"
+      statistics.forall(stats =>
+        !stats.path("minValues").has("eventFingerprint") && !stats.path("maxValues").has("subjectToken")
+      ),
+      "fingerprint and token statistics must be disabled"
     )
     val properties = io.delta.tables.DeltaTable
       .forPath(spark, paths.bronze)
@@ -890,7 +1055,9 @@ class AnalyticsTransformsSpec extends FunSuite {
       try new String(stream.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8)
       finally stream.close()
     }.toVector
-    assert(rawValueStats(addFileActions(controlContents)).exists(stats => stats.path("minValues").has("rawValue")))
+    assert(
+      columnStatistics(addFileActions(controlContents)).exists(stats => stats.path("minValues").has("eventFingerprint"))
+    )
   }
 
   test("Mongo publication failure never marks the Delta manifest PUBLISHED") {

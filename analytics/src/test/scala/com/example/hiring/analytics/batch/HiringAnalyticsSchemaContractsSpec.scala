@@ -47,6 +47,46 @@ class HiringAnalyticsSchemaContractsSpec extends FunSuite {
     )
   }
 
+  test("no persisted Delta shape holds raw envelope, actor, payload, candidate or search result columns") {
+    val forbidden = Set("rawValue", "actorId", "payload", "candidateId", "resultId", "results")
+    val persisted = Map(
+      "bronze" -> AnalyticsTableSchemas.bronze,
+      "quarantine" -> AnalyticsTableSchemas.quarantine,
+      "silver" -> AnalyticsTableSchemas.silver,
+      "lateFacts" -> AnalyticsTableSchemas.lateFacts,
+      "funnel" -> AnalyticsTableSchemas.funnel,
+      "timeToHire" -> AnalyticsTableSchemas.timeToHire,
+      "skills" -> AnalyticsTableSchemas.skills
+    )
+    persisted.foreach { case (table, shape) =>
+      assertEquals(shape.map(_._1).filter(forbidden.contains), Vector.empty[String], table)
+      assert(shape.forall(!_._2.isInstanceOf[StructType]), s"$table holds a nested struct")
+    }
+    assertEquals(
+      AnalyticsTableSchemas.bronze.map(_._1),
+      Vector(
+        "topic",
+        "partition",
+        "offset",
+        "kafkaTimestamp",
+        "eventId",
+        "eventType",
+        "occurredAt",
+        "aggregateType",
+        "aggregateId",
+        "eventFingerprint",
+        "applicationId",
+        "jobId",
+        "newStatus",
+        "jobSkills",
+        "subjectToken",
+        "subjectTokens",
+        "ingestedAt",
+        "expiresAt"
+      )
+    )
+  }
+
   private val SilverSchema = StructType(
     Seq(
       StructField("eventId", StringType, nullable = true),

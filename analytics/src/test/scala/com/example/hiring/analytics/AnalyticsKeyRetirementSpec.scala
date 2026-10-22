@@ -55,6 +55,13 @@ class AnalyticsKeyRetirementSpec extends ScalaCheckSuite {
     )
   }
 
+  test("AEC-09.5 raw envelope, actor and payload stay forbidden checkpoint fields and Bronze holds none of them") {
+    val forbidden = AnalyticsKeyRetirement.ForbiddenCheckpointFields
+    Vector("\"payload\"", "\"rawValue\"", "\"actorId\"").foreach(field => assert(forbidden.contains(field), field))
+    val bronzeColumns = AnalyticsTableSchemas.bronze.map(_._1).map(name => "\"" + name + "\"")
+    assertEquals(bronzeColumns.filter(forbidden.contains), Vector("\"subjectToken\"", "\"subjectTokens\""))
+  }
+
   test("retention gate requires passed Kafka barrier and every elapsed horizon") {
     assert(validateRetention(passedRetention, now).isValid)
 

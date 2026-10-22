@@ -289,7 +289,7 @@ private[analytics] object AnalyticsKeyRetirement {
   }
 
   private val MaximumLineageControlBytes = 4096
-  private val ForbiddenCheckpointFields =
+  private[analytics] val ForbiddenCheckpointFields =
     Vector("\"payload\"", "\"rawValue\"", "\"actorId\"", "\"candidateId\"", "\"subjectToken\"", "\"subjectTokens\"")
 
   private def scanLineageControls(spark: SparkSession, paths: AnalyticsLakehousePaths): ScanResult = {

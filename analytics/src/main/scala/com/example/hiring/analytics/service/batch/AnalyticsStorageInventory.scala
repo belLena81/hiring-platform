@@ -31,7 +31,6 @@ final case class AnalyticsStorageSurface(
 final class AnalyticsStorageInventory private (val surfaces: Vector[AnalyticsStorageSurface]) {
   val delta: Vector[AnalyticsStorageSurface] = surfaces.filter(_.kind == AnalyticsStorageKind.Delta)
   val subjectDelta: Vector[AnalyticsStorageSurface] = delta.filter(_.subjectAttributed)
-  val rawDelta: Vector[AnalyticsStorageSurface] = delta.filter(_.privacy == AnalyticsStoragePrivacy.RawSubjects)
   val mongo: Vector[AnalyticsStorageSurface] = surfaces.filter(_.kind == AnalyticsStorageKind.Mongo)
 }
 
@@ -46,8 +45,8 @@ object AnalyticsStorageInventory {
       spillDirectories: Vector[String] = Vector.empty
   ): AnalyticsStorageInventory = {
     val delta = Vector(
-      AnalyticsStorageSurface(paths.bronze, Delta, RawSubjects, Bronze),
-      AnalyticsStorageSurface(paths.quarantine, Delta, RawSubjects, Quarantine),
+      AnalyticsStorageSurface(paths.bronze, Delta, PseudonymousSubjects, Bronze),
+      AnalyticsStorageSurface(paths.quarantine, Delta, PseudonymousSubjects, Quarantine),
       AnalyticsStorageSurface(paths.silver, Delta, PseudonymousSubjects, Silver),
       AnalyticsStorageSurface(paths.lateFacts, Delta, PseudonymousSubjects, LateFacts),
       AnalyticsStorageSurface(paths.funnelGold, Delta, SuppressedAggregates, Silver),

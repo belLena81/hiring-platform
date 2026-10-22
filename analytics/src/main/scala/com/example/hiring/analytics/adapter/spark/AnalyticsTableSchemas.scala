@@ -89,19 +89,23 @@ private[analytics] object AnalyticsTableSchemas {
     "quarantineReason" -> StringType,
     Columns.ExpiresAt -> TimestampType
   )
+
+  /** Persisted Bronze: Kafka coordinates, envelope fingerprint, normalized fields and tokens; no raw identifiers. */
   val bronze: Shape = Vector(
     Columns.Topic -> StringType,
     Columns.Partition -> IntegerType,
     Columns.Offset -> LongType,
     Columns.KafkaTimestamp -> TimestampType,
-    Columns.RawValue -> StringType,
     Columns.EventId -> StringType,
     Columns.EventType -> StringType,
     Columns.OccurredAt -> TimestampType,
     Columns.AggregateType -> StringType,
     Columns.AggregateId -> StringType,
-    Columns.ActorId -> StringType,
-    Columns.Payload -> OperationalEventTransforms.payloadSchema,
+    Columns.EventFingerprint -> StringType,
+    Columns.ApplicationId -> StringType,
+    Columns.JobId -> StringType,
+    Columns.NewStatus -> StringType,
+    Columns.JobSkills -> ArrayType(StringType),
     Columns.SubjectToken -> StringType,
     Columns.SubjectTokens -> ArrayType(StringType, containsNull = false)
   ) ++ expiry
