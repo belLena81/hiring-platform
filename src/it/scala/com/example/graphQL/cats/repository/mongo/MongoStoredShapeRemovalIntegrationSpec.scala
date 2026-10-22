@@ -503,7 +503,7 @@ final class MongoStoredShapeRemovalIntegrationSpec extends MongoIntegrationSuite
 
   private val withoutRole: Bson = Filters.exists(MongoFields.ActorRole, false)
 
-  test("MR-09.6 migration 033 installs the successor validator over events that all record a role, writing nothing") {
+  test("AC-09.4 migration 033 installs the successor validator over events that all record a role, writing nothing") {
     mongoResource.use { fixture =>
       val database = fixture.database
       for {
@@ -545,7 +545,7 @@ final class MongoStoredShapeRemovalIntegrationSpec extends MongoIntegrationSuite
     }
   }
 
-  test("MR-09.6 migration 033 fails closed on an event without a role, rewrites nothing and completes once repaired") {
+  test("AC-09.4 migration 033 fails closed on an event without a role, rewrites nothing and completes once repaired") {
     mongoResource.use { fixture =>
       val database = fixture.database
       val rows = (0 until 600).toList.map(eventDocument(_, withRole = true))
@@ -586,7 +586,7 @@ final class MongoStoredShapeRemovalIntegrationSpec extends MongoIntegrationSuite
     }
   }
 
-  test("MR-09.6 migration 033 reopens when an earlier binary stores an event without a role again") {
+  test("AC-09.4 migration 033 reopens when an earlier binary stores an event without a role again") {
     mongoResource.use { fixture =>
       val database = fixture.database
       for {
@@ -641,7 +641,7 @@ final class MongoStoredShapeRemovalIntegrationSpec extends MongoIntegrationSuite
     Filters.and(Filters.eq(MongoFields.DocumentType, "workflow"), Filters.exists("initiatedByRole", false))
 
   test(
-    "MR-09.7 migration 034 installs the successor validator over workflows that all record a role, writing nothing"
+    "AC-09.4 migration 034 installs the successor validator over workflows that all record a role, writing nothing"
   ) {
     mongoResource.use { fixture =>
       val database = fixture.database
@@ -679,7 +679,7 @@ final class MongoStoredShapeRemovalIntegrationSpec extends MongoIntegrationSuite
   }
 
   test(
-    "MR-09.7 migration 034 fails closed on a workflow without a role, rewrites nothing and completes once repaired"
+    "AC-09.4 migration 034 fails closed on a workflow without a role, rewrites nothing and completes once repaired"
   ) {
     mongoResource.use { fixture =>
       val database = fixture.database

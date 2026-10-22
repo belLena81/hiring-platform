@@ -3,7 +3,7 @@
 ## Identity and scope
 
 - Task / use case / roadmap phase: Phase 8 (MongoDB/vector optimization) and Phase 9 follow-up. Cross-cutting review of the hiring application against data-modelling, functional-design and GraphQL best practice, with a refactoring plan. Touches UC01–UC11 reads and mutations.
-- Status: S1 (read path) and S4 (graph access) implemented, independently reviewed (Code Reviewer PASS, Security Engineer PASS) and committed 2026-10-19/20; S2, S3 and S5 implemented on branch model-retrieval-consolidation (S3 and S5 2026-10-21, uncommitted, independent review pending); final QA on the merged state pending
+- Status: complete. S1 to S5 implemented and committed on branch model-retrieval-consolidation (2026-10-19 to 2026-10-22), each with independent Code Reviewer PASS and Security Engineer PASS; the schema-consolidation work from refactor (MSC-01 to MSC-09) merged in with ledger steps renumbered 029 to 034; independent QA PASS on the merged state 2026-10-22 (unit 1650 passed; integration 439 passed, 17 skipped by external gates, 0 failed; analytics suites green after an environmental Spark bind flake was rerun once). Remaining work is the Open items list
 - Coordinator: Product Manager. Proposed owners per slice below.
 - User outcome: each read request does the minimum number of store round trips and transfers only the fields it needs; each fact is stored and translated once; GraphQL clients can traverse the hiring graph in one request instead of one root query per level.
 - Authorized scope: review only so far. No code was changed.
