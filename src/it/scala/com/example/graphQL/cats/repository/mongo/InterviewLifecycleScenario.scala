@@ -149,12 +149,7 @@ private[mongo] final case class InterviewLifecycleScenario(
         )
       )
 
-  def actor(role: UserRole, user: UserId, key: UUID = UUID.randomUUID(), input: String = "action") =
-    InterviewLifecycleOrigin.Actor(
-      InterviewWorkflowAccess(user, role),
-      key,
-      MutationReceiptFingerprint.fromCanonicalInput(input)
-    )
+  def actor(role: UserRole, user: UserId) = InterviewLifecycleOrigin.Actor(InterviewWorkflowAccess(user, role))
 
   def apply(
       event: InterviewLifecycleEvent,
@@ -429,8 +424,11 @@ private[mongo] object InterviewLifecycleScenario {
               held,
               at.plusSeconds(300),
               UUID.randomUUID(),
-              ApplicationStatus.Accepted
+              ApplicationStatus.Accepted,
+              UserId(UUID.randomUUID()),
+              com.example.graphQL.cats.domain.model.UserRole.Recruiter
             )
+            .map(workflow => workflow.copy(initiatedBy = workflow.recruiterId))
             .leftMap(error => new AssertionError(s"invalid workflow $error"))
         )
         _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
@@ -439,9 +437,8 @@ private[mongo] object InterviewLifecycleScenario {
           repository.create(
             base,
             InterviewWorkflow.initialCommand(base),
-            UUID.randomUUID(),
-            MutationReceiptFingerprint.fromCanonicalInput("arrangement"),
-            at
+            at,
+            MutationWriteContext.directWrite
           )
         )
         faults <- InterviewProviderFaults.create

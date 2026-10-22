@@ -10,7 +10,8 @@ import com.example.graphQL.cats.domain.model.{
   EmbeddingMeta,
   EntityEmbedding,
   Job,
-  JobStatus,
+  JobState,
+
   Location,
   User,
   UserProfile,
@@ -120,7 +121,7 @@ class MongoDatabaseProbeIntegrationSpec extends CatsEffectSuite {
       List("Cats Effect"),
       Set("Scala", "MongoDB"),
       Location("Cyprus", Some("Nicosia"), remote = true),
-      JobStatus.Open,
+      JobState.Open,
       fixtureTime,
       fixtureTime
     )

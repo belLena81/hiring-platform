@@ -42,10 +42,19 @@ final case class ApplicationPageRequest(
     pageSize: PageSize
 )
 
+/** How much of each job a list read must return. `Summary` leaves out the posting text (`description`, `requirements`)
+  * and the embedding, so a list whose selection names neither does not transfer them; the jobs it returns carry a blank
+  * `description` and no `requirements`. `Full` returns everything a display read returns.
+  */
+enum JobProjection {
+  case Summary, Full
+}
+
 final case class JobPageRequest(
     status: Option[com.example.graphQL.cats.domain.model.JobStatus],
     cursor: Option[JobCursor],
-    pageSize: PageSize
+    pageSize: PageSize,
+    projection: JobProjection = JobProjection.Full
 )
 
 final case class ApplicationEventPageRequest(

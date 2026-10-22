@@ -93,11 +93,14 @@ private[graphql] object HiringGraphQLAccountResolvers {
     authenticated(context) { case (actor, hiring) =>
       val status = context.arg(userStatusArgument).getOrElse(AccountStatus.Active)
       val role = context.arg(userRoleArgument)
-      paged[UserCursor, UserPageRequest, User](hiring, context.arg(firstArgument), context.arg(afterArgument))(
-        (cursor, size) => UserPageRequest(status, role, cursor, size)
-      )(request => raiseOnUseCaseError(hiring.accountService.listUsers(actor, request)))(user =>
-        UserCursor(user.createdAt, user.id)
-      )
+      paged[UserCursor, UserPageRequest, User](
+        hiring,
+        context.arg(firstArgument),
+        context.arg(afterArgument),
+        s"users:${status.toString}:${role.fold("any")(_.toString)}"
+      )((cursor, size) => UserPageRequest(status, role, cursor, size))(request =>
+        raiseOnUseCaseError(hiring.accountService.listUsers(actor, request))
+      )(user => UserCursor(user.createdAt, user.id))
     }
 
   private def updateProfileInput(

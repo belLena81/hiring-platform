@@ -85,6 +85,7 @@ private[mongo] object MongoIndexNames {
   val InterviewSubjectCleanupDue = "interview_subject_cleanup_due"
   val InterviewWorkflowCandidate = "interview_workflows_candidate_id"
   val InterviewWorkflowRecruiter = "interview_workflows_recruiter_id"
+  val InterviewWorkflowApplication = "interview_workflows_application_id"
   val InterviewWorkflowRequestReceipt = "interview_workflows_request_workflow"
   val InterviewWorkflowCommandDue = "interview_workflow_commands_due"
   val InterviewWorkflowCommandLease = "interview_workflow_commands_lease"

@@ -52,7 +52,7 @@ class AppConfigSpec extends FunSuite {
       |  hs256-secret = "01234567890123456789012345678901"
       |  issuer = "hiring-platform-local"
       |  audience = "hiring-graphql-api"
-      |  cursor-ttl-seconds = 900
+      |  cursor-ttl-seconds = 86400
       |}
       |auth.rate-limit {
       |  window-seconds = 60
@@ -239,7 +239,7 @@ class AppConfigSpec extends FunSuite {
         |  hs256-secret = ${AUTH_JWT_HS256_SECRET}
         |  issuer = "hiring-platform-local"
         |  audience = "hiring-graphql-api"
-        |  cursor-ttl-seconds = 900
+        |  cursor-ttl-seconds = 86400
         |}
         |auth.rate-limit {
         |  window-seconds = 30
@@ -485,7 +485,7 @@ class AppConfigSpec extends FunSuite {
         |  hs256-secret = ${?AUTH_JWT_HS256_SECRET}
         |  issuer = "hiring-platform-local"
         |  audience = "hiring-graphql-api"
-        |  cursor-ttl-seconds = 900
+        |  cursor-ttl-seconds = 86400
         |}
         |auth.rate-limit {
         |  window-seconds = 60
@@ -769,16 +769,16 @@ class AppConfigSpec extends FunSuite {
     assert(!defaultJwtAuth.copy(receiptFingerprintSecret = Some(strong)).toString.contains(strong))
   }
 
-  test("HGQL-AC02 cursor JWT TTL is bounded and defaults to fifteen minutes") {
-    assertEquals(AppConfigFixtures.fromConfig(defaultConfig, Map.empty).map(_.jwtAuth.cursorTtl), Right(900.seconds))
+  test("HGQL-AC02 cursor JWT TTL is bounded and defaults to the largest allowed value (one day)") {
+    assertEquals(AppConfigFixtures.fromConfig(defaultConfig, Map.empty).map(_.jwtAuth.cursorTtl), Right(86400.seconds))
     assertContainsError(
       AppConfigFixtures
-        .fromConfig(defaultConfig.replace("cursor-ttl-seconds = 900", "cursor-ttl-seconds = 59"), Map.empty),
+        .fromConfig(defaultConfig.replace("cursor-ttl-seconds = 86400", "cursor-ttl-seconds = 59"), Map.empty),
       ConfigError.InvalidCursorTtl
     )
     assertContainsError(
       AppConfigFixtures
-        .fromConfig(defaultConfig.replace("cursor-ttl-seconds = 900", "cursor-ttl-seconds = 86401"), Map.empty),
+        .fromConfig(defaultConfig.replace("cursor-ttl-seconds = 86400", "cursor-ttl-seconds = 86401"), Map.empty),
       ConfigError.InvalidCursorTtl
     )
   }

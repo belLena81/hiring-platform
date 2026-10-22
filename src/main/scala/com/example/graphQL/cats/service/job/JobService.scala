@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.service.job
 
+import com.example.graphQL.cats.service.events.OperationalEventFailure.*
 import cats.data.EitherT
 import cats.MonadThrow
 import cats.effect.Clock
@@ -7,6 +8,7 @@ import cats.effect.std.UUIDGen
 import cats.syntax.all.*
 import com.example.graphQL.cats.service.{ActorContext, Diagnostics, SearchError, UseCaseError}
 import com.example.graphQL.cats.service.port.{
+  JobOwner,
   JobRepository,
   LexicalJobMatcher,
   MutationEntityReference,
@@ -15,10 +17,9 @@ import com.example.graphQL.cats.service.port.{
   UserRepository,
   Versioned
 }
-import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
-import com.example.graphQL.cats.domain.model.{Job, JobStatus, Location, UserRole}
+import com.example.graphQL.cats.domain.model.{Job, JobState, JobStatus, Location, UserRole}
 import com.example.graphQL.cats.service.events.OperationalEvents
 import com.example.graphQL.cats.service.events.OperationalEventPayload.JobKind
 import com.example.graphQL.cats.domain.policy.{JobLifecycle, LifecycleProgram}
@@ -84,7 +85,7 @@ final class JobService[F[_]: MonadThrow](
     idempotent.executeFor(actor, "createJob", request, jobReference, replayJob(actor)) { context =>
       for {
         user <- authorization.resolve(actor)
-        _ <- UseCaseF.ensure[F](authorization.canManageJobs(user), UseCaseError.Domain(DomainError.Forbidden))
+        _ <- UseCaseF.forbidUnless[F](authorization.canManageJobs(user))
         now <- EitherT.liftF(clock.realTimeInstant)
         jobId <- EitherT.liftF(uuidGen.randomUUID.map(JobId.apply))
         job <- EitherT.fromEither[F](
@@ -125,9 +126,11 @@ final class JobService[F[_]: MonadThrow](
     for {
       user <- authorization.resolve(actor)
       job <- UseCaseF.found(jobs.find(jobId), "job")
-      _ <- UseCaseF.ensure[F](authorization.canView(user, job), UseCaseError.Domain(DomainError.Forbidden))
+      _ <- UseCaseF.forbidUnless[F](authorization.canView(user, JobOwner.of(job)))
     } yield job
 
+  // For display only: under `JobProjection.Summary` the jobs carry a blank description and no requirements (the caller
+  // proved the client selected neither); never persist or re-derive anything from them.
   def searchOpenJobs(actor: ActorContext, filter: JobSearchFilter, page: JobPageRequest): UseCaseF[F, List[Job]] =
     authorization.resolve(actor) *> UseCaseF.repository(jobs.findOpen(filter, page))
 
@@ -195,14 +198,11 @@ final class JobService[F[_]: MonadThrow](
   /** Candidates and the Admin discover jobs; the read scope comes from the persisted actor. */
   private def discoveryScope(actor: ActorContext): UseCaseF[F, HiringReadScope] =
     authorization.readScope(actor).flatMap { (user, scope) =>
-      UseCaseF
-        .ensure(
-          user.role == UserRole.Candidate || user.role == UserRole.Admin,
-          UseCaseError.Domain(DomainError.Forbidden)
-        )
-        .as(scope)
+      UseCaseF.forbidUnless[F](user.role == UserRole.Candidate || user.role == UserRole.Admin).as(scope)
     }
 
+  // For display only: under `JobProjection.Summary` the jobs carry a blank description and no requirements (the caller
+  // proved the client selected neither); never persist or re-derive anything from them.
   def myJobs(actor: ActorContext, page: JobPageRequest): UseCaseF[F, List[Job]] =
     for {
       user <- authorization.resolve(actor)
@@ -253,7 +253,7 @@ final class JobService[F[_]: MonadThrow](
         input.requirements,
         input.skills,
         input.location,
-        input.status,
+        JobState.requested(input.status, now),
         now,
         now
       )
@@ -274,10 +274,9 @@ final class JobService[F[_]: MonadThrow](
         input.requirements,
         input.skills,
         input.location,
-        job.status,
+        job.state,
         job.createdAt,
-        now,
-        job.closedAt
+        now
       )
       .toEither
       .leftMap(UseCaseError.ValidationFailed.apply)
@@ -301,7 +300,7 @@ final class JobService[F[_]: MonadThrow](
       .fromEither[F](
         OperationalEvents
           .jobEvent(kind, eventId(job, kind, occurredAt), job, actorId, occurredAt)
-          .leftMap(_ => UseCaseError.Repository(RepositoryError.InvalidEvent))
+          .leftMap(_.asUseCaseError)
       )
       .flatMap(event => notifyAfterCommit(UseCaseF.repository(write(List(event)))))
 

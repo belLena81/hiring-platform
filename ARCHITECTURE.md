@@ -147,7 +147,7 @@ The API owns GraphQL, HTTP, and authentication adapters. It talks to service use
 
 Domain objects must not represent MongoDB documents or GraphQL types directly.
 
-Abbreviated example (the current `Job` also carries optional `closedAt` and `embedding`):
+Abbreviated example (the current `Job` also carries an optional `embedding`; its `state` is a `JobState`, `Draft`, `Open` or `Closed(at)`, so a closed job always has its closing instant, and `status` and `closedAt` are derived from it):
 
 ```scala
 final case class Job(
@@ -158,7 +158,7 @@ final case class Job(
   requirements: List[String],
   skills: Set[String],
   location: Location,
-  status: JobStatus,
+  state: JobState,
   createdAt: Instant,
   updatedAt: Instant
 )
@@ -352,7 +352,7 @@ The default rule is:
 }
 ```
 
-A Deleted account keeps a tombstone (`accountStatus`, `deletedAt`, a tombstone `name` and `nameCanonical`); its email, password hash, profile and embedding fields are removed.
+A Deleted account keeps a tombstone (`accountStatus`, `deletedAt`, a tombstone `name` and `nameCanonical`); its email, password hash, profile and embedding fields are removed. In the domain the pair is one value, `AccountState.Deleted(at)`; the codec rejects a stored `Deleted` without `deletedAt`.
 
 Recruiters and candidates share one collection.
 
@@ -702,7 +702,7 @@ Document:
   newStatus: "Interview",
 
   actorId: "<user-uuid>",
-  actorRole: "Recruiter",   // stored Scala enum name; optional, absent on events stored before the role was recorded. Not exposed by GraphQL as an identifier.
+  actorRole: "Recruiter",   // stored Scala enum name; required (ledger step 033 and the validator). Not exposed by GraphQL as an identifier.
 
   // feedback and reason are present only when supplied.
   // previousStatus is absent on the initial CREATED event.
@@ -1244,11 +1244,13 @@ Raw candidate-filter requests pass through one pure accumulating validator befor
 
 ### Bounded hiring read authorization
 
-`HiringReadScope` is created only after persisted-actor validation (`ActorAuthorization.readScope`). `ActorAuthorization.requireAdmin` is the shared check for a live, Active, singleton Admin and is used by analytics reporting, embedding coverage and the interview repair/notification-repair operations. Mongo application/history and relationship queries gate the actor and authorized parent in the same selection. Relation-aware fetcher keys remain scoped to each request. Search eligibility uses required scoped projection ports and a pure `SearchEligibilityPolicy`: services sequence prechecks/retrieval, adapters enforce the final actor/query-entity gate and bounded selection, and policy validates current source/metadata/filter state before response truncation. Driver errors carrying transient transaction labels remain with the transaction retry owner inside active outbox sessions, with final sanitized errors at the repository boundary. The [MongoDB/vector specification](docs/specs/mongodb-vector-retrieval-optimization.md) tracks local, live Atlas and performance acceptance separately.
+`HiringReadScope` is created only after persisted-actor validation (`ActorAuthorization.readScope`), over the actor projection (`ActorRecord`, read by `users.findActor`). An `AuthenticatedActor` carries the projection read for the request, so later authorization in the same request makes no further user read; search revalidation after a provider or vector call uses `currentReadScope`, which always re-reads. `AuthorizedJobAccess` and `AuthorizedApplicationAccess` are the one resolve/load-ownership/`canManage` chains for jobs and applications, over the ownership projection (`JobOwner`, `jobs.findOwner`). `ActorAuthorization.requireAdmin` is the shared check for a live, Active, singleton Admin and is used by analytics reporting, embedding coverage and the interview repair/notification-repair operations. Mongo application/history and relationship queries gate the actor and authorized parent in the same selection. Relation-aware fetcher keys remain scoped to each request. Search eligibility uses required scoped projection ports and a pure `SearchEligibilityPolicy`: services sequence prechecks/retrieval, adapters enforce the final actor/query-entity gate and bounded selection, and policy validates current source/metadata/filter state before response truncation. Driver errors carrying transient transaction labels remain with the transaction retry owner inside active outbox sessions, with final sanitized errors at the repository boundary. The [MongoDB/vector specification](docs/specs/mongodb-vector-retrieval-optimization.md) tracks local, live Atlas and performance acceptance separately.
 
 ### Local interview coordination
 
 Interview hiring commits derive aggregate and history values from the same pure `ApplicationLifecycle` program used by ordinary status mutations; the Mongo adapter retains atomic persistence and authorization. Workers receive an explicit diagnostics sink. Cleanup isolates failures between subjects while preserving sequential fencing, purge and retention steps within each subject; a failed subject stays retryable. Embedding provider validation rejects non-finite vector values before either document persistence or query execution. The [boundary reliability specification](docs/specs/embedding-workflow-boundary-reliability.md) owns validation evidence for these refinements.
+
+Application status changes have one persistence path, `ApplicationStatusWrite`: a `$set` of status and `updatedAt` guarded by the previous status and the stored owner facts, the append-only history row and the outbox rows in one transaction. The API status actions, the interview hiring commit and the interview cancellation all use it, so the stored status is always the latest history row. Interview request idempotency is a `mutation_receipts` row (`Idempotent.executeFor`, operation `interviewWorkflow`) sharing the transaction of the guarded write, and the hiring commit is evidenced by its deterministic history row; the interview collections keep no receipt documents of either kind. The outbox claim leases a bounded batch with one claim token and one subject-lease bulk write per page; `LeaseHeartbeat.guard` is the shared renewal loop of the interview publisher, the embedding pipeline and the Kafka publisher, and `MongoLeaseQueue.claimReady` plus `LeaseRequest.validate` serve the embedding and search-session work queues. Details, accepted deviations and the ledger steps 027 to 030 are in [the MongoDB design](docs/mongodb-design.md#status-write-work-rows-and-the-batch-claim).
 
 Cleanup selection uses bounded subject-ID sweeps and independent row decoding. An immutable opaque continuation is threaded through a sequential resource-owned stream; only the Mongo adapter interprets its BSON ordering coordinates. Durable cleanup progress remains protected by existing state/revision CAS and fencing, while page failures retain scheduling position. Pure `InterviewMessagePolicy` functions classify command, result and expired observations in the application layer, preserving acknowledgment/reconciliation rules without importing service ports into the domain. Nearby cursor canonical encoding belongs to its codec; rank contributions and facet dimensions use named immutable values.
 

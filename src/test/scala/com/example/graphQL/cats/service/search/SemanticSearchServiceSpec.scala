@@ -327,7 +327,11 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
     val scenarios: List[(ActorContext, Job, DomainError)] = List(
       (ActorContext(candidateId, UserRole.Candidate), owned, DomainError.RecruiterRequired),
       (ActorContext(recruiterId, UserRole.Recruiter), unowned, DomainError.Forbidden),
-      (ActorContext(recruiterId, UserRole.Recruiter), owned.copy(status = JobStatus.Closed), DomainError.JobMustBeOpen)
+      (
+        ActorContext(recruiterId, UserRole.Recruiter),
+        owned.copy(state = JobState.Closed(java.time.Instant.EPOCH)),
+        DomainError.JobMustBeOpen
+      )
     )
     scenarios.traverse_ { case (actor, job, expected) =>
       for {
@@ -440,7 +444,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
         override def candidateMatches(query: VectorSearchQuery): RepositoryF[IO, List[CandidateRetrievalHit]] =
           RepositoryF.fromFEither(
             jobsRef
-              .update(_.updated(jobId, owned.copy(status = JobStatus.Closed)))
+              .update(_.updated(jobId, owned.copy(state = JobState.Closed(java.time.Instant.EPOCH))))
               .as(Right(List(hit).map(_.retrieval)))
           )
       }
@@ -478,7 +482,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
         name = s"Candidate $suffix",
         profile = Some(UserProfile.Candidate(value)),
         embedding = Some(candidateEmbedding),
-        accountStatus = status
+        state = accountStateOf(status)
       )
     }
     val orderedUsers = List(
@@ -565,7 +569,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
         override def searchJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
           RepositoryF.fromFEither(
             jobsRef
-              .update(_.updated(jobId, embeddedJob.copy(status = JobStatus.Closed)))
+              .update(_.updated(jobId, embeddedJob.copy(state = JobState.Closed(java.time.Instant.EPOCH))))
               .as(Right(List(hit).map(_.retrieval)))
           )
         override def recommendedJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
@@ -606,7 +610,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
         override def searchJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
           RepositoryF.fromFEither(
             jobsRef
-              .update(_.updated(firstJobId, firstJob.copy(status = JobStatus.Closed)))
+              .update(_.updated(firstJobId, firstJob.copy(state = JobState.Closed(java.time.Instant.EPOCH))))
               .as(Right(List(firstHit, secondHit).map(_.retrieval)))
           )
         override def recommendedJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
@@ -705,7 +709,8 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
 
   test("MVR-05 search rechecks the persisted actor when the request carries a cached authenticated viewer") {
     val owned = openJob.copy(embedding = Some(jobEmbedding))
-    val cachedRecruiter = new AuthenticatedActor(ActorContext(recruiterId, UserRole.Recruiter), recruiter)
+    val cachedRecruiter =
+      new AuthenticatedActor(ActorContext(recruiterId, UserRole.Recruiter), ActorRecord.of(recruiter))
     for {
       usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map(recruiterId -> recruiter))
       jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> owned))
@@ -717,7 +722,44 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
         override def candidateMatches(query: VectorSearchQuery): RepositoryF[IO, List[CandidateRetrievalHit]] =
           RepositoryF.fromFEither(
             usersRef
-              .update(_.updated(recruiterId, recruiter.copy(accountStatus = AccountStatus.Deleted)))
+              .update(_.updated(recruiterId, recruiter.copy(state = AccountState.Deleted(java.time.Instant.EPOCH))))
+              .as(Right(Nil))
+          )
+      }
+      service = semanticService(
+        new InMemoryUsers(usersRef),
+        new InMemoryJobs(jobsRef),
+        FakeEmbeddingService.unused,
+        search
+      )
+      cachedResult <- service
+        .candidateMatches(cachedRecruiter, jobId, pageSize, searchId)
+        .value
+    } yield {
+      assertEquals(
+        cachedResult.left.toOption,
+        Some(UseCaseError.Authentication(com.example.graphQL.cats.service.AuthenticationError.Unauthorized))
+      )
+    }
+  }
+
+  test(
+    "AC-03.4 candidate matching refuses the results when the recruiter is deactivated between retrieval and revalidation"
+  ) {
+    val owned = openJob.copy(embedding = Some(jobEmbedding))
+    val cachedRecruiter = ActorContext(recruiterId, UserRole.Recruiter)
+    for {
+      usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map(recruiterId -> recruiter))
+      jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> owned))
+      search = new RetrievalSearchRepository {
+        override def searchJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
+          RepositoryF.fromFEither(IO.pure(Right(Nil)))
+        override def recommendedJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
+          RepositoryF.fromFEither(IO.pure(Right(Nil)))
+        override def candidateMatches(query: VectorSearchQuery): RepositoryF[IO, List[CandidateRetrievalHit]] =
+          RepositoryF.fromFEither(
+            usersRef
+              .update(_.updated(recruiterId, recruiter.copy(state = AccountState.Deleted(java.time.Instant.EPOCH))))
               .as(Right(Nil))
           )
       }
@@ -1087,7 +1129,10 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
         _ <- mutation match {
           case "actor" =>
             usersRef.update(
-              _.updated(recruiterId, recruiter.copy(accountStatus = AccountStatus.Deleted, profile = None))
+              _.updated(
+                recruiterId,
+                recruiter.copy(profile = None, state = AccountState.Deleted(java.time.Instant.EPOCH))
+              )
             )
           case "ownership" =>
             jobsRef.update(_.updated(jobId, original.copy(recruiterId = Identifiers.UserId(UUID.randomUUID()))))
@@ -1099,7 +1144,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
                 original.copy(embedding = Some(jobEmbedding.copy(meta = jobMeta.copy(model = "different"))))
               )
             )
-          case _ => jobsRef.update(_.updated(jobId, original.copy(status = JobStatus.Closed)))
+          case _ => jobsRef.update(_.updated(jobId, original.copy(state = JobState.Closed(java.time.Instant.EPOCH))))
         }
         _ <- release.complete(())
         result <- fiber.joinWithNever
@@ -1133,7 +1178,10 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
         .start
       _ <- entered.get
       _ <- usersRef.update(
-        _.updated(candidateId, candidateWithProfile.copy(accountStatus = AccountStatus.Deleted, profile = None))
+        _.updated(
+          candidateId,
+          candidateWithProfile.copy(profile = None, state = AccountState.Deleted(java.time.Instant.EPOCH))
+        )
       )
       _ <- release.complete(())
       result <- fiber.joinWithNever

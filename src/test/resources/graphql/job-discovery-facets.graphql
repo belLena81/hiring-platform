@@ -6,7 +6,6 @@ query StructuredFacets($filter: JobFilter) {
       cities { value count }
       remote { value count }
       truncated
-      coverage
       coverageLimit
     }
     ... on SearchUnavailable { code message retryable }
@@ -21,7 +20,6 @@ query LexicalQueryFacets($query: String, $filter: JobFilter, $center: GeoPointIn
       cities { value count }
       remote { value count }
       truncated
-      coverage
       coverageLimit
     }
     ... on SearchUnavailable { code message retryable }

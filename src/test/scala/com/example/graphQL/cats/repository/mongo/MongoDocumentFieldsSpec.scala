@@ -215,4 +215,17 @@ final class MongoDocumentFieldsSpec extends FunSuite {
       case other                    => fail(s"unexpected $other")
     }
   }
+
+  test("AC-08.4 MongoDuplicateKey also matches a duplicate key reported inside a bulk write") {
+    def bulkFailure(code: Int) =
+      new com.mongodb.MongoBulkWriteException(
+        com.mongodb.bulk.BulkWriteResult.unacknowledged(),
+        java.util.List.of(new com.mongodb.bulk.BulkWriteError(code, "failure", new BsonDocument(), 0)),
+        null,
+        new ServerAddress(),
+        java.util.Collections.emptySet[String]()
+      )
+    assert(MongoDuplicateKey.unapply(bulkFailure(11000)).nonEmpty)
+    assertEquals(MongoDuplicateKey.unapply(bulkFailure(112)), None)
+  }
 }

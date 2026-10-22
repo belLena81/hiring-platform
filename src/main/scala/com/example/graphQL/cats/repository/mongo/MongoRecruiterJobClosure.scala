@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.repository.mongo.MongoStoredDocumentDecoding.toStored
 import cats.effect.{Clock, IO}
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.*
@@ -77,15 +78,13 @@ private[mongo] final class MongoRecruiterJobClosurePages(
       session: Option[ClientSession[IO]],
       versionedJobs: List[Versioned[Job]]
   ): RepositoryF[IO, Unit] =
-    if (versionedJobs.isEmpty) RepositoryF.at[IO].pure(())
+    if (versionedJobs.isEmpty) MongoF.pure(())
     else {
       val closedJobs =
-        versionedJobs.map(_.value.copy(status = JobStatus.Closed, closedAt = Some(closedAt), updatedAt = closedAt))
+        versionedJobs.map(_.value.copy(state = JobState.Closed(closedAt), updatedAt = closedAt))
       val writes = versionedJobs.zip(closedJobs).traverse_ { case (observed, closed) =>
         for {
-          _ <- RepositoryF
-            .at[IO]
-            .fromEither(Versioned.nextVersion(observed.version).toRight(RepositoryError.Conflict))
+          _ <- MongoF.fromEither(Versioned.nextVersion(observed.version).toRight(RepositoryError.Conflict))
           result <- RepositoryF.lift(
             MongoSessionOperations.updateOne(
               jobs,
@@ -98,7 +97,7 @@ private[mongo] final class MongoRecruiterJobClosurePages(
               MongoJobContentUpdate(closed)
             )
           )
-          _ <- RepositoryF.at[IO].fromEither(MongoRepositorySupport.matchedOne(result))
+          _ <- MongoF.fromEither(MongoRepositorySupport.matchedOne(result))
         } yield ()
       }
       val events = closedJobs.traverse { closed =>
@@ -111,7 +110,7 @@ private[mongo] final class MongoRecruiterJobClosurePages(
         )
       }
       for {
-        validEvents <- RepositoryF.at[IO].fromEither(events.leftMap(_ => RepositoryError.InvalidEvent))
+        validEvents <- MongoF.fromEither(events.leftMap(_ => RepositoryError.InvalidEvent))
         _ <- writes
         _ <- MongoOperationalEventInsertion.insert(outbox, session, validEvents, closedAt, diagnostics)
       } yield ()
@@ -187,7 +186,7 @@ final class MongoRecruiterJobClosure private[mongo] (
       for {
         now <- RepositoryF.lift(clock.realTimeInstant)
         head <- RepositoryF.lift(peek(now))
-        progress <- head.fold(RepositoryF.at[IO].pure(RecruiterJobClosureProgress.Idle))(id => closeRow(id, now))
+        progress <- head.fold(MongoF.pure(RecruiterJobClosureProgress.Idle))(id => closeRow(id, now))
       } yield progress
     )
 
@@ -200,11 +199,17 @@ final class MongoRecruiterJobClosure private[mongo] (
 
   private def closeRow(id: String, now: Instant): RepositoryF[IO, RecruiterJobClosureProgress] =
     RepositoryF.fromFEither(
-      transactionRunner.run(session => closeFor(id, now, session)).value.attempt.flatMap {
-        case Right(Right(progress)) => IO.pure(Right(progress))
-        case Right(Left(error))     => rotate(id, now).as(Left(error))
-        case Left(error)            => rotate(id, now) *> IO.raiseError(error)
-      }
+      transactionRunner
+        .run(session => closeFor(id, now, session))
+        .value
+        .attempt
+        .flatMap(
+          _.fold(
+            thrown => rotate(id, now) *> IO.raiseError(thrown),
+            // The row is rotated behind the others so one failing recruiter cannot starve the queue.
+            _.fold(error => rotate(id, now).as(Left(error)), progress => IO.pure(Right(progress)))
+          )
+        )
     )
 
   private def rotate(id: String, now: Instant): IO[Unit] =
@@ -249,7 +254,7 @@ final class MongoRecruiterJobClosure private[mongo] (
         )
       )
       .flatMap {
-        case None      => RepositoryF.at[IO].pure(RecruiterJobClosureProgress.Idle)
+        case None      => MongoF.pure(RecruiterJobClosureProgress.Idle)
         case Some(row) => closeRecruiter(row, now, session)
       }
 
@@ -259,19 +264,15 @@ final class MongoRecruiterJobClosure private[mongo] (
       session: Option[ClientSession[IO]]
   ): RepositoryF[IO, RecruiterJobClosureProgress] =
     for {
-      recruiter <- RepositoryF
-        .at[IO]
-        .fromEither(
-          MongoDocumentFields
-            .parseUuid(MongoFields.Id, Option(row.getString(MongoFields.Id)).getOrElse(""))
-            .map(UserId.apply)
-            .leftMap(_ => RepositoryError.InvalidStoredData)
-        )
-      requestedAt <- RepositoryF
-        .at[IO]
-        .fromEither(
-          Option(row.getDate(MongoFields.RequestedAt)).map(_.toInstant).toRight(RepositoryError.InvalidStoredData)
-        )
+      recruiter <- MongoF.fromEither(
+        MongoDocumentFields
+          .parseUuid(MongoFields.Id, Option(row.getString(MongoFields.Id)).getOrElse(""))
+          .map(UserId.apply)
+          .toStored
+      )
+      requestedAt <- MongoF.fromEither(
+        Option(row.getDate(MongoFields.RequestedAt)).map(_.toInstant).toRight(RepositoryError.InvalidStoredData)
+      )
       page <- pages.closePage(recruiter, requestedAt, session)
       result <-
         if (page.remains)

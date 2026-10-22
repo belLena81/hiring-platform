@@ -56,7 +56,9 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         interval,
         now.plusSeconds(300),
         UUID.randomUUID(),
-        ApplicationStatus.Accepted
+        ApplicationStatus.Accepted,
+        recruiter,
+        com.example.graphQL.cats.domain.model.UserRole.Recruiter
       )
       .fold(error => fail(s"Invalid test workflow: $error"), identity)
 
@@ -99,9 +101,8 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
           repository.create(
             current,
             InterviewWorkflow.initialCommand(current),
-            UUID.randomUUID(),
-            MutationReceiptFingerprint.fromCanonicalInput("publication-embedding-race"),
-            now
+            now,
+            MutationWriteContext.directWrite
           )
         )
         observed <- success(users.findVersioned(candidate)).flatMap(value =>
@@ -148,7 +149,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
     }
   }
 
-  test("workflow create and advance are atomic, replayable, and guarded by revision and inbox identity") {
+  test("AC-07.12 the workflow of an application is found through the applicationId index, scoped to its participants") {
     mongoResource.use { fixture =>
       val workflowRepository = MongoInterviewWorkflowRepository(
         fixture.database,
@@ -158,9 +159,83 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
       val candidate = UserId(UUID.randomUUID())
       val recruiter = UserId(UUID.randomUUID())
       val value = workflow(UUID.randomUUID(), UUID.randomUUID(), candidate, recruiter)
-      val replayValue = value.copy(id = InterviewWorkflowId(UUID.randomUUID()))
-      val requestKey = UUID.randomUUID()
-      val fingerprint = MutationReceiptFingerprint.fromCanonicalInput("schedule:application:interval")
+      val application = value.applicationId
+      def find(id: UserId, role: UserRole) =
+        success(workflowRepository.findByApplication(application, InterviewWorkflowAccess(id, role)))
+      for {
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
+        _ <- seedSubjects(fixture.database, value)
+        _ <- success(
+          workflowRepository.create(
+            value,
+            InterviewWorkflow.initialCommand(value),
+            now,
+            MutationWriteContext.directWrite
+          )
+        )
+        asCandidate <- find(candidate, UserRole.Candidate)
+        asRecruiter <- find(recruiter, UserRole.Recruiter)
+        asAdmin <- find(UserId(UUID.randomUUID()), UserRole.Admin)
+        otherCandidate <- find(UserId(UUID.randomUUID()), UserRole.Candidate)
+        otherRecruiter <- find(UserId(UUID.randomUUID()), UserRole.Recruiter)
+        // A candidate id presented as a recruiter, and the reverse, are not participants either.
+        candidateAsRecruiter <- find(candidate, UserRole.Recruiter)
+        recruiterAsCandidate <- find(recruiter, UserRole.Candidate)
+        unknown <- success(
+          workflowRepository.findByApplication(
+            ApplicationId(UUID.randomUUID()),
+            InterviewWorkflowAccess(candidate, UserRole.Candidate)
+          )
+        )
+        // The store, not the service, keeps one workflow per application.
+        second = value.copy(id = InterviewWorkflowId(UUID.randomUUID()))
+        duplicate <- MongoRepositoryTestSupport
+          .insertOne(
+            fixture.database,
+            MongoCollections.InterviewWorkflows,
+            MongoInterviewWorkflowCodec.workflowDocument(second)
+          )
+          .attempt
+        explained <- MongoAccessEvaluationSupport.command(
+          fixture.database,
+          new org.bson.Document(
+            "explain",
+            new org.bson.Document("find", MongoCollections.InterviewWorkflows)
+              .append(
+                "filter",
+                new org.bson.Document("applicationId", application.value.toString)
+                  .append("documentType", "workflow")
+                  .append("candidateId", candidate.value.toString)
+              )
+          ).append("verbosity", "executionStats")
+        )
+      } yield {
+        List(asCandidate, asRecruiter, asAdmin).foreach(found => assertEquals(found.map(_.id), Some(value.id)))
+        List(otherCandidate, otherRecruiter, candidateAsRecruiter, recruiterAsCandidate, unknown).foreach(found =>
+          assertEquals(found, None)
+        )
+        assert(duplicate.isLeft, clue(duplicate))
+        val plan = explained.toJson
+        assert(plan.contains("IXSCAN"), clue(plan))
+        assert(plan.contains(MongoIndexNames.InterviewWorkflowApplication), clue(plan))
+        assert(!plan.contains("COLLSCAN"), clue(plan))
+      }
+    }
+  }
+
+  test(
+    "workflow create and advance are atomic, create is one per application, and advance is guarded by revision and inbox identity"
+  ) {
+    mongoResource.use { fixture =>
+      val workflowRepository = MongoInterviewWorkflowRepository(
+        fixture.database,
+        MongoTransactionRunner.sessions(fixture.client, RepositoryError.Conflict, diagnostics = Diagnostics.noop[IO]),
+        Diagnostics.noop[IO]
+      )
+      val candidate = UserId(UUID.randomUUID())
+      val recruiter = UserId(UUID.randomUUID())
+      val value = workflow(UUID.randomUUID(), UUID.randomUUID(), candidate, recruiter)
+      val sameApplication = value.copy(id = InterviewWorkflowId(UUID.randomUUID()))
       val next = InterviewWorkflow
         .decide(value, 0L, InterviewWorkflowEvent.ReservationConfirmed)
         .fold(error => fail(s"Unexpected policy error: $error"), identity)
@@ -172,27 +247,17 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
           workflowRepository.create(
             value,
             InterviewWorkflow.initialCommand(value),
-            requestKey,
-            fingerprint,
-            createdAt
+            createdAt,
+            MutationWriteContext.directWrite
           )
         )
-        replay <- success(
-          workflowRepository.create(
-            replayValue,
-            InterviewWorkflow.initialCommand(replayValue),
-            requestKey,
-            fingerprint,
-            createdAt.plusSeconds(1)
-          )
-        )
-        wrongFingerprint <- workflowRepository
+        // Request idempotency is the caller's mutation receipt; the store itself refuses a second workflow.
+        second <- workflowRepository
           .create(
-            value,
-            InterviewWorkflow.initialCommand(value),
-            requestKey,
-            MutationReceiptFingerprint.fromCanonicalInput("different request"),
-            createdAt
+            sameApplication,
+            InterviewWorkflow.initialCommand(sameApplication),
+            createdAt.plusSeconds(1),
+            MutationWriteContext.directWrite
           )
           .value
         visible <- success(
@@ -231,12 +296,8 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
             now.plusSeconds(4)
           )
         )
-        _ = assertEquals(created, InterviewWorkflowAdvanceResult.Applied)
-        _ = assert(replay match {
-          case InterviewWorkflowAdvanceResult.Duplicate(existing) => existing.id == value.id
-          case _                                                  => false
-        })
-        _ = assertEquals(wrongFingerprint, Left(RepositoryError.Conflict))
+        _ = assertEquals(created, ())
+        _ = assertEquals(second, Left(RepositoryError.Conflict))
         _ = assertEquals(visible.map(_.id), Some(value.id))
         _ = assertEquals(forbidden, None)
         _ = assertEquals(advanced, InterviewWorkflowAdvanceResult.Applied)
@@ -287,27 +348,24 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
           workflowRepository.create(
             first,
             InterviewWorkflow.initialCommand(first),
-            UUID.randomUUID(),
-            MutationReceiptFingerprint.fromCanonicalInput("first"),
-            now
+            now,
+            MutationWriteContext.directWrite
           )
         )
         secondCreate <- success(
           workflowRepository.create(
             second,
             InterviewWorkflow.initialCommand(second),
-            UUID.randomUUID(),
-            MutationReceiptFingerprint.fromCanonicalInput("second"),
-            now
+            now,
+            MutationWriteContext.directWrite
           )
         )
         adjacentCreate <- success(
           workflowRepository.create(
             adjacent,
             InterviewWorkflow.initialCommand(adjacent),
-            UUID.randomUUID(),
-            MutationReceiptFingerprint.fromCanonicalInput("adjacent"),
-            now
+            now,
+            MutationWriteContext.directWrite
           )
         )
         outcomes <- IO.both(
@@ -325,10 +383,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
             )
             .value
         )
-        _ = assertEquals(
-          List(firstCreate, secondCreate, adjacentCreate),
-          List.fill(3)(InterviewWorkflowAdvanceResult.Applied)
-        )
+        _ = assertEquals(List(firstCreate, secondCreate, adjacentCreate), List.fill(3)(()))
         _ = assertEquals(List(outcomes._1, outcomes._2).count(_.isRight), 1)
         _ = assertEquals(List(outcomes._1, outcomes._2).count(_ == Left(InterviewProviderError.Conflict)), 1)
         winner = if (outcomes._1.isRight) first else second
@@ -401,9 +456,8 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
           workflowRepository.create(
             value,
             InterviewWorkflow.initialCommand(value),
-            UUID.randomUUID(),
-            MutationReceiptFingerprint.fromCanonicalInput("claim"),
-            now
+            now,
+            MutationWriteContext.directWrite
           )
         )
         initial <- success(workflowRepository.claimDueCommands("worker-a", claimAt, leaseUntil, 1))
@@ -487,7 +541,16 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
       )
       val applications =
         MongoApplicationRepository.transactional(fixture.database, fixture.client, Diagnostics.noop[IO])
-      val service = new InterviewSchedulingService[IO](users, jobs, applications, repository, 5.minutes)
+      val service = new InterviewSchedulingService[IO](
+        users,
+        jobs,
+        applications,
+        repository,
+        com.example.graphQL.cats.service.mutation.Idempotent(
+          MongoMutationReceiptRepository.transactional(fixture.database, fixture.client, Diagnostics.noop[IO])
+        ),
+        5.minutes
+      )
       val own = workflow(UUID.randomUUID(), UUID.randomUUID(), UserId(UUID.randomUUID()), UserId(UUID.randomUUID()))
       val other = workflow(UUID.randomUUID(), UUID.randomUUID(), UserId(UUID.randomUUID()), UserId(UUID.randomUUID()))
       val key = UUID.randomUUID()
@@ -537,7 +600,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         assertEquals(scheduled.candidateId, own.candidateId)
         assertEquals(scheduled.recruiterId, own.recruiterId)
         assertEquals(scheduled.initiatedBy, own.recruiterId)
-        assertEquals(scheduled.initiatedByRole, Some(UserRole.Recruiter))
+        assertEquals(scheduled.initiatedByRole, UserRole.Recruiter)
         assertEquals(candidateView.map(_.id), Right(scheduled.id))
         assertEquals(strangerView, Left(UseCaseError.Domain(DomainError.NotFound("interviewWorkflow"))))
         assertEquals(recruiterRepair, Left(UseCaseError.Authentication(AuthenticationError.Unauthorized)))
@@ -559,10 +622,9 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         "Scheduling audit admin",
         UserRole.Admin,
         None,
-        now,
-        adminSingleton = true
+        now
       )
-      val initiated = target.copy(initiatedBy = admin.id, initiatedByRole = Some(UserRole.Admin))
+      val initiated = target.copy(initiatedBy = admin.id, initiatedByRole = UserRole.Admin)
       val eventId =
         UUID.nameUUIDFromBytes(s"${initiated.id.value}:status".getBytes(java.nio.charset.StandardCharsets.UTF_8))
       val calendar = LedgerInterviewCalendarProvider.durable(repository)
@@ -576,9 +638,8 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
           repository.create(
             initiated,
             InterviewWorkflow.initialCommand(initiated),
-            initiated.idempotencyKey,
-            MutationReceiptFingerprint.fromCanonicalInput("admin-initiated-workflow"),
-            now
+            now,
+            MutationWriteContext.directWrite
           )
         )
         _ <- providerSuccess(
@@ -608,7 +669,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         )
         expected <- IO.fromEither(
           ApplicationLifecycle
-            .changeStatus(ApplicationStatus.Interview, admin.id, Some(UserRole.Admin), now, None, None)
+            .changeStatus(ApplicationStatus.Interview, admin.id, UserRole.Admin, now, None, None)
             .run(original)
             .leftMap(error => new AssertionError(s"Unexpected lifecycle rejection: $error"))
         )
@@ -639,11 +700,14 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         )
         historyCount <- MongoRepositoryTestSupport.count(fixture.database, MongoCollections.ApplicationEvents)
         outboxCount <- MongoRepositoryTestSupport.count(fixture.database, MongoCollections.EventOutbox)
+        // MR-07: the deterministic history row is the receipt of the commit; no inbox document duplicates it.
+        committed <- success(repository.isHiringCommitted(initiated.id))
         receiptCount <- MongoRepositoryTestSupport.count(
           fixture.database,
           MongoCollections.InterviewWorkflowInbox,
           MongoFilter.eq(MongoFields.Id, s"${initiated.id.value}:hiring").bson
         )
+        _ <- ApplicationStatusInvariant.assertAgrees(fixture.database, initiated.applicationId)
         notificationCount <- MongoRepositoryTestSupport.count(
           fixture.database,
           MongoCollections.InterviewWorkflowCommands,
@@ -667,7 +731,8 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         )
         assertEquals(historyCount, 1L)
         assertEquals(outboxCount, 1L)
-        assertEquals(receiptCount, 1L)
+        assert(committed)
+        assertEquals(receiptCount, 0L)
         assertEquals(notificationCount, 2L)
         assertEquals(current, Some(expectedWorkflow.workflow))
       }
@@ -704,9 +769,8 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
           repository.create(
             value,
             InterviewWorkflow.initialCommand(value),
-            value.idempotencyKey,
-            MutationReceiptFingerprint.fromCanonicalInput("repair-completion-race"),
-            now
+            now,
+            MutationWriteContext.directWrite
           )
         )
         claimedAt <- IO.realTimeInstant
@@ -825,9 +889,8 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
           repository.create(
             value,
             InterviewWorkflow.initialCommand(value),
-            value.idempotencyKey,
-            MutationReceiptFingerprint.fromCanonicalInput("stale-effect"),
-            now
+            now,
+            MutationWriteContext.directWrite
           )
         )
         fresh <- IO.realTimeInstant
@@ -860,7 +923,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         )
         unknownCommit <- success(repository.commitHiring(statusPending.workflow, currentAt)) *>
           IO.raiseError[Unit](new IllegalStateException("simulated response loss after durable hiring commit")).attempt
-        receipt <- success(repository.hasHiringReceipt(value.id))
+        receipt <- success(repository.isHiringCommitted(value.id))
         duplicateCommit <- repository.commitHiring(statusPending.workflow, currentAt).value
         staleRelease <- calendar.release(s"${value.id.value}:release", currentAt, Some(first)).value
         reserveAfterCommit <- calendar
@@ -898,7 +961,16 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
       )
       val applications =
         MongoApplicationRepository.transactional(fixture.database, fixture.client, Diagnostics.noop[IO])
-      val service = new InterviewSchedulingService[IO](users, jobs, applications, repository, 5.minutes)
+      val service = new InterviewSchedulingService[IO](
+        users,
+        jobs,
+        applications,
+        repository,
+        com.example.graphQL.cats.service.mutation.Idempotent(
+          MongoMutationReceiptRepository.transactional(fixture.database, fixture.client, Diagnostics.noop[IO])
+        ),
+        5.minutes
+      )
       val value = workflow(UUID.randomUUID(), UUID.randomUUID(), UserId(UUID.randomUUID()), UserId(UUID.randomUUID()))
       val admin = User(
         UserId(UUID.randomUUID()),
@@ -906,8 +978,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         "Scheduling repair admin",
         UserRole.Admin,
         None,
-        now,
-        adminSingleton = true
+        now
       )
       val calendar = LedgerInterviewCalendarProvider.durable(repository)
       val notifications = LedgerInterviewNotificationProvider.durable(repository)
@@ -922,9 +993,8 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
           repository.create(
             value,
             InterviewWorkflow.initialCommand(value),
-            value.idempotencyKey,
-            MutationReceiptFingerprint.fromCanonicalInput("partial-notification"),
-            now
+            now,
+            MutationWriteContext.directWrite
           )
         )
         _ <- providerSuccess(
@@ -1075,9 +1145,8 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
           repository.create(
             value,
             InterviewWorkflow.initialCommand(value),
-            value.idempotencyKey,
-            MutationReceiptFingerprint.fromCanonicalInput("obsolete-hiring-result"),
-            now
+            now,
+            MutationWriteContext.directWrite
           )
         )
         _ <- providerSuccess(
@@ -1140,9 +1209,8 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
           repository.create(
             value,
             InterviewWorkflow.initialCommand(value),
-            value.idempotencyKey,
-            MutationReceiptFingerprint.fromCanonicalInput("publication-budget"),
-            now
+            now,
+            MutationWriteContext.directWrite
           )
         )
         clock <- Ref.of[IO, Instant](now)
@@ -1187,9 +1255,8 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
           repository.create(
             value,
             InterviewWorkflow.initialCommand(value),
-            value.idempotencyKey,
-            MutationReceiptFingerprint.fromCanonicalInput("execution-budget"),
-            now
+            now,
+            MutationWriteContext.directWrite
           )
         )
         claimed <- success(repository.claimDueCommands("publisher", now, now.plusSeconds(60), 1))
@@ -1294,9 +1361,8 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
           repository.create(
             value,
             InterviewWorkflow.initialCommand(value),
-            value.idempotencyKey,
-            MutationReceiptFingerprint.fromCanonicalInput("malformed-startup"),
-            now
+            now,
+            MutationWriteContext.directWrite
           )
         )
         collection <- Mongo4catsCollections.documents(fixture.database, MongoCollections.InterviewWorkflowCommands)
@@ -1393,9 +1459,8 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
           repository.create(
             value,
             InterviewWorkflow.initialCommand(value),
-            value.idempotencyKey,
-            MutationReceiptFingerprint.fromCanonicalInput("prepaid-required-result"),
-            now
+            now,
+            MutationWriteContext.directWrite
           )
         )
         publication <- success(repository.claimDueCommands("prepaid", now, now.plusSeconds(600), 1)).map(_.head)
@@ -1437,9 +1502,8 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
           repository.create(
             value,
             InterviewWorkflow.initialCommand(value),
-            value.idempotencyKey,
-            MutationReceiptFingerprint.fromCanonicalInput("concurrent-distinct-intents"),
-            now
+            now,
+            MutationWriteContext.directWrite
           )
         )
         publication <- success(repository.claimDueCommands("distinct", now, now.plusSeconds(600), 1)).map(_.head)

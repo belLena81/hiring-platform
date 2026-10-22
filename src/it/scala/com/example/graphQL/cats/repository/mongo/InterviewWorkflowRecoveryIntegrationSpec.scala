@@ -38,8 +38,11 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
         ),
         now.plusSeconds(300),
         UUID.randomUUID(),
-        ApplicationStatus.Accepted
+        ApplicationStatus.Accepted,
+        UserId(UUID.randomUUID()),
+        com.example.graphQL.cats.domain.model.UserRole.Recruiter
       )
+      .map(workflow => workflow.copy(initiatedBy = workflow.recruiterId))
       .fold(error => fail(s"Invalid fixture: $error"), identity)
 
   private def drive(
@@ -93,9 +96,8 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
           repository.create(
             value,
             InterviewWorkflow.initialCommand(value),
-            value.idempotencyKey,
-            MutationReceiptFingerprint.fromCanonicalInput("deadline-crash"),
-            acceptedAt
+            acceptedAt,
+            MutationWriteContext.directWrite
           )
         )
         reserved <- calendar
@@ -114,7 +116,7 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
         )
         repair <- drive(repository, worker, value.id, Set(InterviewWorkflowPhase.RepairRequired))
         finalReservation <- calendar.lookup(value.id, InterviewWorkflow.reservationKey(value.id, 0)).value
-        committed <- success(repository.hasHiringReceipt(value.id))
+        committed <- success(repository.isHiringCommitted(value.id))
         application <- MongoRepositoryTestSupport.findOne(
           fixture.database,
           MongoCollections.Applications,
@@ -152,9 +154,8 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
           repository.create(
             value,
             InterviewWorkflow.initialCommand(value),
-            value.idempotencyKey,
-            MutationReceiptFingerprint.fromCanonicalInput("released-reservation-repair"),
-            now
+            now,
+            MutationWriteContext.directWrite
           )
         )
         reservation <- calendar
@@ -175,7 +176,7 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
         )
         finalState <- drive(repository, worker, value.id, Set(InterviewWorkflowPhase.RepairRequired), remaining = 50)
         retained <- calendar.lookup(value.id, InterviewWorkflow.reservationKey(value.id, 0)).value
-        committed <- success(repository.hasHiringReceipt(value.id))
+        committed <- success(repository.isHiringCommitted(value.id))
         reservationCount <- MongoRepositoryTestSupport.count(
           fixture.database,
           MongoCollections.InterviewCalendarReservations
@@ -253,9 +254,8 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
           repository.create(
             value,
             InterviewWorkflow.initialCommand(value),
-            value.idempotencyKey,
-            MutationReceiptFingerprint.fromCanonicalInput("compensation"),
-            now
+            now,
+            MutationWriteContext.directWrite
           )
         )
         initialReservation <- calendar
@@ -275,7 +275,7 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
           repository.attemptCount(value.id, InterviewWorkflowCommand.ReleaseCalendarSlot(s"${value.id.value}:release"))
         )
         reservation <- calendar.lookup(value.id, InterviewWorkflow.reservationKey(value.id, 0)).value
-        committed <- success(repository.hasHiringReceipt(value.id))
+        committed <- success(repository.isHiringCommitted(value.id))
       } yield {
         assertEquals(repair.phase, InterviewWorkflowPhase.RepairRequired)
         assertEquals(attempts, 5L)
@@ -322,8 +322,7 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
           "Recovery admin",
           UserRole.Admin,
           None,
-          now,
-          adminSingleton = true
+          now
         )
         _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- InterviewSchedulingFixtures.seed(fixture.database, List(value), now)
@@ -334,9 +333,8 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
           repository.create(
             value,
             InterviewWorkflow.initialCommand(value),
-            value.idempotencyKey,
-            MutationReceiptFingerprint.fromCanonicalInput("notification-exhaustion"),
-            now
+            now,
+            MutationWriteContext.directWrite
           )
         )
         repair <- drive(repository, failingWorker, value.id, Set(InterviewWorkflowPhase.RepairRequired))
@@ -347,7 +345,7 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
             InterviewWorkflowCommand.LookupNotificationReceipt(InterviewParticipant.Candidate, candidateKey)
           )
         )
-        committed <- success(repository.hasHiringReceipt(value.id))
+        committed <- success(repository.isHiringCommitted(value.id))
         kept <- calendar.lookup(value.id, InterviewWorkflow.reservationKey(value.id, 0)).value
         storedRepair <- MongoRepositoryTestSupport.findOne(
           fixture.database,
@@ -403,9 +401,8 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
           repository.create(
             value,
             InterviewWorkflow.initialCommand(value),
-            value.idempotencyKey,
-            MutationReceiptFingerprint.fromCanonicalInput("deletion-replay"),
-            now
+            now,
+            MutationWriteContext.directWrite
           )
         )
         outgoing <- Ref.of[IO, Vector[InterviewMessage]](Vector.empty)

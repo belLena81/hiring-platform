@@ -4,7 +4,6 @@ import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.InterviewLifecycleFixtures
 import com.example.graphQL.cats.domain.workflow.InterviewWorkflowId
-import com.example.graphQL.cats.infrastructure.events.OperationalEventWireCodec
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.{Application, CandidateProfile, JobStatus, User, UserProfile, UserRole}
 import com.example.graphQL.cats.service.{Diagnostics, RepositoryError}
@@ -31,6 +30,21 @@ final class MongoOperationalCollectionValidatorsIntegrationSpec extends MongoInt
   private val now = Instant.parse("2026-10-07T12:00:00Z")
   private val Absence = MigrationIds.OptionalFieldAbsence
   private val Validators = MigrationIds.OperationalCollectionValidators
+
+  /** The steps after 025 (the three of the outbox, job filters and binary vectors, and the six that retire a stored
+    * shape); a database at 023 has not run them either.
+    */
+  private val Successors = List(
+    MigrationIds.OutboxEnvelopeSource,
+    MigrationIds.JobCanonicalFilters,
+    MigrationIds.BinaryEmbeddingVectors,
+    MigrationIds.InterviewHiringReceiptRemoval,
+    MigrationIds.InterviewRequestReceiptRemoval,
+    MigrationIds.SearchSessionWorkSingleCopy,
+    MigrationIds.EmbeddingWorkKeyFromIdentity,
+    MigrationIds.ApplicationEventActorRole,
+    MigrationIds.InterviewWorkflowInitiatorRole
+  )
 
   private def init(database: MongoDatabase[IO]): IO[Unit] = MongoHiringSetup.initialize(database, Diagnostics.noop[IO])
 
@@ -59,7 +73,7 @@ final class MongoOperationalCollectionValidatorsIntegrationSpec extends MongoInt
 
   private def validatorsInstalled(database: MongoDatabase[IO]): IO[Boolean] =
     MongoHiringSetup.setupDatabase(database).flatMap { setup =>
-      MongoOperationalValidators.current.forallM { case (name, expected) =>
+      MongoOperationalValidators.all.forallM { case (name, expected) =>
         MongoHiringValidators.validatorMatches(setup, name, expected)
       }
     }
@@ -80,11 +94,7 @@ final class MongoOperationalCollectionValidatorsIntegrationSpec extends MongoInt
       _ <- rows.deleteMany(
         Filters.in(
           MongoFields.Id,
-          Absence.value,
-          Validators.value,
-          MigrationIds.OutboxEnvelopeSource.value,
-          MigrationIds.JobCanonicalFilters.value,
-          MigrationIds.BinaryEmbeddingVectors.value
+          List(Absence, Validators).map(_.value) ++ Successors.map(_.value)*
         )
       )
     } yield ()
@@ -143,8 +153,6 @@ final class MongoOperationalCollectionValidatorsIntegrationSpec extends MongoInt
       val actor = UserId(UUID.randomUUID())
       val value = event(actor)
       val session = searchSession(actor)
-      val searchEvent =
-        OperationalEvents.searchPerformed(UUID.randomUUID(), session).fold(error => fail(error.toString), identity)
       val outbox =
         MongoOperationalEventOutboxRepository.transactional(fixture.database, fixture.client, Diagnostics.noop[IO])
       val work = MongoSearchSessionWorkRepository.transactional(fixture.database, fixture.client, Diagnostics.noop[IO])
@@ -163,7 +171,7 @@ final class MongoOperationalCollectionValidatorsIntegrationSpec extends MongoInt
           .value
           .flatMap(result)
         released <- find(fixture.database, MongoCollections.EventOutbox, value.eventId.toString)
-        _ <- work.enqueue(PendingSearchSessionWork(session, searchEvent), now).value.flatMap(result)
+        _ <- work.enqueue(PendingSearchSessionWork(session), now).value.flatMap(result)
         pending <- find(fixture.database, MongoCollections.SearchSessionWork, session.id.toString)
         lease <- work.claim("validator-test", now.plusSeconds(1), now.plusSeconds(30)).value.flatMap(result)
         _ <- work.complete(lease.get, now.plusSeconds(2)).value.flatMap(result)
@@ -314,13 +322,7 @@ final class MongoOperationalCollectionValidatorsIntegrationSpec extends MongoInt
         hiring <- insert(
           fixture.database,
           MongoCollections.InterviewWorkflowInbox,
-          MongoInterviewWorkflowCodec.hiringReceiptDocument(
-            s"${workflow.value}:hiring",
-            workflow,
-            InterviewLifecycleFixtures.candidateId,
-            InterviewLifecycleFixtures.recruiterId,
-            now
-          )
+          legacyHiringReceipt(workflow)
         ).attempt
         quarantine <- insert(
           fixture.database,
@@ -349,7 +351,9 @@ final class MongoOperationalCollectionValidatorsIntegrationSpec extends MongoInt
         assert(rejected(missing), clue(missing))
         assert(rejected(unknown), clue(unknown))
         assert(rejected(nullActor), clue(nullActor))
-        List(receipt, hiring, quarantine, audited).foreach(result => assert(result.isRight, clue(result)))
+        List(receipt, quarantine, audited).foreach(result => assert(result.isRight, clue(result)))
+        // MR-07: the hiring receipt document type is no longer a stored shape.
+        assert(rejected(hiring), clue(hiring))
       }
     }
   }
@@ -406,18 +410,20 @@ final class MongoOperationalCollectionValidatorsIntegrationSpec extends MongoInt
     }
   }
 
-  /** Seeds one row of every shape migration 024 repairs, plus a hiring receipt that must keep its subjects. */
+  /** Seeds one row of every shape migration 024 repairs, plus a hiring receipt that 024 keeps and 029 later removes. */
   private def seedLegacyShapes(database: MongoDatabase[IO], users: Int): IO[Unit] = {
     val actor = UserId(UUID.randomUUID())
     val session = searchSession(actor)
-    val searchEvent =
-      OperationalEvents.searchPerformed(UUID.randomUUID(), session).fold(error => fail(error.toString), identity)
-    val work = MongoSearchSessionWorkCodecs.work(PendingSearchSessionWork(session, searchEvent), now)
+    val work = MongoSearchSessionWorkCodecs
+      .work(PendingSearchSessionWork(session), now)
+      // The shape of a database at 023: the work row still carries a copy of its event (removed by migration 031).
+      .append(
+        MongoFields.Event,
+        new Document(MongoFields.Id, UUID.randomUUID().toString)
+          .append(MongoFields.Payload, "{}")
+          .append(MongoFields.EnvelopeBytes, new org.bson.types.Binary(Array[Byte](1, 2, 3)))
+      )
     work.get(MongoFields.Session, classOf[Document]).append(MongoFields.Query, null).append(MongoFields.Model, null)
-    // The validator installed at 025 still requires the embedded `payload` copy that migration 026 removes.
-    work
-      .get(MongoFields.Event, classOf[Document])
-      .append(MongoFields.Payload, OperationalEventWireCodec.payloadJson(searchEvent.payload).noSpaces)
     val workflow = InterviewLifecycleFixtures.workflowId
     val outboxRow =
       MongoHiringCodecs.outboxRecord(event(actor), now).fold(message => fail(message), identity)
@@ -450,17 +456,7 @@ final class MongoOperationalCollectionValidatorsIntegrationSpec extends MongoInt
           .inboxDocument("legacy-inbox", workflow, "message", 1L, now)
           .append("auditActorId", null)
       )
-      _ <- insert(
-        database,
-        MongoCollections.InterviewWorkflowInbox,
-        MongoInterviewWorkflowCodec.hiringReceiptDocument(
-          s"${workflow.value}:hiring",
-          workflow,
-          InterviewLifecycleFixtures.candidateId,
-          InterviewLifecycleFixtures.recruiterId,
-          now
-        )
-      )
+      _ <- insert(database, MongoCollections.InterviewWorkflowInbox, legacyHiringReceipt(workflow))
       _ <- insert(
         database,
         MongoCollections.InterviewWorkflows,
@@ -490,6 +486,20 @@ final class MongoOperationalCollectionValidatorsIntegrationSpec extends MongoInt
       )
     } yield ()
   }
+
+  /** The hiring receipt as migration 022 left it; the shape has no writer any more. */
+  private def legacyHiringReceipt(workflow: InterviewWorkflowId): Document =
+    new Document(MongoFields.Id, s"${workflow.value}:hiring")
+      .append(MongoFields.DocumentType, "hiringReceipt")
+      .append(MongoInterviewFields.WorkflowIdField, workflow.value.toString)
+      .append(
+        MongoFields.SubjectIds,
+        List(
+          InterviewLifecycleFixtures.candidateId.value.toString,
+          InterviewLifecycleFixtures.recruiterId.value.toString
+        ).asJava
+      )
+      .append(MongoFields.OccurredAt, Date.from(now))
 
   private def assertRepaired(database: MongoDatabase[IO], users: Long): IO[Unit] =
     for {
@@ -531,11 +541,12 @@ final class MongoOperationalCollectionValidatorsIntegrationSpec extends MongoInt
       assertEquals(nulls, List(0L, 0L, 0L, 0L))
       assertEquals(workflowSubjects, 0L)
       assertEquals(notificationSubjects, 0L)
-      assertEquals(hiring, 1L)
+      // Migration 029 follows 024 and 025 in the same start and removes the hiring receipt.
+      assertEquals(hiring, 0L)
       assertEquals(withoutUpdatedAt, 0L)
       assertEquals(equalDates, users)
       assertEquals(workflow, 1L)
-      assertEquals(inbox, 2L)
+      assertEquals(inbox, 1L)
     }
 
   test(

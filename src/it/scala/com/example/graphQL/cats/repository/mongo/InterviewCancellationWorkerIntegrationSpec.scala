@@ -20,7 +20,7 @@ final class InterviewCancellationWorkerIntegrationSpec extends MongoIntegrationS
   private def cancel(s: InterviewLifecycleScenario, expected: Long = 0L): IO[InterviewWorkflow] =
     s.applied(
       InterviewLifecycleEvent.Cancel(InterviewCancellationInitiator.Candidate, now),
-      s.actor(UserRole.Candidate, s.workflow.candidateId, input = "cancel"),
+      s.actor(UserRole.Candidate, s.workflow.candidateId),
       expected,
       now
     )

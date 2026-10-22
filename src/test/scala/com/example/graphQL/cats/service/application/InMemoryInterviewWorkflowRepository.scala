@@ -2,26 +2,24 @@ package com.example.graphQL.cats.service.application
 
 import cats.effect.{IO, Ref}
 import com.example.graphQL.cats.domain.model.ApplicationStatus
-import com.example.graphQL.cats.domain.model.Identifiers.UserId
+import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, UserId}
 import com.example.graphQL.cats.domain.workflow.*
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.RepositoryError
 import java.time.Instant
-import java.util.UUID
 
 /** What a lifecycle transition committed: a test double for the guarded transaction, with the same observable rules. */
 private[cats] final case class InterviewLifecycleStore(
     workflows: Map[InterviewWorkflowId, InterviewWorkflow],
-    requestReceipts: Map[(UserId, UUID), (InterviewWorkflowId, String)],
     causeReceipts: Set[String],
     commands: Vector[(InterviewWorkflowId, Long, InterviewLifecycleCommand)],
     // Every application status change the cancellation transaction made: actor, previous, new, generated feedback.
     history: Vector[(UserId, ApplicationStatus, ApplicationStatus, String)]
 )
 
-/** In-memory `applyLifecycle` honoring the production contract: replay by actor and key, participant predicate,
-  * revision CAS through the pure policy, the application transition on cancel, and all-or-nothing writes. Everything
-  * else stays unexpected, as in the base double.
+/** In-memory `applyLifecycle` honoring the production contract: internal-cause replay, participant predicate, revision
+  * CAS through the pure policy, the application transition on cancel, and all-or-nothing writes. Everything else stays
+  * unexpected, as in the base double.
   */
 private[cats] final class InMemoryInterviewWorkflowRepository(
     val store: Ref[IO, InterviewLifecycleStore],
@@ -29,7 +27,7 @@ private[cats] final class InMemoryInterviewWorkflowRepository(
 ) extends TestInterviewWorkflowRepository {
 
   private def visible(workflow: InterviewWorkflow, origin: InterviewLifecycleOrigin): Boolean = origin match {
-    case InterviewLifecycleOrigin.Actor(access, _, _) =>
+    case InterviewLifecycleOrigin.Actor(access) =>
       access.role match {
         case com.example.graphQL.cats.domain.model.UserRole.Candidate => workflow.candidateId == access.actorId
         case com.example.graphQL.cats.domain.model.UserRole.Recruiter => workflow.recruiterId == access.actorId
@@ -44,11 +42,7 @@ private[cats] final class InMemoryInterviewWorkflowRepository(
         _.workflows
           .get(workflowId)
           .filter(workflow =>
-            visible(
-              workflow,
-              InterviewLifecycleOrigin
-                .Actor(access, UUID.randomUUID(), MutationReceiptFingerprint.fromCanonicalInput(""))
-            )
+            visible(workflow, InterviewLifecycleOrigin.Actor(access))
               && access.role != com.example.graphQL.cats.domain.model.UserRole.Admin
           )
       )
@@ -57,13 +51,24 @@ private[cats] final class InMemoryInterviewWorkflowRepository(
   override def findForAdmin(workflowId: InterviewWorkflowId) =
     RepositoryF.lift(store.get.map(_.workflows.get(workflowId)))
 
+  override def findByApplication(applicationId: ApplicationId, access: InterviewWorkflowAccess) =
+    RepositoryF.lift(
+      store.get.map(
+        _.workflows.values.find(workflow =>
+          workflow.applicationId == applicationId &&
+            visible(workflow, InterviewLifecycleOrigin.Actor(access))
+        )
+      )
+    )
+
   override def applyLifecycle(
       workflowId: InterviewWorkflowId,
       expectedRevision: Long,
       event: InterviewLifecycleEvent,
       origin: InterviewLifecycleOrigin,
       now: Instant,
-      availableAt: Option[Instant]
+      availableAt: Option[Instant],
+      context: MutationWriteContext
   ) = RepositoryF
     .lift(for {
       status <- applicationStatus.get
@@ -85,15 +90,7 @@ private[cats] final class InMemoryInterviewWorkflowRepository(
   ): (InterviewLifecycleStore, ((Either[RepositoryError, InterviewLifecycleOutcome]), Boolean)) = {
     def refuse(outcome: InterviewLifecycleOutcome) = (state, (Right(outcome), false))
     val replay: Option[Either[RepositoryError, InterviewLifecycleOutcome]] = origin match {
-      case InterviewLifecycleOrigin.Actor(access, key, fingerprint) =>
-        state.requestReceipts.get((access.actorId, key)).map {
-          case (stored, existing) if stored == id && existing == fingerprint.value =>
-            state.workflows
-              .get(id)
-              .toRight(RepositoryError.InvalidStoredData)
-              .map(InterviewLifecycleOutcome.Duplicate.apply)
-          case _ => Left(RepositoryError.Conflict)
-        }
+      case InterviewLifecycleOrigin.Actor(_)        => None
       case InterviewLifecycleOrigin.Internal(cause) =>
         Option.when(state.causeReceipts(cause.receiptIdentity))(
           state.workflows
@@ -121,7 +118,7 @@ private[cats] final class InMemoryInterviewWorkflowRepository(
                   refuse(InterviewLifecycleOutcome.ApplicationNotInterview(status))
                 else {
                   val cancelHistory = (event, origin) match {
-                    case (InterviewLifecycleEvent.Cancel(initiator, _), InterviewLifecycleOrigin.Actor(access, _, _)) =>
+                    case (InterviewLifecycleEvent.Cancel(initiator, _), InterviewLifecycleOrigin.Actor(access)) =>
                       Vector(
                         (
                           access.actorId,
@@ -134,13 +131,8 @@ private[cats] final class InMemoryInterviewWorkflowRepository(
                   }
                   val next = decision.workflow
                   val receipts = origin match {
-                    case InterviewLifecycleOrigin.Actor(access, key, fingerprint) =>
-                      (
-                        state.requestReceipts.updated((access.actorId, key), (id, fingerprint.value)),
-                        state.causeReceipts
-                      )
-                    case InterviewLifecycleOrigin.Internal(cause) =>
-                      (state.requestReceipts, state.causeReceipts + cause.receiptIdentity)
+                    case InterviewLifecycleOrigin.Actor(_)        => state.causeReceipts
+                    case InterviewLifecycleOrigin.Internal(cause) => state.causeReceipts + cause.receiptIdentity
                   }
                   val noOp = next.revision == current.revision
                   val updated =
@@ -148,8 +140,7 @@ private[cats] final class InMemoryInterviewWorkflowRepository(
                     else
                       state.copy(
                         workflows = state.workflows.updated(id, next),
-                        requestReceipts = receipts._1,
-                        causeReceipts = receipts._2,
+                        causeReceipts = receipts,
                         commands = state.commands ++ decision.commands.map((id, next.revision, _)),
                         history = state.history ++ cancelHistory
                       )
@@ -171,7 +162,7 @@ private[cats] object InMemoryInterviewWorkflowRepository {
   ): IO[InMemoryInterviewWorkflowRepository] =
     for {
       store <- Ref.of[IO, InterviewLifecycleStore](
-        InterviewLifecycleStore(Map(initial.id -> initial), Map.empty, Set.empty, Vector.empty, Vector.empty)
+        InterviewLifecycleStore(Map(initial.id -> initial), Set.empty, Vector.empty, Vector.empty)
       )
       applicationStatus <- Ref.of[IO, ApplicationStatus](status)
     } yield new InMemoryInterviewWorkflowRepository(store, applicationStatus)

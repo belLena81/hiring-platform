@@ -4,7 +4,7 @@ import cats.data.EitherT
 import cats.Monad
 import cats.syntax.all.*
 import com.example.graphQL.cats.service.port.*
-import com.example.graphQL.cats.service.{ActorContext, RepositoryError, SearchError, UseCaseError}
+import com.example.graphQL.cats.service.{ActorContext, SearchError, UseCaseError}
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.{
@@ -23,6 +23,7 @@ import com.example.graphQL.cats.service.read.HiringReadScope
 import com.example.graphQL.cats.service.protocol.{SearchUseCases, UseCaseF}
 import com.example.graphQL.cats.shared.crypto.SourceHash
 import com.example.graphQL.cats.domain.pagination.PageSize
+import com.example.graphQL.cats.service.search.SearchFailure.*
 import com.example.graphQL.cats.service.search.{
   CandidateMatchFilters,
   JobSearchFilter,
@@ -147,7 +148,7 @@ final class SemanticSearchService[F[_]: Monad](
   ): UseCaseF[F, PreparedCandidateMatch] =
     for {
       user <- authorization.resolve(actor)
-      job <- authorizeJobForMatching(user, UseCaseF.found(jobs.find(jobId), "job"))
+      job <- authorizeJobForMatching(user, withEmbedding(jobId))
       normalizedQuery = queryText.map(_.trim).filter(_.nonEmpty)
       _ <- normalizedQuery.traverse_(requireQueryLength)
       validatedFilters <- EitherT.fromEither[F](
@@ -197,27 +198,16 @@ final class SemanticSearchService[F[_]: Monad](
   private def candidateSkillMatch(candidate: User, job: Job): List[String] =
     SkillMatching.matched(candidate.candidateProfile.fold(Set.empty[String])(_.skills), job.skills)
 
-  /** Turns exactly the degradable retrieval failures into a value: an unavailable embedding provider and a vector
-    * search that failed alone (`SearchError.VectorSearchUnavailable`, or `RepositoryError.VectorSearchUnavailable`,
-    * which the repository reports only when the lexical branch of the same query answered). A generic
-    * `RepositoryError.Unavailable` is not degradable: it can mean the whole store is down, so a lexical query against
-    * the same store would fail the same way. A query that exceeded its time budget or was refused by the search
-    * admission (`RepositoryError.Overloaded`) is not degradable either, since answering it again through another
-    * retrieval path would repeat the same load. Both fail fast as an unavailable search. Every other failure stays a
-    * failure. The retrieval passes in with unmapped repository errors so they can be told apart here.
+  /** Turns exactly the degradable retrieval failures (`SearchFailure.degradation`) into a value. The retrieval passes
+    * in unmapped, so a generic `Unavailable` (possibly the whole store), an `Overloaded` refusal (answering again
+    * through another path would repeat the load) and corrupt stored data are told apart from a lone vector failure:
+    * they are not degraded and keep their own reading through `asSearchFailure`.
     */
   private def degradable[A](retrieval: UseCaseF[F, A]): UseCaseF[F, Either[DegradedSearch, A]] =
-    EitherT(retrieval.value.map {
-      case Right(value)                                               => Right(Right(value))
-      case Left(UseCaseError.Search(SearchError.ProviderUnavailable)) =>
-        Right(Left(DegradedSearch(SearchError.ProviderUnavailable)))
-      case Left(
-            UseCaseError.Search(SearchError.VectorSearchUnavailable) |
-            UseCaseError.Repository(RepositoryError.VectorSearchUnavailable)
-          ) =>
-        Right(Left(DegradedSearch(SearchError.VectorSearchUnavailable)))
-      case Left(other) => Left(searchFailure(other))
-    })
+    retrieval.transform {
+      case Right(value) => Right(Right(value))
+      case Left(error)  => error.degradation.map(Left(_)).toRight(error.asSearchFailure)
+    }
 
   /** A usable, bounded lexical query: trimmed, within the query limit, and non-empty. */
   private def lexicalFallbackText(text: Option[String]): Option[String] =
@@ -323,11 +313,9 @@ final class SemanticSearchService[F[_]: Monad](
       ids: List[UserId]
   ): UseCaseF[F, List[CandidateSearchEligibility]] =
     for {
-      (currentActor, scope) <- authorization.readScope(actor).leftMap(searchFailure)
-      currentJob <- authorizeJobForMatching(
-        currentActor,
-        UseCaseF.found(jobs.find(jobId), "job").leftMap(searchFailure)
-      )
+      (currentActor, scope) <- authorization.currentReadScope(actor).leftMap(_.asSearchFailure)
+      // Read again after retrieval on purpose: the job may have been edited, closed or re-embedded meanwhile.
+      currentJob <- authorizeJobForMatching(currentActor, withEmbedding(jobId).leftMap(_.asSearchFailure))
       _ <- UseCaseF.ensure[F](
         currentJob.embedding.exists(embedding =>
           embedding.meta == queryMeta && jobEmbeddingIsCurrent(currentJob, embedding)
@@ -340,14 +328,11 @@ final class SemanticSearchService[F[_]: Monad](
     } yield currentUsers
 
   /** A non-Candidate user matching candidates against an open job it may manage. */
-  private def authorizeJobForMatching(user: User, job: UseCaseF[F, Job]): UseCaseF[F, Job] =
+  private def authorizeJobForMatching(user: ActorRecord, job: UseCaseF[F, Job]): UseCaseF[F, Job] =
     for {
       _ <- UseCaseF.ensure[F](user.role != UserRole.Candidate, UseCaseError.Domain(DomainError.RecruiterRequired))
       found <- job
-      _ <- UseCaseF.ensure[F](
-        user.role != UserRole.Recruiter || found.recruiterId == user.id,
-        UseCaseError.Domain(DomainError.Forbidden)
-      )
+      _ <- UseCaseF.forbidUnless[F](user.role != UserRole.Recruiter || found.recruiterId == user.id)
       _ <- UseCaseF.ensure[F](found.status == JobStatus.Open, UseCaseError.Domain(DomainError.JobMustBeOpen))
     } yield found
 
@@ -386,14 +371,18 @@ final class SemanticSearchService[F[_]: Monad](
     embedding.meta.model == embeddingModel &&
       embedding.meta.sourceHash == SourceHash.sha256(SearchableText.candidate(profile))
 
+  /** The whole job including its embedding: ranking compares the stored embedding with the current job text. */
+  private def withEmbedding(jobId: JobId): UseCaseF[F, Job] =
+    UseCaseF.found(jobs.findVersioned(jobId).map(_.map(_.value)), "job")
+
   private def requireCandidate(user: User): UseCaseF[F, Unit] =
     UseCaseF.ensure[F](user.role == UserRole.Candidate, UseCaseError.Domain(DomainError.CandidateRequired))
 
   private def resolveCandidate(actor: ActorContext): UseCaseF[F, User] =
-    authorization.resolve(actor).flatTap(requireCandidate)
+    authorization.resolveWithEmbedding(actor).flatTap(requireCandidate)
 
   private def currentCandidate(actor: ActorContext): UseCaseF[F, (User, HiringReadScope)] =
-    authorization.readScope(actor).leftMap(searchFailure).flatTap((user, _) => requireCandidate(user))
+    authorization.readScopeWithEmbedding(actor).leftMap(_.asSearchFailure).flatTap((user, _) => requireCandidate(user))
 
   private def embedQuery(text: String): UseCaseF[F, EmbeddingVector] =
     EitherT
@@ -403,18 +392,8 @@ final class SemanticSearchService[F[_]: Monad](
           .leftMap(_ => UseCaseError.Search(SearchError.ProviderUnavailable))
       )
 
-  /** A revoked authority stays forbidden and a write conflict stays a conflict; other store failures mean the vector
-    * search backend is unavailable.
-    */
-  private def searchFailure(error: UseCaseError): UseCaseError =
-    error match {
-      case UseCaseError.Repository(RepositoryError.Conflict) | UseCaseError.Domain(DomainError.Forbidden) => error
-      case UseCaseError.Repository(_) => UseCaseError.Search(SearchError.VectorSearchUnavailable)
-      case other                      => other
-    }
-
   private def searchRead[A](result: RepositoryF[F, A]): UseCaseF[F, A] =
-    UseCaseF.repository(result).leftMap(searchFailure)
+    UseCaseF.repository(result).leftMap(_.asSearchFailure)
 }
 
 /** Candidate matching inputs validated before any provider call. */

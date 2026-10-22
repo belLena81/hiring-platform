@@ -59,7 +59,9 @@ final class InterviewPublicationScalingIntegrationSpec extends KafkaIntegrationS
           InterviewInterval(at.plusSeconds(3600L + n * 120L), at.plusSeconds(3660L + n * 120L)),
           at.plusSeconds(300),
           identity(s"$cohort:request:$n"),
-          ApplicationStatus.Accepted
+          ApplicationStatus.Accepted,
+          UserId(identity(s"$cohort:recruiter")),
+          com.example.graphQL.cats.domain.model.UserRole.Recruiter
         )
         .fold(error => fail(s"Invalid publication fixture: $error"), value => value)
     }
@@ -75,9 +77,8 @@ final class InterviewPublicationScalingIntegrationSpec extends KafkaIntegrationS
         repository.create(
           workflow,
           InterviewWorkflow.initialCommand(workflow),
-          workflow.idempotencyKey,
-          MutationReceiptFingerprint.fromCanonicalInput(workflow.id.value.toString),
-          at
+          at,
+          MutationWriteContext.directWrite
         )
       )
     )

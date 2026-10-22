@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.service.events
 
+import com.example.graphQL.cats.service.events.OperationalEventFailure.*
 import cats.data.EitherT
 import cats.Monad
 import cats.effect.Clock
@@ -15,7 +16,6 @@ import com.example.graphQL.cats.service.port.{
   SearchSessionWorkRepository,
   UserRepository
 }
-import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
 import com.example.graphQL.cats.service.auth.ActorAuthorization
 import com.example.graphQL.cats.service.mutation.Idempotent
@@ -48,8 +48,8 @@ final class OperationalTelemetryService[F[_]: Monad](
     ) { context =>
       for {
         user <- authorization.resolve(actor)
-        job <- UseCaseF.found(jobs.find(jobId), "job")
-        _ <- UseCaseF.ensure[F](authorization.canView(user, job), UseCaseError.Domain(DomainError.Forbidden))
+        job <- UseCaseF.found(jobs.findOwner(jobId), "job")
+        _ <- UseCaseF.forbidUnless[F](authorization.canView(user, job))
         rank <- searchId.fold(EitherT.rightT[F, UseCaseError](Option.empty[Int]))(id =>
           verifiedSearchResult(actor, id, jobId.value.toString).map(value => Some(value._1))
         )
@@ -87,7 +87,7 @@ final class OperationalTelemetryService[F[_]: Monad](
               verified._1,
               now
             )
-            .leftMap(_ => UseCaseError.Repository(RepositoryError.InvalidEvent))
+            .leftMap(_.asUseCaseError)
         )
         _ <- UseCaseF.repository(searchSessions.recordInteraction(event, context))
       } yield ()

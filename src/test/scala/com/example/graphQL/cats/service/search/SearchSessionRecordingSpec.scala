@@ -6,6 +6,7 @@ import com.example.graphQL.cats.FixedTestClock
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.service.events.OperationalEventPayload.SearchKind
 import com.example.graphQL.cats.service.events.{
+  OperationalEvents,
   OperationalEventEnvelope,
   OperationalEventPayload,
   SearchFilterSnapshot,
@@ -26,11 +27,10 @@ final class SearchSessionRecordingSpec extends CatsEffectSuite {
 
   private val generator = new UUIDGen[IO] { def randomUUID: IO[UUID] = IO.pure(generated) }
 
-  private def recording(sink: Ref[IO, Vector[(SearchSession, OperationalEventEnvelope)]]) =
+  private def recording(sink: Ref[IO, Vector[SearchSession]]) =
     SearchSessionRecording(
       new SearchSessionHandoff[IO] {
-        def enqueue(session: SearchSession, event: OperationalEventEnvelope): IO[Unit] =
-          sink.update(_ :+ (session -> event))
+        def enqueue(session: SearchSession): IO[Unit] = sink.update(_ :+ session)
       },
       new SearchRecordingFailureRepository[IO] {
         def record(event: OperationalEventEnvelope) = RepositoryF.at[IO].fromEither(Right(true))
@@ -41,7 +41,7 @@ final class SearchSessionRecordingSpec extends CatsEffectSuite {
 
   test("a client-supplied search id is reused and an absent one is generated") {
     for {
-      sink <- Ref.of[IO, Vector[(SearchSession, OperationalEventEnvelope)]](Vector.empty)
+      sink <- Ref.of[IO, Vector[SearchSession]](Vector.empty)
       service = recording(sink)
       reused <- service.searchId(Some(supplied))
       fresh <- service.searchId(None)
@@ -53,7 +53,7 @@ final class SearchSessionRecordingSpec extends CatsEffectSuite {
 
   test("recording ranks results, applies seven-day retention and derives a deterministic event identity") {
     for {
-      sink <- Ref.of[IO, Vector[(SearchSession, OperationalEventEnvelope)]](Vector.empty)
+      sink <- Ref.of[IO, Vector[SearchSession]](Vector.empty)
       service = recording(sink)
       _ <- service
         .record(
@@ -70,7 +70,8 @@ final class SearchSessionRecordingSpec extends CatsEffectSuite {
         .value
       recorded <- sink.get
     } yield {
-      val (session, event) = recorded.head
+      val session = recorded.head
+      val event = OperationalEvents.searchPerformed(session).fold(error => fail(error.toString), identity)
       assertEquals(session.id, supplied)
       assertEquals(session.actorId, actorId)
       assertEquals(session.searchKind, SearchKind.Jobs)
@@ -92,7 +93,7 @@ final class SearchSessionRecordingSpec extends CatsEffectSuite {
     for {
       stored <- Ref.of[IO, Vector[OperationalEventEnvelope]](Vector.empty)
       service = SearchSessionRecording(
-        new SearchSessionHandoff[IO] { def enqueue(session: SearchSession, event: OperationalEventEnvelope) = IO.unit },
+        new SearchSessionHandoff[IO] { def enqueue(session: SearchSession) = IO.unit },
         new SearchRecordingFailureRepository[IO] {
           def record(event: OperationalEventEnvelope) =
             RepositoryF.lift(stored.update(_ :+ event).as(true))
@@ -116,7 +117,7 @@ final class SearchSessionRecordingSpec extends CatsEffectSuite {
 
   test("an empty result list with a model records an empty ranked session") {
     for {
-      sink <- Ref.of[IO, Vector[(SearchSession, OperationalEventEnvelope)]](Vector.empty)
+      sink <- Ref.of[IO, Vector[SearchSession]](Vector.empty)
       _ <- recording(sink)
         .record(
           actorId,
@@ -130,9 +131,9 @@ final class SearchSessionRecordingSpec extends CatsEffectSuite {
       recorded <- sink.get
     } yield {
       assertEquals(recorded.size, 1)
-      assertEquals(recorded.head._1.results, Nil)
-      assertEquals(recorded.head._1.model, Some("voyage-4-lite"))
-      assertEquals(recorded.head._1.searchKind, SearchKind.SemanticJobSearch)
+      assertEquals(recorded.head.results, Nil)
+      assertEquals(recorded.head.model, Some("voyage-4-lite"))
+      assertEquals(recorded.head.searchKind, SearchKind.SemanticJobSearch)
     }
   }
 }

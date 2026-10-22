@@ -66,7 +66,7 @@ final class AtlasHiringSearchIntegrationSpec extends CatsEffectSuite {
       List("scala"),
       Set("scala"),
       Location("Canada", Some("Toronto"), false),
-      JobStatus.Open,
+      JobState.Open,
       now,
       now
     )

@@ -16,10 +16,7 @@ import sangria.marshalling.ResultMarshaller
 private[graphql] final class HiringGraphQLSangriaAdapter(dispatcher: Dispatcher[IO]) {
   def resolverFuture[A](context: RequestContext, action: HiringGraphQLResult[A]): Future[A] =
     dispatcher.unsafeToFuture(
-      context.requestScoped(action).value.flatMap {
-        case Right(value)  => IO.pure(value)
-        case Left(failure) => IO.raiseError(ResolverFailureSignal(failure))
-      }
+      context.requestScoped(action).valueOrF(failure => IO.raiseError(ResolverFailureSignal(failure)))
     )
 
   def fieldFuture[A](context: RequestContext, name: String, action: HiringGraphQLResult[A]): Future[A] =

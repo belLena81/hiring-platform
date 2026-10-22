@@ -13,7 +13,7 @@ import org.apache.kafka.common.errors.{
   RetriableException,
   SerializationException
 }
-import com.example.graphQL.cats.service.resilience.CircuitBreaker
+import com.example.graphQL.cats.service.resilience.{CircuitBreaker, LeaseHeartbeat, LeaseLost}
 import com.example.graphQL.cats.service.port.{
   ClaimedOperationalEvent,
   ConsumerReceiptRepository,
@@ -216,7 +216,7 @@ object OperationalEventKafkaRuntime {
       claim: ClaimedOperationalEvent,
       clock: Clock[IO] = Clock[IO]
   )(send: IO[Unit]): IO[Unit] = {
-    def renew: IO[Unit] = clock.realTimeInstant.flatMap { now =>
+    val renew: IO[Either[LeaseLost, Unit]] = clock.realTimeInstant.flatMap { now =>
       requireOutboxSuccess(
         outbox.renewLease(
           claim.event.eventId,
@@ -224,15 +224,14 @@ object OperationalEventKafkaRuntime {
           claim.subjectIds,
           now.plusSeconds(config.publisher.leaseSeconds.toLong)
         )
-      )
+      ).as(Either.right[LeaseLost, Unit](()))
     }
-    val renewEvery = (config.publisher.leaseSeconds.seconds / 3).max(1.second)
-    val heartbeat = Stream.awakeEvery[IO](renewEvery).evalMap(_ => renew).compile.drain
-    renew *> IO
-      .race(send.attempt, heartbeat)
+    // A failed renewal raises, so the guard answers only with the send outcome; a lease it reports lost is a fault.
+    LeaseHeartbeat
+      .guard(config.publisher.leaseSeconds.seconds)(renew)(send.attempt)
       .flatMap {
-        case Left(outcome) => IO.pure(outcome)
-        case Right(_)      =>
+        case Right(outcome) => IO.pure(outcome)
+        case Left(_)        =>
           IO.raiseError[Either[Throwable, Unit]](
             OutboxOperationFailed("lease heartbeat stopped before Kafka send completed")
           )

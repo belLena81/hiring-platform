@@ -154,15 +154,6 @@ private[mongo] object MongoHiringValidators {
   /** Every users definition a completed earlier proof may find installed. */
   def userValidatorHistory: List[Document] = List(userValidatorV1, userValidatorV2, userValidator)
 
-  private val deletedAccountPersonalFields: List[String] = List(
-    MongoFields.Email,
-    MongoFields.EmailCanonical,
-    MongoFields.PasswordHash,
-    MongoFields.Profile,
-    MongoFields.Embedding,
-    MongoFields.EmbeddingMeta
-  )
-
   private def userSchema(level: Int): Document = {
     val successor = level >= 2
     def active(role: String, required: String) = new Document("required", List(required).asJava).append(
@@ -230,7 +221,7 @@ private[mongo] object MongoHiringValidators {
           "not",
           new Document(
             "anyOf",
-            deletedAccountPersonalFields.map(field => new Document("required", List(field).asJava)).asJava
+            UserFields.erasedOnDeletion.map(field => new Document("required", List(field).asJava)).asJava
           )
         )
       else deletedProperties

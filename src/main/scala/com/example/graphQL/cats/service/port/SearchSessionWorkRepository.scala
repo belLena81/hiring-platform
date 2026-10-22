@@ -1,24 +1,13 @@
 package com.example.graphQL.cats.service.port
 
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
-import com.example.graphQL.cats.service.events.{
-  OperationalAggregateType,
-  OperationalEventEnvelope,
-  OperationalEventType,
-  SearchSession
-}
-import com.example.graphQL.cats.shared.Parsing
+import com.example.graphQL.cats.service.events.SearchSession
 
 import java.time.Instant
 import java.util.UUID
 
-final case class PendingSearchSessionWork(session: SearchSession, event: OperationalEventEnvelope) {
-  def addressesSession: Boolean =
-    event.eventType == OperationalEventType.SEARCH_PERFORMED &&
-      event.aggregateType == OperationalAggregateType.Search &&
-      event.actorId == session.actorId &&
-      Parsing.parseUuid(event.aggregateId).toOption.contains(session.id)
-}
+/** The durable work row holds only the session; its `SearchPerformed` event is derived when the work completes. */
+final case class PendingSearchSessionWork(session: SearchSession)
 
 enum SearchSessionWorkState {
   case Ready, Processing, Retry, Failed

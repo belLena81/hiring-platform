@@ -39,12 +39,12 @@ private[kafka] object KafkaRuntimeSupport {
       partition: Int,
       offset: Long
   )(process: RepositoryF[IO, Unit])(commit: IO[Unit]): IO[Unit] =
-    process.value.flatMap {
-      case Right(()) => commit
+    process.foldF(
       // Stop this stream before reading a later offset. Continuing here could
       // commit N+1 and make the undurable record at N unrecoverable for this group.
-      case Left(error) => IO.raiseError(RecordNotDurable(topic, partition, offset, error))
-    }
+      error => IO.raiseError(RecordNotDurable(topic, partition, offset, error)),
+      _ => commit
+    )
 
   def resilientStream(
       diagnostics: Diagnostics[IO],

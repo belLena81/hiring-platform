@@ -1,6 +1,7 @@
 package com.example.graphQL.cats.service.application
 
 import cats.Monad
+import cats.data.EitherT
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.workflow.*
 import com.example.graphQL.cats.service.port.*
@@ -15,33 +16,40 @@ private[application] final class InterviewProviderExecutor[F[_]: Monad](
     notifications: InterviewNotificationProvider[F],
     currentTime: F[java.time.Instant]
 ) {
-  private def provider[A](operation: InterviewProviderF[F, A]): F[InterviewResult] = operation.value.map {
-    case Right(_)                              => InterviewResult.Succeeded
-    case Left(InterviewProviderError.Conflict) => InterviewResult.Rejected
-    case Left(_)                               => InterviewResult.OutcomeUnknown
-  }
+  // The failure is classified, not dropped: a refusal is definitive, anything else is an outcome the lookup resolves.
+  private def provider[A](operation: InterviewProviderF[F, A]): F[InterviewResult] =
+    operation.fold[InterviewResult](
+      {
+        case InterviewProviderError.Conflict => InterviewResult.Rejected
+        case _                               => InterviewResult.OutcomeUnknown
+      },
+      _ => InterviewResult.Succeeded
+    )
 
   /** The one reading of a lookup: found, definitively absent, or unknown when the answer could not be read. */
-  private def lookedUp[E](answer: Either[E, Boolean]): InterviewResult = answer match {
-    case Right(true)  => InterviewResult.Found
-    case Right(false) => InterviewResult.Absent
-    case Left(_)      => InterviewResult.OutcomeUnknown
-  }
+  private def lookedUp[E](answer: EitherT[F, E, Boolean]): F[InterviewResult] =
+    answer.fold[InterviewResult](
+      _ => InterviewResult.OutcomeUnknown,
+      found => if (found) InterviewResult.Found else InterviewResult.Absent
+    )
 
   private def reservationLookup(workflowId: InterviewWorkflowId, key: String)(
       found: InterviewCalendarReservation => Boolean
   ): F[InterviewResult] =
-    calendar.lookup(workflowId, key).value.map(answer => lookedUp(answer.map(_.exists(found))))
+    lookedUp(calendar.lookup(workflowId, key).map(_.exists(found)))
 
   private def receiptLookup(key: String): F[InterviewResult] =
-    notifications.lookup(key).value.map(answer => lookedUp(answer.map(_.nonEmpty)))
+    lookedUp(notifications.lookup(key).map(_.nonEmpty))
 
   /** A write the repository refuses as a conflict is a definitive rejection; any other failure is unknown. */
-  private def repositoryResult(operation: RepositoryF[F, ?]): F[InterviewResult] = operation.value.map {
-    case Right(_)                       => InterviewResult.Succeeded
-    case Left(RepositoryError.Conflict) => InterviewResult.Rejected
-    case Left(_)                        => InterviewResult.OutcomeUnknown
-  }
+  private def repositoryResult(operation: RepositoryF[F, ?]): F[InterviewResult] =
+    operation.fold[InterviewResult](
+      {
+        case RepositoryError.Conflict => InterviewResult.Rejected
+        case _                        => InterviewResult.OutcomeUnknown
+      },
+      _ => InterviewResult.Succeeded
+    )
 
   private def recipient(workflow: InterviewWorkflow, participant: InterviewParticipant) =
     if (participant == InterviewParticipant.Candidate) workflow.candidateId else workflow.recruiterId
@@ -67,13 +75,17 @@ private[application] final class InterviewProviderExecutor[F[_]: Monad](
     import InterviewLifecycleCommand as C
     command match {
       case C.CancelCalendarSlot(key) =>
-        calendar.cancel(workflow.id, key, now, Some(claim)).value.map {
-          case Right(InterviewCalendarCancellation.Cancelled(_) | InterviewCalendarCancellation.AlreadyCancelled(_)) =>
-            InterviewResult.Succeeded
-          // Definitive: the provider has no such reservation, so repeating the cancel or looking it up cannot help.
-          case Right(InterviewCalendarCancellation.UnknownReservation) => InterviewResult.Rejected
-          case _                                                       => InterviewResult.OutcomeUnknown
-        }
+        calendar
+          .cancel(workflow.id, key, now, Some(claim))
+          .fold[InterviewResult](
+            _ => InterviewResult.OutcomeUnknown,
+            {
+              case InterviewCalendarCancellation.Cancelled(_) | InterviewCalendarCancellation.AlreadyCancelled(_) =>
+                InterviewResult.Succeeded
+              // Definitive: the provider has no such reservation, so repeating the cancel or looking it up cannot help.
+              case InterviewCalendarCancellation.UnknownReservation => InterviewResult.Rejected
+            }
+          )
       case C.LookupCalendarCancellation(key) =>
         reservationLookup(workflow.id, key)(_.releasedAt.nonEmpty)
       case C.HoldReplacementSlot(key, interval) =>
@@ -96,7 +108,7 @@ private[application] final class InterviewProviderExecutor[F[_]: Monad](
         else
           repositoryResult(repository.approveRescheduledInterval(workflow, now, claim))
       case C.LookupRescheduleCommitReceipt(id, generation) =>
-        repository.hasRescheduleApproval(id, generation).value.map(lookedUp)
+        lookedUp(repository.hasRescheduleApproval(id, generation))
       // Due work: the command is only claimed once the proposal's expiry time has been reached.
       case C.ExpireProposal(_)              => Monad[F].pure(InterviewResult.Succeeded)
       case C.Notify(kind, participant, key) =>
@@ -114,11 +126,12 @@ private[application] final class InterviewProviderExecutor[F[_]: Monad](
         // Informational messages are looked up first so a retry after a crash does not resend a recorded delivery.
         if (!InterviewCommands.isInformational(command)) send
         else
-          notifications.lookup(key).value.flatMap {
-            case Right(Some(_)) => Monad[F].pure(InterviewResult.Succeeded)
-            case Right(None)    => send
-            case Left(_)        => Monad[F].pure(InterviewResult.OutcomeUnknown)
-          }
+          notifications
+            .lookup(key)
+            .foldF[InterviewResult](
+              _ => Monad[F].pure(InterviewResult.OutcomeUnknown),
+              _.fold(send)(_ => Monad[F].pure(InterviewResult.Succeeded))
+            )
       case C.LookupNotificationReceipt(_, _, key) => receiptLookup(key)
       case C.RequireRepair(_)                     => Monad[F].pure(InterviewResult.Rejected)
     }
@@ -133,11 +146,13 @@ private[application] final class InterviewProviderExecutor[F[_]: Monad](
       command match {
         case InterviewWorkflowCommand.ReserveCalendarSlot(key) =>
           def reconcile: F[InterviewResult] =
-            calendar.lookup(workflow.id, InterviewWorkflow.reservationKey(workflow.id, 0)).value.map {
-              case Right(Some(reservation)) if reservation.releasedAt.isEmpty => InterviewResult.Succeeded
-              case Right(_)                                                   => InterviewResult.Rejected
-              case Left(_)                                                    => InterviewResult.OutcomeUnknown
-            }
+            calendar
+              .lookup(workflow.id, InterviewWorkflow.reservationKey(workflow.id, 0))
+              .fold[InterviewResult](
+                _ => InterviewResult.OutcomeUnknown,
+                reservation =>
+                  if (reservation.exists(_.releasedAt.isEmpty)) InterviewResult.Succeeded else InterviewResult.Rejected
+              )
           if (!now.isBefore(workflow.preCommitDeadline)) reconcile
           else
             provider(
@@ -159,7 +174,7 @@ private[application] final class InterviewProviderExecutor[F[_]: Monad](
         case InterviewWorkflowCommand.CommitAcceptedToInterview(_) =>
           repositoryResult(repository.commitHiring(workflow, now, Some(claim)))
         case InterviewWorkflowCommand.LookupStatusCommitReceipt(id) =>
-          repository.hasHiringReceipt(id).value.map(lookedUp)
+          lookedUp(repository.isHiringCommitted(id))
         case InterviewWorkflowCommand.ReleaseCalendarSlot(key) => provider(calendar.release(key, now, Some(claim)))
         case InterviewWorkflowCommand.Notify(participant, key) =>
           provider(

@@ -95,7 +95,7 @@ private[mongo] object MongoHiringPersistenceCodecs {
       occurredAt: Date,
       feedback: Option[String],
       reason: Option[String],
-      actorRole: Option[String] = None
+      actorRole: String
   )
 
   final case class StoredOperationalEvent(

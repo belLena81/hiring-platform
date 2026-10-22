@@ -68,8 +68,7 @@ final class MongoOutboxTransactionRetryIntegrationSpec extends MongoIntegrationS
         UserRole.Candidate,
         None,
         now,
-        accountStatus = AccountStatus.Deleted,
-        deletedAt = Some(now)
+        state = AccountState.Deleted(now)
       )
       val event = OperationalEvents.jobViewed(UUID.randomUUID(), JobId(UUID.randomUUID()), actor.id, None, None, now)
       val outbox =

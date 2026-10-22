@@ -33,7 +33,9 @@ trait HiringReadModel[F[_]] {
   def viewer(actor: ActorContext): UseCaseF[F, AuthenticatedActor]
   def canViewUserEmails(actor: ActorContext, userIds: List[UserId]): UseCaseF[F, Set[UserId]]
   def application(id: ApplicationId): UseCaseF[F, Option[Application]]
-  def canViewApplication(actor: ActorContext, applicationId: ApplicationId): UseCaseF[F, Unit]
+
+  /** The application, if the actor may view it; the loaded value is returned so callers need no second read. */
+  def canViewApplication(actor: ActorContext, applicationId: ApplicationId): UseCaseF[F, Application]
   def applicationHistory(
       actor: ActorContext,
       applicationId: ApplicationId,

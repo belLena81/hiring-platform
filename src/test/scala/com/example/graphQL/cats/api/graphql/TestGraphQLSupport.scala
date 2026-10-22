@@ -73,7 +73,7 @@ object TestGraphQLSupport {
   /** Test fixture: real recording service over a handoff that drops every session. */
   val searchSessions: SearchSessionRecording[IO] = SearchSessionRecording(
     new SearchSessionHandoff[IO] {
-      def enqueue(session: SearchSession, event: OperationalEventEnvelope): IO[Unit] = IO.unit
+      def enqueue(session: SearchSession): IO[Unit] = IO.unit
     },
     new com.example.graphQL.cats.service.port.SearchRecordingFailureRepository[IO] {
       def record(event: OperationalEventEnvelope) =

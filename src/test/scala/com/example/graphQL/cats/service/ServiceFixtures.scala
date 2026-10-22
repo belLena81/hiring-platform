@@ -5,6 +5,8 @@ import cats.effect.IO
 import cats.effect.Ref
 import cats.syntax.all.*
 import com.example.graphQL.cats.service.port.{
+  ActorRecord,
+  JobOwner,
   ApplicationRepository,
   ApplicationWriteActor,
   JobRepository,
@@ -16,14 +18,16 @@ import com.example.graphQL.cats.service.port.{
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.{
+  AccountState,
   AccountStatus,
   Application,
   ApplicationEvent,
   CandidateProfile,
   EntityEmbedding,
   Job,
-  JobSubmissionSnapshot,
+  JobState,
   JobStatus,
+  JobSubmissionSnapshot,
   Location,
   RecruiterProfile,
   User,
@@ -64,7 +68,7 @@ private[cats] object ServiceFixtures {
     now
   )
   val admin: User =
-    User(adminId, Some(email("admin@example.com")), "Admin", UserRole.Admin, None, now, adminSingleton = true)
+    User(adminId, Some(email("admin@example.com")), "Admin", UserRole.Admin, None, now)
   val openJob: Job = Job(
     jobId,
     recruiterId,
@@ -73,7 +77,7 @@ private[cats] object ServiceFixtures {
     List("Scala"),
     Set("Scala"),
     Location("Ukraine", Some("Kyiv"), remote = true),
-    JobStatus.Open,
+    JobState.Open,
     now,
     now
   )
@@ -90,9 +94,7 @@ private[cats] object ServiceFixtures {
     (users.get, jobs.get, applications.get).mapN { (currentUsers, currentJobs, currentApplications) =>
       val active = currentUsers
         .get(scope.userId)
-        .exists(user =>
-          user.role == scope.role && user.accountStatus == AccountStatus.Active && (user.role != UserRole.Admin || user.adminSingleton)
-        )
+        .exists(user => user.role == scope.role && user.accountStatus == AccountStatus.Active)
       def ownApplication(application: Application): Boolean = scope.role match {
         case UserRole.Admin     => true
         case UserRole.Candidate => application.candidateId == scope.userId
@@ -131,9 +133,7 @@ private[cats] object ServiceFixtures {
     (users.get, jobs.get, applications.get).mapN { (currentUsers, currentJobs, currentApplications) =>
       val active = currentUsers
         .get(scope.userId)
-        .exists(user =>
-          user.role == scope.role && user.accountStatus == AccountStatus.Active && (user.role != UserRole.Admin || user.adminSingleton)
-        )
+        .exists(user => user.role == scope.role && user.accountStatus == AccountStatus.Active)
       keys.distinct
         .filter(_ => active)
         .flatMap(key =>
@@ -151,9 +151,30 @@ private[cats] object ServiceFixtures {
         )
     }
 
+  /** The state a test account has for a status; a deleted account was deleted at `now`. */
+  def accountStateOf(status: AccountStatus): AccountState = status match {
+    case AccountStatus.Active  => AccountState.Active
+    case AccountStatus.Deleted => AccountState.Deleted(now)
+  }
+
+  /** The actor projection of a stored user. The domain cannot represent an Admin without the singleton marker, so a
+    * corrupted store (the marker missing on the stored document) is modelled here, on the projection only.
+    */
+  def actorRecord(user: User, unmarkedAdmins: Set[UserId]): ActorRecord = {
+    val record = ActorRecord.of(user)
+    record.copy(adminSingleton = record.adminSingleton && !unmarkedAdmins(user.id))
+  }
+
   private[cats] trait VersionedUserRepositoryTestAdapter extends UserRepository[IO] {
+
+    /** Admins whose stored document lacks the singleton marker. */
+    protected def unmarkedAdmins: Set[UserId] = Set.empty
+
     override def relatedUsers(scope: HiringReadScope, keys: List[UserRelationKey]): RepositoryF[IO, List[RelatedUser]] =
       RepositoryF.at[IO].raise(RepositoryError.Unavailable)
+
+    override def findActor(id: UserId): RepositoryF[IO, Option[ActorRecord]] =
+      find(id).map(_.map(actorRecord(_, unmarkedAdmins)))
 
     override def findVersioned(id: UserId): RepositoryF[IO, Option[Versioned[User]]] =
       com.example.graphQL.cats.service.port.RepositoryF.fromFEither(
@@ -181,13 +202,18 @@ private[cats] object ServiceFixtures {
 
   final class InMemoryUsers(
       protected val ref: Ref[IO, Map[UserId, User]],
-      relationLookup: Option[(HiringReadScope, List[UserRelationKey]) => IO[List[RelatedUser]]] = None
+      relationLookup: Option[(HiringReadScope, List[UserRelationKey]) => IO[List[RelatedUser]]] = None,
+      unmarkedAdmins: Set[UserId] = Set.empty
   ) extends UserRepository[IO]
       with RefBackedLookup[UserId, User] {
     override def relatedUsers(scope: HiringReadScope, keys: List[UserRelationKey]): RepositoryF[IO, List[RelatedUser]] =
       relationLookup.fold(RepositoryF.at[IO].fromEither[List[RelatedUser]](Left(RepositoryError.Unavailable)))(lookup =>
         RepositoryF.lift(lookup(scope, keys))
       )
+
+    override def findActor(id: UserId): RepositoryF[IO, Option[ActorRecord]] =
+      com.example.graphQL.cats.service.port.RepositoryF
+        .fromFEither(findOne(id).map(user => Right(user.map(actorRecord(_, unmarkedAdmins)))))
 
     override def find(id: UserId): RepositoryF[IO, Option[User]] =
       com.example.graphQL.cats.service.port.RepositoryF.fromFEither(findOne(id).map(Right(_)))
@@ -223,13 +249,17 @@ private[cats] object ServiceFixtures {
       protected val ref: Ref[IO, Map[JobId, Job]],
       operationalEvents: Option[Ref[IO, Vector[OperationalEventEnvelope]]] = None,
       relationLookup: Option[(HiringReadScope, List[JobRelationKey]) => IO[List[RelatedJob]]] = None,
-      discoveryActors: Option[Ref[IO, Map[UserId, User]]] = None
+      discoveryActors: Option[Ref[IO, Map[UserId, User]]] = None,
+      pageRequests: Option[Ref[IO, Vector[JobPageRequest]]] = None
   ) extends JobRepository[IO]
       with RefBackedLookup[JobId, Job] {
     override def relatedJobs(scope: HiringReadScope, keys: List[JobRelationKey]): RepositoryF[IO, List[RelatedJob]] =
       relationLookup.fold(RepositoryF.at[IO].fromEither[List[RelatedJob]](Left(RepositoryError.Unavailable)))(lookup =>
         RepositoryF.lift(lookup(scope, keys))
       )
+
+    override def findOwner(id: JobId): RepositoryF[IO, Option[JobOwner]] =
+      com.example.graphQL.cats.service.port.RepositoryF.fromFEither(findOne(id).map(job => Right(job.map(JobOwner.of))))
 
     override def find(id: JobId): RepositoryF[IO, Option[Job]] =
       com.example.graphQL.cats.service.port.RepositoryF.fromFEither(findOne(id).map(Right(_)))
@@ -241,26 +271,32 @@ private[cats] object ServiceFixtures {
     override def findSubmissionSnapshot(id: JobId): RepositoryF[IO, Option[JobSubmissionSnapshot]] =
       findVersioned(id).map(_.map(job => JobSubmissionSnapshot(job.value.id, job.value.status)))
 
+    /** Records the list read a use case issued, so a test can see which projection it asked for. */
+    private def recorded[A](page: JobPageRequest)(read: RepositoryF[IO, A]): RepositoryF[IO, A] =
+      RepositoryF.lift(pageRequests.traverse_(_.update(_ :+ page))) *> read
+
     override def findOpen(filter: JobSearchFilter, page: JobPageRequest): RepositoryF[IO, List[Job]] =
-      com.example.graphQL.cats.service.port.RepositoryF.fromFEither(
-        ref.get
-          .map(
-            _.values
-              .filter { job =>
-                job.status == JobStatus.Open &&
-                filter.city.forall(c => job.location.city.contains(c)) &&
-                filter.skills.subsetOf(job.skills) &&
-                filter.createdAfter.forall(!job.createdAt.isBefore(_)) &&
-                matches(page)(job) &&
-                keysetAfter(page.cursor.map(cursor => cursor.createdAt -> cursor.id.value.toString))(job)(
-                  _.createdAt,
-                  _.id.value.toString
-                )
-              }
-              .toList
-          )
-          .map(keysetPage(_, page.pageSize.value)(_.createdAt, _.id.value.toString))
-          .map(Right(_))
+      recorded(page)(
+        com.example.graphQL.cats.service.port.RepositoryF.fromFEither(
+          ref.get
+            .map(
+              _.values
+                .filter { job =>
+                  job.status == JobStatus.Open &&
+                  filter.city.forall(c => job.location.city.contains(c)) &&
+                  filter.skills.subsetOf(job.skills) &&
+                  filter.createdAfter.forall(!job.createdAt.isBefore(_)) &&
+                  matches(page)(job) &&
+                  keysetAfter(page.cursor.map(cursor => cursor.createdAt -> cursor.id.value.toString))(job)(
+                    _.createdAt,
+                    _.id.value.toString
+                  )
+                }
+                .toList
+            )
+            .map(keysetPage(_, page.pageSize.value)(_.createdAt, _.id.value.toString))
+            .map(Right(_))
+        )
       )
 
     override def nearbyJobs(
@@ -322,7 +358,7 @@ private[cats] object ServiceFixtures {
               .get(scope.userId)
               .exists(user =>
                 user.role == scope.role && user.accountStatus == AccountStatus.Active &&
-                  (user.role == UserRole.Candidate || (user.role == UserRole.Admin && user.adminSingleton))
+                  (user.role == UserRole.Candidate || user.role == UserRole.Admin)
               ),
             (),
             RepositoryError.AuthorityRevoked
@@ -343,40 +379,44 @@ private[cats] object ServiceFixtures {
     }
 
     override def findAll(page: JobPageRequest): RepositoryF[IO, List[Job]] =
-      com.example.graphQL.cats.service.port.RepositoryF.fromFEither(
-        ref.get
-          .map(
-            _.values
-              .filter(job =>
-                matches(page)(job) &&
-                  keysetAfter(page.cursor.map(cursor => cursor.createdAt -> cursor.id.value.toString))(job)(
-                    _.createdAt,
-                    _.id.value.toString
-                  )
-              )
-              .toList
-          )
-          .map(keysetPage(_, page.pageSize.value)(_.createdAt, _.id.value.toString))
-          .map(Right(_))
+      recorded(page)(
+        com.example.graphQL.cats.service.port.RepositoryF.fromFEither(
+          ref.get
+            .map(
+              _.values
+                .filter(job =>
+                  matches(page)(job) &&
+                    keysetAfter(page.cursor.map(cursor => cursor.createdAt -> cursor.id.value.toString))(job)(
+                      _.createdAt,
+                      _.id.value.toString
+                    )
+                )
+                .toList
+            )
+            .map(keysetPage(_, page.pageSize.value)(_.createdAt, _.id.value.toString))
+            .map(Right(_))
+        )
       )
 
     override def findByRecruiter(recruiterId: UserId, page: JobPageRequest): RepositoryF[IO, List[Job]] =
-      com.example.graphQL.cats.service.port.RepositoryF.fromFEither(
-        ref.get
-          .map(
-            _.values
-              .filter(job =>
-                job.recruiterId == recruiterId &&
-                  matches(page)(job) &&
-                  keysetAfter(page.cursor.map(cursor => cursor.createdAt -> cursor.id.value.toString))(job)(
-                    _.createdAt,
-                    _.id.value.toString
-                  )
-              )
-              .toList
-          )
-          .map(keysetPage(_, page.pageSize.value)(_.createdAt, _.id.value.toString))
-          .map(Right(_))
+      recorded(page)(
+        com.example.graphQL.cats.service.port.RepositoryF.fromFEither(
+          ref.get
+            .map(
+              _.values
+                .filter(job =>
+                  job.recruiterId == recruiterId &&
+                    matches(page)(job) &&
+                    keysetAfter(page.cursor.map(cursor => cursor.createdAt -> cursor.id.value.toString))(job)(
+                      _.createdAt,
+                      _.id.value.toString
+                    )
+                )
+                .toList
+            )
+            .map(keysetPage(_, page.pageSize.value)(_.createdAt, _.id.value.toString))
+            .map(Right(_))
+        )
       )
 
     override def createWithEvents(

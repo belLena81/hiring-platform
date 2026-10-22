@@ -348,6 +348,73 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
     }
   }
 
+  test(
+    "AC-06.4 a failed claim is reported with the repository error code, not dropped, and marks the worker unhealthy"
+  ) {
+    for {
+      usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map.empty)
+      jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map.empty)
+      calls <- Ref.of[IO, Int](0)
+      clock <- Ref.of[IO, Instant](now)
+      work <- InMemoryEmbeddingWorkRepository.create
+      seen <- Ref.of[IO, List[(LogEvent, Map[LogField, String])]](Nil)
+      health <- Ref.of[IO, List[Boolean]](Nil)
+      overloaded = new EmbeddingWorkRepository[IO] {
+        override def enqueue(value: EmbeddingWorkKey, at: Instant): RepositoryF[IO, Unit] = work.enqueue(value, at)
+        override def claim(
+            workerId: String,
+            at: Instant,
+            leaseUntil: Instant
+        ): RepositoryF[IO, Option[ClaimedEmbeddingWork]] = RepositoryF.at[IO].raise(RepositoryError.Overloaded)
+        override def renew(claim: ClaimedEmbeddingWork, now: Instant, leaseUntil: Instant): RepositoryF[IO, Boolean] =
+          work.renew(claim, now, leaseUntil)
+        override def complete(claim: ClaimedEmbeddingWork): RepositoryF[IO, Unit] = work.complete(claim)
+        override def retry(
+            claim: ClaimedEmbeddingWork,
+            availableAt: Instant,
+            chargeAttempt: Boolean = true
+        ): RepositoryF[IO, Unit] = work.retry(claim, availableAt, chargeAttempt)
+        override def fail(
+            claim: ClaimedEmbeddingWork,
+            failure: EmbeddingWorkFailure,
+            at: Instant
+        ): RepositoryF[IO, Unit] = work.fail(claim, failure, at)
+      }
+      diagnostics = new Diagnostics[IO] {
+        override def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]): IO[Unit] =
+          seen.update(_ :+ (event -> fields))
+      }
+      _ <- Resource
+        .eval(Queue.bounded[IO, Unit](8))
+        .flatMap { wakeups =>
+          val worker = new EmbeddingPipeline[IO](
+            wakeups,
+            overloaded,
+            InMemoryUsers(usersRef),
+            InMemoryJobs(jobsRef),
+            CountingEmbeddingService(calls),
+            "voyage-4-lite",
+            1,
+            3,
+            1.hour,
+            30.seconds,
+            clockOf(clock),
+            "fixture-worker",
+            diagnostics,
+            workerHealth = healthy => health.update(_ :+ healthy)
+          )
+          Resource.make(worker.stream.compile.drain.start)(_.cancel).as(wakeups)
+        }
+        .use(wakeups => wakeups.offer(()) *> waitFor(seen.get.map(_.nonEmpty)))
+      events <- seen.get
+      reported <- health.get
+    } yield {
+      assertEquals(events.map(_._1).distinct, List(LogEvent.EmbeddingProcessingFailed))
+      assertEquals(events.head._2, Map(LogField.ErrorCode -> "OVERLOADED"))
+      assertEquals(reported.distinct, List(false))
+    }
+  }
+
   test("embedding worker reports unexpected processing failure and records retry exhaustion") {
     val provider = new EmbeddingService[IO] {
       override def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] =
@@ -514,7 +581,8 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
                   usersRef.update(
                     _.updated(
                       id,
-                      candidate.copy(accountStatus = AccountStatus.Deleted, profile = None, embedding = None)
+                      candidate
+                        .copy(state = AccountState.Deleted(java.time.Instant.EPOCH), profile = None, embedding = None)
                     )
                   )
                 else usersRef.update(_ - id)
@@ -1471,6 +1539,8 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
     ) = delegate.relatedJobs(scope, keys)
 
     override def find(id: Identifiers.JobId): RepositoryF[IO, Option[Job]] = delegate.find(id)
+
+    override def findOwner(id: Identifiers.JobId): RepositoryF[IO, Option[JobOwner]] = delegate.findOwner(id)
 
     override def findSubmissionSnapshot(id: Identifiers.JobId): RepositoryF[IO, Option[JobSubmissionSnapshot]] =
       delegate.findSubmissionSnapshot(id)

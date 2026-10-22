@@ -36,7 +36,7 @@ final class MongoSemanticSearchRepository(
 ) extends SemanticSearchRepository[IO] {
 
   private def admitted[A](query: RepositoryF[IO, A]): RepositoryF[IO, A] =
-    discoveryPolicy.fold(RepositoryF.at[IO].fromEither[A](Left(RepositoryError.Unavailable)))(policy =>
+    discoveryPolicy.fold(MongoF.fromEither[A](Left(RepositoryError.Unavailable)))(policy =>
       RepositoryF.fromFEither(
         policy.run(query.value).recover {
           // An open breaker refused the query: refused, not unreachable, so no other retrieval path is tried.
@@ -152,8 +152,8 @@ final class MongoSemanticSearchRepository(
       fields: List[String]
   )(decode: Document => Either[RepositoryError, A]): RepositoryF[IO, List[A]] = {
     val selected = ids.distinct
-    if (selected.size > branchLimit) RepositoryF.at[IO].raise(RepositoryError.Unavailable)
-    else if (selected.isEmpty) RepositoryF.at[IO].pure(Nil)
+    if (selected.size > branchLimit) MongoF.raise(RepositoryError.Unavailable)
+    else if (selected.isEmpty) MongoF.pure(Nil)
     else
       // Eligibility queries run on the same search deployment, so they share its admission and breaker.
       eligibilityAdmitted(searchGuard("semanticSearch.authorizedEligibility") {

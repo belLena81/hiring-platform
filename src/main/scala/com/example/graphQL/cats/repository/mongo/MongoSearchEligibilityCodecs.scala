@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.repository.mongo.MongoStoredDocumentDecoding.toStored
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.{UserId, parse as parseIdentifier}
@@ -10,21 +11,7 @@ import org.bson.Document
 
 /** Projected BSON is untrusted; malformed present values fail closed at this adapter. */
 private[mongo] object MongoSearchEligibilityCodecs {
-  val jobFields: List[String] = List(
-    MongoFields.Id,
-    MongoFields.Version,
-    MongoFields.RecruiterId,
-    MongoFields.Title,
-    MongoFields.Description,
-    MongoFields.Requirements,
-    MongoFields.Skills,
-    MongoFields.Location,
-    MongoFields.Status,
-    MongoFields.CreatedAt,
-    MongoFields.UpdatedAt,
-    MongoFields.ClosedAt,
-    MongoFields.EmbeddingMeta
-  )
+  val jobFields: List[String] = JobFields.eligibility
   val candidateFields: List[String] = List(
     MongoFields.Id,
     MongoFields.Name,
@@ -56,7 +43,7 @@ private[mongo] object MongoSearchEligibilityCodecs {
   def job(document: Document): Either[RepositoryError, JobSearchEligibility] = {
     val source = new Document(document)
     source.remove(MongoFields.EmbeddingMeta)
-    (MongoHiringCodecs.readJob(source).toEither.leftMap(_ => RepositoryError.InvalidStoredData), metadata(document))
+    (MongoHiringCodecs.readJob(source).toStored, metadata(document))
       .mapN(JobSearchEligibility.apply)
   }
 

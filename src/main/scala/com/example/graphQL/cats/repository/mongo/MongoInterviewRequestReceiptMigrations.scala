@@ -3,6 +3,7 @@ package com.example.graphQL.cats.repository.mongo
 import cats.effect.IO
 import cats.syntax.all.*
 import com.mongodb.MongoCommandException
+import com.mongodb.client.model.{IndexOptions, Indexes}
 import org.bson.Document
 
 /** `019_interview_request_receipt_index`: the sparse `requestWorkflowId` index of the interview workflow collection.
@@ -17,7 +18,11 @@ private[mongo] object MongoInterviewRequestReceiptMigrations {
   private val Id: MigrationId = MigrationIds.InterviewRequestReceiptIndex
   val MigrationId: String = Id.value
   private val CoveredProofs = List(MigrationIds.InterviewCancellationReschedule)
-  private val spec = MongoHiringIndexSetup.interviewRequestReceiptIndex
+  private val spec = IndexSpec(
+    MongoCollections.InterviewWorkflows,
+    Indexes.ascending("requestWorkflowId"),
+    new IndexOptions().name(MongoIndexNames.InterviewWorkflowRequestReceipt).sparse(true)
+  )
 
   private def listIndexes(database: MongoHiringSetup.SetupDatabase): IO[List[Document]] =
     database
@@ -40,8 +45,15 @@ private[mongo] object MongoInterviewRequestReceiptMigrations {
       }
     }
 
+  /** Documented successor: once `030_interview_request_receipt_removal` completed, request receipts and their index are
+    * gone by design, so the index is no longer part of this proof.
+    */
   private def verifyCompleted(database: MongoHiringSetup.SetupDatabase): IO[CompletedProof] =
-    MongoMigrationLedger.requireComplete(database, CoveredProofs) *> indexProof(database)
+    MongoMigrationLedger.requireComplete(database, CoveredProofs) *>
+      MongoMigrationLedger.read(database, MigrationIds.InterviewRequestReceiptRemoval).flatMap {
+        case MigrationLedgerState.Complete => IO.pure(CompletedProof.Trusted)
+        case _                             => indexProof(database)
+      }
 
   private def cutover(run: MigrationRun): IO[Unit] =
     for {

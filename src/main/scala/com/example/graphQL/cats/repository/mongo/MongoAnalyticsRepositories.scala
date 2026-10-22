@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.repository.mongo.MongoF.asRepository
 import com.example.graphQL.cats.service.resilience.CircuitBreaker
 
 import cats.data.OptionT
@@ -73,11 +74,11 @@ final class MongoAnalyticsErasureRequestRepository(
       session: Option[ClientSession[IO]],
       requestId: String,
       freshReceiptId: String
-  ): OptionT[[A] =>> RepositoryF[IO, A], String] = {
+  ): OptionT[MongoF, String] = {
     val byId = MongoFilter.eq(MongoFields.Id, requestId)
     OptionT(RepositoryF.lift(MongoSessionOperations.findOne(documents, session, byId))).semiflatMap { document =>
-      RepositoryF.at[IO].fromEither(storedString(document, MongoFields.ReceiptId)).flatMap {
-        case Some(receipt) => receipt.pure[[A] =>> RepositoryF[IO, A]]
+      MongoF.fromEither(storedString(document, MongoFields.ReceiptId)).flatMap {
+        case Some(receipt) => receipt.asRepository
         case None          =>
           RepositoryF
             .lift(
@@ -135,7 +136,7 @@ final class MongoAnalyticsErasureRequestRepository(
           new UpdateOptions
         )
       )
-      _ <- RepositoryF.at[IO].fromEither(MongoRepositorySupport.matchedOne(hidden))
+      _ <- MongoF.fromEither(MongoRepositorySupport.matchedOne(hidden))
     } yield freshReceiptId
   }
 
@@ -143,7 +144,7 @@ final class MongoAnalyticsErasureRequestRepository(
       userId: UserId,
       receiptId: String
   ): RepositoryF[IO, AccountDeletionStatus] =
-    if (Parsing.parseUuid(receiptId).isLeft) AccountDeletionStatus.NotFound.pure[[A] =>> RepositoryF[IO, A]]
+    if (Parsing.parseUuid(receiptId).isLeft) AccountDeletionStatus.NotFound.asRepository
     else
       MongoRepositorySupport
         .repositoryGuard(diagnostics, "analyticsErasure.statusForSubject")({
@@ -159,13 +160,11 @@ final class MongoAnalyticsErasureRequestRepository(
             .lift(MongoSessionOperations.findOne(collection, None, requestFilter))
             .flatMap {
               case Some(document) =>
-                RepositoryF
-                  .at[IO]
-                  .fromEither(storedString(document, MongoFields.State).flatMap {
-                    case Some("Complete")               => Right(AccountDeletionStatus.Complete)
-                    case Some("Pending" | "Processing") => Right(AccountDeletionStatus.Pending)
-                    case _                              => Left(RepositoryError.InvalidStoredData)
-                  })
+                MongoF.fromEither(storedString(document, MongoFields.State).flatMap {
+                  case Some("Complete")               => Right(AccountDeletionStatus.Complete)
+                  case Some("Pending" | "Processing") => Right(AccountDeletionStatus.Pending)
+                  case _                              => Left(RepositoryError.InvalidStoredData)
+                })
               case None =>
                 RepositoryF
                   .lift(MongoSessionOperations.findOne(completions, None, completionFilter))
@@ -194,7 +193,7 @@ final class MongoAnalyticsErasureRequestRepository(
                 ).mapN(_ && _)
               )
               .map(if (_) AccountDeletionStatus.Complete else AccountDeletionStatus.Pending)
-          case other => other.pure[[A] =>> RepositoryF[IO, A]]
+          case other => other.asRepository
         }
 
   override def purgeSubjectOutbox(userId: UserId): RepositoryF[IO, Unit] =
@@ -242,13 +241,11 @@ final class MongoAnalyticsErasureRequestRepository(
                     )
                   )
                   completed.flatMap(
-                    _.fold(RepositoryF.at[IO].raise(RepositoryError.Conflict))(_ =>
-                      persistCompletion(session, requestId, now)
-                    )
+                    _.fold(MongoF.raise(RepositoryError.Conflict))(_ => persistCompletion(session, requestId, now))
                   )
                 }
               }
-            case _ => RepositoryF.at[IO].raise(RepositoryError.Conflict)
+            case _ => MongoF.raise(RepositoryError.Conflict)
           }
       })
 
@@ -315,15 +312,13 @@ final class MongoAnalyticsReportRepository(
             MongoSessionOperations
               .findOne(control, session, MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.ControlId))
           )
-          state <- RepositoryF
-            .at[IO]
-            .fromEither(
-              stored.traverse(
-                MongoHiringPersistenceCodecs
-                  .decodeAnalyticsReportControl(_)
-                  .leftMap(_ => RepositoryError.InvalidStoredData)
-              )
+          state <- MongoF.fromEither(
+            stored.traverse(
+              MongoHiringPersistenceCodecs
+                .decodeAnalyticsReportControl(_)
+                .leftMap(_ => RepositoryError.InvalidStoredData)
             )
+          )
           published = state.filter(value =>
             value.state == AnalyticsReportSnapshotDocument.Published && value.generation >= 0L &&
               value.lastPublishedRevision >= 0L

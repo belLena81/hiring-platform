@@ -28,6 +28,7 @@ final class MongoApplicationRepository private (
   private def events = Mongo4catsCollections.documents(database, MongoCollections.ApplicationEvents)
   private def jobs = Mongo4catsCollections.documents(database, MongoCollections.Jobs)
   private val writeFence = new MongoApplicationWriteFence(database)
+  private val statusWrite = new ApplicationStatusWrite(database, diagnostics)
   private def outbox = Mongo4catsCollections.documents(database, MongoCollections.EventOutbox)
 
   override def find(id: ApplicationId): RepositoryF[IO, Option[Application]] =
@@ -45,10 +46,15 @@ final class MongoApplicationRepository private (
       page: ApplicationPageRequest
   ): RepositoryF[IO, List[Application]] = {
     import MongoAuthorizedReadQueries.*
-    if (scope.role != UserRole.Candidate) RepositoryF.at[IO].pure(Nil)
+    if (scope.role != UserRole.Candidate) MongoF.pure(Nil)
     else {
-      val pipeline = List(matching(baseFilter(MongoFields.CandidateId, scope.userId.value.toString, page).bson)) ++
-        actor(scope) ++ List(new Document("$sort", new Document(MongoFields.CreatedAt, -1).append(MongoFields.Id, -1)))
+      // Match, sort and limit run on the indexed applications collection before the actor check, so the
+      // applications_candidate_* index orders the page; a failed actor check still yields an empty page.
+      val pipeline = List(
+        matching(baseFilter(MongoFields.CandidateId, scope.userId.value.toString, page).bson),
+        new Document("$sort", new Document(MongoFields.CreatedAt, -1).append(MongoFields.Id, -1)),
+        new Document("$limit", page.pageSize.value)
+      ) ++ actor(scope)
       documents(database, MongoCollections.Applications, pipeline, page.pageSize.value, diagnostics)
         .subflatMap(values => MongoStoredDocumentDecoding.values(values.map(MongoHiringCodecs.readApplication)))
     }
@@ -138,28 +144,7 @@ final class MongoApplicationRepository private (
       event: ApplicationEvent,
       operationalEvents: List[OperationalEventEnvelope],
       session: Option[ClientSession[IO]]
-  ): RepositoryF[IO, Unit] =
-    val statusGuard = event.previousStatus
-      .map(status => MongoFilter.eq(MongoFields.Status, status.toString))
-      .getOrElse(MongoFilter.exists(MongoFields.Status))
-    // The replacement document is the caller's, so the stored owner facts the fence relied on are part of the predicate:
-    // a forged jobId or candidateId matches nothing and the write is refused as a Conflict.
-    val filter = MongoFilter.and(
-      MongoFilter.eq(MongoFields.Id, application.id.value.toString),
-      MongoFilter.eq(MongoFields.JobId, application.jobId.value.toString),
-      MongoFilter.eq(MongoFields.CandidateId, application.candidateId.value.toString),
-      statusGuard
-    )
-    for {
-      result <- RepositoryF.lift(
-        MongoSessionOperations.replaceOne(collection, session, filter, MongoHiringCodecs.application(application))
-      )
-      _ <- RepositoryF.at[IO].fromEither(MongoRepositorySupport.matchedOne(result))
-      _ <- MongoRepositorySupport.repositoryGuard(diagnostics, "applications.insertStatusEvent") {
-        RepositoryF.lift(MongoApplicationEventInsertion.insert(events, session, event)).void
-      }(MongoErrors.duplicateAs(RepositoryError.Conflict))
-      _ <- MongoOperationalEventInsertion.insert(outbox, session, operationalEvents, application.updatedAt, diagnostics)
-    } yield ()
+  ): RepositoryF[IO, Unit] = statusWrite(session, application, event, operationalEvents)
 
   /** A duplicate key on the actor's fence document is a lost race (`Conflict`), never a `DuplicateApplication`. */
   private def fenced(operation: String, fence: RepositoryF[IO, Unit]): RepositoryF[IO, Unit] =
@@ -214,7 +199,7 @@ final class MongoApplicationRepository private (
     val update = MongoUpdate.inc(MongoFields.AdmissionFence, 1L)
     val guard = MongoSessionOperations.updateOne(jobs, session, guardFilter, update)
     RepositoryF.lift(guard).flatMap { result =>
-      RepositoryF.at[IO].fromEither(MongoRepositorySupport.matchedOne(result)) *>
+      MongoF.fromEither(MongoRepositorySupport.matchedOne(result)) *>
         insertApplicationAndEvent(session, application, initialEvent, operationalEvents)
     }
 

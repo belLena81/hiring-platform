@@ -4,6 +4,7 @@ import cats.data.{Validated, ValidatedNel}
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.*
+import com.example.graphQL.cats.domain.pagination.JobProjection
 import com.example.graphQL.cats.service.events.*
 import com.example.graphQL.cats.service.port.Versioned
 import MongoHiringPersistenceCodecs.*
@@ -57,7 +58,7 @@ private[mongo] object MongoHiringCodecs {
 
   def readVersionedUser(document: Document): ValidatedNel[StoredDocumentError, Versioned[User]] =
     (
-      decode(withoutEmbedding(document), UserFields)(MongoHiringPersistenceCodecs.decodeUser),
+      decode(withoutEmbedding(document), storedUserFields)(MongoHiringPersistenceCodecs.decodeUser),
       storedVector(document)
     ).tupled.andThen { case (stored, vector) => readVersionedUser(stored, vector) }
 
@@ -74,23 +75,43 @@ private[mongo] object MongoHiringCodecs {
       enumValue(MongoFields.Role, value.role, UserRole.values).toValidatedNel,
       readUserProfile(value.profile),
       value.createdAt.toInstant.validNel,
-      enumValue(MongoFields.AccountStatus, value.accountStatus, AccountStatus.values).toValidatedNel,
-      value.deletedAt.map(_.toInstant).validNel,
-      value.adminSingletonKey.map(_.contains("singleton-admin")).getOrElse(false).validNel,
-      readEmbedding(vector, value.embeddingMeta)
-    ).mapN { (id, email, name, role, profile, createdAt, accountStatus, deletedAt, adminSingleton, embedding) =>
-      Versioned(
-        User(id, email, name, role, profile, createdAt, adminSingleton, embedding, accountStatus, deletedAt),
-        value.version
-      )
+      readEmbedding(vector, value.embeddingMeta),
+      enumValue(MongoFields.AccountStatus, value.accountStatus, AccountStatus.values)
+        .flatMap(accountState(_, value.deletedAt.map(_.toInstant)))
+        .toValidatedNel
+    ).mapN { (id, email, name, role, profile, createdAt, embedding, state) =>
+      Versioned(User(id, email, name, role, profile, createdAt, embedding, state), value.version)
     }.andThen { user =>
-      if (!user.value.roleProfileIsValid) InconsistentDocument.invalidNel
+      if (!user.value.roleProfileIsValid || !hasAdminMarkerIffAdmin(user.value, value.adminSingletonKey))
+        InconsistentDocument.invalidNel
       else Either.cond(user.version >= 0L, user, InvalidField(MongoFields.Version)).toValidatedNel
     }
 
+  /** The status and its instant are one fact: a Deleted account has `deletedAt`, an Active one does not. */
+  private def accountState(
+      status: AccountStatus,
+      deletedAt: Option[Instant]
+  ): Either[StoredDocumentError, AccountState] =
+    (status, deletedAt) match {
+      case (AccountStatus.Active, None)      => AccountState.Active.asRight
+      case (AccountStatus.Deleted, Some(at)) => AccountState.Deleted(at).asRight
+      case _                                 => InconsistentDocument.asLeft
+    }
+
+  /** The unique-index marker is stored for the singleton Admin only; the domain derives it from the role. A deleted
+    * account keeps whatever marker it had, which no longer says anything.
+    */
+  private def hasAdminMarkerIffAdmin(user: User, marker: Option[String]): Boolean =
+    user.state match {
+      case AccountState.Active     => marker.contains(SingletonAdminMarker) == (user.role == UserRole.Admin)
+      case AccountState.Deleted(_) => true
+    }
+
+  private[mongo] val SingletonAdminMarker = "singleton-admin"
+
   def readCredentials(document: Document): ValidatedNel[StoredDocumentError, Option[AccountCredentials]] =
     (
-      decode(withoutEmbedding(document), UserFields)(MongoHiringPersistenceCodecs.decodeUser),
+      decode(withoutEmbedding(document), storedUserFields)(MongoHiringPersistenceCodecs.decodeUser),
       storedVector(document)
     ).tupled.andThen { case (value, vector) =>
       value.passwordHash.fold(None.validNel)(hash =>
@@ -106,9 +127,25 @@ private[mongo] object MongoHiringCodecs {
 
   def readVersionedJob(document: Document): ValidatedNel[StoredDocumentError, Versioned[Job]] =
     (
-      decode(withoutEmbedding(document), JobFields)(MongoHiringPersistenceCodecs.decodeJob),
+      decode(withoutEmbedding(document), storedJobFields)(MongoHiringPersistenceCodecs.decodeJob),
       storedVector(document)
     ).tupled.andThen { case (stored, vector) => readVersionedJob(stored, vector) }
+
+  /** A job read with the given projection: a summary read leaves out the posting text, which the decoded job then
+    * carries as empty (`description` blank, `requirements` empty). Only a caller that selected neither may use it.
+    */
+  def readJob(document: Document, projection: JobProjection): ValidatedNel[StoredDocumentError, Job] =
+    projection match {
+      case JobProjection.Full    => readJob(document)
+      case JobProjection.Summary => readJob(withEmptyPosting(document))
+    }
+
+  private def withEmptyPosting(document: Document): Document = {
+    val completed = new Document(document)
+    val _ = completed.putIfAbsent(MongoFields.Description, "")
+    val _ = completed.putIfAbsent(MongoFields.Requirements, List.empty[String].asJava)
+    completed
+  }
 
   private def readVersionedJob(
       value: StoredJob,
@@ -122,13 +159,23 @@ private[mongo] object MongoHiringCodecs {
       value.requirements.validNel,
       value.skills.toSet.validNel,
       decodeLocation(value.location),
-      enumValue(MongoFields.Status, value.status, JobStatus.values).toValidatedNel,
+      enumValue(MongoFields.Status, value.status, JobStatus.values)
+        .flatMap(jobState(_, value.closedAt.map(_.toInstant)))
+        .toValidatedNel,
       value.createdAt.toInstant.validNel,
       value.updatedAt.toInstant.validNel,
-      value.closedAt.map(_.toInstant).validNel,
       readEmbedding(vector, value.embeddingMeta)
     ).mapN(Job.apply).map(Versioned(_, value.version)).andThen { job =>
       Either.cond(job.version >= 0L, job, InvalidField(MongoFields.Version)).toValidatedNel
+    }
+
+  /** The status and its instant are one fact: a Closed job has `closedAt`, a Draft or Open one does not. */
+  private def jobState(status: JobStatus, closedAt: Option[Instant]): Either[StoredDocumentError, JobState] =
+    (status, closedAt) match {
+      case (JobStatus.Draft, None)      => JobState.Draft.asRight
+      case (JobStatus.Open, None)       => JobState.Open.asRight
+      case (JobStatus.Closed, Some(at)) => JobState.Closed(at).asRight
+      case _                            => InconsistentDocument.asLeft
     }
 
   def application(application: Application): Document =
@@ -166,7 +213,7 @@ private[mongo] object MongoHiringCodecs {
         event.occurredAt.toDate,
         event.feedback,
         event.reason,
-        event.actorRole.map(_.toString)
+        event.actorRole.toString
       )
     )
 
@@ -181,7 +228,7 @@ private[mongo] object MongoHiringCodecs {
         value.occurredAt.toInstant.validNel,
         value.feedback.validNel,
         value.reason.validNel,
-        optionalEnum(MongoFields.ActorRole, value.actorRole, UserRole.values).toValidatedNel
+        enumValue(MongoFields.ActorRole, value.actorRole, UserRole.values).toValidatedNel
       ).mapN(ApplicationEvent.apply)
     }
 
@@ -324,42 +371,8 @@ private[mongo] object MongoHiringCodecs {
       ).mapN(SearchSession.apply)
     }
 
-  private val UserFields = Set(
-    MongoFields.Id,
-    MongoFields.Version,
-    MongoFields.Email,
-    MongoFields.EmailCanonical,
-    MongoFields.Name,
-    MongoFields.NameCanonical,
-    MongoFields.Role,
-    MongoFields.Profile,
-    MongoFields.CreatedAt,
-    MongoFields.UpdatedAt,
-    MongoFields.AccountStatus,
-    MongoFields.DeletedAt,
-    MongoFields.AdminSingletonKey,
-    MongoFields.PasswordHash,
-    MongoFields.Embedding,
-    MongoFields.EmbeddingMeta
-  )
-  private val JobFields = Set(
-    MongoFields.Id,
-    MongoFields.Version,
-    MongoFields.RecruiterId,
-    MongoFields.Title,
-    MongoFields.Description,
-    MongoFields.Requirements,
-    MongoFields.Skills,
-    MongoFields.Location,
-    MongoFields.Status,
-    MongoFields.CreatedAt,
-    MongoFields.UpdatedAt,
-    MongoFields.ClosedAt,
-    MongoFields.Embedding,
-    MongoFields.EmbeddingMeta,
-    MongoFields.AdmissionFence,
-    MongoFields.SkillsCanonical
-  )
+  private val storedUserFields = UserFields.stored.toSet
+  private val storedJobFields = JobFields.stored.toSet
   private val ApplicationFields = Set(
     MongoFields.Id,
     MongoFields.CandidateId,
@@ -443,17 +456,23 @@ private[mongo] object MongoHiringCodecs {
   private def readUserProfile(profile: Option[StoredProfile]): ValidatedNel[StoredDocumentError, Option[UserProfile]] =
     profile.traverse(readProfile)
 
-  private[mongo] def profile(value: UserProfile): Document = value match {
-    case UserProfile.Candidate(profile) =>
-      MongoHiringPersistenceCodecs.profile(
+  private[mongo] def profile(value: UserProfile): Document =
+    MongoHiringPersistenceCodecs.profile(storedProfile(value))
+
+  /** The one mapping of a profile to its stored form, including the lowercase sidecars the indexes and the search
+    * eligibility filter read; the profile document and the whole user document are both built from it.
+    */
+  private def storedProfile(value: UserProfile): StoredProfile = {
+    value match {
+      case UserProfile.Candidate(candidate) =>
         StoredProfile(
           "Candidate",
-          Some(profile.skills.toList.sorted),
-          profile.experienceSummary,
-          profile.resumeRef,
+          Some(candidate.skills.toList.sorted),
+          candidate.experienceSummary,
+          candidate.resumeRef,
           None,
           None,
-          profile.currentResidence.map(residence =>
+          candidate.currentResidence.map(residence =>
             MongoHiringPersistenceCodecs.StoredCandidateResidence(
               residence.country,
               residence.city,
@@ -461,25 +480,23 @@ private[mongo] object MongoHiringCodecs {
               residence.city.map(SearchTerm.canonical)
             )
           ),
-          profile.availabilityStatus.map(_.toString),
-          Some(profile.recruiterSearchOptIn),
-          Some(profile.skills.toList.map(SearchTerm.canonical).sorted)
+          candidate.availabilityStatus.map(_.toString),
+          Some(candidate.recruiterSearchOptIn),
+          Some(candidate.skills.toList.map(SearchTerm.canonical).sorted)
         )
-      )
-    case UserProfile.Recruiter(profile) =>
-      MongoHiringPersistenceCodecs.profile(
+      case UserProfile.Recruiter(recruiter) =>
         StoredProfile(
           "Recruiter",
           None,
           None,
           None,
-          Some(profile.organizationName),
-          profile.jobTitle,
+          Some(recruiter.organizationName),
+          recruiter.jobTitle,
           None,
           None,
           None
         )
-      )
+    }
   }
 
   private def readProfile(profile: StoredProfile): ValidatedNel[StoredDocumentError, UserProfile] =
@@ -525,10 +542,14 @@ private[mongo] object MongoHiringCodecs {
     }
 
   /** The `embedding` vector and `embeddingMeta` fields written by the derived-data (embedding) update. */
-  def embeddingDocument(embedding: EntityEmbedding): Document = {
-    val meta = StoredEmbeddingMeta(embedding.meta.model, embedding.meta.sourceHash, embedding.meta.updatedAt.toDate)
-    withEmbedding(MongoHiringPersistenceCodecs.embedding(StoredEmbeddingFields(meta)), Some(embedding))
-  }
+  def embeddingDocument(embedding: EntityEmbedding): Document =
+    withEmbedding(
+      MongoHiringPersistenceCodecs.embedding(StoredEmbeddingFields(storedEmbeddingMeta(embedding))),
+      Some(embedding)
+    )
+
+  private def storedEmbeddingMeta(embedding: EntityEmbedding): StoredEmbeddingMeta =
+    StoredEmbeddingMeta(embedding.meta.model, embedding.meta.sourceHash, embedding.meta.updatedAt.toDate)
 
   private def isOutbox(document: Document): Boolean =
     document.keySet.asScala.exists(
@@ -556,13 +577,7 @@ private[mongo] object MongoHiringCodecs {
 
   private def storedUser(value: User, passwordHash: Option[String], version: Long): StoredUser = {
     val emailCanonical = value.email.map(email => AccountName.canonical(email.value))
-    val embeddingMeta = value.embedding.map(embedding =>
-      StoredEmbeddingMeta(
-        embedding.meta.model,
-        embedding.meta.sourceHash,
-        embedding.meta.updatedAt.toDate
-      )
-    )
+    val embeddingMeta = value.embedding.map(storedEmbeddingMeta)
     StoredUser(
       value.id.value.toString,
       version,
@@ -571,58 +586,19 @@ private[mongo] object MongoHiringCodecs {
       value.name,
       AccountName.canonical(value.name),
       value.role.toString,
-      value.profile.map {
-        case UserProfile.Candidate(candidate) =>
-          StoredProfile(
-            "Candidate",
-            Some(candidate.skills.toList.sorted),
-            candidate.experienceSummary,
-            candidate.resumeRef,
-            None,
-            None,
-            candidate.currentResidence.map(residence =>
-              MongoHiringPersistenceCodecs.StoredCandidateResidence(
-                residence.country,
-                residence.city,
-                SearchTerm.canonical(residence.country),
-                residence.city.map(SearchTerm.canonical)
-              )
-            ),
-            candidate.availabilityStatus.map(_.toString),
-            Some(candidate.recruiterSearchOptIn),
-            Some(candidate.skills.toList.map(SearchTerm.canonical).sorted)
-          )
-        case UserProfile.Recruiter(recruiter) =>
-          StoredProfile(
-            "Recruiter",
-            None,
-            None,
-            None,
-            Some(recruiter.organizationName),
-            recruiter.jobTitle,
-            None,
-            None,
-            None
-          )
-      },
+      value.profile.map(storedProfile),
       value.createdAt.toDate,
       value.createdAt.toDate,
       value.accountStatus.toString,
       value.deletedAt.map(Date.from),
-      Option.when(value.role == UserRole.Admin && value.adminSingleton)("singleton-admin"),
+      Option.when(value.role == UserRole.Admin)(SingletonAdminMarker),
       passwordHash,
       embeddingMeta
     )
   }
 
   private def storedJob(value: Job, version: Long): StoredJob = {
-    val embeddingMeta = value.embedding.map(embedding =>
-      StoredEmbeddingMeta(
-        embedding.meta.model,
-        embedding.meta.sourceHash,
-        embedding.meta.updatedAt.toDate
-      )
-    )
+    val embeddingMeta = value.embedding.map(storedEmbeddingMeta)
     val skills = value.skills.toList.sorted
     StoredJob(
       value.id.value.toString,

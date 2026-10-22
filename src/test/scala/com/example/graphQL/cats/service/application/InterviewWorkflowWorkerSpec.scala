@@ -160,7 +160,7 @@ final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
   }
 
   test(
-    "a failed publication claim emits the supplied sanitized diagnostic and performs no provider or transport effects"
+    "a failed publication claim emits the sanitized diagnostic with its error code and performs no provider or transport effects"
   ) {
     for {
       events <- Ref.of[IO, Vector[(LogEvent, Map[LogField, String])]](Vector.empty)
@@ -179,7 +179,12 @@ final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
       observed <- events.get
     } yield assertEquals(
       observed,
-      Vector((LogEvent.MongoRepositoryFailed, Map(LogField.SpanName -> "interviewWorkflow.claimPublication")))
+      Vector(
+        (
+          LogEvent.MongoRepositoryFailed,
+          Map(LogField.ErrorCode -> "UNAVAILABLE", LogField.SpanName -> "interviewWorkflow.claimPublication")
+        )
+      )
     )
   }
 
@@ -195,7 +200,8 @@ final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
     0L,
     InterviewWorkflowPhase.ReservationPending,
     Set.empty,
-    UserId(new UUID(0L, 4L))
+    UserId(new UUID(0L, 4L)),
+    initiatedByRole = com.example.graphQL.cats.domain.model.UserRole.Recruiter
   )
   private val command = InterviewWorkflowCommandRecord(
     workflow.id,

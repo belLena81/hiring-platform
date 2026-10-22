@@ -54,7 +54,13 @@ final class MongoHiringSetupStateIntegrationSpec extends MongoIntegrationSuite {
     "025_operational_collection_validators",
     "026_outbox_envelope_source",
     "027_job_canonical_filters",
-    "028_binary_embedding_vectors"
+    "028_binary_embedding_vectors",
+    "029_interview_hiring_receipt_removal",
+    "030_interview_request_receipt_removal",
+    "031_search_session_work_single_copy",
+    "032_embedding_work_key_from_identity",
+    "033_application_event_actor_role",
+    "034_interview_workflow_initiator_role"
   )
 
   /** Records schema-changing commands, which the shared access fixture deliberately ignores. */

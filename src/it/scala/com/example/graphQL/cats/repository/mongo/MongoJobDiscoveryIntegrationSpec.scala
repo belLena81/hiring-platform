@@ -60,7 +60,7 @@ final class MongoJobDiscoveryIntegrationSpec extends MongoJobDiscoveryFixture {
         .map(index => job(index, Some(GeoPoint(center.latitude + 0.001d, center.longitude)))) ++ List(
         job(25, remote = true),
         job(26, None),
-        job(27).copy(status = JobStatus.Closed)
+        job(27).copy(state = JobState.Closed(java.time.Instant.EPOCH))
       )
       for {
         _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
@@ -104,7 +104,11 @@ final class MongoJobDiscoveryIntegrationSpec extends MongoJobDiscoveryFixture {
         Some(policy)
       )
       val values = (1 to 24).toList
-        .map(job(_)) ++ List(job(25, remote = true), job(26, None), job(27).copy(status = JobStatus.Closed))
+        .map(job(_)) ++ List(
+        job(25, remote = true),
+        job(26, None),
+        job(27).copy(state = JobState.Closed(java.time.Instant.EPOCH))
+      )
       for {
         _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- values.traverse_(value =>
@@ -192,7 +196,7 @@ final class MongoJobDiscoveryIntegrationSpec extends MongoJobDiscoveryFixture {
           job(3, Some(outside)),
           job(4, Some(inside), remote = true),
           job(5, None),
-          job(6, Some(inside)).copy(status = JobStatus.Closed)
+          job(6, Some(inside)).copy(state = JobState.Closed(java.time.Instant.EPOCH))
         )
         for {
           _ <- values.traverse_(value =>

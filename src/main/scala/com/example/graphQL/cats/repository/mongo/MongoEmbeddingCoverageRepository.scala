@@ -94,11 +94,9 @@ final class MongoEmbeddingCoverageRepository(database: MongoDatabase[IO], diagno
         snapshot = true
       )
         .flatMap(documents =>
-          RepositoryF
-            .at[IO]
-            .fromEither(
-              documents.traverse(scan.decode).map(documents.lastOption.map(_.getString(MongoFields.Id)) -> _)
-            )
+          MongoF.fromEither(
+            documents.traverse(scan.decode).map(documents.lastOption.map(_.getString(MongoFields.Id)) -> _)
+          )
         )
         .map { case (lastId, decoded) =>
           val (within, over) = decoded.flatten.splitAt(remaining)
@@ -113,19 +111,17 @@ final class MongoEmbeddingCoverageRepository(database: MongoDatabase[IO], diagno
     }
     for {
       searchable <- countEligible(scan, limits)
-      scanned <- Monad[[A] =>> RepositoryF[IO, A]].tailRecM(Page(None, 0, initial))(page)
+      scanned <- Monad[MongoF].tailRecM(Page(None, 0, initial))(page)
     } yield scanned.tally -> EmbeddingCoverageKindObservation(scan.kind, searchable, scanned.truncated)
   }
 
   private def countEligible(scan: CoverageKind, limits: EmbeddingCoverageLimits): RepositoryF[IO, Long] =
     aggregate(scan.collection, countPipeline(scan), limits).flatMap(rows =>
-      RepositoryF
-        .at[IO]
-        .fromEither(
-          rows.headOption.fold[Either[RepositoryError, Long]](Right(0L))(row =>
-            MongoDocumentFields.toRepository(MongoDocumentFields.requiredNumberAsLong(row, "n"))
-          )
+      MongoF.fromEither(
+        rows.headOption.fold[Either[RepositoryError, Long]](Right(0L))(row =>
+          MongoDocumentFields.toRepository(MongoDocumentFields.requiredNumberAsLong(row, "n"))
         )
+      )
     )
 
   private def observeQueue(
@@ -133,17 +129,15 @@ final class MongoEmbeddingCoverageRepository(database: MongoDatabase[IO], diagno
       request: EmbeddingCoverageScanRequest
   ): RepositoryF[IO, EmbeddingQueueObservation] =
     aggregate(MongoCollections.EmbeddingWork, queuePipeline(scan, request), request.limits).flatMap(rows =>
-      RepositoryF
-        .at[IO]
-        .fromEither(rows.headOption match {
-          case None      => Right(EmbeddingQueueObservation(truncated = false, 0L, None))
-          case Some(row) =>
-            MongoDocumentFields.toRepository(for {
-              total <- MongoDocumentFields.requiredNumberAsLong(row, "total")
-              stuck <- MongoDocumentFields.requiredNumberAsLong(row, "stuck")
-              oldest <- MongoDocumentFields.optionalInstant(row, "oldest")
-            } yield EmbeddingQueueObservation(total > request.limits.maxEntitiesPerKind.toLong, stuck, oldest))
-        })
+      MongoF.fromEither(rows.headOption match {
+        case None      => Right(EmbeddingQueueObservation(truncated = false, 0L, None))
+        case Some(row) =>
+          MongoDocumentFields.toRepository(for {
+            total <- MongoDocumentFields.requiredNumberAsLong(row, "total")
+            stuck <- MongoDocumentFields.requiredNumberAsLong(row, "stuck")
+            oldest <- MongoDocumentFields.optionalInstant(row, "oldest")
+          } yield EmbeddingQueueObservation(total > request.limits.maxEntitiesPerKind.toLong, stuck, oldest))
+      })
     )
 }
 

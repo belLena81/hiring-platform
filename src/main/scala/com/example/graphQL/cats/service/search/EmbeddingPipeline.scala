@@ -8,11 +8,20 @@ import cats.effect.{Clock, Resource, Temporal}
 import cats.effect.implicits.*
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId, parse as parseIdentifier}
-import com.example.graphQL.cats.domain.model.{EmbeddingMeta, EntityEmbedding, SearchableText}
+import com.example.graphQL.cats.domain.model.{
+  AccountStatus,
+  EmbeddingMeta,
+  EntityEmbedding,
+  SearchableText,
+  User,
+  UserRole
+}
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.RepositoryError
+import com.example.graphQL.cats.service.resilience.{LeaseHeartbeat, LeaseLost}
 import com.example.graphQL.cats.service.{BackgroundWorker, Diagnostics, LogEvent, LogFields}
 import com.example.graphQL.cats.service.Diagnostics.*
+import com.example.graphQL.cats.service.RepositoryReporting.orReport
 import fs2.Stream
 import java.time.Instant
 import retry.*
@@ -70,17 +79,25 @@ final class EmbeddingPipeline[F[_]](using F: Temporal[F])(
     claimNext.flatMap(_.fold(Applicative[F].unit)(claim => processClaim(claim) *> drain))
 
   private def claimNext: F[Option[ClaimedEmbeddingWork]] =
-    now.flatMap(instant => work.claim(workerId, instant, instant.plusMillis(leaseDuration.toMillis)).value).flatMap {
-      case Right(claim) => workerHealth(true).as(claim)
-      case Left(_)      => workerHealth(false) *> reportRepositoryFailure.as(None)
-    }
+    now.flatMap(instant =>
+      work
+        .claim(workerId, instant, instant.plusMillis(leaseDuration.toMillis))
+        .foldF(
+          error => workerHealth(false) *> reportRepositoryFailure(error).as(None),
+          claim => workerHealth(true).as(claim)
+        )
+    )
 
-  private def reportRepositoryFailure: F[Unit] =
-    diagnostics.emit(LogEvent.EmbeddingProcessingFailed)
+  private def reportRepositoryFailure(error: RepositoryError): F[Unit] =
+    diagnostics.emit(LogEvent.EmbeddingProcessingFailed, fields = LogFields.repositoryFailure(error))
 
   /** Runs a repository step, reporting (not raising) its typed failure. */
   private def orReport[A](step: RepositoryF[F, A]): F[Unit] =
-    step.leftSemiflatMap(_ => reportRepositoryFailure).value.void
+    step.void.orReport(diagnostics, LogEvent.EmbeddingProcessingFailed)(())
+
+  /** A failed read retries the work; the cause is reported, not dropped. */
+  private def retryAfter(error: RepositoryError): F[ProcessingOutcome] =
+    reportRepositoryFailure(error).as(ProcessingOutcome.Retry)
 
   private enum ProcessingOutcome {
     case Completed, Retry, Conflict, Abandoned
@@ -94,8 +111,8 @@ final class EmbeddingPipeline[F[_]](using F: Temporal[F])(
     limitRetries[F](math.max(retryAttempts - 1, 0)) join constantDelay[F](retryDelay)
 
   private def processClaim(claim: ClaimedEmbeddingWork): F[Unit] =
-    Temporal[F]
-      .race(
+    LeaseHeartbeat
+      .guard(leaseDuration, renewFirst = false)(renewClaim(claim))(
         retryingOnFailures(
           process(claim).handleErrorWith(error =>
             diagnostics
@@ -109,11 +126,10 @@ final class EmbeddingPipeline[F[_]](using F: Temporal[F])(
               case ProcessingOutcome.Retry => HandlerDecision.Continue
               case _                       => HandlerDecision.Stop
             })
-        ),
-        leaseHeartbeat(claim)
+        )
       )
       .flatMap { result =>
-        result.fold(_.fold(identity, identity), _ => ProcessingOutcome.Abandoned) match {
+        result.fold(_ => ProcessingOutcome.Abandoned, _.fold(identity, identity)) match {
           case ProcessingOutcome.Abandoned => Applicative[F].unit
           case ProcessingOutcome.Conflict  =>
             orReport(
@@ -169,24 +185,30 @@ final class EmbeddingPipeline[F[_]](using F: Temporal[F])(
       }
 
     val reread = onKey(claim)(id =>
-      jobs.findVersioned(id).value.map {
-        case Right(Some(observed)) =>
-          preparedOutcome(Some(SearchableText.job(observed.value)), observed.value.embedding.map(_.meta))
-        case Right(None) => ProcessingOutcome.Completed
-        case Left(_)     => ProcessingOutcome.Retry
-      }
+      jobs
+        .findVersioned(id)
+        .foldF(
+          retryAfter,
+          {
+            case Some(observed) =>
+              preparedOutcome(Some(SearchableText.job(observed.value)), observed.value.embedding.map(_.meta)).pure[F]
+            case None => ProcessingOutcome.Completed.pure[F]
+          }
+        )
     )(id =>
-      users.findVersioned(id).value.map {
-        case Right(Some(observed))
-            if observed.value.accountStatus == com.example.graphQL.cats.domain.model.AccountStatus.Active &&
-              observed.value.role == com.example.graphQL.cats.domain.model.UserRole.Candidate =>
-          preparedOutcome(
-            observed.value.candidateProfile.map(SearchableText.candidate),
-            observed.value.embedding.map(_.meta)
-          )
-        case Right(_) => ProcessingOutcome.Completed
-        case Left(_)  => ProcessingOutcome.Retry
-      }
+      users
+        .findVersioned(id)
+        .foldF(
+          retryAfter,
+          {
+            case Some(observed) if isActiveCandidate(observed.value) =>
+              preparedOutcome(
+                observed.value.candidateProfile.map(SearchableText.candidate),
+                observed.value.embedding.map(_.meta)
+              ).pure[F]
+            case _ => ProcessingOutcome.Completed.pure[F]
+          }
+        )
     )
     reread.handleErrorWith(error =>
       diagnostics
@@ -195,19 +217,15 @@ final class EmbeddingPipeline[F[_]](using F: Temporal[F])(
     )
   }
 
-  private def renewClaim(claim: ClaimedEmbeddingWork): F[Boolean] =
-    now.flatMap(at => work.renew(claim, at, at.plusMillis(leaseDuration.toMillis)).value).flatMap {
-      case Right(renewed) => Applicative[F].pure(renewed)
-      case Left(_)        => reportRepositoryFailure.as(false)
-    }
-
-  private def leaseHeartbeat(claim: ClaimedEmbeddingWork): F[Unit] =
-    Stream
-      .awakeEvery[F]((leaseDuration / 3).max(1.millis))
-      .evalMap(_ => renewClaim(claim))
-      .takeWhile(identity)
-      .compile
-      .drain
+  /** A reported failure to renew is an unknown lease, handled as a lost one: the work is abandoned to lease recovery.
+    */
+  private def renewClaim(claim: ClaimedEmbeddingWork): F[Either[LeaseLost, Unit]] =
+    now.flatMap(at =>
+      work
+        .renew(claim, at, at.plusMillis(leaseDuration.toMillis))
+        .orReport(diagnostics, LogEvent.EmbeddingProcessingFailed)(false)
+        .map(held => Either.cond(held, (), LeaseLost.Expired))
+    )
 
   private def process(claim: ClaimedEmbeddingWork): F[ProcessingOutcome] =
     onKey(claim)(processJob)(processCandidate)
@@ -223,43 +241,58 @@ final class EmbeddingPipeline[F[_]](using F: Temporal[F])(
     }
 
   private def processJob(id: JobId): F[ProcessingOutcome] =
-    jobs.findVersioned(id).value.flatMap {
-      case Right(Some(observed)) =>
-        val job = observed.value
-        val prepared = EmbeddingPreparation.prepare(
-          Some(SearchableText.job(job)),
-          job.embedding.map(_.meta),
-          model,
-          SearchableText.DocumentMaxChars
-        )
-        embedPrepared(prepared)(embedding => jobs.updateEmbedding(observed, embedding)).value.map(attemptOutcome)
-      case Right(None) => Applicative[F].pure(ProcessingOutcome.Completed)
-      case Left(_)     => Applicative[F].pure(ProcessingOutcome.Retry)
-    }
+    jobs
+      .findVersioned(id)
+      .foldF(
+        retryAfter,
+        {
+          case Some(observed) =>
+            val job = observed.value
+            val prepared = EmbeddingPreparation.prepare(
+              Some(SearchableText.job(job)),
+              job.embedding.map(_.meta),
+              model,
+              SearchableText.DocumentMaxChars
+            )
+            embedPrepared(prepared)(embedding => jobs.updateEmbedding(observed, embedding)).foldF(
+              attemptFailure,
+              _.pure[F]
+            )
+          case None => ProcessingOutcome.Completed.pure[F]
+        }
+      )
 
   private def processCandidate(id: UserId): F[ProcessingOutcome] =
-    users.findVersioned(id).value.flatMap {
-      case Right(Some(observed))
-          if observed.value.accountStatus == com.example.graphQL.cats.domain.model.AccountStatus.Active &&
-            observed.value.role == com.example.graphQL.cats.domain.model.UserRole.Candidate =>
-        val user = observed.value
-        val prepared = EmbeddingPreparation.prepare(
-          user.candidateProfile.map(SearchableText.candidate),
-          user.embedding.map(_.meta),
-          model,
-          SearchableText.DocumentMaxChars
-        )
-        embedPrepared(prepared)(embedding => users.updateEmbedding(observed, embedding)).value.map(attemptOutcome)
-      case Right(Some(_)) => Applicative[F].pure(ProcessingOutcome.Completed)
-      case Right(None)    => Applicative[F].pure(ProcessingOutcome.Completed)
-      case Left(_)        => Applicative[F].pure(ProcessingOutcome.Retry)
-    }
+    users
+      .findVersioned(id)
+      .foldF(
+        retryAfter,
+        {
+          case Some(observed) if isActiveCandidate(observed.value) =>
+            val user = observed.value
+            val prepared = EmbeddingPreparation.prepare(
+              user.candidateProfile.map(SearchableText.candidate),
+              user.embedding.map(_.meta),
+              model,
+              SearchableText.DocumentMaxChars
+            )
+            embedPrepared(prepared)(embedding => users.updateEmbedding(observed, embedding)).foldF(
+              attemptFailure,
+              _.pure[F]
+            )
+          case _ => ProcessingOutcome.Completed.pure[F]
+        }
+      )
 
-  private def attemptOutcome(result: Either[RepositoryError, ProcessingOutcome]): ProcessingOutcome = result match {
-    case Right(outcome)                 => outcome
-    case Left(RepositoryError.Conflict) => ProcessingOutcome.Conflict
-    case Left(_)                        => ProcessingOutcome.Retry
-  }
+  private def isActiveCandidate(user: User): Boolean =
+    user.accountStatus == AccountStatus.Active && user.role == UserRole.Candidate
+
+  /** A guarded write that lost its revision is a conflict; any other failure retries and is reported. */
+  private def attemptFailure(error: RepositoryError): F[ProcessingOutcome] =
+    error match {
+      case RepositoryError.Conflict => ProcessingOutcome.Conflict.pure[F]
+      case other                    => retryAfter(other)
+    }
 
   private def embedPrepared(prepared: EmbeddingPreparation)(
       persist: EntityEmbedding => RepositoryF[F, Unit]

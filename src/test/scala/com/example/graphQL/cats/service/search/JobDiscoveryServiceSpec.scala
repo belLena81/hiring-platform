@@ -1,7 +1,8 @@
 package com.example.graphQL.cats.service.search
 
+import com.example.graphQL.cats.domain.model.{AccountState}
 import cats.syntax.all.*
-import com.example.graphQL.cats.domain.model.{AccountStatus, GeoPoint}
+import com.example.graphQL.cats.domain.model.{GeoPoint}
 import com.example.graphQL.cats.service.{ActorContext, SearchError, ServiceFixtures, UseCaseError}
 import munit.CatsEffectSuite
 
@@ -77,7 +78,7 @@ final class JobDiscoveryServiceSpec extends CatsEffectSuite {
   }
 
   test("recruiters and deleted accounts cannot execute discovery") {
-    val actors = List(ServiceFixtures.recruiter, candidate.copy(accountStatus = AccountStatus.Deleted))
+    val actors = List(ServiceFixtures.recruiter, candidate.copy(state = AccountState.Deleted(java.time.Instant.EPOCH)))
     actors.traverse_ { user =>
       JobDiscoveryTestSupport.fixture(List(user)).flatMap { fixture =>
         val denied = ActorContext(user.id, user.role)

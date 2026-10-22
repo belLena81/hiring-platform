@@ -35,17 +35,43 @@ private[mongo] object MongoProducerRegistrations {
             MongoFilter.eq(MongoFields.Id, s"$subject:$transactionalId"),
             MongoFilter.eq(MongoFields.State, ProducerRegistrationValues.Active)
           ),
-          MongoUpdate.combine(
-            MongoUpdate.setOnInsert(MongoFields.SubjectId, subject),
-            MongoUpdate.setOnInsert(MongoFields.TransactionalId, transactionalId),
-            MongoUpdate.setOnInsert(MongoFields.Kind, kind),
-            MongoUpdate.setOnInsert(MongoFields.State, ProducerRegistrationValues.Active),
-            MongoUpdate.setOnInsert("registeredAt", now.toDate)
-          ),
+          activeRegistration(subject, transactionalId, kind, now),
           new UpdateOptions().upsert(true)
         )
       )
       .void
+
+  /** [[register]] for several subjects in one bulk write, in the given order. */
+  def registerAll(
+      database: MongoDatabase[IO],
+      session: Option[ClientSession[IO]],
+      subjects: List[String],
+      transactionalId: String,
+      kind: String,
+      now: Instant
+  ): RepositoryF[IO, Unit] =
+    RepositoryF
+      .lift(
+        MongoSessionOperations.upsertEach(
+          Mongo4catsCollections.documents(database, Collection),
+          session,
+          subjects.map(subject =>
+            MongoFilter.and(
+              MongoFilter.eq(MongoFields.Id, s"$subject:$transactionalId"),
+              MongoFilter.eq(MongoFields.State, ProducerRegistrationValues.Active)
+            ) -> activeRegistration(subject, transactionalId, kind, now)
+          )
+        )
+      )
+
+  private def activeRegistration(subject: String, transactionalId: String, kind: String, now: Instant): MongoUpdate =
+    MongoUpdate.combine(
+      MongoUpdate.setOnInsert(MongoFields.SubjectId, subject),
+      MongoUpdate.setOnInsert(MongoFields.TransactionalId, transactionalId),
+      MongoUpdate.setOnInsert(MongoFields.Kind, kind),
+      MongoUpdate.setOnInsert(MongoFields.State, ProducerRegistrationValues.Active),
+      MongoUpdate.setOnInsert("registeredAt", now.toDate)
+    )
 
   def batch(database: MongoDatabase[IO], subject: String, kind: String): RepositoryF[IO, Vector[String]] =
     RepositoryF
@@ -80,7 +106,7 @@ private[mongo] object MongoProducerRegistrations {
       ids: Vector[String],
       now: Instant
   ): RepositoryF[IO, Unit] =
-    if (ids.isEmpty || ids.size > BatchSize) RepositoryF.at[IO].raise(RepositoryError.InvalidStoredData)
+    if (ids.isEmpty || ids.size > BatchSize) MongoF.raise(RepositoryError.InvalidStoredData)
     else
       RepositoryF
         .lift(

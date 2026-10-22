@@ -1,7 +1,7 @@
 package com.example.graphQL.cats.repository.mongo
 
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
-import com.example.graphQL.cats.domain.model.{CandidateProfile, JobStatus}
+import com.example.graphQL.cats.domain.model.{CandidateProfile, JobState}
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.ServiceFixtures.*
 import com.example.graphQL.cats.service.search.{
@@ -69,7 +69,7 @@ final class MongoLexicalFallbackSpec extends FunSuite {
     assert(!SearchEligibilityPolicy.jobLexical(noEmbedding, JobSearchFilter(Some("Lviv"), Set.empty, None)))
     assert(
       !SearchEligibilityPolicy.jobLexical(
-        JobSearchEligibility(openJob.copy(status = JobStatus.Closed), None),
+        JobSearchEligibility(openJob.copy(state = JobState.Closed(java.time.Instant.EPOCH)), None),
         JobSearchFilter(None, Set.empty, None)
       )
     )

@@ -19,7 +19,7 @@ private[application] final class InterviewMessageReceiver[F[_]: Temporal](
     currentTime: F[java.time.Instant],
     executor: InterviewProviderExecutor[F]
 ) {
-  import reporter.report
+  import reporter.{failed, report}
 
   private val scheduling = InterviewSchedulingOrchestrator(repository)
 
@@ -34,18 +34,18 @@ private[application] final class InterviewMessageReceiver[F[_]: Temporal](
     (for {
       workflow <- repository.findForAdmin(id)
       command <- repository.findCommand(id, message.stepId)
-    } yield (workflow, command)).value.flatMap {
-      case Right(loaded) => admit(loaded)
-      case Left(_)       => report(failure).as(false)
-    }
+    } yield (workflow, command)).foldF(_ => report(failure).as(false), admit)
   }
 
   /** A stale revision or a failed write leaves the message unacknowledged for redelivery. */
   private def advanced(result: RepositoryF[F, InterviewWorkflowAdvanceResult]): F[Boolean] =
-    result.value.map {
-      case Right(InterviewWorkflowAdvanceResult.StaleRevision) | Left(_) => false
-      case Right(_)                                                      => true
-    }
+    result.fold(
+      _ => false,
+      {
+        case InterviewWorkflowAdvanceResult.StaleRevision => false
+        case _                                            => true
+      }
+    )
 
   private def quarantineMessage(message: InterviewMessage, reason: InterviewMessageRejection): F[Boolean] =
     currentTime.flatMap(now =>
@@ -119,17 +119,19 @@ private[application] final class InterviewMessageReceiver[F[_]: Temporal](
       case InterviewLifecycleCommand.ExpireProposal(due) =>
         val availableAt =
           InterviewMessagePolicy.expiryDeferral(due, now, settings.initialBackoff, settings.maxBackoff)
-        repository.deferExpiry(record, availableAt).value.flatMap {
-          case Right(true)  => Applicative[F].pure(true)
-          case Right(false) =>
-            // Not requeued: acknowledge only if the row is settled elsewhere, otherwise redeliver the message.
-            repository.findCommand(record.workflowId, record.stepId).value.map {
-              case Right(Some(current)) => settledElsewhere(current)
-              case Right(None)          => true
-              case Left(_)              => false
+        repository
+          .deferExpiry(record, availableAt)
+          .foldF(
+            _ => Applicative[F].pure(false),
+            {
+              case true  => Applicative[F].pure(true)
+              case false =>
+                // Not requeued: acknowledge only if the row is settled elsewhere, otherwise redeliver the message.
+                repository
+                  .findCommand(record.workflowId, record.stepId)
+                  .fold(_ => false, _.fold(true)(settledElsewhere))
             }
-          case Left(_) => Applicative[F].pure(false)
-        }
+          )
       case _ => Applicative[F].pure(false)
     }
 
@@ -167,10 +169,10 @@ private[application] final class InterviewMessageReceiver[F[_]: Temporal](
       case Right(InterviewMessagePolicy.LifecycleReplayFailure.Notification) =>
         settled(
           command.fold(Applicative[F].pure(false))(record =>
-            repository
-              .settleNotificationResult(record, InterviewNotificationSettlement.Exhausted(step), now)
-              .value
-              .map(_.isRight)
+            reporter.succeeded(
+              repository.settleNotificationResult(record, InterviewNotificationSettlement.Exhausted(step), now),
+              "interviewWorkflow.settleNotification"
+            )
           )
         )
       case Right(InterviewMessagePolicy.LifecycleReplayFailure.Workflow(event)) =>
@@ -178,11 +180,14 @@ private[application] final class InterviewMessageReceiver[F[_]: Temporal](
           workflow.fold(Applicative[F].pure(false))(current =>
             repository
               .applyLifecycle(current.id, current.revision, event, InterviewLifecycleOrigin.Internal(cause), now, None)
-              .value
-              .map {
-                case Right(InterviewLifecycleOutcome.Applied(_) | InterviewLifecycleOutcome.Duplicate(_)) => true
-                case _                                                                                    => false
-              }
+              .foldF(
+                error => failed("interviewWorkflow.applyLifecycle", error).as(false),
+                {
+                  case InterviewLifecycleOutcome.Applied(_) | InterviewLifecycleOutcome.Duplicate(_) =>
+                    Applicative[F].pure(true)
+                  case _ => Applicative[F].pure(false)
+                }
+              )
           )
         )
     }
@@ -203,29 +208,28 @@ private[application] final class InterviewMessageReceiver[F[_]: Temporal](
                 claimAt.plusMillis(settings.claimLease.toMillis),
                 settings.maxAttempts
               )
-              .value
-              .flatMap {
-                case Left(_)                                    => report("interviewWorkflow.claimExecution").as(false)
-                case Right(InterviewExecutionClaimOutcome.Busy) => Applicative[F].pure(false)
-                case Right(
-                      InterviewExecutionClaimOutcome.AlreadyHandled |
+              .foldF(
+                error => failed("interviewWorkflow.claimExecution", error).as(false),
+                {
+                  case InterviewExecutionClaimOutcome.Busy => Applicative[F].pure(false)
+                  case InterviewExecutionClaimOutcome.AlreadyHandled |
                       InterviewExecutionClaimOutcome.ReconciliationQueued |
-                      InterviewExecutionClaimOutcome.RepairRequired
-                    ) =>
-                  Applicative[F].pure(true)
-                case Right(InterviewExecutionClaimOutcome.Acquired(claim)) =>
-                  executor
-                    .execute(workflow, command.command, claim)
-                    .timeoutTo(settings.providerTimeout, Applicative[F].pure(InterviewResult.OutcomeUnknown))
-                    .flatMap(result =>
-                      currentTime.flatMap(at =>
-                        reporter.succeeded(
-                          repository.recordResult(claim, result, at),
-                          "interviewWorkflow.recordResult"
+                      InterviewExecutionClaimOutcome.RepairRequired =>
+                    Applicative[F].pure(true)
+                  case InterviewExecutionClaimOutcome.Acquired(claim) =>
+                    executor
+                      .execute(workflow, command.command, claim)
+                      .timeoutTo(settings.providerTimeout, Applicative[F].pure(InterviewResult.OutcomeUnknown))
+                      .flatMap(result =>
+                        currentTime.flatMap(at =>
+                          reporter.succeeded(
+                            repository.recordResult(claim, result, at),
+                            "interviewWorkflow.recordResult"
+                          )
                         )
                       )
-                    )
-              }
+                }
+              )
           }
       }
     }
@@ -235,36 +239,38 @@ private[application] final class InterviewMessageReceiver[F[_]: Temporal](
       InterviewMessagePolicy.resultAdmission(current, stored, message) match {
         case Left(reason)               => quarantineMessage(message, reason)
         case Right((workflow, command)) =>
-          repository.attemptCount(workflow.id, command.command).value.flatMap {
-            case Left(_)      => report("interviewWorkflow.receive").as(false)
-            case Right(count) =>
-              command.command match {
-                case lifecycle: InterviewLifecycleCommand =>
-                  applyLifecycleResult(workflow, command, lifecycle, message, count)
-                case _: InterviewWorkflowCommand =>
-                  InterviewMessagePolicy.resultEvent(message, count, settings.maxAttempts) match {
-                    case None     => quarantineMessage(message, InterviewMessageRejection.InvalidTransition)
-                    case Some(ev) =>
-                      currentTime.flatMap(now =>
-                        scheduling
-                          .settle(
-                            workflow,
-                            InterviewSchedulingSaga.input(workflow, ev),
-                            InterviewAdvanceCause.ResultReceipt(message.messageId.toString),
-                            now,
-                            retryAvailableAt(message, count, now)
-                          )
-                          .value
-                          .flatMap {
-                            case Right(SagaSettlement.Refused(_)) =>
-                              quarantineMessage(message, InterviewMessageRejection.InvalidTransition)
-                            case Right(SagaSettlement.StaleRevision) | Left(_) => Applicative[F].pure(false)
-                            case Right(_)                                      => Applicative[F].pure(true)
-                          }
-                      )
-                  }
-              }
-          }
+          repository
+            .attemptCount(workflow.id, command.command)
+            .foldF(
+              _ => report("interviewWorkflow.receive").as(false),
+              count =>
+                command.command match {
+                  case lifecycle: InterviewLifecycleCommand =>
+                    applyLifecycleResult(workflow, command, lifecycle, message, count)
+                  case _: InterviewWorkflowCommand =>
+                    InterviewMessagePolicy.resultEvent(message, count, settings.maxAttempts) match {
+                      case None     => quarantineMessage(message, InterviewMessageRejection.InvalidTransition)
+                      case Some(ev) =>
+                        currentTime.flatMap(now =>
+                          scheduling
+                            .settle(
+                              workflow,
+                              InterviewSchedulingSaga.input(workflow, ev),
+                              InterviewAdvanceCause.ResultReceipt(message.messageId.toString),
+                              now,
+                              retryAvailableAt(message, count, now)
+                            )
+                            .value
+                            .flatMap {
+                              case Right(SagaSettlement.Refused(_)) =>
+                                quarantineMessage(message, InterviewMessageRejection.InvalidTransition)
+                              case Right(SagaSettlement.StaleRevision) | Left(_) => Applicative[F].pure(false)
+                              case Right(_)                                      => Applicative[F].pure(true)
+                            }
+                        )
+                    }
+                }
+            )
       }
     }
 

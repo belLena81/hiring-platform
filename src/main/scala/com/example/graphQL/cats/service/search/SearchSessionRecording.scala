@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.service.search
 
+import com.example.graphQL.cats.service.events.OperationalEventFailure.*
 import cats.data.EitherT
 import cats.Monad
 import cats.effect.kernel.Clock
@@ -16,7 +17,7 @@ import com.example.graphQL.cats.service.events.{
 }
 import com.example.graphQL.cats.service.port.SearchRecordingFailureRepository
 import com.example.graphQL.cats.service.protocol.UseCaseF
-import com.example.graphQL.cats.service.{RepositoryError, UseCaseError}
+import com.example.graphQL.cats.service.UseCaseError
 import com.example.graphQL.cats.shared.StableIds
 import java.util.UUID
 import scala.concurrent.duration.*
@@ -53,8 +54,7 @@ trait SearchSessionRecording[F[_]] {
 object SearchSessionRecording {
   private[search] val Retention: FiniteDuration = 7.days
 
-  def eventId(searchId: UUID): UUID =
-    StableIds.uuid(s"search-performed:$searchId")
+  def eventId(searchId: UUID): UUID = OperationalEvents.searchPerformedEventId(searchId)
 
   def failureEventId(searchId: UUID): UUID =
     StableIds.uuid(s"search-recording-failed:$searchId")
@@ -95,13 +95,11 @@ object SearchSessionRecording {
           now,
           now.plusSeconds(Retention.toSeconds)
         )
+        // The event is derived from the session when the work completes; it is built here only to refuse a session
+        // that could never be published, before it is accepted for durable handoff.
         EitherT
-          .fromEither[F](
-            OperationalEvents
-              .searchPerformed(eventId(searchId), session)
-              .leftMap(_ => UseCaseError.Repository(RepositoryError.InvalidEvent))
-          )
-          .flatMap(event => EitherT.liftF[F, UseCaseError, Unit](handoff.enqueue(session, event)))
+          .fromEither[F](OperationalEvents.searchPerformed(session).leftMap(_.asUseCaseError))
+          .flatMap(_ => EitherT.liftF[F, UseCaseError, Unit](handoff.enqueue(session)))
       }
 
     def recordFailure(

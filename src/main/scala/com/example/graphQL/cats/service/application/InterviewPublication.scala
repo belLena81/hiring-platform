@@ -8,7 +8,7 @@ import com.example.graphQL.cats.domain.workflow.*
 import com.example.graphQL.cats.service.application.InterviewMessagePolicy.{stableId, step}
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.RepositoryError
-import scala.concurrent.duration.*
+import com.example.graphQL.cats.service.resilience.{LeaseHeartbeat, LeaseLost}
 
 /** Claims due commands one at a time and publishes them under a renewed claim lease. */
 private[application] final class InterviewPublication[F[_]: Temporal](
@@ -17,7 +17,7 @@ private[application] final class InterviewPublication[F[_]: Temporal](
     reporter: InterviewWorkerReporter[F],
     currentTime: F[java.time.Instant]
 ) {
-  import reporter.{observe, report}
+  import reporter.{failed, observe}
 
   private enum PublicationOutcome {
     case Published, LeaseLost, CoordinationUnavailable
@@ -94,38 +94,42 @@ private[application] final class InterviewPublication[F[_]: Temporal](
         "interviewWorkflow.deferPublication"
       ).as(false)
     )
+    def publishAuthorized: F[Boolean] =
+      publishWithLease(transport, message, claim).attempt.flatMap {
+        case Right(PublicationOutcome.Published) =>
+          currentTime.flatMap(at =>
+            reporter.succeeded(repository.markPublished(claim, at), "interviewWorkflow.markPublished")
+          )
+        case Right(PublicationOutcome.LeaseLost)                                     => Applicative[F].pure(false)
+        case Right(PublicationOutcome.CoordinationUnavailable)                       => deferCoordination
+        case Left(fenced: InterviewProducerGenerationFenced)                         => Temporal[F].raiseError(fenced)
+        case Left(_) if claim.record.publicationAttempts + 1 >= settings.maxAttempts => finish
+        case Left(_)                                                                 =>
+          currentTime.flatMap { at =>
+            val delay = RetryBackoff.exponentialMillis(
+              claim.record.publicationAttempts + 1,
+              settings.initialBackoff.toMillis,
+              settings.maxBackoff.toMillis
+            )
+            observe(
+              repository.retry(claim, at, at.plusMillis(delay), InterviewFailureCode.PublicationUnavailable),
+              "interviewWorkflow.retryPublication"
+            ).as(false)
+          }
+      }
     if (claim.record.publicationAttempts >= settings.maxAttempts) finish
     else
-      currentTime
-        .flatMap(checkedAt => repository.authorizePublication(claim, transport.generationFor(message), checkedAt).value)
-        .flatMap {
-          case Left(RepositoryError.Unavailable) => deferCoordination
-          case Left(_)                           => report("interviewWorkflow.authorizePublication").as(false)
-          case Right(false)                      => Applicative[F].pure(false)
-          case Right(true)                       =>
-            publishWithLease(transport, message, claim).attempt.flatMap {
-              case Right(PublicationOutcome.Published) =>
-                currentTime.flatMap(at =>
-                  reporter.succeeded(repository.markPublished(claim, at), "interviewWorkflow.markPublished")
-                )
-              case Right(PublicationOutcome.LeaseLost)               => Applicative[F].pure(false)
-              case Right(PublicationOutcome.CoordinationUnavailable) => deferCoordination
-              case Left(fenced: InterviewProducerGenerationFenced)   => Temporal[F].raiseError(fenced)
-              case Left(_) if claim.record.publicationAttempts + 1 >= settings.maxAttempts => finish
-              case Left(_)                                                                 =>
-                currentTime.flatMap { at =>
-                  val delay = RetryBackoff.exponentialMillis(
-                    claim.record.publicationAttempts + 1,
-                    settings.initialBackoff.toMillis,
-                    settings.maxBackoff.toMillis
-                  )
-                  observe(
-                    repository.retry(claim, at, at.plusMillis(delay), InterviewFailureCode.PublicationUnavailable),
-                    "interviewWorkflow.retryPublication"
-                  ).as(false)
-                }
-            }
-        }
+      currentTime.flatMap(checkedAt =>
+        repository
+          .authorizePublication(claim, transport.generationFor(message), checkedAt)
+          .foldF(
+            {
+              case RepositoryError.Unavailable => deferCoordination
+              case error                       => failed("interviewWorkflow.authorizePublication", error).as(false)
+            },
+            authorized => if (authorized) publishAuthorized else Applicative[F].pure(false)
+          )
+      )
   }
 
   private def publishWithLease(
@@ -133,29 +137,19 @@ private[application] final class InterviewPublication[F[_]: Temporal](
       message: InterviewMessage,
       claim: ClaimedInterviewWorkflowCommand
   ): F[PublicationOutcome] = {
-    def renew: F[Option[PublicationOutcome]] = currentTime.flatMap { now =>
-      repository.renewPublication(claim, now, now.plusMillis(settings.claimLease.toMillis)).value.map {
-        case Right(true)  => None
-        case Right(false) => Some(PublicationOutcome.LeaseLost)
-        case Left(_)      => Some(PublicationOutcome.CoordinationUnavailable)
-      }
+    val renew: F[Either[LeaseLost, Unit]] = currentTime.flatMap { now =>
+      repository
+        .renewPublication(claim, now, now.plusMillis(settings.claimLease.toMillis))
+        .fold[Either[LeaseLost, Unit]](
+          _ => Left(LeaseLost.Unavailable),
+          renewed => Either.cond(renewed, (), LeaseLost.Expired)
+        )
     }
-    val heartbeat = fs2.Stream
-      .awakeEvery[F]((settings.claimLease / 3).max(1.millis))
-      .evalMap(_ => renew)
-      .unNone
-      .take(1)
-      .compile
-      .last
-      .map(_.getOrElse(PublicationOutcome.CoordinationUnavailable))
-    // Loading and authorization can consume most of the original claim lease.
-    renew.flatMap {
-      case Some(outcome) => Applicative[F].pure(outcome)
-      case None          =>
-        Applicative[F].unit.flatMap(_ => Temporal[F].race(transport.publish(message), heartbeat)).map {
-          case Left(_)        => PublicationOutcome.Published
-          case Right(outcome) => outcome
-        }
+    // Loading and authorization can consume most of the original claim lease, so it is renewed before publishing.
+    LeaseHeartbeat.guard(settings.claimLease)(renew)(transport.publish(message)).map {
+      case Right(_)                    => PublicationOutcome.Published
+      case Left(LeaseLost.Expired)     => PublicationOutcome.LeaseLost
+      case Left(LeaseLost.Unavailable) => PublicationOutcome.CoordinationUnavailable
     }
   }
 }

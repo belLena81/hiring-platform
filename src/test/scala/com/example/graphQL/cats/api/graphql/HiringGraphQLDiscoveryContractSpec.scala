@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.api.graphql
 
+import com.example.graphQL.cats.domain.model.{AccountState}
 import cats.effect.{IO, Ref}
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.{AccountStatus, GeoPoint, Location, Application, ApplicationEvent}
@@ -253,7 +254,7 @@ final class HiringGraphQLDiscoveryContractSpec extends CatsEffectSuite {
       .encodeToString(
         s"1.0|${pointJob.id.value}|${query.fingerprint}".getBytes(java.nio.charset.StandardCharsets.UTF_8)
       )
-    val operation = """query($after: String) {
+    val operation = """query($after: Cursor) {
       nearbyJobs(center: {latitude: 35, longitude: 33}, radiusKm: 20, first: 1, after: $after) { pageInfo { hasNextPage } }
     }"""
     JobDiscoveryTestSupport.fixture(List(candidate)).flatMap { fixture =>
@@ -276,7 +277,7 @@ final class HiringGraphQLDiscoveryContractSpec extends CatsEffectSuite {
   test("executed discovery authorizes active candidates and singleton admin and denies restricted accounts") {
     val operation = "query { jobDiscoveryFacets { ... on JobDiscoveryFacets { truncated } ... on UserError { code } } }"
     val active = List(candidate, ServiceFixtures.admin)
-    val denied = List(ServiceFixtures.recruiter, candidate.copy(accountStatus = AccountStatus.Deleted))
+    val denied = List(ServiceFixtures.recruiter, candidate.copy(state = AccountState.Deleted(java.time.Instant.EPOCH)))
     active.traverse_ { user =>
       JobDiscoveryTestSupport.fixture(List(user)).flatMap { fixture =>
         execute(operation, Json.obj(), fixture, Some(ActorContext(user.id, user.role)))
@@ -299,7 +300,7 @@ final class HiringGraphQLDiscoveryContractSpec extends CatsEffectSuite {
     }
   }
 
-  private val facetFields = "skills { value count } truncated coverage coverageLimit"
+  private val facetFields = "skills { value count } truncated coverageLimit"
   private def lexicalJobs = (1 to 4).toList.map(n =>
     ServiceFixtures.openJob.copy(
       id = com.example.graphQL.cats.domain.model.Identifiers.JobId(new java.util.UUID(0L, n.toLong)),
@@ -308,15 +309,15 @@ final class HiringGraphQLDiscoveryContractSpec extends CatsEffectSuite {
   )
   private def lexicalScores = lexicalJobs.map(job => job.id -> (10d - job.id.value.getLeastSignificantBits)).toMap
 
-  test("HDQ-12.11 the SDL fixture declares the query argument, FacetCoverage and both coverage fields") {
+  test("HDQ-12.11 the SDL fixture declares the query argument and the single coverage field") {
     val sdl = scala.io.Source.fromResource("graphql/hiring.graphql").mkString
     val facetsField = sdl.slice(sdl.indexOf("  jobDiscoveryFacets("), sdl.indexOf("): JobDiscoveryFacetsResult"))
     List("query: String,", "filter: JobFilter,", "center: GeoPointInput,", "radiusKm: Float").foreach(argument =>
       assert(facetsField.contains(argument), argument)
     )
-    assert(sdl.contains("enum FacetCoverage {"))
-    assert(sdl.contains("  ALL_MATCHES\n") && sdl.contains("  TOP_MATCHES\n"))
-    assert(sdl.contains("  truncated: Boolean!\n  coverage: FacetCoverage!\n  coverageLimit: Int\n"))
+    assert(!sdl.contains("enum FacetCoverage"))
+    assert(sdl.contains("  truncated: Boolean!\n"))
+    assert(sdl.contains("  coverageLimit: Int\n"))
   }
 
   test("HDQ-12.11 the facet operation fixture validates against the active schema") {
@@ -344,10 +345,8 @@ final class HiringGraphQLDiscoveryContractSpec extends CatsEffectSuite {
     } yield {
       def facets(result: Json) = result.hcursor.downField("data").downField("jobDiscoveryFacets")
       assert(!structured.hcursor.downField("errors").succeeded, structured.noSpaces)
-      assertEquals(facets(structured).get[String]("coverage"), Right("ALL_MATCHES"))
       assertEquals(facets(structured).downField("coverageLimit").focus, Some(Json.Null))
       assertEquals(facets(structured).downField("skills").values.map(_.size), Some(4))
-      assertEquals(facets(topped).get[String]("coverage"), Right("TOP_MATCHES"))
       assertEquals(facets(topped).get[Int]("coverageLimit"), Right(3))
       assertEquals(facets(topped).downField("skills").values.map(_.size), Some(3))
       assertEquals(calls.map(_._1), List("scala"))

@@ -5,6 +5,7 @@ import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.{GraphQLFailure, 
 import com.example.graphQL.cats.domain.error.{DomainError, DomainValidationError}
 import com.example.graphQL.cats.domain.workflow.InterviewWorkflowError
 import com.example.graphQL.cats.service.RepositoryError
+import com.example.graphQL.cats.service.protocol.UseCaseF
 import com.example.graphQL.cats.service.{
   AccountError,
   AnalyticsError,
@@ -366,14 +367,14 @@ private[graphql] object GraphQLFailureCatalog {
   def costBudgetExhausted: GraphQLFailure =
     failure(FailureMetadata.RateLimited, "Query cost budget exhausted; retry later")
 
-  /** A role or ownership refusal of a mutation is a typed payload for interview actions, so one refused alias does not
+  /** A role or ownership refusal. `UseCaseF` has already turned a revoked authority into `Forbidden`, so this is the
+    * one representation to test for. Interview actions report it as a typed payload, so one refused alias does not
     * discard the results of the others in a batched request.
     */
   def isAuthorizationRefusal(error: UseCaseError): Boolean =
     error match {
-      case UseCaseError.Domain(DomainError.Forbidden) | UseCaseError.Repository(RepositoryError.AuthorityRevoked) =>
-        true
-      case _ => false
+      case UseCaseError.Domain(DomainError.Forbidden) => true
+      case _                                          => false
     }
 
   /** The interview rules refuse with stable codes that name no workflow, user, time or text. */
@@ -482,12 +483,14 @@ private[graphql] object GraphQLFailureCatalog {
     error match {
       case RepositoryError.DuplicateApplication =>
         failure(FailureMetadata.DuplicateApplication, "Application already exists")
-      case RepositoryError.AuthorityRevoked => failure(FailureMetadata.Forbidden, "Forbidden")
-      case RepositoryError.Conflict         => failure(FailureMetadata.Conflict, "Conflict")
-      case RepositoryError.InvalidEvent | RepositoryError.InvalidStoredData | RepositoryError.MissingStoredResult =>
+      case RepositoryError.Conflict => failure(FailureMetadata.Conflict, "Conflict")
+      case RepositoryError.InvalidEvent | RepositoryError.InvalidStoredData | RepositoryError.MissingStoredResult |
+          RepositoryError.Unavailable | RepositoryError.Overloaded =>
         failure(FailureMetadata.RepositoryUnavailable, "Repository unavailable")
-      case RepositoryError.Unavailable | RepositoryError.Overloaded | RepositoryError.VectorSearchUnavailable =>
-        failure(FailureMetadata.RepositoryUnavailable, "Repository unavailable")
+      // `UseCaseF.translate` owns these two: they never reach a use-case error as `Repository(_)`, so the policy is
+      // not restated here; a hand-built `Repository(_)` of either is classified as its translation.
+      case RepositoryError.AuthorityRevoked | RepositoryError.VectorSearchUnavailable =>
+        classify(UseCaseF.translate(error))
     }
 
   private def classifySearch(error: SearchError): GraphQLFailure =

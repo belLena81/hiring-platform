@@ -20,7 +20,7 @@ final class ApplicationWriteFenceIntegrationSpec extends MongoIntegrationSuite {
   private val at = Instant.parse("2026-10-05T12:00:00Z")
   private val rounds = 25
 
-  private def user(role: UserRole, name: String, singleton: Boolean = false): User =
+  private def user(role: UserRole, name: String): User =
     User(
       UserId(UUID.randomUUID()),
       None,
@@ -31,8 +31,7 @@ final class ApplicationWriteFenceIntegrationSpec extends MongoIntegrationSuite {
         case UserRole.Recruiter => Some(UserProfile.Recruiter(RecruiterProfile("Fence organization", None)))
         case UserRole.Admin     => None
       },
-      at,
-      adminSingleton = singleton
+      at
     )
 
   private def openJob(owner: User): Job =
@@ -44,7 +43,7 @@ final class ApplicationWriteFenceIntegrationSpec extends MongoIntegrationSuite {
       List("Fence requirement"),
       Set("Scala"),
       Location("Cyprus", Some("Nicosia"), remote = false),
-      JobStatus.Open,
+      JobState.Open,
       at,
       at
     )
@@ -85,7 +84,7 @@ final class ApplicationWriteFenceIntegrationSpec extends MongoIntegrationSuite {
         at,
         None,
         None,
-        Some(candidate.role)
+        candidate.role
       )
       applications
         .createForOpenJobWithEvents(
@@ -114,7 +113,7 @@ final class ApplicationWriteFenceIntegrationSpec extends MongoIntegrationSuite {
         at.plusSeconds(60),
         None,
         None,
-        Some(actor.role)
+        actor.role
       )
       applications
         .updateStatusWithEvents(
@@ -232,6 +231,11 @@ final class ApplicationWriteFenceIntegrationSpec extends MongoIntegrationSuite {
           application <- h.created(candidate, job)
           (changed, _) <- (h.accept(application, recruiter), h.delete(recruiter)).parTupled
           after <- h.status(application)
+          _ <- ApplicationStatusInvariant.assertAgrees(
+            h.fixture.database,
+            application.id,
+            expectHistory = changed.isRight
+          )
           history <- h.countWhere(
             MongoCollections.ApplicationEvents,
             Filters.eq("applicationId", application.id.value.toString)
@@ -289,7 +293,7 @@ final class ApplicationWriteFenceIntegrationSpec extends MongoIntegrationSuite {
       val candidate = user(UserRole.Candidate, "Fence candidate")
       val owner = user(UserRole.Recruiter, "Fence owner")
       val other = user(UserRole.Recruiter, "Fence other recruiter")
-      val admin = user(UserRole.Admin, "Fence admin", singleton = true)
+      val admin = user(UserRole.Admin, "Fence admin")
       val job = openJob(owner)
       for {
         _ <- List(candidate, owner, other, admin).traverse_(h.insertUser) *> h.insertJob(job)

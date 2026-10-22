@@ -86,29 +86,38 @@ final class MongoOutboxEnvelopeSourceIntegrationSpec extends MongoIntegrationSui
     )
     val value =
       OperationalEvents.searchPerformed(UUID.randomUUID(), session).fold(error => fail(error.toString), identity)
-    val work = MongoSearchSessionWorkCodecs.work(PendingSearchSessionWork(session, value), now)
-    work
-      .get(MongoFields.Event, classOf[Document])
-      .append(MongoFields.Payload, OperationalEventWireCodec.payloadJson(value.payload).noSpaces)
-    work
+    // The shape of a database at 025: the work row still stores its event, with the `payload` copy (migration 031 later
+    // removes the event itself).
+    MongoSearchSessionWorkCodecs
+      .work(PendingSearchSessionWork(session), now)
+      .append(
+        MongoFields.Event,
+        new Document(MongoFields.Id, value.eventId.toString)
+          .append(MongoFields.EnvelopeBytes, new Binary(OperationalEventWireCodec.bytes(value)))
+          .append(MongoFields.Payload, OperationalEventWireCodec.payloadJson(value.payload).noSpaces)
+      )
   }
 
   private def insertUnvalidated(database: MongoDatabase[IO], name: String, rows: List[Document]): IO[Unit] =
     collection(database, name).flatMap(_.insertMany(rows, new InsertManyOptions().bypassDocumentValidation(true))).void
 
-  /** A database that completed 025 under the earlier binary: the earlier validators, no 026 proof. */
+  /** A database that completed 025 under the earlier binary: the earlier validators, no 026 proof. The single-copy step
+    * of search session work (031) rebuilds the validator 026 installs, so it has not completed either.
+    */
   private def rewindTo025(database: MongoDatabase[IO]): IO[Unit] =
     for {
       setup <- MongoHiringSetup.setupDatabase(database)
       _ <- MongoHiringValidators.install(setup, Outbox, MongoHiringValidators.outboxValidatorV1)
-      _ <- MongoHiringValidators.install(setup, Work, MongoOperationalValidators.searchSessionWorkValidatorV1)
+      _ <- MongoHiringValidators.install(setup, Work, MongoOperationalValidators.searchSessionWorkValidatorThrough025)
       rows <- collection(database, MongoCollections.HiringMigrationLedger)
-      _ <- rows.deleteMany(Filters.eq(MongoFields.Id, Source.value))
+      _ <- rows.deleteMany(
+        Filters.in(MongoFields.Id, Source.value, MigrationIds.SearchSessionWorkSingleCopy.value)
+      )
     } yield ()
 
   private def successorInstalled(database: MongoDatabase[IO]): IO[Boolean] =
     MongoHiringSetup.setupDatabase(database).flatMap { setup =>
-      (MongoOperationalValidators.current :+ (Outbox -> MongoHiringValidators.outboxValidator)).forallM {
+      (MongoOperationalValidators.all :+ (Outbox -> MongoHiringValidators.outboxValidator)).forallM {
         case (name, expected) => MongoHiringValidators.validatorMatches(setup, name, expected)
       }
     }
@@ -133,7 +142,7 @@ final class MongoOutboxEnvelopeSourceIntegrationSpec extends MongoIntegrationSui
       assertEquals(outbox, events)
       assertEquals(work, works)
       assert(rows.forall(row => MongoHiringCodecs.readOperationalEvent(row).isValid), clue(rows))
-      assert(workRows.forall(row => MongoSearchSessionWorkCodecs.readWork(row).isRight), clue(workRows))
+      assert(workRows.forall(row => MongoSearchSessionWorkCodecs.readWork(row).isValid), clue(workRows))
     }
 
   test("MSC-06.1 a published event row has the envelope and the query fields but no payload") {
@@ -146,8 +155,7 @@ final class MongoOutboxEnvelopeSourceIntegrationSpec extends MongoIntegrationSui
           OperationalEventPayload.JobSnapshot(UUID.fromString(value.aggregateId), List("Cats"), JobStatus.Open)
         )
       )
-      val sessions =
-        MongoSearchSessionRepository.transactional(fixture.database, fixture.client, Diagnostics.noop[IO])
+      val sessions = MongoSearchSessionRepository(fixture.database, Diagnostics.noop[IO])
       val outbox =
         MongoOperationalEventOutboxRepository.transactional(fixture.database, fixture.client, Diagnostics.noop[IO])
       def row =
@@ -201,6 +209,9 @@ final class MongoOutboxEnvelopeSourceIntegrationSpec extends MongoIntegrationSui
       val actor = UserId(UUID.randomUUID())
       for {
         _ <- init(fixture.database)
+        setup <- MongoHiringSetup.setupDatabase(fixture.database)
+        // The work definition 026 installed; migration 031 later replaces it with one that has no stored event.
+        _ <- MongoHiringValidators.install(setup, Work, MongoOperationalValidators.searchSessionWorkValidatorThrough026)
         outbox <- MongoRepositoryTestSupport
           .insertOne(fixture.database, Outbox, legacyOutbox(event(actor)))
           .attempt

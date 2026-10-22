@@ -2,7 +2,7 @@ package com.example.graphQL.cats.domain
 
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
-import com.example.graphQL.cats.domain.model.{Job, JobStatus, Location}
+import com.example.graphQL.cats.domain.model.{Job, JobStatus, Location, JobState}
 import com.example.graphQL.cats.domain.policy.JobLifecycle
 import java.time.Instant
 import java.util.UUID
@@ -21,7 +21,7 @@ class JobLifecycleSpec extends FunSuite {
     List("Scala"),
     Set("Scala"),
     Location("Ukraine", Some("Kyiv"), remote = true),
-    JobStatus.Draft,
+    JobState.Draft,
     createdAt,
     createdAt
   )
@@ -34,14 +34,14 @@ class JobLifecycleSpec extends FunSuite {
   }
 
   test("create rejects Closed as an initial status") {
-    val closed = draftJob.copy(status = JobStatus.Closed)
+    val closed = draftJob.copy(state = JobState.Closed(java.time.Instant.EPOCH))
     val result = JobLifecycle.create(closed)
 
     assertEquals(result, Left(DomainError.InvalidInitialJobStatus(JobStatus.Closed)))
   }
 
   test("rejected publish retains the original aggregate value") {
-    val closed = draftJob.copy(status = JobStatus.Closed)
+    val closed = draftJob.copy(state = JobState.Closed(java.time.Instant.EPOCH))
     val result = JobLifecycle.publish(updatedAt).run(closed)
 
     assertEquals(result, Left(DomainError.InvalidJobTransition(JobStatus.Closed, JobStatus.Open)))
@@ -66,7 +66,7 @@ class JobLifecycleSpec extends FunSuite {
   }
 
   test("close moves Draft or Open to Closed and rejects already closed jobs") {
-    val closedResult = JobLifecycle.close(updatedAt).run(draftJob.copy(status = JobStatus.Open))
+    val closedResult = JobLifecycle.close(updatedAt).run(draftJob.copy(state = JobState.Open))
     val closedState = closedResult.map(_._1).toOption.getOrElse(fail("expected job to close"))
     val rejectedResult = JobLifecycle.close(updatedAt).run(closedState)
 

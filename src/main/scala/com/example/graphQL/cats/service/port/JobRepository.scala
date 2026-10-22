@@ -16,7 +16,14 @@ import java.time.Instant
 
 trait JobRepository[F[_]] {
   def relatedJobs(scope: HiringReadScope, keys: List[JobRelationKey]): RepositoryF[F, List[RelatedJob]]
+
+  /** The ownership projection used by authorization; never carries the description or embedding. */
+  def findOwner(id: JobId): RepositoryF[F, Option[JobOwner]]
+
+  /** The job for display. The embedding vector is not read: `embedding` is always `None`. */
   def find(id: JobId): RepositoryF[F, Option[Job]]
+
+  /** The whole job including its embedding, with its revision, for compare-and-set writes and search ranking. */
   def findVersioned(id: JobId): RepositoryF[F, Option[Versioned[Job]]]
   def findSubmissionSnapshot(id: JobId): RepositoryF[F, Option[JobSubmissionSnapshot]]
   def findOpen(filter: JobSearchFilter, page: JobPageRequest): RepositoryF[F, List[Job]]

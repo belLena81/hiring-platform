@@ -1,7 +1,8 @@
 package com.example.graphQL.cats.service
 
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
-import com.example.graphQL.cats.domain.model.{User, UserRole}
+import com.example.graphQL.cats.domain.model.UserRole
+import com.example.graphQL.cats.service.port.ActorRecord
 
 sealed trait ActorContext {
   def userId: UserId
@@ -14,12 +15,13 @@ object ActorContext {
   def apply(userId: UserId, role: UserRole): ActorContext = Claims(userId, role)
 }
 
-final class AuthenticatedActor private[service] (val claims: ActorContext, val viewer: User) extends ActorContext {
+final class AuthenticatedActor private[service] (val claims: ActorContext, val viewer: ActorRecord)
+    extends ActorContext {
   override val userId: UserId = claims.userId
   override val role: UserRole = claims.role
 }
 
 object AuthenticatedActor {
-  private[service] def apply(claims: ActorContext, viewer: User): AuthenticatedActor =
+  private[service] def apply(claims: ActorContext, viewer: ActorRecord): AuthenticatedActor =
     new AuthenticatedActor(claims, viewer)
 }

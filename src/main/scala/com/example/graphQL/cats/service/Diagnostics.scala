@@ -167,6 +167,22 @@ object LogFields {
     )
   }
 
+  /** A repository failure as a safe diagnostic field: the stable upper-snake name of the case, never a message. */
+  def repositoryFailure(error: RepositoryError): Map[LogField, String] =
+    Map(
+      LogField.ErrorCode -> (error match {
+        case RepositoryError.DuplicateApplication    => "DUPLICATE_APPLICATION"
+        case RepositoryError.AuthorityRevoked        => "AUTHORITY_REVOKED"
+        case RepositoryError.Conflict                => "CONFLICT"
+        case RepositoryError.InvalidEvent            => "INVALID_EVENT"
+        case RepositoryError.InvalidStoredData       => "INVALID_STORED_DATA"
+        case RepositoryError.MissingStoredResult     => "MISSING_STORED_RESULT"
+        case RepositoryError.Unavailable             => "UNAVAILABLE"
+        case RepositoryError.Overloaded              => "OVERLOADED"
+        case RepositoryError.VectorSearchUnavailable => "VECTOR_SEARCH_UNAVAILABLE"
+      })
+    )
+
   /** Failure class names reach diagnostics raw; the sink reports any class outside the allow-lists as this value. */
   val OtherErrorType = "OtherException"
 

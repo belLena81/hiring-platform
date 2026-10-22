@@ -1,6 +1,7 @@
 package com.example.graphQL.cats.repository.mongo
 
 import com.mongodb.client.result.{DeleteResult, UpdateResult}
+import cats.syntax.all.*
 import cats.effect.IO
 import cats.effect.{Deferred, Outcome, Ref}
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
@@ -35,6 +36,35 @@ final class MongoRepositorySupportSpec extends CatsEffectSuite {
         OperationalEventPayload.JobSnapshot(new UUID(1L, number), List("Scala"), JobStatus.Open)
       )
     )
+
+  test("AC-06.3 toStored collapses every accumulated decode error into InvalidStoredData and keeps valid values") {
+    import MongoStoredDocumentDecoding.toStored
+    import MongoHiringCodecs.StoredDocumentError
+    import cats.data.Validated
+    val invalid: cats.data.ValidatedNel[StoredDocumentError, Int] =
+      Validated.invalidNel[StoredDocumentError, Int](StoredDocumentError.MissingField("a")) *>
+        Validated.invalidNel[StoredDocumentError, Int](StoredDocumentError.InvalidField("b"))
+    assertEquals(invalid.toStored, Left(RepositoryError.InvalidStoredData))
+    assertEquals(Validated.validNel[StoredDocumentError, Int](7).toStored, Right(7))
+    assertEquals(
+      Left[StoredDocumentError, Int](StoredDocumentError.InconsistentDocument).toStored,
+      Left(RepositoryError.InvalidStoredData)
+    )
+    assertEquals(Right[StoredDocumentError, Int](3).toStored, Right(3))
+  }
+
+  test("AC-06.6 MongoF lifts values and failures without naming the effect") {
+    import MongoF.asRepository
+    for {
+      lifted <- 5.asRepository.value
+      raised <- MongoF.raise[Int](RepositoryError.Conflict).value
+      fromEither <- MongoF.fromEither[Int](Left(RepositoryError.Unavailable)).value
+    } yield {
+      assertEquals(lifted, Right(5))
+      assertEquals(raised, Left(RepositoryError.Conflict))
+      assertEquals(fromEither, Left(RepositoryError.Unavailable))
+    }
+  }
 
   test("repository guard logs safe failure metadata before returning its typed error") {
     for {

@@ -22,8 +22,9 @@ private[graphql] object HiringGraphQLJobResolvers {
         connection <- paged[JobCursor, JobPageRequest, Job](
           hiring,
           context.arg(firstArgument),
-          context.arg(afterArgument)
-        )((cursor, size) => JobPageRequest(None, cursor, size))(request =>
+          context.arg(afterArgument),
+          "open-jobs"
+        )((cursor, size) => JobPageRequest(None, cursor, size, HiringGraphQLJobProjection.of(context)))(request =>
           for {
             values <- raiseOnUseCaseError(hiring.jobService.searchOpenJobs(actor, filter, request))
             _ <- recordSearch(context.ctx, hiring, actor.userId, SearchKind.Jobs, searchId, filterSnapshot(filter))(
@@ -34,7 +35,7 @@ private[graphql] object HiringGraphQLJobResolvers {
             )
           } yield values
         )(job => JobCursor(job.createdAt, job.id))
-      } yield JobSearchConnection(connection, SearchId(searchId))
+      } yield JobSearchConnection(connection.edges, connection.pageInfo, SearchId(searchId))
     }
 
   def job(context: Context[RequestContext, Unit]): HiringGraphQLResult[Job] =
@@ -44,8 +45,13 @@ private[graphql] object HiringGraphQLJobResolvers {
 
   def myJobs(context: Context[RequestContext, Unit]): HiringGraphQLResult[Connection[Job]] =
     authenticated(context) { case (actor, hiring) =>
-      paged[JobCursor, JobPageRequest, Job](hiring, context.arg(firstArgument), context.arg(afterArgument))(
-        (cursor, size) => JobPageRequest(context.arg(jobStatusArgument), cursor, size)
+      paged[JobCursor, JobPageRequest, Job](
+        hiring,
+        context.arg(firstArgument),
+        context.arg(afterArgument),
+        s"my-jobs:${context.arg(jobStatusArgument).fold("any")(_.toString)}"
+      )((cursor, size) =>
+        JobPageRequest(context.arg(jobStatusArgument), cursor, size, HiringGraphQLJobProjection.of(context))
       )(request => raiseOnUseCaseError(hiring.jobService.myJobs(actor, request)))(job =>
         JobCursor(job.createdAt, job.id)
       )

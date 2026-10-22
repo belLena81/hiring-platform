@@ -54,7 +54,8 @@ object InterviewCharacterizationFixtures {
       proposal = proposal,
       rescheduleRequestedAt = rescheduleRequestedAt,
       repairOrigin = repairOrigin,
-      skippedGenerations = skippedGenerations
+      skippedGenerations = skippedGenerations,
+      initiatedByRole = com.example.graphQL.cats.domain.model.UserRole.Recruiter
     )
 
   def openProposal: InterviewRescheduleProposal = InterviewRescheduleProposal(replacement, recruiterId, proposalExpiry)

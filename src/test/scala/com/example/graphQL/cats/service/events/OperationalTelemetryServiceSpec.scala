@@ -1,10 +1,11 @@
 package com.example.graphQL.cats.service.events
 
+import com.example.graphQL.cats.domain.model.{AccountState}
 import com.example.graphQL.cats.service.events.OperationalEventPayload.SearchKind
 import cats.effect.{IO, Ref}
 import com.example.graphQL.cats.FixedTestClock
 import com.example.graphQL.cats.domain.error.DomainError
-import com.example.graphQL.cats.domain.model.{AccountStatus, UserRole}
+import com.example.graphQL.cats.domain.model.{UserRole}
 import com.example.graphQL.cats.service.port.{
   MutationEntityReference,
   MutationReceiptExecution,
@@ -95,7 +96,7 @@ class OperationalTelemetryServiceSpec extends CatsEffectSuite {
   }
 
   test("interaction replay rejects a deleted actor without repeating persistence") {
-    val deletedCandidate = candidate.copy(accountStatus = AccountStatus.Deleted)
+    val deletedCandidate = candidate.copy(state = AccountState.Deleted(java.time.Instant.EPOCH))
     withService(
       userValues = Map(candidateId -> deletedCandidate, recruiterId -> recruiter),
       idempotent = Idempotent(ReplayReceipts(MutationEntityReference("interaction", eventId.toString)))
@@ -197,14 +198,6 @@ class OperationalTelemetryServiceSpec extends CatsEffectSuite {
       sessions: Ref[IO, Map[UUID, SearchSession]],
       storedEvents: Ref[IO, Vector[OperationalEventEnvelope]]
   ) extends SearchSessionRepository[IO] {
-    override def save(session: SearchSession, event: OperationalEventEnvelope): RepositoryF[IO, Unit] =
-      com.example.graphQL.cats.service.port.RepositoryF.fromFEither(
-        IO.defer {
-          val _ = event
-          sessions.update(_ + (session.id -> session)).as(Right(()))
-        }
-      )
-
     override def find(id: UUID): RepositoryF[IO, Option[SearchSession]] =
       com.example.graphQL.cats.service.port.RepositoryF.fromFEither(sessions.get.map(values => Right(values.get(id))))
 

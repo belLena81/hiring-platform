@@ -1,8 +1,8 @@
 package com.example.graphQL.cats.domain.workflow
 
+import com.example.graphQL.cats.domain.model.Identifiers
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import java.time.Instant
-import java.util.UUID
 
 final case class InterviewRetentionBarrier(topic: String, partition: Int, endOffset: Long)
 
@@ -71,7 +71,7 @@ object InterviewSubjectCleanup {
     def valid(id: String): Boolean = ProducerPrefixes.exists { prefix =>
       id.startsWith(prefix) && {
         val suffix = id.substring(prefix.length)
-        scala.util.Try(UUID.fromString(suffix)).toOption.exists(_.toString == suffix)
+        Identifiers.parse(suffix)(identity).exists(_.toString == suffix)
       }
     }
     Either.cond(ids.forall(valid), ids.distinct.sorted, InterviewCleanupError.InvalidProducerIds)

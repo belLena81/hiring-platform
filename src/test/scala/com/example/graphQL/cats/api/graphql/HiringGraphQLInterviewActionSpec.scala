@@ -61,7 +61,8 @@ final class HiringGraphQLInterviewActionSpec extends CatsEffectSuite {
         revision,
         phase,
         bothNotified,
-        recruiterId
+        recruiterId,
+        initiatedByRole = com.example.graphQL.cats.domain.model.UserRole.Recruiter
       )
     )
 
@@ -149,6 +150,7 @@ final class HiringGraphQLInterviewActionSpec extends CatsEffectSuite {
       events <- Ref.of[IO, Vector[ApplicationEvent]](Vector.empty)
       errors <- Ref.of[IO, Option[RepositoryError]](None)
       repository <- InMemoryInterviewWorkflowRepository.create(workflow, status)
+      receipts <- com.example.graphQL.cats.service.mutation.TestIdempotency.remembering
       users = new InMemoryUsers(usersRef, Some(ServiceFixtures.userRelations(usersRef, jobsRef, applicationsRef)))
       jobs = new InMemoryJobs(
         jobsRef,
@@ -160,7 +162,15 @@ final class HiringGraphQLInterviewActionSpec extends CatsEffectSuite {
         errors,
         jobLookup = id => jobsRef.get.map(_.get(id))
       )
-      service = new InterviewSchedulingService[IO](users, jobs, applications, repository, 5.minutes, IO.pure(clock))
+      service = new InterviewSchedulingService[IO](
+        users,
+        jobs,
+        applications,
+        repository,
+        com.example.graphQL.cats.service.mutation.Idempotent(receipts),
+        5.minutes,
+        IO.pure(clock)
+      )
     } yield Arrangement(
       HiringGraphQLServices(
         HiringReadService(users, jobs, applications),
@@ -346,18 +356,15 @@ final class HiringGraphQLInterviewActionSpec extends CatsEffectSuite {
       Set(
         "id",
         "applicationId",
-        "startsAt",
-        "endsAt",
+        "slot",
         "revision",
         "progress",
         "notifiedParticipants",
-        "pendingStartsAt",
-        "pendingEndsAt",
+        "application",
+        "pending",
         "cancelledAt",
-        "proposedStartsAt",
-        "proposedEndsAt",
-        "proposalExpiresAt",
-        "rescheduleRequested"
+        "proposal",
+        "rescheduleRequestedAt"
       )
     )
   }
@@ -392,12 +399,13 @@ final class HiringGraphQLInterviewActionSpec extends CatsEffectSuite {
             Right(List("CANDIDATE", "RECRUITER")),
             clue(json)
           )
-          assertEquals(workflow.get[String]("proposedStartsAt"), Right(replacement.startsAt.toString))
-          assertEquals(workflow.get[String]("proposedEndsAt"), Right(replacement.endsAt.toString))
-          assertEquals(workflow.get[String]("proposalExpiresAt"), Right(withProposal.proposal.get.expiresAt.toString))
-          assertEquals(workflow.get[Boolean]("rescheduleRequested"), Right(false))
+          val proposal = workflow.downField("proposal")
+          assertEquals(proposal.downField("slot").get[String]("startsAt"), Right(replacement.startsAt.toString))
+          assertEquals(proposal.downField("slot").get[String]("endsAt"), Right(replacement.endsAt.toString))
+          assertEquals(proposal.get[String]("expiresAt"), Right(withProposal.proposal.get.expiresAt.toString))
+          assertEquals(workflow.downField("rescheduleRequestedAt").focus, Some(Json.Null))
           assertEquals(workflow.downField("cancelledAt").focus, Some(Json.Null))
-          assertEquals(workflow.downField("pendingStartsAt").focus, Some(Json.Null))
+          assertEquals(workflow.downField("pending").focus, Some(Json.Null))
         }
         List(asStranger, asOtherRecruiter).foreach { json =>
           assertEquals(json.hcursor.downField("data").downField("interviewWorkflow").focus, Some(Json.Null), clue(json))
@@ -487,10 +495,10 @@ final class HiringGraphQLInterviewActionSpec extends CatsEffectSuite {
       cancelled <- act(c, Action.Cancel, Some(candidateActor), variables(Action.Cancel))
       history <- c.repository.store.get.map(_.history)
     } yield {
-      assertEquals(payload(requested, Action.Request).hcursor.get[Boolean]("rescheduleRequested"), Right(true))
+      assert(payload(requested, Action.Request).hcursor.get[String]("rescheduleRequestedAt").isRight)
       assertEquals(payload(accepted, Action.Accept).hcursor.get[String]("progress"), Right("RESCHEDULE_HOLD_PENDING"))
       assertEquals(
-        payload(accepted, Action.Accept).hcursor.get[String]("pendingStartsAt"),
+        payload(accepted, Action.Accept).hcursor.downField("pending").get[String]("startsAt"),
         Right(replacement.startsAt.toString)
       )
       assertEquals(payload(cancelled, Action.Cancel).hcursor.get[String]("progress"), Right("CANCEL_PENDING"))
@@ -576,7 +584,7 @@ final class HiringGraphQLInterviewActionSpec extends CatsEffectSuite {
   )
 
   rules.foreach { case (label, workflow, action, clock, status, expectedRevision, expected) =>
-    test(s"DHW-19 $label is the sanitized code $expected and changes nothing") {
+    test(s"AC-06.7 DHW-19 $label is the sanitized code $expected and changes nothing") {
       val actor = action match {
         case Action.Propose | Action.Withdraw | Action.Dismiss => recruiterActor
         case _                                                 => candidateActor
@@ -597,7 +605,7 @@ final class HiringGraphQLInterviewActionSpec extends CatsEffectSuite {
     }
   }
 
-  test("DHW-19 an interval that ends before it starts, or equals the current one, is a typed outcome") {
+  test("AC-06.7 DHW-19 an interval that ends before it starts, or equals the current one, is a typed outcome") {
     arranged(completed).flatMap { a =>
       for {
         reversed <- act(

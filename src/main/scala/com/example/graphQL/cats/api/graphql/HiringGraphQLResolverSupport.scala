@@ -30,19 +30,27 @@ private[graphql] object HiringGraphQLResolverSupport {
   def inputResult[A](value: Either[GraphQLFailure, A]): HiringGraphQLResult[A] =
     EitherT.fromEither[IO](value.leftMap(HiringGraphQLFailure.Input(_)))
 
+  /** The one place that decides whether a failed mutation is data (a typed `DomainError` or `ValidationError` payload,
+    * so sibling aliases survive) or a top-level GraphQL error. The catalog's failure metadata decides: a
+    * non-exceptional failure is data; an exceptional one, and every authentication failure, is top-level. Interview
+    * actions also report a role or ownership refusal as data (`authorizationRefusalAsData`), so one refused alias does
+    * not discard the results of the others in a batched request.
+    */
   def mutationResult[A](
       value: UseCaseF[IO, A],
-      fieldPath: InputFieldPaths.Path = InputFieldPaths.none
+      fieldPath: InputFieldPaths.Path = InputFieldPaths.none,
+      authorizationRefusalAsData: Boolean = false
   ): HiringGraphQLResult[MutationOutcome[A]] =
-    EitherT(value.value.flatMap {
-      case Right(result)                               => IO.pure(Right(result))
-      case Left(UseCaseError.ValidationFailed(errors)) => IO.pure(Right(validationError(errors, fieldPath)))
+    value.transform {
+      case Right(result)                               => Right(result)
+      case Left(UseCaseError.ValidationFailed(errors)) => Right(validationError(errors, fieldPath))
       case Left(error)                                 =>
         val failure = GraphQLFailureCatalog.classify(error)
-        if (failure.exceptional || GraphQLFailureCatalog.isAuthenticationFailure(error))
-          IO.pure(Left(HiringGraphQLFailure.UseCase(error)))
-        else IO.pure(Right(DomainError(failure.code, failure.message)))
-    })
+        val refusedAsData = authorizationRefusalAsData && GraphQLFailureCatalog.isAuthorizationRefusal(error)
+        if ((failure.exceptional && !refusedAsData) || GraphQLFailureCatalog.isAuthenticationFailure(error))
+          Left(HiringGraphQLFailure.UseCase(error))
+        else Right(DomainError(failure.code, failure.message))
+    }
 
   /** A rate-limit refusal as data: the code and message come from the failure, and the delay is carried (whole seconds,
     * clamped to `Int`) so the client knows when to retry.
@@ -60,7 +68,7 @@ private[graphql] object HiringGraphQLResolverSupport {
       value: HiringGraphQLResult[A],
       fieldPath: InputFieldPaths.Path
   ): HiringGraphQLResult[SearchOutcome[A]] =
-    EitherT(value.value.map {
+    value.transform {
       case Right(result)                                   => Right(result)
       case Left(HiringGraphQLFailure.RateLimited(seconds)) =>
         Right(rateLimitedRefusal(GraphQLFailureCatalog.requestRateLimited, seconds))
@@ -72,17 +80,17 @@ private[graphql] object HiringGraphQLResolverSupport {
             )
           refusal.toRight(failure)
         }
-    })
+    }
 
   /** The facets root has no business-rule member, so only unavailability and invalid input become data. */
   def facetsResult[A](
       value: HiringGraphQLResult[A],
       fieldPath: InputFieldPaths.Path
   ): HiringGraphQLResult[FacetsOutcome[A]] =
-    EitherT(value.value.map {
+    value.transform {
       case Right(result) => Right(result)
       case Left(failure) => searchRefusal(failure).flatMap(dataRefusal(_, fieldPath).toRight(failure))
-    })
+    }
 
   private def searchRefusal(failure: HiringGraphQLFailure): Either[HiringGraphQLFailure, GraphQLFailure] =
     failure match {
@@ -164,19 +172,23 @@ private[graphql] object HiringGraphQLResolverSupport {
         )
         .value
         .attempt
-        .flatMap {
-          case Right(Right(()))   => IO.unit
-          case Right(Left(error)) =>
-            reportFailure(
-              requestContext,
-              hiring,
-              actorId,
-              kind,
-              searchId,
-              Right(GraphQLFailureCatalog.classify(error).code)
+        .flatMap(
+          _.fold(
+            error => reportFailure(requestContext, hiring, actorId, kind, searchId, Left(error)),
+            _.fold(
+              error =>
+                reportFailure(
+                  requestContext,
+                  hiring,
+                  actorId,
+                  kind,
+                  searchId,
+                  Right(GraphQLFailureCatalog.classify(error).code)
+                ),
+              _ => IO.unit
             )
-          case Left(error) => reportFailure(requestContext, hiring, actorId, kind, searchId, Left(error))
-        }
+          )
+        )
     )
 
   /** Logs the failed recording and publishes its operational event. Publishing is best-effort too: a failure to emit it
@@ -196,12 +208,12 @@ private[graphql] object HiringGraphQLResolverSupport {
         .attempt
         .void
 
-  def authenticated[A](context: Context[RequestContext, Unit])(
+  def authenticated[A](context: Context[RequestContext, ?])(
       action: (ActorContext, HiringGraphQLServices) => HiringGraphQLResult[A]
   ): HiringGraphQLResult[A] = authenticated(context).flatMap(action.tupled)
 
   /** Runs `action` only while the hiring services are available. */
-  def withHiring[A](context: Context[RequestContext, Unit])(
+  def withHiring[A](context: Context[RequestContext, ?])(
       action: HiringGraphQLServices => HiringGraphQLResult[A]
   ): HiringGraphQLResult[A] =
     EitherT.liftF[IO, HiringGraphQLFailure, ProbeResult](context.ctx.hiringAvailable).flatMap {
@@ -223,7 +235,7 @@ private[graphql] object HiringGraphQLResolverSupport {
     }
 
   /** One bounded cursor page: decodes `after`, fetches with the request built from it, and signs the cursors. */
-  def paged[C, R, A](hiring: HiringGraphQLServices, first: Int, after: Option[String])(
+  def paged[C, R, A](hiring: HiringGraphQLServices, first: Int, after: Option[String], scope: String)(
       build: (Option[C], PageSize) => R
   )(fetch: R => HiringGraphQLResult[List[A]])(cursorOf: A => C)(using
       CursorCodec.Keyed[C]
@@ -231,15 +243,42 @@ private[graphql] object HiringGraphQLResolverSupport {
     given CursorCodec.CursorKey = hiring.cursorKey
     for {
       now <- EitherT.liftF[IO, HiringGraphQLFailure, Instant](IO.realTimeInstant)
-      (request, size) <- inputResult(cursorPage(first, after, CursorCodec.decode[C](_, now))(build))
+      (request, size) <- inputResult(cursorPage(first, after, decodeScoped[C](scope, _, now))(build))
       values <- fetch(request)
-    } yield connection(values, size)(value => CursorCodec.encode(cursorOf(value), now))
+    } yield connection(values, size, after.isDefined)(value =>
+      CursorCodec.encode(CursorCodec.Scoped(scope, cursorOf(value)), now)
+    )
   }
 
-  def connection[A](values: List[A], requested: Int)(cursor: A => String): Connection[A] = {
-    val nodes = values.take(requested)
-    val edges = nodes.map(value => Edge(value, cursor(value)))
-    Connection(edges, PageInfo(values.size > requested, edges.lastOption.map(_.cursor)))
+  private def decodeScoped[C](scope: String, value: String, now: Instant)(using
+      CursorCodec.Keyed[C],
+      CursorCodec.CursorKey
+  ): Either[CursorCodec.CursorError, C] =
+    CursorCodec
+      .decode[CursorCodec.Scoped[C]](value, now)
+      .flatMap(found => Either.cond(found.scope == scope, found.value, CursorCodec.CursorError.CriteriaMismatch))
+
+  /** The one place that turns a fetched window (one row more than requested) into edges and page information, for every
+    * list field. `edge` builds the edge of one row; `cursorOf` reads the cursor back from it.
+    */
+  def pageOf[A, E](values: List[A], requested: Int, afterSupplied: Boolean)(edge: A => E)(
+      cursorOf: E => String
+  ): (List[E], PageInfo) = {
+    val edges = values.take(requested).map(edge)
+    (
+      edges,
+      PageInfo(
+        hasNextPage = values.size > requested,
+        hasPreviousPage = afterSupplied,
+        startCursor = edges.headOption.map(cursorOf),
+        endCursor = edges.lastOption.map(cursorOf)
+      )
+    )
+  }
+
+  def connection[A](values: List[A], requested: Int, afterSupplied: Boolean)(cursor: A => String): Connection[A] = {
+    val (edges, pageInfo) = pageOf(values, requested, afterSupplied)(value => Edge(value, cursor(value)))(_.cursor)
+    Connection(edges, pageInfo)
   }
 
   private def validationError(
@@ -251,7 +290,7 @@ private[graphql] object HiringGraphQLResolverSupport {
   }
 
   private def authenticated(
-      context: Context[RequestContext, Unit]
+      context: Context[RequestContext, ?]
   ): HiringGraphQLResult[(ActorContext, HiringGraphQLServices)] =
     withHiring(context)(hiring => context.ctx.authenticatedActor.map(_ -> hiring))
 

@@ -11,7 +11,7 @@ import com.example.graphQL.cats.config.{
   KafkaPublisherConfig,
   KafkaSaslSecurityProtocol
 }
-import com.example.graphQL.cats.domain.model.{Job, JobStatus, Location}
+import com.example.graphQL.cats.domain.model.{Job, Location, JobState}
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.infrastructure.kafka.OperationalEventKafkaRuntime
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField}
@@ -66,7 +66,7 @@ class OperationalEventComposeIntegrationSpec extends KafkaIntegrationSuite {
     List("Scala"),
     Set("Scala"),
     Location("Cyprus", Some("Nicosia"), remote = true),
-    JobStatus.Open,
+    JobState.Open,
     createdAt,
     createdAt
   )

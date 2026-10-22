@@ -87,7 +87,15 @@ final class MongoMigrationLedgerSpec extends FunSuite {
       "023_consumer_receipt_identity",
       "024_optional_field_absence",
       "025_operational_collection_validators",
-      "026_outbox_envelope_source"
+      "026_outbox_envelope_source",
+      "027_job_canonical_filters",
+      "028_binary_embedding_vectors",
+      "029_interview_hiring_receipt_removal",
+      "030_interview_request_receipt_removal",
+      "031_search_session_work_single_copy",
+      "032_embedding_work_key_from_identity",
+      "033_application_event_actor_role",
+      "034_interview_workflow_initiator_role"
     )
     val actual = List(
       MigrationIds.UserJobRevisions,
@@ -115,7 +123,15 @@ final class MongoMigrationLedgerSpec extends FunSuite {
       MigrationIds.ConsumerReceiptIdentity,
       MigrationIds.OptionalFieldAbsence,
       MigrationIds.OperationalCollectionValidators,
-      MigrationIds.OutboxEnvelopeSource
+      MigrationIds.OutboxEnvelopeSource,
+      MigrationIds.JobCanonicalFilters,
+      MigrationIds.BinaryEmbeddingVectors,
+      MigrationIds.InterviewHiringReceiptRemoval,
+      MigrationIds.InterviewRequestReceiptRemoval,
+      MigrationIds.SearchSessionWorkSingleCopy,
+      MigrationIds.EmbeddingWorkKeyFromIdentity,
+      MigrationIds.ApplicationEventActorRole,
+      MigrationIds.InterviewWorkflowInitiatorRole
     ).map(_.value)
     assertEquals(actual, expected)
     assertEquals(MongoDeletedAccountEmbeddingMigrations.MigrationId, MigrationIds.DeletedAccountEmbeddings.value)

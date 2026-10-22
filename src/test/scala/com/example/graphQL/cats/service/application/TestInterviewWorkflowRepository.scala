@@ -1,7 +1,7 @@
 package com.example.graphQL.cats.service.application
 
 import cats.effect.IO
-import com.example.graphQL.cats.domain.model.Identifiers.UserId
+import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, UserId}
 import com.example.graphQL.cats.domain.workflow.*
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.RepositoryError
@@ -32,8 +32,6 @@ private[cats] class TestInterviewWorkflowRepository extends InterviewWorkflowRep
   override def quarantine(identity: String, now: Instant) = unexpected[Unit]
   override def recordResult(claim: ClaimedInterviewWorkflowCommand, result: InterviewResult, now: Instant) =
     unexpected[Unit]
-  override def findRequest(actorId: UserId, requestKey: UUID, fingerprint: MutationReceiptFingerprint) =
-    unexpected[Option[InterviewWorkflow]]
   override def findCommand(workflowId: InterviewWorkflowId, stepId: String) =
     unexpected[Option[InterviewWorkflowCommandRecord]]
   override def applyLifecycle(
@@ -42,7 +40,8 @@ private[cats] class TestInterviewWorkflowRepository extends InterviewWorkflowRep
       event: InterviewLifecycleEvent,
       origin: InterviewLifecycleOrigin,
       now: Instant,
-      availableAt: Option[Instant]
+      availableAt: Option[Instant],
+      context: MutationWriteContext
   ) = unexpected[InterviewLifecycleOutcome]
   override def approveRescheduledInterval(
       workflow: InterviewWorkflow,
@@ -72,17 +71,18 @@ private[cats] class TestInterviewWorkflowRepository extends InterviewWorkflowRep
       now: Instant,
       execution: Option[ClaimedInterviewWorkflowCommand]
   ) = unexpected[Unit]
-  override def hasHiringReceipt(workflowId: InterviewWorkflowId) = unexpected[Boolean]
+  override def isHiringCommitted(workflowId: InterviewWorkflowId) = unexpected[Boolean]
   override def create(
       workflow: InterviewWorkflow,
       initialCommand: InterviewWorkflowCommand,
-      requestKey: UUID,
-      fingerprint: MutationReceiptFingerprint,
-      createdAt: Instant
-  ) = unexpected[InterviewWorkflowAdvanceResult]
+      createdAt: Instant,
+      context: MutationWriteContext
+  ) = unexpected[Unit]
   override def findForActor(workflowId: InterviewWorkflowId, access: InterviewWorkflowAccess) =
     unexpected[Option[InterviewWorkflow]]
   override def findForAdmin(workflowId: InterviewWorkflowId) = unexpected[Option[InterviewWorkflow]]
+  override def findByApplication(applicationId: ApplicationId, access: InterviewWorkflowAccess) =
+    unexpected[Option[InterviewWorkflow]]
   override def advance(
       workflow: InterviewWorkflow,
       expectedRevision: Long,

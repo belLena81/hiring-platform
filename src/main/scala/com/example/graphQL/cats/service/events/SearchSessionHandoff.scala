@@ -10,7 +10,6 @@ import com.example.graphQL.cats.service.port.{
 }
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.{BackgroundWorker, Diagnostics, LogEvent, LogField, LogFields, LogOutcome}
-import com.example.graphQL.cats.service.events.{OperationalEventEnvelope, SearchSession}
 
 import scala.concurrent.duration.*
 
@@ -24,7 +23,7 @@ final case class SearchSessionHandoffConfig(
 )
 
 trait SearchSessionHandoff[F[_]] {
-  def enqueue(session: SearchSession, event: OperationalEventEnvelope): F[Unit]
+  def enqueue(session: SearchSession): F[Unit]
 }
 
 object SearchSessionHandoff {
@@ -46,19 +45,10 @@ object SearchSessionHandoff {
       )
       .sequence_
       .as(new SearchSessionHandoff[F] {
-        def enqueue(session: SearchSession, event: OperationalEventEnvelope): F[Unit] =
-          repository.enqueue(PendingSearchSessionWork(session, event), session.occurredAt).value.flatMap {
-            case Right(())   => F.unit
-            case Left(error) =>
-              diagnostics.emit(
-                LogEvent.RuntimeFailed,
-                fields = Map(
-                  LogField.Outcome -> LogOutcome.Rejected.wire,
-                  LogField.ErrorType -> errorType(error),
-                  LogField.ErrorLocation -> "unavailable"
-                )
-              )
-          }
+        def enqueue(session: SearchSession): F[Unit] =
+          repository
+            .enqueue(PendingSearchSessionWork(session), session.occurredAt)
+            .valueOrF(error => diagnostics.emit(LogEvent.RuntimeFailed, fields = rejectedFields(error)))
       })
   }
 
@@ -89,31 +79,36 @@ object SearchSessionHandoff {
   )(using F: Temporal[F]): F[Unit] =
     // Only a pass that reached the store and handled its claim (or found none) is progress for readiness.
     clock.realTimeInstant.flatMap { now =>
-      repository.claim(config.workerId, now, now.plusMillis(config.lease.toMillis)).value.flatMap {
-        case Right(Some(claim)) =>
-          processClaim(repository, config, claim, now).flatMap {
-            case WorkOutcome.Completed | WorkOutcome.RetryScheduled | WorkOutcome.Failed => alive
-            case WorkOutcome.OwnershipLost                                               =>
-              diagnostics.emit(LogEvent.RuntimeFailed, fields = Map(LogField.Outcome -> LogOutcome.OwnershipLost.wire))
-            case WorkOutcome.RecoveryDeferred(error) =>
-              diagnostics.emit(
-                LogEvent.RuntimeFailed,
-                fields =
-                  Map(LogField.Outcome -> LogOutcome.RecoveryDeferred.wire, LogField.ErrorType -> errorType(error))
-              ) *> F.sleep(config.pollInterval)
+      repository
+        .claim(config.workerId, now, now.plusMillis(config.lease.toMillis))
+        .foldF(
+          error =>
+            diagnostics.emit(LogEvent.RuntimeFailed, fields = rejectedFields(error)) *> F.sleep(config.pollInterval),
+          {
+            case Some(claim) =>
+              processClaim(repository, config, claim, now).flatMap {
+                case WorkOutcome.Completed | WorkOutcome.RetryScheduled | WorkOutcome.Failed => alive
+                case WorkOutcome.OwnershipLost                                               =>
+                  diagnostics
+                    .emit(LogEvent.RuntimeFailed, fields = Map(LogField.Outcome -> LogOutcome.OwnershipLost.wire))
+                case WorkOutcome.RecoveryDeferred(error) =>
+                  diagnostics.emit(
+                    LogEvent.RuntimeFailed,
+                    fields =
+                      Map(LogField.Outcome -> LogOutcome.RecoveryDeferred.wire, LogField.ErrorType -> errorType(error))
+                  ) *> F.sleep(config.pollInterval)
+              }
+            case None => alive *> F.sleep(config.pollInterval)
           }
-        case Right(None) => alive *> F.sleep(config.pollInterval)
-        case Left(error) =>
-          diagnostics.emit(
-            LogEvent.RuntimeFailed,
-            fields = Map(
-              LogField.Outcome -> LogOutcome.Rejected.wire,
-              LogField.ErrorType -> errorType(error),
-              LogField.ErrorLocation -> "unavailable"
-            )
-          ) *> F.sleep(config.pollInterval)
-      }
+        )
     }
+
+  private def rejectedFields(error: RepositoryError): Map[LogField, String] =
+    Map(
+      LogField.Outcome -> LogOutcome.Rejected.wire,
+      LogField.ErrorType -> errorType(error),
+      LogField.ErrorLocation -> "unavailable"
+    )
 
   private[events] enum WorkOutcome {
     case Completed, RetryScheduled, Failed, OwnershipLost
@@ -126,21 +121,26 @@ object SearchSessionHandoff {
       claim: com.example.graphQL.cats.service.port.ClaimedSearchSessionWork,
       now: java.time.Instant
   ): F[WorkOutcome] =
-    repository.complete(claim, now).value.flatMap {
-      case Right(()) => Monad[F].pure(WorkOutcome.Completed)
-      case Left(_)   =>
-        // Persisted attempts count prior failed executions, starting at zero.
-        val exhausted = claim.attempts.toLong + 1L >= config.maxAttempts.toLong
-        val transition =
-          if (exhausted) repository.fail(claim, SearchSessionWorkFailure.RetryExhausted, now)
-          else repository.retry(claim, now.plusMillis(config.retryDelay.toMillis))
-        transition.value.map {
-          case Right(())                      => if (exhausted) WorkOutcome.Failed else WorkOutcome.RetryScheduled
-          case Left(RepositoryError.Conflict) => WorkOutcome.OwnershipLost
-          // Leave the guarded claim for lease recovery; never pretend the write succeeded.
-          case Left(error) => WorkOutcome.RecoveryDeferred(error)
-        }
-    }
+    repository
+      .complete(claim, now)
+      .foldF(
+        _ => {
+          // Persisted attempts count prior failed executions, starting at zero.
+          val exhausted = claim.attempts.toLong + 1L >= config.maxAttempts.toLong
+          val transition =
+            if (exhausted) repository.fail(claim, SearchSessionWorkFailure.RetryExhausted, now)
+            else repository.retry(claim, now.plusMillis(config.retryDelay.toMillis))
+          transition.fold(
+            {
+              case RepositoryError.Conflict => WorkOutcome.OwnershipLost
+              // Leave the guarded claim for lease recovery; never pretend the write succeeded.
+              case error => WorkOutcome.RecoveryDeferred(error)
+            },
+            _ => if (exhausted) WorkOutcome.Failed else WorkOutcome.RetryScheduled
+          )
+        },
+        _ => Monad[F].pure(WorkOutcome.Completed)
+      )
 
   private[events] def errorType(error: RepositoryError): String =
     error match {

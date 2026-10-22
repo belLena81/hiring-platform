@@ -26,13 +26,11 @@ class MongoSearchSessionRetryIntegrationSpec extends MongoIntegrationSuite {
         now,
         now.plusSeconds(3600)
       )
-      val event =
-        OperationalEvents.searchPerformed(UUID.randomUUID(), session).fold(error => fail(error.toString), identity)
       val underlying =
         MongoSearchSessionWorkRepository.transactional(fixture.database, fixture.client, Diagnostics.noop[IO])
       for {
         _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
-        _ <- underlying.enqueue(PendingSearchSessionWork(session, event), now).value.flatMap(result)
+        _ <- underlying.enqueue(PendingSearchSessionWork(session), now).value.flatMap(result)
         executions <- Ref.of[IO, Vector[Int]](Vector.empty)
         terminal <- Deferred[IO, Unit]
         repository = new SearchSessionWorkRepository[IO] {
@@ -86,13 +84,11 @@ class MongoSearchSessionRetryIntegrationSpec extends MongoIntegrationSuite {
         now,
         now.plusSeconds(3600)
       )
-      val event =
-        OperationalEvents.searchPerformed(UUID.randomUUID(), session).fold(error => fail(error.toString), identity)
       val repository =
         MongoSearchSessionWorkRepository.transactional(fixture.database, fixture.client, Diagnostics.noop[IO])
       for {
         _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
-        _ <- repository.enqueue(PendingSearchSessionWork(session, event), now).value.flatMap(result)
+        _ <- repository.enqueue(PendingSearchSessionWork(session), now).value.flatMap(result)
         first <- repository
           .claim("first", now, now.plusSeconds(1))
           .value
@@ -137,13 +133,11 @@ class MongoSearchSessionRetryIntegrationSpec extends MongoIntegrationSuite {
         now,
         now.plusSeconds(3600)
       )
-      val event =
-        OperationalEvents.searchPerformed(UUID.randomUUID(), session).fold(error => fail(error.toString), identity)
       val repository =
         MongoSearchSessionWorkRepository.transactional(fixture.database, fixture.client, Diagnostics.noop[IO])
       for {
         _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
-        _ <- repository.enqueue(PendingSearchSessionWork(session, event), now).value.flatMap(result)
+        _ <- repository.enqueue(PendingSearchSessionWork(session), now).value.flatMap(result)
         first <- repository.claim("first", now, leaseUntil).value.flatMap(result)
         held <- repository.claim("second", leaseUntil.minusMillis(1L), leaseUntil.plusSeconds(30)).value.flatMap(result)
         reclaimed <- repository.claim("second", leaseUntil, leaseUntil.plusSeconds(30)).value.flatMap(result)

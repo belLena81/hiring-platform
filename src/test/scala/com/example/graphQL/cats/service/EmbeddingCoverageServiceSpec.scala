@@ -1,8 +1,9 @@
 package com.example.graphQL.cats.service
 
+import com.example.graphQL.cats.domain.model.{AccountState}
 import cats.effect.{IO, Ref}
 import com.example.graphQL.cats.FixedTestClock
-import com.example.graphQL.cats.domain.model.{AccountStatus, EntityEmbedding, User, UserRole}
+import com.example.graphQL.cats.domain.model.{EntityEmbedding, User, UserRole}
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.service.port.{EmbeddingCoverageRepository, RepositoryF}
 import com.example.graphQL.cats.service.search.*
@@ -17,12 +18,11 @@ final class EmbeddingCoverageServiceSpec extends CatsEffectSuite {
   private val adminId = UserId(UUID.fromString("40000000-0000-0000-0000-000000000001"))
   private val recruiterId = UserId(UUID.fromString("40000000-0000-0000-0000-000000000002"))
   private val candidateId = UserId(UUID.fromString("40000000-0000-0000-0000-000000000003"))
-  private val admin = User(adminId, None, "Admin", UserRole.Admin, None, now, adminSingleton = true)
+  private val admin = User(adminId, None, "Admin", UserRole.Admin, None, now)
   private val recruiter = User(recruiterId, None, "Recruiter", UserRole.Recruiter, None, now)
   private val candidate = User(candidateId, None, "Candidate", UserRole.Candidate, None, now)
-  private val duplicateAdmin =
-    admin.copy(id = UserId(UUID.fromString("40000000-0000-0000-0000-000000000004")), adminSingleton = false)
-  private val deletedAdmin = admin.copy(accountStatus = AccountStatus.Deleted, deletedAt = Some(now))
+  private val duplicateAdmin = admin.copy(id = UserId(UUID.fromString("40000000-0000-0000-0000-000000000004")))
+  private val deletedAdmin = admin.copy(state = AccountState.Deleted(now))
   private val empty = EmbeddingCoverageObservation(
     EmbeddingCoverageTally.empty,
     Nil,
@@ -35,7 +35,8 @@ final class EmbeddingCoverageServiceSpec extends CatsEffectSuite {
       RepositoryF.lift(requests.update(request :: _).as(empty))
   }
 
-  private def users(values: User*) = new TestUsers(values.map(user => user.id -> user).toMap)
+  private def users(values: User*) =
+    new TestUsers(values.map(user => user.id -> user).toMap, Set(duplicateAdmin.id))
 
   private def live(known: User*)(requests: Ref[IO, List[EmbeddingCoverageScanRequest]]) =
     EmbeddingCoverageService.live(users(known*), new Recording(requests), 5.minutes, clock = FixedTestClock.at(now))
@@ -138,7 +139,8 @@ final class EmbeddingCoverageServiceSpec extends CatsEffectSuite {
       }
   }
 
-  private final class TestUsers(values: Map[UserId, User]) extends ServiceFixtures.VersionedUserRepositoryTestAdapter {
+  private final class TestUsers(values: Map[UserId, User], override protected val unmarkedAdmins: Set[UserId])
+      extends ServiceFixtures.VersionedUserRepositoryTestAdapter {
     override def find(id: UserId): RepositoryF[IO, Option[User]] = RepositoryF.at[IO].pure(values.get(id))
     override def updateEmbedding(id: UserId, embedding: EntityEmbedding): RepositoryF[IO, Unit] =
       RepositoryF.at[IO].pure(())

@@ -48,10 +48,22 @@ private[mongo] object MongoOutboxEnvelopeSourceMigrations {
     Target(MongoCollections.SearchSessionWork, s"${MongoFields.Event}.${MongoFields.Payload}")
   )
 
-  /** Installed (and exactly proven) by this step; `event_outbox` is also installed at every start. */
-  private val validators: List[(String, Document)] = List(
-    MongoCollections.EventOutbox -> MongoHiringValidators.outboxValidator,
-    MongoCollections.SearchSessionWork -> MongoOperationalValidators.searchSessionWorkValidator
+  /** What this step installs for one collection, and the later generations its completed proof also accepts. */
+  private final case class Successor(collection: String, installed: Document, later: List[Document] = Nil) {
+    def accepted: List[Document] = installed :: later
+  }
+
+  /** Installed (and exactly proven) by this step; `event_outbox` is also installed at every start. A later step
+    * (`031_search_session_work_single_copy`) replaces the search-session-work definition again; once that definition is
+    * in place it is the one audited, and it is never overwritten by this step.
+    */
+  private val validators: List[Successor] = List(
+    Successor(MongoCollections.EventOutbox, MongoHiringValidators.outboxValidator),
+    Successor(
+      MongoCollections.SearchSessionWork,
+      MongoOperationalValidators.searchSessionWorkValidatorThrough026,
+      List(MongoOperationalValidators.searchSessionWorkValidator)
+    )
   )
 
   private val CheckpointPattern = raw"(\d{2}):(.+)".r
@@ -92,17 +104,20 @@ private[mongo] object MongoOutboxEnvelopeSourceMigrations {
       val after = from.collect { case (start, id) if start == ordinal => id }
       IO.unlessA(skipped)(
         MongoBatchScan.byId(MongoBatchScan.BatchSize, after)(page(run, target, _))(key(run, _)) { rows =>
+          // An empty page has nothing to unset and issues no write.
           rows.traverse(key(run, _)).flatMap { ids =>
-            run.database
-              .getCollection(target.collection)
-              .updateMany(
-                Filters.and(Filters.in(MongoFields.Id, ids.asJava), target.pending),
-                Updates.unset(target.path),
-                // The earlier search-session-work validator requires the field being removed; the audit below checks
-                // the rewritten rows against the successor validators.
-                new UpdateOptions().bypassDocumentValidation(true)
-              ) *>
-              IO.whenA(checkpoint)(ids.lastOption.traverse_(id => run.advance(checkpointOf(ordinal, id))))
+            IO.unlessA(ids.isEmpty)(
+              run.database
+                .getCollection(target.collection)
+                .updateMany(
+                  Filters.and(Filters.in(MongoFields.Id, ids.asJava), target.pending),
+                  Updates.unset(target.path),
+                  // The earlier search-session-work validator requires the field being removed; the audit below checks
+                  // the rewritten rows against the successor validators.
+                  new UpdateOptions().bypassDocumentValidation(true)
+                ) *>
+                IO.whenA(checkpoint)(ids.lastOption.traverse_(id => run.advance(checkpointOf(ordinal, id))))
+            )
           }
         }
       )
@@ -113,17 +128,29 @@ private[mongo] object MongoOutboxEnvelopeSourceMigrations {
       database.getCollection(target.collection).find(target.pending).limit(1).first.map(_.nonEmpty)
     )
 
+  /** The definition of the collection that is in force: a later generation already in place, otherwise this step's. */
+  private def inForce(database: MongoHiringSetup.SetupDatabase, successor: Successor): IO[(Document, Boolean)] =
+    MongoHiringValidators.collectionOptions(database, List(successor.collection)).map { options =>
+      successor.later
+        .find(MongoHiringValidators.strictValidatorMatches(options.get(successor.collection), _))
+        .fold(successor.installed -> false)(_ -> true)
+    }
+
   /** Fails with the first collection holding a row its successor validator rejects; the error names only the
     * collection.
     */
   private def audit(run: MigrationRun): IO[Unit] =
-    validators.traverse_ { case (name, validator) =>
-      run.database
-        .getCollection(name)
-        .find(new Document("$nor", List(validator).asJava))
-        .limit(1)
-        .first
-        .flatMap(invalid => IO.whenA(invalid.nonEmpty)(run.fail[Unit](s"found invalid stored data in $name")))
+    validators.traverse_ { successor =>
+      inForce(run.database, successor).flatMap { case (validator, _) =>
+        run.database
+          .getCollection(successor.collection)
+          .find(new Document("$nor", List(validator).asJava))
+          .limit(1)
+          .first
+          .flatMap(invalid =>
+            IO.whenA(invalid.nonEmpty)(run.fail[Unit](s"found invalid stored data in ${successor.collection}"))
+          )
+      }
     }
 
   private def unsetPayloads(run: MigrationRun): IO[Unit] =
@@ -138,7 +165,9 @@ private[mongo] object MongoOutboxEnvelopeSourceMigrations {
       }
 
   private def verifyCompleted(database: MongoHiringSetup.SetupDatabase): IO[CompletedProof] =
-    MongoHiringValidators.assertStrictValidators(database, validators) *>
+    validators.traverse_(successor =>
+      MongoHiringValidators.assertAnyStrictValidator(database, successor.collection, successor.accepted)
+    ) *>
       pendingTarget(database).map(_.fold[CompletedProof](CompletedProof.Trusted)(_ => CompletedProof.Reopen))
 
   private def cutover(run: MigrationRun): IO[Unit] =
@@ -146,8 +175,12 @@ private[mongo] object MongoOutboxEnvelopeSourceMigrations {
       _ <- MongoMigrationLedger.requireComplete(run.database, MigrationIds.OperationalCollectionValidators)
       _ <- unsetPayloads(run)
       _ <- audit(run)
-      _ <- validators.traverse_ { case (name, validator) =>
-        MongoHiringValidators.install(run.database, name, validator)
+      _ <- validators.traverse_ { successor =>
+        inForce(run.database, successor).flatMap { case (_, laterInPlace) =>
+          IO.unlessA(laterInPlace)(
+            MongoHiringValidators.install(run.database, successor.collection, successor.installed)
+          )
+        }
       }
       _ <- audit(run)
     } yield ()

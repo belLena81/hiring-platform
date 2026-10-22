@@ -16,7 +16,7 @@ class JobDiscoverySpec extends FunSuite {
     List("Scala"),
     skills,
     Location("Cyprus", Some(city), remote = false),
-    JobStatus.Open,
+    JobState.Open,
     now,
     now
   )

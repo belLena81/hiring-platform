@@ -145,6 +145,39 @@ final class IdempotentSpec extends CatsEffectSuite {
       }
   }
 
+  test(
+    "AC-06.2 only an untranslated repository error is re-raised; a translated search failure is a rejected receipt"
+  ) {
+    // `UseCaseF.translate` turns the repository's lone vector failure into a search error before it reaches a write, so
+    // it would be recorded as a rejection, not abort the transaction. No write produces it today; this pins the rule.
+    val translated = UseCaseError.Search(com.example.graphQL.cats.service.SearchError.VectorSearchUnavailable)
+    val receipts = new MutationReceiptRepository[IO] {
+      override def execute[A, E](
+          key: MutationReceiptKey,
+          fingerprint: MutationReceiptFingerprint,
+          currentTime: Instant,
+          expiresAt: Instant
+      )(
+          write: MutationWriteContext => RepositoryF[IO, MutationWriteOutcome[A, E]]
+      ): RepositoryF[IO, MutationReceiptExecution[A, E]] =
+        write(MutationWriteContext.directWrite).flatMap {
+          case MutationWriteOutcome.Rejected(error) =>
+            RepositoryF.at[IO].pure(MutationReceiptExecution.Rejected(error))
+          case other => RepositoryF.at[IO].raise(RepositoryError.InvalidEvent).map(_ => fail(s"unexpected $other"))
+        }
+    }
+    Idempotent(receipts, FixedTestClock.at(now))
+      .execute[String](
+        "createJob",
+        "actor-1",
+        request,
+        value => MutationEntityReference("job", value),
+        reference => EitherT.rightT(reference.entityId)
+      )(_ => EitherT.leftT(translated))
+      .value
+      .map(result => assertEquals(result, Left(translated)))
+  }
+
   test("keeps business rejection distinct from repository failure") {
     val rejection = UseCaseError.Domain(DomainError.Forbidden)
     Idempotent(

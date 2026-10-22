@@ -1,7 +1,7 @@
 package com.example.graphQL.cats.repository.mongo
 
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
-import com.example.graphQL.cats.domain.model.{GeoPoint, Job, JobStatus, Location}
+import com.example.graphQL.cats.domain.model.{GeoPoint, Job, JobState, Location}
 import com.mongodb.MongoClientSettings
 import munit.FunSuite
 import org.bson.BsonDocument
@@ -14,7 +14,7 @@ class MongoJobContentUpdateSpec extends FunSuite {
   private val now = Instant.parse("2026-01-01T10:00:00Z")
   private val closedAt = Instant.parse("2026-02-01T10:00:00Z")
 
-  private def job(location: Location, status: JobStatus, closed: Option[Instant]): Job = Job(
+  private def job(location: Location, state: JobState): Job = Job(
     JobId(UUID.fromString("00000000-0000-0000-0000-000000000601")),
     UserId(UUID.fromString("00000000-0000-0000-0000-000000000602")),
     "Scala Developer",
@@ -22,10 +22,9 @@ class MongoJobContentUpdateSpec extends FunSuite {
     List("Cats Effect"),
     Set("Scala", "MongoDB"),
     location,
-    status,
+    state,
     now,
-    closed.getOrElse(now),
-    closed
+    state.closedAt.getOrElse(now)
   )
 
   private def render(job: Job): BsonDocument =
@@ -35,7 +34,7 @@ class MongoJobContentUpdateSpec extends FunSuite {
     Option(document.getDocument(operator, null)).fold(Set.empty[String])(_.keySet().asScala.toSet)
 
   test("MSC-01.1 an open job without city or point sets content, unsets absent optionals and advances version once") {
-    val update = render(job(Location("Cyprus", None, remote = true), JobStatus.Open, None))
+    val update = render(job(Location("Cyprus", None, remote = true), JobState.Open))
     assertEquals(
       keys(update, "$set"),
       Set(
@@ -63,8 +62,7 @@ class MongoJobContentUpdateSpec extends FunSuite {
     val update = render(
       job(
         Location("Cyprus", Some("Nicosia"), remote = false, coordinates = Some(GeoPoint(33.4, 35.1))),
-        JobStatus.Closed,
-        Some(closedAt)
+        JobState.Closed(closedAt)
       )
     )
     assert(keys(update, "$set").containsAll(Set("location.city", "location.point", "closedAt", "status")))
@@ -90,10 +88,9 @@ class MongoJobContentUpdateSpec extends FunSuite {
   test("MSC-01.1 drift guard: the content update covers exactly the content keys the job codec stores") {
     val full = job(
       Location("Cyprus", Some("Nicosia"), remote = false, coordinates = Some(GeoPoint(33.4, 35.1))),
-      JobStatus.Closed,
-      Some(closedAt)
+      JobState.Closed(closedAt)
     )
-    val minimal = job(Location("Cyprus", None, remote = true), JobStatus.Open, None)
+    val minimal = job(Location("Cyprus", None, remote = true), JobState.Open)
     def written(job: Job): Set[String] = {
       val update = render(job)
       keys(update, "$set") ++ keys(update, "$unset")

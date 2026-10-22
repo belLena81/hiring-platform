@@ -43,20 +43,32 @@ final class InterviewSubjectCleanupWorker[F[_]](using F: Temporal[F])(
     }
 
   private def processObserved(subject: Either[RepositoryError, InterviewSubjectCleanup]): F[Option[RepositoryError]] =
-    subject.fold(error => RepositoryF.fromEither[F, Unit](Left(error)), process).value.attempt.flatMap {
-      case Right(Right(_))    => Applicative[F].pure(None)
-      case Right(Left(error)) =>
-        diagnostics
-          .emit(LogEvent.RuntimeFailed, fields = Map(LogField.SpanName -> "interviewCleanup.process"))
-          .as(Some(error))
-      case Left(error) =>
-        diagnostics
-          .emit(
-            LogEvent.RuntimeFailed,
-            fields = LogFields.failure(error) + (LogField.SpanName -> "interviewCleanup.process")
+    subject
+      .fold(error => RepositoryF.raise[F, Unit](error), process)
+      .value
+      .attempt
+      .flatMap(
+        // A typed failure keeps its safe error code; an unexpected one is reported and surfaces as `Unavailable`.
+        _.fold(
+          thrown =>
+            diagnostics
+              .emit(
+                LogEvent.RuntimeFailed,
+                fields = LogFields.failure(thrown) + (LogField.SpanName -> "interviewCleanup.process")
+              )
+              .as(Some(RepositoryError.Unavailable)),
+          _.fold(
+            error =>
+              diagnostics
+                .emit(
+                  LogEvent.RuntimeFailed,
+                  fields = LogFields.repositoryFailure(error) + (LogField.SpanName -> "interviewCleanup.process")
+                )
+                .as(Some(error)),
+            _ => Applicative[F].pure(None)
           )
-          .as(Some(RepositoryError.Unavailable))
-    }
+        )
+      )
 
   private def process(current: InterviewSubjectCleanup): RepositoryF[F, Unit] = {
     def advance(observation: InterviewCleanupObservation): RepositoryF[F, Unit] =
@@ -117,16 +129,16 @@ final class InterviewSubjectCleanupWorker[F[_]](using F: Temporal[F])(
   private def polling: fs2.Stream[F, Unit] =
     fs2.Stream
       .unfoldEval(Option.empty[InterviewCleanupCursor]) { cursor =>
-        runOnce(cursor).value.attempt.flatMap {
-          case Right(Right(progress)) =>
-            // A page with a failing subject is not progress for readiness.
-            (if (progress.firstFailure.isEmpty) alive else Applicative[F].unit).as(Some(((), progress.next)))
-          case Right(Left(_)) => diagnostics.emit(LogEvent.RuntimeFailed).as(Some(((), cursor)))
-          case Left(error)    =>
-            diagnostics
-              .emit(LogEvent.RuntimeFailed, fields = LogFields.failure(error))
-              .as(Some(((), cursor)))
-        }
+        runOnce(cursor).value.attempt.flatMap(
+          _.fold(
+            thrown => diagnostics.emit(LogEvent.RuntimeFailed, fields = LogFields.failure(thrown)).as(cursor),
+            _.fold(
+              error => diagnostics.emit(LogEvent.RuntimeFailed, fields = LogFields.repositoryFailure(error)).as(cursor),
+              // A page with a failing subject is not progress for readiness.
+              progress => (if (progress.firstFailure.isEmpty) alive else Applicative[F].unit).as(progress.next)
+            )
+          ).map(next => Some(((), next)))
+        )
       }
       .metered(1.second)
 }

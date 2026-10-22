@@ -19,7 +19,7 @@ import com.example.graphQL.cats.service.search.EmbeddingWorkPublisher
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.error.DomainValidationError
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
-import com.example.graphQL.cats.domain.model.{GeoPoint, Job, JobStatus, Location, User, UserRole}
+import com.example.graphQL.cats.domain.model.{GeoPoint, Job, JobStatus, Location, User, UserRole, JobState}
 import com.example.graphQL.cats.service.events.OperationalEventType
 import java.util.UUID
 import scala.concurrent.duration.*
@@ -328,13 +328,17 @@ class JobServiceSpec extends CatsEffectSuite {
   }
 
   test("stored admin without singleton marker is rejected") {
-    val unseededAdmin = admin.copy(adminSingleton = false)
     for {
       users <- Ref.of[IO, Map[com.example.graphQL.cats.domain.model.Identifiers.UserId, User]](
-        Map(adminId -> unseededAdmin)
+        Map(adminId -> admin)
       )
       jobs <- Ref.of[IO, Map[JobId, Job]](Map(jobId -> openJob))
-      service <- deterministicService(InMemoryUsers(users), InMemoryJobs(jobs), List(later), Nil)
+      service <- deterministicService(
+        InMemoryUsers(users, unmarkedAdmins = Set(adminId)),
+        InMemoryJobs(jobs),
+        List(later),
+        Nil
+      )
       result <- service.closeJob(request("close-unseeded-admin"), ActorContext(adminId, UserRole.Admin), jobId).value
     } yield assertEquals(result, Left(UseCaseError.Authentication(AuthenticationError.SingletonAdminViolation)))
   }
@@ -391,7 +395,7 @@ class JobServiceSpec extends CatsEffectSuite {
   test("publishJob opens a draft and records a job update event") {
     for {
       users <- Ref.of[IO, Map[UserId, User]](Map(recruiterId -> recruiter))
-      jobs <- Ref.of[IO, Map[JobId, Job]](Map(jobId -> openJob.copy(status = JobStatus.Draft)))
+      jobs <- Ref.of[IO, Map[JobId, Job]](Map(jobId -> openJob.copy(state = JobState.Draft)))
       outbox <- Ref.of[IO, Vector[com.example.graphQL.cats.service.events.OperationalEventEnvelope]](Vector.empty)
       jobRepository = InMemoryJobs(jobs, Some(outbox))
       service <- deterministicService(InMemoryUsers(users), jobRepository, List(later), Nil)
@@ -412,7 +416,7 @@ class JobServiceSpec extends CatsEffectSuite {
         Map(candidateId -> candidate)
       )
       jobs <- Ref.of[IO, Map[JobId, Job]](
-        Map(jobId -> openJob.copy(status = JobStatus.Closed))
+        Map(jobId -> openJob.copy(state = JobState.Closed(java.time.Instant.EPOCH)))
       )
       service = TestHiringServices.job(InMemoryUsers(users), InMemoryJobs(jobs))
       result <- service.viewJob(ActorContext(candidateId, UserRole.Candidate), jobId).value

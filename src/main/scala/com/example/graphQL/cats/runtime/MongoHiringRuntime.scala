@@ -155,7 +155,7 @@ object MongoHiringRuntime {
         breakers.mongoWrites
       )
       applications = MongoApplicationRepository.transactional(database, client, diagnostics, breakers.mongoWrites)
-      searchSessions = MongoSearchSessionRepository.transactional(database, client, diagnostics, breakers.mongoWrites)
+      searchSessions = MongoSearchSessionRepository(database, diagnostics)
       searchSessionWork = MongoSearchSessionWorkRepository.transactional(
         database,
         client,
@@ -342,6 +342,7 @@ object MongoHiringRuntime {
             jobs,
             applications,
             interviewRepository,
+            idempotent,
             config.kafka.interview.preCommitDeadlineSeconds.seconds,
             proposalTtl = proposalTtl
           )

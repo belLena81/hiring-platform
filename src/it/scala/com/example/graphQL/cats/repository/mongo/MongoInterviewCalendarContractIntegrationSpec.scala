@@ -42,7 +42,9 @@ final class MongoInterviewCalendarContractIntegrationSpec
                   interval,
                   now.plusSeconds(300),
                   UUID.randomUUID(),
-                  ApplicationStatus.Accepted
+                  ApplicationStatus.Accepted,
+                  recruiter,
+                  com.example.graphQL.cats.domain.model.UserRole.Recruiter
                 )
                 .leftMap(error => new AssertionError(s"Invalid workflow: $error"))
             )
@@ -51,9 +53,8 @@ final class MongoInterviewCalendarContractIntegrationSpec
               .create(
                 workflow,
                 InterviewWorkflow.initialCommand(workflow),
-                UUID.randomUUID(),
-                MutationReceiptFingerprint.fromCanonicalInput(workflow.id.value.toString),
-                now
+                now,
+                MutationWriteContext.directWrite
               )
               .value
               .flatMap(_.fold(error => IO.raiseError(new AssertionError(s"create failed: $error")), _ => IO.unit))

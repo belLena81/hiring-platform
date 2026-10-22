@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.repository.mongo.MongoF.asRepository
 import cats.effect.IO
 import cats.effect.std.UUIDGen
 import cats.syntax.all.*
@@ -33,7 +34,7 @@ object MongoEmbeddingWorkEnqueuer {
         _session: Option[ClientSession[IO]],
         _key: EmbeddingWorkKey,
         _now: Instant
-    ): RepositoryF[IO, Unit] = ().pure[[A] =>> RepositoryF[IO, A]]
+    ): RepositoryF[IO, Unit] = ().asRepository
   }
 }
 
@@ -58,18 +59,16 @@ final class MongoEmbeddingWorkRepository(
         MongoSessionOperations.findOne(collection, session, MongoFilter.eq(MongoFields.Id, key.value))
       )
       result <- row.traverse(document =>
-        RepositoryF
-          .at[IO]
-          .fromEither(MongoDocumentFields.toRepository(for {
-            generation <- MongoDocumentFields.requiredNumberAsLong(document, MongoFields.Generation)
-            attempts <- MongoDocumentFields.requiredNumberAsInt(document, MongoFields.Attempts)
-            state <- MongoDocumentFields.requiredEnum(document, MongoFields.State)(
-              MongoDocumentFields.byName(EmbeddingWorkState.values)
-            )
-            failure <- MongoDocumentFields.optionalEnum(document, MongoFields.Failure)(
-              MongoDocumentFields.byName(EmbeddingWorkFailure.values)
-            )
-          } yield EmbeddingWorkInspection(generation, attempts, state, failure)))
+        MongoF.fromEither(MongoDocumentFields.toRepository(for {
+          generation <- MongoDocumentFields.requiredNumberAsLong(document, MongoFields.Generation)
+          attempts <- MongoDocumentFields.requiredNumberAsInt(document, MongoFields.Attempts)
+          state <- MongoDocumentFields.requiredEnum(document, MongoFields.State)(
+            MongoDocumentFields.byName(EmbeddingWorkState.values)
+          )
+          failure <- MongoDocumentFields.optionalEnum(document, MongoFields.Failure)(
+            MongoDocumentFields.byName(EmbeddingWorkFailure.values)
+          )
+        } yield EmbeddingWorkInspection(generation, attempts, state, failure)))
       )
     } yield result
   }
@@ -99,7 +98,7 @@ final class MongoEmbeddingWorkRepository(
       transactions: MongoTransactionRunner
   ): RepositoryF[IO, Boolean] =
     if (expectedGeneration < 1L || expectedGeneration == Long.MaxValue)
-      RepositoryF.at[IO].raise(RepositoryError.InvalidStoredData)
+      MongoF.raise(RepositoryError.InvalidStoredData)
     else
       transactions.run { session =>
         for {
@@ -143,7 +142,7 @@ final class MongoEmbeddingWorkRepository(
       key: EmbeddingWorkKey,
       now: Instant
   ): RepositoryF[IO, Unit] = {
-    val pipeline = List(enqueueStage(key, now))
+    val pipeline = List(enqueueStage(now))
     // A state predicate in an upsert filter attempts a duplicate insert for an active lease.
     // Conditional pipeline fields instead inspect state within one identity-only atomic write.
     MongoRepositorySupport
@@ -168,7 +167,7 @@ final class MongoEmbeddingWorkRepository(
       }
   }
 
-  private def enqueueStage(key: EmbeddingWorkKey, now: Instant): BsonDocument = {
+  private def enqueueStage(now: Instant): BsonDocument = {
     def reference(field: String): BsonString = new BsonString(s"$$$field")
     def expression(operator: String, arguments: BsonValue*): BsonDocument =
       new BsonDocument(operator, new BsonArray(arguments.toList.asJava))
@@ -189,8 +188,6 @@ final class MongoEmbeddingWorkRepository(
       expression("$cond", processing, reference(field), otherwise)
     val timestamp = literal(new BsonDateTime(now.toEpochMilli))
     val fields = new BsonDocument()
-      .append(MongoFields.Kind, initialized(MongoFields.Kind, new BsonString(key.kind.toString)))
-      .append(MongoFields.WorkEntityId, initialized(MongoFields.WorkEntityId, new BsonString(key.entityId)))
       .append(MongoFields.CreatedAt, initialized(MongoFields.CreatedAt, new BsonDateTime(now.toEpochMilli)))
       .append(
         MongoFields.Generation,
@@ -220,29 +217,28 @@ final class MongoEmbeddingWorkRepository(
       leaseUntil: Instant
   ): RepositoryF[IO, Option[ClaimedEmbeddingWork]] =
     RepositoryF.lift(uuidGen.randomUUID.map(_.toString)).flatMap { token =>
-      val available = MongoFilter.and(
-        MongoFilter.in(MongoFields.State, List(EmbeddingWorkState.Ready, EmbeddingWorkState.Retry).map(_.toString)),
-        MongoFilter.lte(MongoFields.AvailableAt, now.toDate)
-      )
       MongoRepositorySupport
         .repositoryGuard(diagnostics, "embeddingWork.claim") {
-          MongoLeaseQueue.claimNext(
+          MongoLeaseQueue.claimReady(
             collection,
-            None,
-            MongoLeaseQueue.claimable(available, processing, now),
-            MongoLeaseQueue.leaseStamp(EmbeddingWorkState.Processing.toString, workerId, token, leaseUntil, now),
+            List(EmbeddingWorkState.Ready, EmbeddingWorkState.Retry).map(_.toString),
+            EmbeddingWorkState.Processing.toString,
+            workerId,
+            token,
+            now,
+            leaseUntil,
             Sorts.ascending(MongoFields.AvailableAt, MongoFields.Id)
-          )(document => RepositoryF.at[IO].fromEither(readClaim(document)))
+          )(document => MongoF.fromEither(readClaim(document)))
         }
     }
 
   override def renew(claim: ClaimedEmbeddingWork, now: Instant, leaseUntil: Instant): RepositoryF[IO, Boolean] =
-    if (!leaseUntil.isAfter(now)) RepositoryF.at[IO].raise(RepositoryError.InvalidStoredData)
-    else
+    LeaseRequest.whenWindowValid(now, leaseUntil) {
       MongoRepositorySupport.repositoryGuard(diagnostics, "embeddingWork.renew") {
         MongoLeaseQueue
           .renewHeld(collection, None, MongoFilter.and(leaseFilter(claim), MongoLeaseQueue.leaseHeld(now)), leaseUntil)
       }
+    }
 
   override def complete(claim: ClaimedEmbeddingWork): RepositoryF[IO, Unit] =
     MongoRepositorySupport
@@ -304,14 +300,14 @@ final class MongoEmbeddingWorkRepository(
 
   private def readClaim(document: Document): Either[RepositoryError, ClaimedEmbeddingWork] =
     MongoDocumentFields.toRepository(for {
-      kind <- MongoDocumentFields.requiredEnum(document, MongoFields.Kind)(
-        MongoDocumentFields.byName(EmbeddingWorkKind.values)
-      )
-      entityId <- MongoDocumentFields.requiredString(document, MongoFields.WorkEntityId)
+      id <- MongoDocumentFields.requiredString(document, MongoFields.Id)
+      key <- EmbeddingWorkKey
+        .fromId(id)
+        .toRight(MongoHiringCodecs.StoredDocumentError.InvalidField(MongoFields.Id))
       generation <- MongoDocumentFields.requiredNumberAsLong(document, MongoFields.Generation)
       attempts <- MongoDocumentFields.requiredNumberAsInt(document, MongoFields.Attempts)
       leaseToken <- MongoDocumentFields.requiredString(document, MongoFields.LeaseToken)
-    } yield ClaimedEmbeddingWork(EmbeddingWorkKey(kind, entityId), generation, attempts, leaseToken))
+    } yield ClaimedEmbeddingWork(key, generation, attempts, leaseToken))
 }
 
 final case class EmbeddingWorkInspection(

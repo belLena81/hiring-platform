@@ -38,6 +38,7 @@ final class ApplicationService[F[_]: Monad](
 ) extends ApplicationUseCases[F] {
   private val authorization = ActorAuthorization(users)
   private val authorizedJobs = AuthorizedJobAccess(authorization, jobs)
+  private val authorizedApplications = AuthorizedApplicationAccess(authorization, jobs, applications)
 
   override def submitApplication(
       request: IdempotencyRequest,
@@ -48,13 +49,15 @@ final class ApplicationService[F[_]: Monad](
       context =>
         for {
           candidate <- authorization.resolve(actor)
-          _ <- UseCaseF.ensure[F](candidate.role == UserRole.Candidate, UseCaseError.Domain(DomainError.Forbidden))
+          _ <- UseCaseF.forbidUnless[F](candidate.role == UserRole.Candidate)
           job <- UseCaseF.found(jobs.findSubmissionSnapshot(jobId), "job")
           now <- EitherT.liftF(clock.realTimeInstant)
           applicationId <- EitherT.liftF(uuidGen.randomUUID.map(uuid => ApplicationId(uuid)))
           eventId <- EitherT.liftF(uuidGen.randomUUID.map(uuid => ApplicationEventId(uuid)))
           application <- EitherT.fromEither[F](
-            ApplicationSubmission.create(candidate, job, applicationId, now).leftMap(UseCaseError.Domain.apply)
+            ApplicationSubmission
+              .create(candidate.id, candidate.role, job, applicationId, now)
+              .leftMap(UseCaseError.Domain.apply)
           )
           initialEvent = ApplicationEvent(
             eventId,
@@ -65,7 +68,7 @@ final class ApplicationService[F[_]: Monad](
             now,
             None,
             None,
-            Some(candidate.role)
+            candidate.role
           )
           event = OperationalEvents.applicationCreated(eventId.value, application, candidate.id, now)
           _ <- UseCaseF.repository(
@@ -87,7 +90,7 @@ final class ApplicationService[F[_]: Monad](
   ): UseCaseF[F, List[Application]] =
     for {
       (user, scope) <- authorization.readScope(actor)
-      _ <- UseCaseF.ensure[F](user.role == UserRole.Candidate, UseCaseError.Domain(DomainError.Forbidden))
+      _ <- UseCaseF.forbidUnless[F](user.role == UserRole.Candidate)
       applications <- UseCaseF.repository(this.applications.findByCandidate(scope, page))
     } yield applications
 
@@ -96,10 +99,10 @@ final class ApplicationService[F[_]: Monad](
       jobId: JobId,
       page: ApplicationPageRequest
   ): UseCaseF[F, List[Application]] =
-    authorizedJobs.manage(actor, jobId) { job =>
+    authorizedJobs.manage(actor, jobId) { (record, job) =>
       authorization
-        .readScope(actor)
-        .flatMap((_, scope) => UseCaseF.repository(applications.findByJob(scope, job.id, page)))
+        .scopeOf(actor, record)
+        .flatMap(scope => UseCaseF.repository(applications.findByJob(scope, job.id, page)))
     }
 
   override def changeStatus(
@@ -113,15 +116,13 @@ final class ApplicationService[F[_]: Monad](
     idempotent.executeFor(actor, statusOperation(target), request, applicationReference, replayApplication(actor)) {
       context =>
         for {
-          actorUser <- authorization.resolve(actor)
-          application <- UseCaseF.found(applications.find(applicationId), "application")
-          job <- UseCaseF.found(jobs.find(application.jobId), "job")
-          _ <- UseCaseF.ensure[F](authorization.canManage(actorUser, job), UseCaseError.Domain(DomainError.Forbidden))
+          managed <- authorizedApplications.manage(actor, applicationId)
+          ManagedApplication(actorUser, application, _) = managed
           now <- EitherT.liftF(clock.realTimeInstant)
           eventId <- EitherT.liftF(uuidGen.randomUUID.map(uuid => ApplicationEventId(uuid)))
           (persistedApplication, change) <- EitherT.fromEither[F](
             ApplicationLifecycle
-              .changeStatus(target, actorUser.id, Some(actorUser.role), now, feedback, reason)
+              .changeStatus(target, actorUser.id, actorUser.role, now, feedback, reason)
               .run(application)
               .leftMap(UseCaseError.Domain.apply)
           )
@@ -140,7 +141,7 @@ final class ApplicationService[F[_]: Monad](
 
   private def replayApplication(actor: ActorContext): MutationEntityReference => UseCaseF[F, Application] =
     Idempotent.replayById[F, ApplicationId, Application]("application", ApplicationId.apply)(id =>
-      readModel.canViewApplication(actor, id) *> UseCaseF.found(applications.find(id), "application")
+      readModel.canViewApplication(actor, id)
     )
 
   private def applicationReference(application: Application): MutationEntityReference =

@@ -148,7 +148,9 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
             com.example.graphQL.cats.domain.workflow.InterviewInterval(starts, ends),
             at.plusSeconds(300),
             UUID.randomUUID(),
-            ApplicationStatus.Accepted
+            ApplicationStatus.Accepted,
+            recruiterId,
+            com.example.graphQL.cats.domain.model.UserRole.Recruiter
           )
           .fold(error => fail(s"Invalid workflow: $error"), identity)
         val users = MongoUserRepository.transactional(
@@ -171,6 +173,9 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
           jobs,
           applications,
           workflows,
+          com.example.graphQL.cats.service.mutation.Idempotent(
+            MongoMutationReceiptRepository.transactional(fixture.database, fixture.client, Diagnostics.noop[IO])
+          ),
           5.minutes
         )
         val work = new MongoEmbeddingWorkRepository(fixture.database, Diagnostics.noop[IO])
@@ -241,8 +246,13 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
               } yield ()
             }
           count <- calls.get
-          user <- successful(users.find(candidateId)).flatMap(IO.fromOption(_)(new AssertionError("Missing candidate")))
-          job <- successful(jobs.find(application.jobId)).flatMap(IO.fromOption(_)(new AssertionError("Missing job")))
+          // `find` omits the vector by design; the embedding metadata is read with the whole-document read.
+          user <- successful(users.findVersioned(candidateId))
+            .flatMap(IO.fromOption(_)(new AssertionError("Missing candidate")))
+            .map(_.value)
+          job <- successful(jobs.findVersioned(application.jobId))
+            .flatMap(IO.fromOption(_)(new AssertionError("Missing job")))
+            .map(_.value)
         } yield {
           // The scheduling fences changed no content, so the in-flight embedding was stored without a second pass.
           assertEquals(count, 1)
@@ -268,7 +278,7 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
     database.use { case (db, transactions) =>
       val users = new MongoUserRepository(db, transactions, MongoEmbeddingWorkEnqueuer.disabled, Diagnostics.noop[IO])
       val work = new MongoEmbeddingWorkRepository(db, Diagnostics.noop[IO])
-      val admin = User(UserId(UUID.randomUUID()), None, "Admin", UserRole.Admin, None, now, adminSingleton = true)
+      val admin = User(UserId(UUID.randomUUID()), None, "Admin", UserRole.Admin, None, now)
       val candidate = User(
         UserId(UUID.randomUUID()),
         Some(email(s"${UUID.randomUUID()}@example.com")),
@@ -438,7 +448,7 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
         List("Cats Effect"),
         Set("Scala"),
         Location("Cyprus", Some("Nicosia"), remote = true),
-        JobStatus.Open,
+        JobState.Open,
         now,
         now
       )
@@ -484,8 +494,9 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
         staleJob <- jobs.updateEmbedding(observedJob, embedding).value
         staleUser <- users.updateEmbedding(observedUser, embedding).value
         completions <- List(first, second).traverse(claim => work.complete(claim).value)
-        currentJob <- successful(jobs.find(jobId))
-        currentUser <- successful(users.find(candidateId))
+        // The whole-document reads: `find` omits the vector, so it could not show that a stale write left none.
+        currentJob <- successful(jobs.findVersioned(jobId)).map(_.map(_.value))
+        currentUser <- successful(users.findVersioned(candidateId)).map(_.map(_.value))
         documents <- List(first.key, second.key).traverse(stored(db, _))
       } yield {
         assertEquals(staleJob, Left(RepositoryError.Conflict))

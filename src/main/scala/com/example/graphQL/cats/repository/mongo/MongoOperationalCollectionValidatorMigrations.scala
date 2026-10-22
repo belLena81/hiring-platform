@@ -14,11 +14,11 @@ import scala.jdk.CollectionConverters.*
   * which a writer could have stored an invalid row between the first audit and the install. Nothing is rewritten, so
   * there is no checkpoint; the whole step is idempotent and a restart reruns the same three phases.
   *
-  * The completed proof is read-only and exact: every definition in `MongoOperationalValidators.all` (users V2 included)
-  * must be installed unchanged (or, for search-session-work, its successor from `026`), so later drift fails closed
-  * with the drifted collection and is never overwritten. The users validator is also installed at every start by
-  * `MongoHiringSetup`; the earlier proof of `016_candidate_residence_integrity` accepts it as the documented successor
-  * of its own definition.
+  * The completed proof is read-only and exact: every collection must hold one generation of its history in
+  * `MongoOperationalValidators.acceptedByCompletedProof` (what this step installed, users V2 included, or a documented
+  * successor installed by a later step), so later drift fails closed with the drifted collection and is never
+  * overwritten. The users validator is also installed at every start by `MongoHiringSetup`; the earlier proof of
+  * `016_candidate_residence_integrity` accepts it as the documented successor of its own definition.
   *
   * Recovery is forward-only. Stop every writer running an earlier binary before upgrading: it stores `null` optional
   * values, `subjectIds` on workflows and notification receipts, an inbox receipt without `documentType` and a user
@@ -29,16 +29,17 @@ private[mongo] object MongoOperationalCollectionValidatorMigrations {
   private val Id: MigrationId = MigrationIds.OperationalCollectionValidators
   val MigrationId: String = Id.value
 
+  /** Each collection must hold the definition this step installed or its documented successor (the current one). */
   private def verifyCompleted(database: MongoHiringSetup.SetupDatabase): IO[CompletedProof] =
-    // Migration 026 replaces the search-session-work definition and 028 the users definition with their documented
-    // successors; the proof accepts either one and fails closed on any other drift.
+    // Later steps replace the definitions of six collections with their documented successors; the proof accepts
+    // any generation of the history and fails closed on any other drift.
     MongoOperationalValidators.acceptedByCompletedProof
       .traverse_ { case (name, accepted) => MongoHiringValidators.assertAnyStrictValidator(database, name, accepted) }
       .as(CompletedProof.Trusted)
 
   /** Fails with the first collection holding a row its validator rejects; the error names the collection only. */
   private def audit(run: MigrationRun): IO[Unit] =
-    MongoOperationalValidators.all.traverse_ { case (name, validator) =>
+    MongoOperationalValidators.installedBy025.traverse_ { case (name, validator) =>
       run.database
         .getCollection(name)
         .find(new Document("$nor", List(validator).asJava))
@@ -51,7 +52,7 @@ private[mongo] object MongoOperationalCollectionValidatorMigrations {
     for {
       _ <- MongoMigrationLedger.requireComplete(run.database, MigrationIds.OptionalFieldAbsence)
       _ <- audit(run)
-      _ <- MongoOperationalValidators.all.traverse_ { case (name, validator) =>
+      _ <- MongoOperationalValidators.installedBy025.traverse_ { case (name, validator) =>
         MongoHiringValidators.install(run.database, name, validator)
       }
       _ <- audit(run)

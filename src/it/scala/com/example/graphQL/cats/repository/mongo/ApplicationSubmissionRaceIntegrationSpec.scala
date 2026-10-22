@@ -46,7 +46,7 @@ final class ApplicationSubmissionRaceIntegrationSpec extends MongoIntegrationSui
       List("Race requirement"),
       Set("Scala"),
       Location("Cyprus", Some("Nicosia"), remote = false),
-      JobStatus.Open,
+      JobState.Open,
       fixtureTime,
       fixtureTime
     )

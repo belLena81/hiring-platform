@@ -39,7 +39,11 @@ final class SemanticSearchLexicalFallbackSpec extends CatsEffectSuite {
   private def jobNumber(n: Int): JobId = JobId(new UUID(0L, 0x1000L + n))
   private def userNumber(n: Int): UserId = UserId(new UUID(0L, 0x2000L + n))
   private def jobIn(n: Int, city: String, status: JobStatus = JobStatus.Open): Job =
-    openJob.copy(id = jobNumber(n), location = Location("Ukraine", Some(city), remote = false), status = status)
+    openJob.copy(
+      id = jobNumber(n),
+      location = Location("Ukraine", Some(city), remote = false),
+      state = JobState.requested(status, now)
+    )
 
   private def candidateUser(
       n: Int,
@@ -51,7 +55,7 @@ final class SemanticSearchLexicalFallbackSpec extends CatsEffectSuite {
       id = userNumber(n),
       name = s"Candidate $n",
       role = role,
-      accountStatus = status,
+      state = accountStateOf(status),
       profile = Some(UserProfile.Candidate(profile))
     )
 
@@ -217,6 +221,41 @@ final class SemanticSearchLexicalFallbackSpec extends CatsEffectSuite {
     }
   }
 
+  test("AC-06.2 only a lone vector failure degrades; Overloaded, Unavailable and corrupt data never fall back") {
+    val kyiv = jobIn(1, "Kyiv")
+    def search(vector: RepositoryError) =
+      for {
+        h <- harness(
+          List(skilledCandidate),
+          List(kyiv),
+          embedding = providerUp,
+          vector = Left(vector),
+          lexicalJobIds = List(kyiv.id)
+        )
+        result <- h.service.semanticJobSearch(candidateActor, "scala", noFilter, pageSize, searchId).value
+        lexicalQueries <- h.lexicalQueries.get
+      } yield (result, lexicalQueries.size)
+
+    for {
+      vectorOnly <- search(RepositoryError.VectorSearchUnavailable)
+      overloaded <- search(RepositoryError.Overloaded)
+      unavailable <- search(RepositoryError.Unavailable)
+      corrupt <- search(RepositoryError.InvalidStoredData)
+    } yield {
+      // Given the lexical branch answered, the lexical fallback serves the request and says why.
+      assertEquals(vectorOnly._1.map(_.degraded), Right(Some(DegradedSearch(SearchError.VectorSearchUnavailable))))
+      assertEquals(vectorOnly._2, 1)
+      // An overloaded or wholly unavailable store is an unavailable search, and no lexical query repeats the load.
+      List(overloaded, unavailable).foreach { case (result, lexicalQueries) =>
+        assertEquals(result, Left(UseCaseError.Search(SearchError.VectorSearchUnavailable)))
+        assertEquals(lexicalQueries, 0)
+      }
+      // Corrupt stored data is sanitized the same way (the existing contract) and also never falls back.
+      assertEquals(corrupt._1, Left(UseCaseError.Search(SearchError.VectorSearchUnavailable)))
+      assertEquals(corrupt._2, 0)
+    }
+  }
+
   test("AIR-05.1 a healthy provider and vector search is not degraded and never reads the lexical index") {
     for {
       h <- harness(List(skilledCandidate), List(jobIn(1, "Kyiv")), embedding = providerUp)
@@ -238,7 +277,8 @@ final class SemanticSearchLexicalFallbackSpec extends CatsEffectSuite {
         List(skilledCandidate),
         List(stays, closes),
         lexicalJobIds = List(closes.id, stays.id),
-        afterLexicalRetrieval = jobs => jobs.update(_.updated(closes.id, closes.copy(status = JobStatus.Closed)))
+        afterLexicalRetrieval =
+          jobs => jobs.update(_.updated(closes.id, closes.copy(state = JobState.Closed(java.time.Instant.EPOCH))))
       )
       result <- h.service
         .semanticJobSearch(candidateActor, "scala", noFilter, pageSize, searchId)

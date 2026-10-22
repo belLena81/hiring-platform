@@ -38,7 +38,7 @@ final case class ApplicationEvent(
     occurredAt: Instant,
     feedback: Option[String],
     reason: Option[String],
-    actorRole: Option[UserRole]
+    actorRole: UserRole
 )
 
 object ApplicationEvent {
@@ -51,7 +51,7 @@ object ApplicationEvent {
       occurredAt: Instant,
       feedback: Option[String],
       reason: Option[String],
-      actorRole: Option[UserRole]
+      actorRole: UserRole
   ): ValidatedNel[DomainValidationError, ApplicationEvent] =
     (
       validateOptionalText("feedback", feedback, FieldLimits.LongTextMaxChars),

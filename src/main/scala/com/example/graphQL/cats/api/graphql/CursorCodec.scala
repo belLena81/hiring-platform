@@ -5,23 +5,32 @@ import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, Ap
 import com.example.graphQL.cats.shared.Parsing
 import com.example.graphQL.cats.domain.pagination.TimestampIdCursor
 import com.example.graphQL.cats.service.search.NearbyJobCursor
-import com.example.graphQL.cats.shared.crypto.{Hmac, HmacJwt}
-import pdi.jwt.{JwtAlgorithm, JwtCirce, JwtClaim}
+import com.example.graphQL.cats.shared.crypto.Hmac
 
 import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
 import java.time.Instant
-import java.util.UUID
+import java.util.{Base64, UUID}
 
 private[cats] object CursorCodec {
   private val KeyDerivationLabel = "hiring-platform:graphql-cursor"
-  private val CursorIssuer = "hiring-platform-cursor"
-  private val CursorAudience = "hiring-graphql-api"
+
+  /** A cursor is a position, not a credential: every page request is authorized again, so the lifetime only bounds how
+    * long a paused client may resume a listing. One day outlasts a paused session; tampering is excluded by the
+    * signature, not by a short expiry.
+    */
+  val DefaultTtlSeconds: Long = 86400L
+
+  private val Separator = "."
+  private val PayloadSeparator = "|"
+  private val url = Base64.getUrlEncoder.withoutPadding()
+  private val urlDecoder = Base64.getUrlDecoder
 
   final class CursorKey private[graphql] (private val bytes: Array[Byte], val ttlSeconds: Long) {
-    private[graphql] val secretKey = Hmac.secretKey(bytes)
+    private[graphql] def sign(value: String): Array[Byte] = Hmac.sha256(bytes, value)
   }
 
-  /** Wire shape of one cursor type: the payload is `kind|field|field...` signed inside the JWT subject. */
+  /** Wire shape of one cursor type: the payload is `kind|field|field...`, followed by the expiry on the wire. */
   trait Keyed[A] {
     def kind: CursorKind
     def fields(value: A): List[String]
@@ -97,35 +106,55 @@ private[cats] object CursorCodec {
         case _ => Left(CursorError.Malformed("Invalid cursor shape"))
       }
 
-  def keyFromSecret(secret: String, ttlSeconds: Long = 900L): CursorKey = {
-    new CursorKey(Hmac.sha256(secret.getBytes(StandardCharsets.UTF_8), KeyDerivationLabel), ttlSeconds)
-  }
+  /** A cursor bound to the list it was issued for (parent id and filters): replaying it on another parent or with
+    * another filter is refused, like a nearby cursor with other criteria. The scope holds no `|`.
+    */
+  final case class Scoped[A](scope: String, value: A)
 
-  def encode[A](value: A, now: Instant)(using keyed: Keyed[A], key: CursorKey): String = {
-    val payload = (keyed.kind.tag :: keyed.fields(value)).mkString("|")
-    val claim = JwtClaim()
-      .about(payload)
-      .by(CursorIssuer)
-      .to(CursorAudience)
-      .issuedAt(now.getEpochSecond)
-      .expiresAt(now.plusSeconds(key.ttlSeconds).getEpochSecond)
-    JwtCirce.encode(claim, key.secretKey, JwtAlgorithm.HS256)
-  }
-
-  def decode[A](value: String, now: Instant)(using keyed: Keyed[A], key: CursorKey): Either[CursorError, A] = {
-    for {
-      claim <- HmacJwt
-        .decode(value, key.secretKey, now, CursorIssuer, CursorAudience)
-        .toRight(CursorError.Malformed("Invalid cursor"))
-      payload <- claim.subject.toRight(CursorError.Malformed("Invalid cursor subject"))
-      tagged <- payload.split("\\|", -1).toList match {
-        case tag :: rest => Right((tag, rest))
-        case Nil         => Left(CursorError.Malformed("Invalid cursor shape"))
+  given [A](using inner: Keyed[A]): Keyed[Scoped[A]] with
+    def kind: CursorKind = inner.kind
+    def fields(value: Scoped[A]): List[String] = value.scope :: inner.fields(value.value)
+    def read(fields: List[String]): Either[CursorError, Scoped[A]] =
+      fields match {
+        case scope :: rest => inner.read(rest).map(Scoped(scope, _))
+        case Nil           => Left(CursorError.Malformed("Invalid cursor shape"))
       }
-      (tag, fields) = tagged
+
+  def keyFromSecret(secret: String, ttlSeconds: Long = DefaultTtlSeconds): CursorKey =
+    new CursorKey(Hmac.sha256(secret.getBytes(StandardCharsets.UTF_8), KeyDerivationLabel), ttlSeconds)
+
+  /** Compact opaque cursor: `base64url(kind|fields|expiryEpochSecond).base64url(HMAC-SHA256 of the first segment)`. */
+  def encode[A](value: A, now: Instant)(using keyed: Keyed[A], key: CursorKey): String = {
+    val payload =
+      (keyed.kind.tag :: keyed.fields(value) ::: List(now.plusSeconds(key.ttlSeconds).getEpochSecond.toString))
+        .mkString(PayloadSeparator)
+    val body = url.encodeToString(payload.getBytes(StandardCharsets.UTF_8))
+    body + Separator + url.encodeToString(key.sign(body))
+  }
+
+  def decode[A](value: String, now: Instant)(using keyed: Keyed[A], key: CursorKey): Either[CursorError, A] =
+    for {
+      signed <- value.split("\\.", -1).toList match {
+        case List(body, signature) => Right((body, signature))
+        case _                     => Left(CursorError.Malformed("Invalid cursor"))
+      }
+      (body, signature) = signed
+      presented <- Either
+        .catchNonFatal(urlDecoder.decode(signature))
+        .leftMap(_ => CursorError.Malformed("Invalid cursor"))
+      _ <- Either.cond(MessageDigest.isEqual(key.sign(body), presented), (), CursorError.Malformed("Invalid cursor"))
+      payload <- Either
+        .catchNonFatal(new String(urlDecoder.decode(body), StandardCharsets.UTF_8))
+        .leftMap(_ => CursorError.Malformed("Invalid cursor"))
+      tagged <- payload.split("\\|", -1).toList match {
+        case tag :: rest if rest.nonEmpty => Right((tag, rest.init, rest.last))
+        case _                            => Left(CursorError.Malformed("Invalid cursor shape"))
+      }
+      (tag, fields, expiry) = tagged
+      expiresAt <- expiry.toLongOption.toRight(CursorError.Malformed("Invalid cursor expiry"))
+      _ <- Either.cond(now.getEpochSecond <= expiresAt, (), CursorError.Malformed("Invalid cursor"))
       actualKind <- CursorKind.values.find(_.tag == tag).toRight(CursorError.Malformed("Unknown cursor kind"))
       _ <- Either.cond(actualKind == keyed.kind, (), CursorError.WrongKind(actualKind.tag))
       cursor <- keyed.read(fields)
     } yield cursor
-  }
 }

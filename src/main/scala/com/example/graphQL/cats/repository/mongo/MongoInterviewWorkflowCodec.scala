@@ -31,32 +31,11 @@ private[mongo] object MongoInterviewWorkflowCodec {
       .append(RevisionField, value.revision)
       .append("phase", value.phase.toString)
       .append("notified", value.notified.toList.map(_.toString).sorted.asJava)
-    val withRole = value.initiatedByRole.fold(base)(role => base.append("initiatedByRole", role.toString))
+    val withRole = base.append("initiatedByRole", value.initiatedByRole.toString)
     MongoInterviewWorkflowLifecycleCodec.insertFields(value).foldLeft(withRole) {
       case (document, (field, fieldValue)) => document.append(field, fieldValue)
     }
   }
-
-  def requestReceiptDocument(
-      receiptId: String,
-      workflowId: InterviewWorkflowId,
-      fingerprint: MutationReceiptFingerprint,
-      createdAt: Instant
-  ): Document =
-    new Document(MongoFields.Id, receiptId)
-      .append(DocumentTypeField, RequestReceiptType)
-      .append(RequestWorkflowField, workflowId.value.toString)
-      .append(RequestFingerprintField, fingerprint.value)
-      .append(MongoFields.CreatedAt, createdAt.toDate)
-
-  def requestReceiptId(actorId: UserId, requestKey: UUID): String =
-    s"request:${actorId.value}:$requestKey"
-
-  def decodeReceipt(document: Document): Either[RepositoryError, (InterviewWorkflowId, String)] =
-    for {
-      workflow <- uuid(document, RequestWorkflowField).map(InterviewWorkflowId.apply)
-      fingerprint <- string(document, RequestFingerprintField)
-    } yield workflow -> fingerprint
 
   def inboxDocument(
       id: String,
@@ -72,19 +51,9 @@ private[mongo] object MongoInterviewWorkflowCodec {
       .append(RevisionField, revision)
       .append(MongoFields.OccurredAt, at.toDate)
 
-  /** The hiring receipt names its subjects so erasure finds it without the workflow, which may have expired. */
-  def hiringReceiptDocument(
-      id: String,
-      workflowId: InterviewWorkflowId,
-      candidateId: UserId,
-      recruiterId: UserId,
-      at: Instant
-  ): Document =
-    new Document(MongoFields.Id, id)
-      .append(DocumentTypeField, HiringReceiptType)
-      .append(WorkflowIdField, workflowId.value.toString)
-      .append(MongoFields.SubjectIds, List(candidateId.value.toString, recruiterId.value.toString).distinct.asJava)
-      .append(MongoFields.OccurredAt, at.toDate)
+  /** The status event of the hiring commit has a deterministic identity, so a repeated commit finds its own row. */
+  def hiringStatusEventId(workflowId: InterviewWorkflowId): java.util.UUID =
+    com.example.graphQL.cats.shared.StableIds.uuid(s"${workflowId.value}:status")
 
   def commandDocument(record: InterviewWorkflowCommandRecord): Document =
     commandEnvelope(
@@ -153,9 +122,9 @@ private[mongo] object MongoInterviewWorkflowCodec {
           .map(_.toSet)
       )
       lifecycle <- MongoInterviewWorkflowLifecycleCodec.decode(document, phase)
-      initiatorRole <- Option(document.get("initiatedByRole")).traverse {
-        case name: String => named(UserRole.values)(name)
-        case _            => Left(RepositoryError.InvalidStoredData)
+      initiatorRole <- Option(document.get("initiatedByRole")) match {
+        case Some(name: String) => named(UserRole.values)(name)
+        case _                  => Left(RepositoryError.InvalidStoredData)
       }
       _ <- Either.cond(
         revision >= 0L && (!Set(InterviewWorkflowPhase.Completed, InterviewWorkflowPhase.Cancelled)(phase) ||

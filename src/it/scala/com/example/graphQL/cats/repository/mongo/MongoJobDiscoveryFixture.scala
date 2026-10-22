@@ -25,7 +25,7 @@ private[mongo] abstract class MongoJobDiscoveryFixture extends MongoIntegrationS
       List("Scala"),
       Set("Scala", s"Skill$index"),
       Location("Cyprus", Some("Nicosia"), remote, point),
-      JobStatus.Open,
+      JobState.Open,
       now,
       now
     )
@@ -45,7 +45,7 @@ private[mongo] abstract class MongoJobDiscoveryFixture extends MongoIntegrationS
         com.example.graphQL.cats.service.read.HiringReadScope
           .validated(
             com.example.graphQL.cats.service.ActorContext(actor.id, actor.role),
-            actor,
+            com.example.graphQL.cats.service.port.ActorRecord.of(actor),
             com.example.graphQL.cats.service.auth.ActorAuthorization(users)
           )
           .leftMap(error => new AssertionError(error.toString))

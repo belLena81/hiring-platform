@@ -1,0 +1,78 @@
+query JobApplicationsGraph($jobId: JobID!, $first: Int!, $after: Cursor, $status: ApplicationStatus, $eventsFirst: Int!) {
+  job(id: $jobId) {
+    id
+    title
+    applications(first: $first, after: $after, status: $status) {
+      edges {
+        cursor
+        node {
+          id
+          status
+          candidate { id name }
+          events(first: $eventsFirst) {
+            edges { node { id previousStatus newStatus occurredAt } }
+            pageInfo { hasNextPage hasPreviousPage startCursor endCursor }
+          }
+        }
+      }
+      pageInfo { hasNextPage hasPreviousPage startCursor endCursor }
+    }
+  }
+}
+
+query MyJobsWithApplications($first: Int!, $applicationsFirst: Int!) {
+  myJobs(first: $first) {
+    edges {
+      node {
+        id
+        title
+        applications(first: $applicationsFirst) {
+          edges { node { id status candidate { id name } } }
+          pageInfo { hasNextPage endCursor }
+        }
+      }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+
+query MyApplicationsGraph($first: Int!, $after: Cursor) {
+  me {
+    id
+    applications(first: $first, after: $after) {
+      edges { node { id status job { id title } } }
+      pageInfo { hasNextPage hasPreviousPage startCursor endCursor }
+    }
+  }
+}
+
+query InterviewWorkflowApplication($workflowId: InterviewWorkflowID!) {
+  interviewWorkflow(workflowId: $workflowId) {
+    id
+    progress
+    application { id status job { id title } candidate { id name } }
+  }
+}
+
+query MyApplicationsWithInterview($first: Int!) {
+  myApplications(first: $first) {
+    edges { node { id status interview { id progress slot { startsAt endsAt } } } }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+
+mutation ErrorFragmentAcrossMutations($publish: JobActionInput!, $create: CreateJobInput!) {
+  publishJob(input: $publish) {
+    ... on Job { id }
+    ...Refusal
+  }
+  createJob(input: $create) {
+    ... on Job { id }
+    ...Refusal
+  }
+}
+
+fragment Refusal on UserError {
+  code
+  message
+}

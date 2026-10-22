@@ -1,9 +1,10 @@
 package com.example.graphQL.cats.service.search
 
+import com.example.graphQL.cats.domain.model.{AccountState, JobState}
 import cats.effect.IO
 
 import cats.syntax.all.*
-import com.example.graphQL.cats.domain.model.{AccountStatus, GeoPoint, Job, JobStatus, Location}
+import com.example.graphQL.cats.domain.model.{GeoPoint, Job, JobStatus, Location}
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.service.{ActorContext, RepositoryError, SearchError, ServiceFixtures, UseCaseError}
 import com.example.graphQL.cats.service.port.{JobRepository, RepositoryF}
@@ -33,7 +34,7 @@ final class LexicalQueryFacetsSpec extends CatsEffectSuite {
     ServiceFixtures.openJob.copy(
       id = jobId(n),
       skills = skills,
-      status = status,
+      state = JobState.requested(status, created),
       location = Location("Cyprus", Some(city), remote, coordinates),
       createdAt = createdAt
     )
@@ -187,7 +188,7 @@ final class LexicalQueryFacetsSpec extends CatsEffectSuite {
   }
 
   test("HDQ-12.6 recruiters, deleted candidates and unknown actors are denied before the matcher is called") {
-    val deleted = candidate.copy(accountStatus = AccountStatus.Deleted)
+    val deleted = candidate.copy(state = AccountState.Deleted(java.time.Instant.EPOCH))
     val denied = List(ServiceFixtures.recruiter, deleted).map(user => ActorContext(user.id, user.role)) :+
       ActorContext(UserId(new UUID(9L, 9L)), candidate.role)
     for {
@@ -377,6 +378,7 @@ final class LexicalQueryFacetsSpec extends CatsEffectSuite {
     export delegate.{
       relatedJobs,
       find,
+      findOwner,
       findVersioned,
       findSubmissionSnapshot,
       findOpen,

@@ -32,11 +32,25 @@ final class MongoJobRepository(
   private def collection = Mongo4catsCollections.documents(database, MongoCollections.Jobs)
   private def outbox = Mongo4catsCollections.documents(database, MongoCollections.EventOutbox)
 
+  override def findOwner(id: JobId): RepositoryF[IO, Option[JobOwner]] =
+    MongoRepositorySupport
+      .repositoryGuard(diagnostics, "MongoJobRepository.findOwner")(
+        RepositoryF
+          .lift(
+            MongoSessionOperations.findById(collection, None, id.value.toString, Some(MongoReadProjections.jobOwner))
+          )
+          .subflatMap(document =>
+            MongoStoredDocumentDecoding.repository(document.traverse(MongoAuthorizationProjectionCodecs.readOwner))
+          )
+      )
+
   override def find(id: JobId): RepositoryF[IO, Option[Job]] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "MongoJobRepository.find")(
         RepositoryF
-          .lift(MongoSessionOperations.findById(collection, None, id.value.toString))
+          .lift(
+            MongoSessionOperations.findById(collection, None, id.value.toString, Some(MongoReadProjections.jobDisplay))
+          )
           .subflatMap(document => MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readJob)))
       )
 
@@ -65,7 +79,7 @@ final class MongoJobRepository(
   override def relatedJobs(scope: HiringReadScope, keys: List[JobRelationKey]): RepositoryF[IO, List[RelatedJob]] = {
     import MongoAuthorizedReadQueries.*
     val requested = keys.distinct
-    if (requested.isEmpty) RepositoryF.at[IO].pure(Nil)
+    if (requested.isEmpty) MongoF.pure(Nil)
     else {
       val pipeline = List(
         matching(
@@ -80,7 +94,13 @@ final class MongoJobRepository(
         )
       ) ++
         actor(scope) ++ applicationAccess(scope) ++ List(
-          lookup(MongoCollections.Jobs, MongoFields.JobId, MongoFields.Id, "related"),
+          lookup(
+            MongoCollections.Jobs,
+            MongoFields.JobId,
+            MongoFields.Id,
+            "related",
+            List(MongoReadProjections.jobDisplayStage)
+          ),
           unwind("related")
         )
       documents(database, MongoCollections.Applications, pipeline, requested.size, diagnostics).subflatMap(values =>
@@ -197,11 +217,11 @@ final class MongoJobRepository(
       maxTime: Option[scala.concurrent.duration.FiniteDuration]
   ): RepositoryF[IO, List[Document]] =
     discoveryPolicy match {
-      case None         => RepositoryF.at[IO].raise(RepositoryError.Unavailable)
+      case None         => MongoF.raise(RepositoryError.Unavailable)
       case Some(policy) =>
         import scala.jdk.CollectionConverters.*
         val allowed = scope.role == UserRole.Candidate || scope.role == UserRole.Admin
-        if (!allowed) RepositoryF.at[IO].raise(RepositoryError.AuthorityRevoked)
+        if (!allowed) MongoF.raise(RepositoryError.AuthorityRevoked)
         else {
           val pipeline = MongoJobRepository.authorizedDiscoveryPipeline(scope, jobsPipeline)
           RepositoryF
@@ -309,9 +329,7 @@ final class MongoJobRepository(
       session: Option[ClientSession[IO]]
   ): RepositoryF[IO, Versioned[Job]] =
     for {
-      nextVersion <- RepositoryF
-        .at[IO]
-        .fromEither(Versioned.nextVersion(expected.version).toRight(RepositoryError.Conflict))
+      nextVersion <- MongoF.fromEither(Versioned.nextVersion(expected.version).toRight(RepositoryError.Conflict))
       result <- RepositoryF.lift(
         MongoSessionOperations.updateOne(
           collection,
@@ -323,21 +341,27 @@ final class MongoJobRepository(
           MongoJobContentUpdate(replacement)
         )
       )
-      _ <- RepositoryF.at[IO].fromEither(MongoRepositorySupport.matchedOne(result))
+      _ <- MongoF.fromEither(MongoRepositorySupport.matchedOne(result))
       _ <- embeddingWork.enqueue(session, EmbeddingWorkKey(EmbeddingWorkKind.Job, replacement.id.value.toString), now)
       _ <- MongoOperationalEventInsertion.insert(outbox, session, events, now, diagnostics)
     } yield Versioned(replacement, nextVersion)
 
   override def updateEmbedding(id: JobId, embedding: EntityEmbedding): RepositoryF[IO, Unit] =
-    findVersioned(id).flatMap {
-      case Some(job) => updateEmbedding(job, embedding)
-      case None      => EitherT.leftT[IO, Unit](RepositoryError.Conflict)
-    }
+    MongoRepositorySupport
+      .repositoryGuard(diagnostics, "MongoJobRepository.updateEmbedding")(
+        MongoRevisionReads.revision(collection, id.value.toString)
+      )
+      .flatMap {
+        case Some(version) => writeEmbedding(id, version, embedding)
+        case None          => EitherT.leftT[IO, Unit](RepositoryError.Conflict)
+      }
 
   override def updateEmbedding(
       observed: Versioned[Job],
       embedding: EntityEmbedding
-  ): RepositoryF[IO, Unit] = {
+  ): RepositoryF[IO, Unit] = writeEmbedding(observed.value.id, observed.version, embedding)
+
+  private def writeEmbedding(id: JobId, version: Long, embedding: EntityEmbedding): RepositoryF[IO, Unit] = {
     val encoded = MongoHiringCodecs.embeddingDocument(embedding)
     RepositoryF
       .lift(
@@ -346,8 +370,8 @@ final class MongoJobRepository(
             collection,
             None,
             MongoFilter.and(
-              MongoFilter.eq(MongoFields.Id, observed.value.id.value.toString),
-              MongoFilter.eq(MongoFields.Version, observed.version),
+              MongoFilter.eq(MongoFields.Id, id.value.toString),
+              MongoFilter.eq(MongoFields.Version, version),
               MongoFilter.lt(MongoFields.Version, Long.MaxValue)
             ),
             MongoUpdate.combine(
@@ -364,9 +388,13 @@ final class MongoJobRepository(
   }
 
   private def findMany(filter: MongoFilter, page: JobPageRequest): RepositoryF[IO, List[Job]] =
-    MongoKeysetPaging.page(collection, filter, MongoFields.CreatedAt, page.pageSize)(MongoHiringCodecs.readJob)(
-      diagnostics
-    )
+    MongoKeysetPaging.page(
+      collection,
+      filter,
+      MongoFields.CreatedAt,
+      page.pageSize,
+      Some(MongoReadProjections.jobList(page.projection))
+    )(MongoHiringCodecs.readJob(_, page.projection))(diagnostics)
 
   private def baseSearchFilter(filter: JobSearchFilter, page: JobPageRequest): MongoFilter =
     baseJobFilter(

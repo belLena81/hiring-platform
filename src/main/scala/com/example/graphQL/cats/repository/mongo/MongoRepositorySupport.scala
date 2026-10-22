@@ -11,7 +11,6 @@ import com.mongodb.client.model.{
   DeleteOptions,
   FindOneAndUpdateOptions,
   InsertOneOptions,
-  ReplaceOptions,
   ReturnDocument,
   UpdateOptions,
   Updates
@@ -25,6 +24,7 @@ import com.example.graphQL.cats.domain.pagination.PageSize
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFields}
 import com.example.graphQL.cats.service.Diagnostics.*
 import com.mongodb.{
+  MongoBulkWriteException,
   MongoCommandException,
   MongoConnectionPoolClearedException,
   MongoException,
@@ -130,13 +130,33 @@ private[mongo] object MongoSessionOperations {
       collection: IO[Documents],
       session: Option[ClientSession[IO]],
       filter: MongoFilter,
-      limit: Int
+      limit: Int,
+      projection: Option[Bson] = None
   ): IO[List[Document]] =
     collection.flatMap { c =>
       val ordered = Sorts.ascending(MongoFields.Id)
-      session.fold(c.find(filter.bson).sort(ordered).limit(limit).boundedStream(limit).compile.toList)(active =>
-        c.find(active, filter.sessionFilter).sort(ordered).limit(limit).boundedStream(limit).compile.toList
-      )
+      val query = session.fold(c.find(filter.bson))(active => c.find(active, filter.sessionFilter))
+      projection.fold(query)(query.projection).sort(ordered).limit(limit).boundedStream(limit).compile.toList
+    }
+
+  /** One ordered bulk write of upserting single-document updates: one command for any number of entries. The first
+    * failing entry (for example a duplicate key) fails the whole write.
+    */
+  def upsertEach(
+      collection: IO[Documents],
+      session: Option[ClientSession[IO]],
+      entries: List[(MongoFilter, MongoUpdate)]
+  ): IO[Unit] =
+    if (entries.isEmpty) IO.unit
+    else {
+      val upsert = new UpdateOptions().upsert(true)
+      val commands = entries.map { case (filter, update) =>
+        mongo4cats.models.collection.WriteCommand.UpdateOne(filter.sessionFilter, update.sessionUpdate, upsert)
+      }
+      val options = new com.mongodb.client.model.BulkWriteOptions()
+      collection
+        .flatMap(c => session.fold(c.bulkWrite(commands, options))(active => c.bulkWrite(active, commands, options)))
+        .void
     }
 
   def insertOne(
@@ -190,19 +210,6 @@ private[mongo] object MongoSessionOperations {
     collection.flatMap(c =>
       session.fold(c.updateMany(filter.bson, update.bson, options))(active =>
         c.updateMany(active, filter.sessionFilter, update.sessionUpdate, options)
-      )
-    )
-
-  def replaceOne(
-      collection: IO[Documents],
-      session: Option[ClientSession[IO]],
-      filter: MongoFilter,
-      document: Document,
-      options: ReplaceOptions = new ReplaceOptions
-  ): IO[UpdateResult] =
-    collection.flatMap(c =>
-      session.fold(c.replaceOne(filter.bson, document, options))(active =>
-        c.replaceOne(active, filter.sessionFilter, document, options)
       )
     )
 
@@ -297,6 +304,34 @@ private[mongo] object MongoLeaseQueue {
         )
       )
       .flatMap(_.traverse(decode))
+
+  /** The shared claim of a state-machine queue (`Ready`/`Retry` work that is due, or `Processing` work whose lease
+    * expired): validates the request, stamps the lease with `token` and decodes the claimed document. Queues differ
+    * only in their states, sort order and decoder.
+    */
+  def claimReady[A](
+      collection: IO[MongoSessionOperations.Documents],
+      readyStates: List[String],
+      inProgressState: String,
+      workerId: String,
+      token: String,
+      now: Instant,
+      leaseUntil: Instant,
+      sort: Bson
+  )(decode: Document => RepositoryF[IO, A]): RepositoryF[IO, Option[A]] =
+    LeaseRequest.whenValid(workerId, now, leaseUntil) {
+      val available = MongoFilter.and(
+        MongoFilter.in(MongoFields.State, readyStates),
+        MongoFilter.lte(MongoFields.AvailableAt, now.toDate)
+      )
+      claimNext(
+        collection,
+        None,
+        claimable(available, MongoFilter.eq(MongoFields.State, inProgressState), now),
+        leaseStamp(inProgressState, workerId, token, leaseUntil, now),
+        sort
+      )(decode)
+    }
 
   /** Extends a lease only while `held` still matches; `false` reports a lost lease without failing. */
   def renewHeld(
@@ -399,13 +434,14 @@ private[mongo] object MongoRepositorySupport {
   )
 }
 
-/** Matches the MongoDB duplicate-key write failure (server error code 11000). */
+/** Matches the MongoDB duplicate-key write failure (server error code 11000), single or inside a bulk write. */
 private[mongo] object MongoDuplicateKey {
   val Code: Int = 11000
 
-  def unapply(error: Throwable): Option[MongoWriteException] = error match {
-    case write: MongoWriteException if write.getError.getCode == Code => Some(write)
-    case _                                                            => None
+  def unapply(error: Throwable): Option[MongoException] = error match {
+    case write: MongoWriteException if write.getError.getCode == Code                           => Some(write)
+    case bulk: MongoBulkWriteException if bulk.getWriteErrors.asScala.exists(_.getCode == Code) => Some(bulk)
+    case _                                                                                      => None
   }
 }
 
@@ -500,8 +536,7 @@ private[mongo] object MongoOperationalEventInsertion {
   def insertSequence(events: List[OperationalEventEnvelope], now: Instant)(
       write: Document => RepositoryF[IO, Unit]
   ): RepositoryF[IO, Unit] =
-    RepositoryF
-      .at[IO]
+    MongoF
       .fromEither(
         events.traverse { event =>
           com.example.graphQL.cats.infrastructure.events.OperationalEventWireCodec
@@ -514,8 +549,25 @@ private[mongo] object MongoOperationalEventInsertion {
 }
 
 private[mongo] object MongoStoredDocumentDecoding {
+
+  extension [A](decoded: ValidatedNel[MongoHiringCodecs.StoredDocumentError, A]) {
+
+    /** The one place where a decode failure becomes the repository's `InvalidStoredData`. Accumulation is internal to
+      * the codec (`ValidatedNel` keeps every `StoredDocumentError` until here, so none is dropped by an earlier
+      * `.head`); the detail is deliberately not surfaced past this point. The read fails closed, and neither the error,
+      * the field names nor any stored text is logged or returned.
+      */
+    def toStored: Either[RepositoryError, A] = decoded.toEither.leftMap(_ => RepositoryError.InvalidStoredData)
+  }
+
+  extension [A](decoded: Either[MongoHiringCodecs.StoredDocumentError, A]) {
+
+    /** The same collapse for a single field read. */
+    def toStored: Either[RepositoryError, A] = decoded.leftMap(_ => RepositoryError.InvalidStoredData)
+  }
+
   def repository[A](decoded: ValidatedNel[MongoHiringCodecs.StoredDocumentError, A]): Either[RepositoryError, A] =
-    decoded.toEither.leftMap(_ => RepositoryError.InvalidStoredData)
+    decoded.toStored
 
   def optional[A](
       decoded: ValidatedNel[MongoHiringCodecs.StoredDocumentError, Option[A]]
@@ -528,12 +580,29 @@ private[mongo] object MongoStoredDocumentDecoding {
     repository(decoded.sequence)
 }
 
+private[mongo] object MongoRevisionReads {
+
+  /** The stored revision of one document, reading nothing else. */
+  def revision(
+      collection: IO[MongoCollection[IO, Document]],
+      id: String
+  ): RepositoryF[IO, Option[Long]] =
+    RepositoryF
+      .lift(MongoSessionOperations.findById(collection, None, id, Some(MongoReadProjections.revision)))
+      .subflatMap(
+        _.traverse(document =>
+          MongoDocumentFields.toRepository(MongoDocumentFields.requiredInt64(document, MongoFields.Version, min = 0L))
+        )
+      )
+}
+
 private[mongo] object MongoKeysetPaging {
   def page[A](
       collection: IO[MongoCollection[IO, Document]],
       filter: MongoFilter,
       timestampField: String,
-      pageSize: PageSize
+      pageSize: PageSize,
+      projection: Option[Bson] = None
   )(read: Document => ValidatedNel[MongoHiringCodecs.StoredDocumentError, A])(
       diagnostics: Diagnostics[IO]
   ): RepositoryF[IO, List[A]] =
@@ -542,14 +611,13 @@ private[mongo] object MongoKeysetPaging {
         RepositoryF
           .lift(
             collection
-              .flatMap(
-                _.find(filter.bson)
+              .flatMap { c =>
+                val query = c
+                  .find(filter.bson)
                   .sort(Sorts.orderBy(Sorts.descending(timestampField), Sorts.descending(MongoFields.Id)))
                   .limit(pageSize.value)
-                  .boundedStream(pageSize.value)
-                  .compile
-                  .toList
-              )
+                projection.fold(query)(query.projection).boundedStream(pageSize.value).compile.toList
+              }
           )
           .subflatMap(documents => MongoStoredDocumentDecoding.values(documents.map(read)))
       )

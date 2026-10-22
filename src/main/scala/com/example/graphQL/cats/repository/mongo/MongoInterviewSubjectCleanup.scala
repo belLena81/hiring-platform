@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.repository.mongo.MongoF.asRepository
 import cats.effect.{Clock, IO}
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
@@ -21,7 +22,8 @@ import com.example.graphQL.cats.service.port.{
   InterviewCleanupPage,
   RepositoryF
 }
-import com.example.graphQL.cats.service.{RepositoryError, Diagnostics}
+import com.example.graphQL.cats.service.{Diagnostics, LogEvent, RepositoryError}
+import com.example.graphQL.cats.service.RepositoryReporting.orReport
 import mongo4cats.client.ClientSession
 import mongo4cats.database.MongoDatabase
 import org.bson.Document
@@ -59,7 +61,7 @@ final class MongoInterviewSubjectCleanup(
       ids <- MongoProducerRegistrations.batch(database, subject.value.toString, ProducerRegistrationValues.Interview)
       attributable <- hasAttributableData(subject, session)
       _ <-
-        if (!attributable && ids.isEmpty) ().pure[[A] =>> RepositoryF[IO, A]]
+        if (!attributable && ids.isEmpty) ().asRepository
         else
           RepositoryF
             .lift(
@@ -106,7 +108,7 @@ final class MongoInterviewSubjectCleanup(
           .map(_.exists(_.nonEmpty))
       )
       .flatMap {
-        case true  => RepositoryF.at[IO].pure(true)
+        case true  => MongoF.pure(true)
         case false =>
           RepositoryF
             .lift(
@@ -124,19 +126,17 @@ final class MongoInterviewSubjectCleanup(
   ) {
     RepositoryF
       .lift(MongoSessionOperations.findById(queue, None, subject.value.toString))
-      .flatMap(_.traverse(row => RepositoryF.at[IO].fromEither(MongoInterviewCleanupCodec.decodeCurrent(row, topics))))
+      .flatMap(_.traverse(row => MongoF.fromEither(MongoInterviewCleanupCodec.decodeCurrent(row, topics))))
   }
 
   /** Malformed evidence cannot certify public deletion completion. */
-  def complete(subject: UserId): IO[Boolean] = find(subject).value.map {
-    case Right(None)        => true
-    case Right(Some(value)) =>
-      value.state match {
+  def complete(subject: UserId): IO[Boolean] =
+    find(subject)
+      .map(_.forall(_.state match {
         case InterviewCleanupState.Complete(_) => true
         case _                                 => false
-      }
-    case Left(_) => false
-  }
+      }))
+      .orReport(diagnostics, LogEvent.MongoRepositoryFailed)(false)
 
   override def pendingPage(
       cursor: Option[InterviewCleanupCursor],
@@ -144,7 +144,7 @@ final class MongoInterviewSubjectCleanup(
   ): RepositoryF[IO, InterviewCleanupPage] = guard("interviewCleanup.pending") {
     import MongoInterviewCleanupSweepCodec.*
     val sweep = cursor match {
-      case Some(value) => RepositoryF.at[IO].fromEither(decode(value).map(Some(_)))
+      case Some(value) => MongoF.fromEither(decode(value).map(Some(_)))
       case None        =>
         RepositoryF
           .lift(
@@ -153,11 +153,11 @@ final class MongoInterviewSubjectCleanup(
             )
           )
           .flatMap(
-            _.traverse(row => RepositoryF.at[IO].fromEither(identity(row).map(id => Sweep(None, id, observedAt))))
+            _.traverse(row => MongoF.fromEither(identity(row).map(id => Sweep(None, id, observedAt))))
           )
     }
     sweep.flatMap {
-      case None          => RepositoryF.at[IO].pure(InterviewCleanupPage(Vector.empty, None))
+      case None          => MongoF.pure(InterviewCleanupPage(Vector.empty, None))
       case Some(current) =>
         RepositoryF
           .lift(
@@ -177,13 +177,11 @@ final class MongoInterviewSubjectCleanup(
                     }
                   )
                   .map(_.flatten)
-            RepositoryF
-              .at[IO]
-              .fromEither(
-                next.map(token =>
-                  InterviewCleanupPage(selected.map(MongoInterviewCleanupCodec.decodeCurrent(_, topics)), token)
-                )
+            MongoF.fromEither(
+              next.map(token =>
+                InterviewCleanupPage(selected.map(MongoInterviewCleanupCodec.decodeCurrent(_, topics)), token)
               )
+            )
           }
     }
   }
@@ -204,19 +202,13 @@ final class MongoInterviewSubjectCleanup(
         case _                                                                               => false
       }
       for {
-        _ <- RepositoryF
-          .at[IO]
-          .fromEither(
-            InterviewSubjectCleanup.validate(expected, topics).leftMap(_ => RepositoryError.InvalidStoredData)
-          )
-        _ <- RepositoryF
-          .at[IO]
-          .fromEither(
-            InterviewSubjectCleanup.validate(next, topics).leftMap(_ => RepositoryError.InvalidStoredData)
-          )
-        _ <- RepositoryF
-          .at[IO]
-          .fromEither(Either.cond(immutableInputs && forward, (), RepositoryError.InvalidStoredData))
+        _ <- MongoF.fromEither(
+          InterviewSubjectCleanup.validate(expected, topics).leftMap(_ => RepositoryError.InvalidStoredData)
+        )
+        _ <- MongoF.fromEither(
+          InterviewSubjectCleanup.validate(next, topics).leftMap(_ => RepositoryError.InvalidStoredData)
+        )
+        _ <- MongoF.fromEither(Either.cond(immutableInputs && forward, (), RepositoryError.InvalidStoredData))
         result <- RepositoryF
           .lift(
             MongoSessionOperations.updateOne(
@@ -281,29 +273,19 @@ final class MongoInterviewSubjectCleanup(
 
   /** One indexed predicate per collection that names a subject; every stored shape has a single writer.
     *   - workflows: a subject is the workflow's candidate or recruiter (the initiator is that recruiter or the
-    *     undeletable Admin), served by the existing `candidateId` and `recruiterId` indexes. Request receipts keep the
-    *     initiating subject in their `request:<subject>:` `_id`, served by the primary key. They remain after the
-    *     workflow's TTL.
+    *     undeletable Admin), served by the existing `candidateId` and `recruiterId` indexes.
     *   - reservations: `participants` holds both parties, the prefix of the participants index.
     *   - notification receipts: `recipientId`, the prefix of the recipient index.
-    *   - inbox: only hiring receipts name subjects, via the partial hiring-receipt index. Other inbox rows and every
-    *     command row are reached through `workflowId`.
+    *   - inbox rows and every command row name no subject; they are reached through `workflowId`. Interview request
+    *     idempotency lives in `mutation_receipts` (an expiring row of scope, fingerprint and workflow id).
     */
   private def subjectTargets(subject: String): List[(String, MongoFilter)] = List(
     MongoCollections.InterviewWorkflows -> MongoFilter.or(
       MongoFilter.eq(MongoFields.CandidateId, subject),
-      MongoFilter.eq(MongoFields.RecruiterId, subject),
-      MongoFilter.and(
-        MongoFilter.gte(MongoFields.Id, s"request:$subject:"),
-        MongoFilter.lt(MongoFields.Id, s"request:$subject;")
-      )
+      MongoFilter.eq(MongoFields.RecruiterId, subject)
     ),
     MongoCollections.InterviewCalendarReservations -> MongoFilter.eq("participants", subject),
-    MongoCollections.InterviewNotificationReceipts -> MongoFilter.eq("recipientId", subject),
-    MongoCollections.InterviewWorkflowInbox -> MongoFilter.and(
-      MongoFilter.eq(MongoInterviewFields.DocumentTypeField, MongoInterviewFields.HiringReceiptType),
-      MongoFilter.eq(MongoFields.SubjectIds, subject)
-    )
+    MongoCollections.InterviewNotificationReceipts -> MongoFilter.eq("recipientId", subject)
   )
 
   private val ReleasedAtField = "releasedAt"
@@ -330,11 +312,7 @@ final class MongoInterviewSubjectCleanup(
         ) *>
         workflows
           .flatMap(
-            _.deleteMany(
-              MongoFilter
-                .or(MongoFilter.in("_id", ids), MongoFilter.in("requestWorkflowId", ids))
-                .bson
-            )
+            _.deleteMany(MongoFilter.in("_id", ids).bson)
           )
           .void
     }
@@ -342,7 +320,6 @@ final class MongoInterviewSubjectCleanup(
       RepositoryF
         .lift(
           targets
-            .filterNot((name, _) => name == MongoCollections.InterviewWorkflowInbox)
             .traverse((name, predicate) =>
               Mongo4catsCollections
                 .documents(database, name)
@@ -353,17 +330,13 @@ final class MongoInterviewSubjectCleanup(
         )
         .flatMap { found =>
           val ids = found
-            .flatMap(row =>
-              Option(row.getString("workflowId"))
-                .orElse(Option(row.getString("requestWorkflowId")))
-                .orElse(Option(row.getString("_id")))
-            )
+            .flatMap(row => Option(row.getString("workflowId")).orElse(Option(row.getString("_id"))))
             .distinct
-          if (ids.isEmpty) ().pure[[A] =>> RepositoryF[IO, A]]
+          if (ids.isEmpty) ().asRepository
           else releaseLiveHolds(ids) *> RepositoryF.lift(deleteLinked(ids)) *> batch
         }
     batch *> RepositoryF.lift(
-      // The loop above ended with no workflow left; orphan reservations, receipts and hiring receipts remain.
+      // The loop above ended with no workflow left; orphan reservations and notification receipts remain.
       targets
         .filterNot((name, _) => name == MongoCollections.InterviewWorkflows)
         .traverse_((name, predicate) =>
@@ -416,16 +389,18 @@ final class MongoInterviewSubjectCleanup(
     } yield InterviewLiveHold(workflowId, reserveKey, cancelKey)
 
   private def releaseHold(row: Document): RepositoryF[IO, Unit] =
-    liveHold(row).fold(().pure[[A] =>> RepositoryF[IO, A]]) { hold =>
+    liveHold(row).fold(().asRepository) { hold =>
       RepositoryF
         .lift(clock.realTimeInstant)
         .flatMap { now =>
-          RepositoryF.fromFEither(holds.cancel(hold, now).value.map {
-            case Right(InterviewCalendarCancellation.Cancelled(at))        => Right(at)
-            case Right(InterviewCalendarCancellation.AlreadyCancelled(at)) => Right(at)
-            case Right(InterviewCalendarCancellation.UnknownReservation)   => Left(RepositoryError.Conflict)
-            case Left(_)                                                   => Left(RepositoryError.Unavailable)
-          })
+          holds
+            .cancel(hold, now)
+            .leftMap(_ => RepositoryError.Unavailable)
+            .subflatMap {
+              case InterviewCalendarCancellation.Cancelled(at)        => Right(at)
+              case InterviewCalendarCancellation.AlreadyCancelled(at) => Right(at)
+              case InterviewCalendarCancellation.UnknownReservation   => Left(RepositoryError.Conflict)
+            }
         }
         .flatMap(at =>
           // Mirrors the confirmed release locally; only a still-held row changes, so a replay is a no-op.

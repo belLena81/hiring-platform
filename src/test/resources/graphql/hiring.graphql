@@ -54,6 +54,17 @@ type Application {
   updatedAt: Instant!
   candidate: User
   job: Job
+
+  "A page of the append-only status history of this application, the same list and visibility as applicationHistory: to its candidate, the owning recruiter and Admin."
+  events(
+    "The page size; between 1 and 100."
+    first: Int!,
+
+    "The cursor of the last item of the previous page."
+    after: Cursor): ApplicationEventConnection!
+
+  "The interview workflow of this application, as `interviewWorkflow(workflowId)` shows it: to its candidate, the owning recruiter and Admin. Null when the application has no interview or the caller may not see it."
+  interview: InterviewWorkflow
 }
 
 "A status change of an application that needs no further data."
@@ -72,7 +83,7 @@ type ApplicationConnection {
 
 type ApplicationEdge {
   node: Application!
-  cursor: String!
+  cursor: Cursor!
 }
 
 type ApplicationEvent {
@@ -92,7 +103,7 @@ type ApplicationEventConnection {
 
 type ApplicationEventEdge {
   node: ApplicationEvent!
-  cursor: String!
+  cursor: Cursor!
 }
 
 "The identifier of an entry in an application's history."
@@ -236,6 +247,9 @@ input CreateJobInput {
 
 "The outcome of the mutation: Job on success, or a typed ValidationError or DomainError."
 union CreateJobResult = Job | ValidationError | DomainError
+
+"An opaque, signed position in a list. Pass the `endCursor` of a page as `after` to get the next page; do not parse, build or store it long term (it stops working after a limited time)."
+scalar Cursor
 
 "Declines an application as its candidate; a reason is required."
 input DeclineApplicationInput {
@@ -567,15 +581,6 @@ enum ErrorCode {
   NO_RESCHEDULE_REQUEST
 }
 
-"How much of the match set the facet counts cover."
-enum FacetCoverage {
-  "Counts cover every match."
-  ALL_MATCHES
-
-  "Counts cover only the top matches; see coverageLimit."
-  TOP_MATCHES
-}
-
 type GeoPoint {
   latitude: Float!
   longitude: Float!
@@ -675,18 +680,17 @@ enum InterviewProgress {
 type InterviewWorkflow {
   id: InterviewWorkflowID!
   applicationId: ApplicationID!
-  startsAt: Instant!
-  endsAt: Instant!
+
+  "The application the interview belongs to, resolved with the same visibility as the application itself; null when the caller may not see it."
+  application: Application
+  slot: TimeSlot!
   revision: Long!
   progress: InterviewProgress!
   notifiedParticipants: [InterviewParticipant!]!
-  pendingStartsAt: Instant
-  pendingEndsAt: Instant
+  pending: TimeSlot
   cancelledAt: Instant
-  proposedStartsAt: Instant
-  proposedEndsAt: Instant
-  proposalExpiresAt: Instant
-  rescheduleRequested: Boolean!
+  proposal: RescheduleProposal
+  rescheduleRequestedAt: Instant
 }
 
 "The identifier of an interview workflow."
@@ -703,6 +707,17 @@ type Job {
   createdAt: Instant!
   updatedAt: Instant!
   recruiter: User
+
+  "A page of the applications to this job, newest first, optionally of one status. Only the owning recruiter and Admin may read them; anyone else is refused exactly as by jobApplications."
+  applications(
+    "The page size; between 1 and 100."
+    first: Int!,
+
+    "The cursor of the last item of the previous page."
+    after: Cursor,
+
+    "Only applications in this status."
+    status: ApplicationStatus): ApplicationConnection!
 }
 
 "A lifecycle action on a job owned by the caller."
@@ -725,7 +740,8 @@ type JobDiscoveryFacets {
   cities: [JobFacetBucket!]!
   remote: [JobFacetBucket!]!
   truncated: Boolean!
-  coverage: FacetCoverage!
+
+  "Null when the counts cover every matching job; otherwise the counts cover only this many top-ranked matches and are not totals."
   coverageLimit: Int
 }
 
@@ -734,7 +750,7 @@ union JobDiscoveryFacetsResult = JobDiscoveryFacets | SearchUnavailable | Valida
 
 type JobEdge {
   node: Job!
-  cursor: String!
+  cursor: Cursor!
 }
 
 type JobFacetBucket {
@@ -960,8 +976,8 @@ type Mutation {
 
 type NearbyJobEdge {
   node: Job!
+  cursor: Cursor!
   distanceKm: Float!
-  cursor: String!
 }
 
 type NearbyJobsConnection {
@@ -969,9 +985,12 @@ type NearbyJobsConnection {
   pageInfo: PageInfo!
 }
 
+"Where a page sits in its list."
 type PageInfo {
   hasNextPage: Boolean!
-  endCursor: String
+  hasPreviousPage: Boolean!
+  startCursor: Cursor
+  endCursor: Cursor
 }
 
 "A role-specific profile. Exactly one of candidate and recruiter must be set, and it must match the account's role."
@@ -1038,7 +1057,7 @@ type Query {
     first: Int!,
 
     "The cursor of the last item of the previous page."
-    after: String,
+    after: Cursor,
 
     "Only users with this role."
     role: UserRole,
@@ -1055,7 +1074,7 @@ type Query {
     first: Int!,
 
     "The cursor of the last item of the previous page."
-    after: String,
+    after: Cursor,
 
     "Reuses a search identifier so repeated pages and later interactions correlate; the server issues one if absent."
     searchId: SearchID): JobSearchConnection!
@@ -1075,7 +1094,7 @@ type Query {
     first: Int!,
 
     "The cursor of the last item of the previous page."
-    after: String): NearbyJobsConnection!
+    after: Cursor): NearbyJobsConnection!
 
   "Facet counts over the open jobs that match the filter, an optional radius and an optional lexical query. Cost: 100 + cost of the selected subfields, or 100 + 25 * (1 + cost of the selected subfields) when `query` is given. Caps per request: total complexity at most 1000, nesting depth at most 16, `first` between 1 and 100, and a configured maximum number of expensive discovery roots (default 4). The cost is charged to the caller's cost budget; the response reports it in `extensions.cost` when the caller has its own allowance."
   jobDiscoveryFacets(
@@ -1141,7 +1160,7 @@ type Query {
     first: Int!,
 
     "The cursor of the last item of the previous page."
-    after: String,
+    after: Cursor,
 
     "Only jobs in this status."
     status: JobStatus): JobConnection!
@@ -1152,7 +1171,7 @@ type Query {
     first: Int!,
 
     "The cursor of the last item of the previous page."
-    after: String,
+    after: Cursor,
 
     "Only applications in this status."
     status: ApplicationStatus): ApplicationConnection!
@@ -1166,7 +1185,7 @@ type Query {
     first: Int!,
 
     "The cursor of the last item of the previous page."
-    after: String,
+    after: Cursor,
 
     "Only applications in this status."
     status: ApplicationStatus): ApplicationConnection!
@@ -1180,46 +1199,44 @@ type Query {
     first: Int!,
 
     "The cursor of the last item of the previous page."
-    after: String): ApplicationEventConnection!
+    after: Cursor): ApplicationEventConnection!
 }
 
-type RankedCandidate {
+type RankedCandidate implements ScoredHit {
   candidate: CandidateMatchCandidate!
   score: Float!
   searchMode: SearchMode!
-  model: String
-  searchId: SearchID!
   matchedSkills: [String!]!
   retrievalScore: Float
 }
 
 type RankedCandidateResults {
   results: [RankedCandidate!]!
+  searchId: SearchID!
 
-  "True when the semantic ranking was unavailable and these are keyword (LEXICAL) results; their relevance is not comparable with normal results."
-  degraded: Boolean!
+  "The embedding model that ranked the results; null for keyword (LEXICAL) results."
+  model: String
 
-  "Why the results are degraded (PROVIDER_UNAVAILABLE or VECTOR_SEARCH_UNAVAILABLE); null otherwise."
+  "Set when the semantic ranking was unavailable and these are keyword (LEXICAL) results, whose relevance is not comparable with normal results: PROVIDER_UNAVAILABLE or VECTOR_SEARCH_UNAVAILABLE. Null otherwise."
   degradedReason: ErrorCode
 }
 
-type RankedJob {
+type RankedJob implements ScoredHit {
   job: Job!
   score: Float!
   searchMode: SearchMode!
-  model: String
-  searchId: SearchID!
   matchedSkills: [String!]!
   retrievalScore: Float
 }
 
 type RankedJobResults {
   results: [RankedJob!]!
+  searchId: SearchID!
 
-  "True when the semantic ranking was unavailable and these are keyword (LEXICAL) results; their relevance is not comparable with normal results."
-  degraded: Boolean!
+  "The embedding model that ranked the results; null for keyword (LEXICAL) results."
+  model: String
 
-  "Why the results are degraded (PROVIDER_UNAVAILABLE or VECTOR_SEARCH_UNAVAILABLE); null otherwise."
+  "Set when the semantic ranking was unavailable and these are keyword (LEXICAL) results, whose relevance is not comparable with normal results: PROVIDER_UNAVAILABLE or VECTOR_SEARCH_UNAVAILABLE. Null otherwise."
   degradedReason: ErrorCode
 }
 
@@ -1306,6 +1323,12 @@ input RepairInterviewInput {
 "The outcome of the mutation: InterviewWorkflow on success, or a typed ValidationError or DomainError."
 union RepairInterviewResult = InterviewWorkflow | ValidationError | DomainError
 
+"Another time offered for an interview. Who proposed it is not exposed."
+type RescheduleProposal {
+  slot: TimeSlot!
+  expiresAt: Instant!
+}
+
 "Where a candidate currently lives."
 input ResidenceInput {
   "The country."
@@ -1332,6 +1355,14 @@ input ScheduleInterviewInput {
 
 "The outcome of the mutation: InterviewWorkflow on success, or a typed ValidationError or DomainError."
 union ScheduleInterviewResult = InterviewWorkflow | ValidationError | DomainError
+
+"What every ranked search hit carries, whatever it ranks."
+interface ScoredHit {
+  score: Float!
+  searchMode: SearchMode!
+  matchedSkills: [String!]!
+  retrievalScore: Float
+}
 
 "The identifier of one search, issued by the server or supplied by the client to correlate later interactions."
 scalar SearchID
@@ -1399,6 +1430,12 @@ input SubmitApplicationInput {
 "The outcome of the mutation: Application on success, or a typed ValidationError or DomainError."
 union SubmitApplicationResult = Application | ValidationError | DomainError
 
+"A span of time, from `startsAt` to `endsAt`."
+type TimeSlot {
+  startsAt: Instant!
+  endsAt: Instant!
+}
+
 "A UUID in its canonical textual form."
 scalar UUID
 
@@ -1437,6 +1474,17 @@ type User {
   status: UserStatus!
   profile: UserProfile
   createdAt: Instant!
+
+  "A page of the user's applications, newest first. Only the calling candidate's own account has them (the same list as myApplications); null for any other user, so another account's applications are never read."
+  applications(
+    "The page size; between 1 and 100."
+    first: Int!,
+
+    "The cursor of the last item of the previous page."
+    after: Cursor,
+
+    "Only applications in this status."
+    status: ApplicationStatus): ApplicationConnection
 }
 
 type UserConnection {
@@ -1446,10 +1494,10 @@ type UserConnection {
 
 type UserEdge {
   node: User!
-  cursor: String!
+  cursor: Cursor!
 }
 
-"A refusal returned as data instead of a top-level error."
+"A refusal returned as data instead of a top-level error. A client reads any mutation or search result with one fragment, `... on UserError { code message }`."
 interface UserError {
   "The stable error code."
   code: ErrorCode!

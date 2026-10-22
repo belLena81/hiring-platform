@@ -6,7 +6,9 @@ import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, App
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.workflow.*
 import com.example.graphQL.cats.service.{ActorContext, ServiceFixtures, UseCaseError}
+import com.example.graphQL.cats.service.mutation.{Idempotent, TestIdempotency}
 import com.example.graphQL.cats.service.port.*
+import com.example.graphQL.cats.service.protocol.IdempotencyRequest
 import com.example.graphQL.cats.service.RepositoryError
 import java.time.Instant
 import java.util.UUID
@@ -30,13 +32,15 @@ final class InterviewSchedulingServiceSpec extends CatsEffectSuite {
     0L,
     InterviewWorkflowPhase.ReservationPending,
     Set.empty,
-    recruiterId
+    recruiterId,
+    initiatedByRole = com.example.graphQL.cats.domain.model.UserRole.Recruiter
   )
 
   private def service(
       workflows: InterviewWorkflowRepository[IO],
       clock: IO[Instant],
-      ids: IO[InterviewWorkflowId]
+      ids: IO[InterviewWorkflowId],
+      remembered: Option[MutationReceiptRepository[IO]] = None
   ): IO[InterviewSchedulingService[IO]] =
     for {
       users <- Ref.of[IO, Map[UserId, User]](Map(candidateId -> candidate, recruiterId -> recruiter, adminId -> admin))
@@ -44,11 +48,13 @@ final class InterviewSchedulingServiceSpec extends CatsEffectSuite {
       applications <- Ref.of[IO, Map[ApplicationId, Application]](Map(applicationId -> accepted))
       events <- Ref.of[IO, Vector[ApplicationEvent]](Vector.empty)
       errors <- Ref.of[IO, Option[RepositoryError]](None)
+      receipts <- remembered.fold(TestIdempotency.remembering)(IO.pure)
     } yield new InterviewSchedulingService[IO](
       new InMemoryUsers(users),
       new InMemoryJobs(jobs),
       new InMemoryApplications(applications, events, errors),
       workflows,
+      Idempotent(receipts),
       5.minutes,
       clock,
       ids
@@ -60,16 +66,13 @@ final class InterviewSchedulingServiceSpec extends CatsEffectSuite {
       identityReads <- Ref.of[IO, Int](0)
       writes <- Ref.of[IO, Vector[(InterviewWorkflow, Instant)]](Vector.empty)
       repository = new TestInterviewWorkflowRepository {
-        override def findRequest(actor: UserId, key: UUID, fingerprint: MutationReceiptFingerprint) =
-          RepositoryF.at[IO].pure(Option.empty[InterviewWorkflow])
         override def create(
             workflow: InterviewWorkflow,
             initialCommand: InterviewWorkflowCommand,
-            key: UUID,
-            fingerprint: MutationReceiptFingerprint,
-            at: Instant
+            at: Instant,
+            context: MutationWriteContext
         ) =
-          RepositoryF.lift(writes.update(_ :+ (workflow, at))).as(InterviewWorkflowAdvanceResult.Applied)
+          RepositoryF.lift(writes.update(_ :+ (workflow, at)))
       }
       scheduling <- service(
         repository,
@@ -110,22 +113,43 @@ final class InterviewSchedulingServiceSpec extends CatsEffectSuite {
 
   test("durable replay canonicalizes submillisecond interval inputs without reading time or generating identity") {
     val past = existing.copy(interval = InterviewInterval(now.minusSeconds(120), now.minusSeconds(60)))
-    val expectedFingerprint = MutationReceiptFingerprint.fromCanonicalInput(
-      s"${applicationId.value}|${past.interval.startsAt}|${past.interval.endsAt}"
+    val request = IdempotencyRequest.fromCanonicalInput(
+      requestKey,
+      s"schedule|${applicationId.value}|${past.interval.startsAt}|${past.interval.endsAt}"
     )
     val repository = new TestInterviewWorkflowRepository {
-      override def findRequest(actor: UserId, key: UUID, fingerprint: MutationReceiptFingerprint) = {
-        assertEquals(actor, recruiterId)
-        assertEquals(key, requestKey)
-        assertEquals(fingerprint, expectedFingerprint)
+      override def findForActor(id: InterviewWorkflowId, access: InterviewWorkflowAccess) = {
+        assertEquals(id, past.id)
+        assertEquals(access, InterviewWorkflowAccess(recruiterId, UserRole.Recruiter))
         RepositoryF.at[IO].pure(Some(past))
       }
     }
     for {
+      receipts <- TestIdempotency.remembering
+      // The earlier request stored this receipt: same actor, same key, same canonical input.
+      _ <- receipts
+        .execute(
+          MutationReceiptKey(
+            "interviewWorkflow",
+            Idempotent.actorScope(ActorContext(recruiterId, UserRole.Recruiter)),
+            requestKey
+          ),
+          request.fingerprint,
+          now,
+          now.plusSeconds(60)
+        )(_ =>
+          RepositoryF.pure[IO, MutationWriteOutcome[Unit, Unit]](
+            MutationWriteOutcome.Applied(
+              MutationReceiptWrite((), MutationEntityReference.of("interviewWorkflow", past.id.value))
+            )
+          )
+        )
+        .value
       scheduling <- service(
         repository,
         IO.raiseError(new AssertionError("Replay read the clock")),
-        IO.raiseError(new AssertionError("Replay generated an identity"))
+        IO.raiseError(new AssertionError("Replay generated an identity")),
+        Some(receipts)
       )
       replay <- scheduling
         .schedule(
@@ -140,10 +164,7 @@ final class InterviewSchedulingServiceSpec extends CatsEffectSuite {
   }
 
   test("invalid interval observes supplied time but does not generate identity or persist intent") {
-    val repository = new TestInterviewWorkflowRepository {
-      override def findRequest(actor: UserId, key: UUID, fingerprint: MutationReceiptFingerprint) =
-        RepositoryF.at[IO].pure(Option.empty[InterviewWorkflow])
-    }
+    val repository = new TestInterviewWorkflowRepository {}
     for {
       reads <- Ref.of[IO, Int](0)
       scheduling <- service(

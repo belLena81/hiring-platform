@@ -1,7 +1,8 @@
 package com.example.graphQL.cats.service
 
+import com.example.graphQL.cats.domain.model.{AccountState}
 import cats.effect.IO
-import com.example.graphQL.cats.domain.model.{AccountStatus, EntityEmbedding, User, UserRole}
+import com.example.graphQL.cats.domain.model.{EntityEmbedding, User, UserRole}
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.service.port.{AnalyticsReportRepository, RepositoryF}
 import munit.CatsEffectSuite
@@ -16,7 +17,7 @@ final class AnalyticsReportingServiceSpec extends CatsEffectSuite {
   private val snapshot = AnalyticsReportSnapshot(now, Nil, None, Nil)
 
   test("HAL-03.1 published analytics are available only to the stored active Admin") {
-    val admin = User(adminId, None, "Admin", UserRole.Admin, None, now, adminSingleton = true)
+    val admin = User(adminId, None, "Admin", UserRole.Admin, None, now)
     val service = new AnalyticsReportingService(new TestUsers(Map(adminId -> admin)), new TestReports(Some(snapshot)))
     service.report(ActorContext(adminId, UserRole.Admin), AnalyticsPeriod(now.minusSeconds(60), now)).value.map {
       result =>
@@ -25,7 +26,7 @@ final class AnalyticsReportingServiceSpec extends CatsEffectSuite {
   }
 
   test("HAL-03.2 analytics rejects a period longer than the retained published window") {
-    val admin = User(adminId, None, "Admin", UserRole.Admin, None, now, adminSingleton = true)
+    val admin = User(adminId, None, "Admin", UserRole.Admin, None, now)
     val service = new AnalyticsReportingService(new TestUsers(Map(adminId -> admin)), new TestReports(Some(snapshot)))
     service
       .report(ActorContext(adminId, UserRole.Admin), AnalyticsPeriod(now.minusSeconds(31L * 24L * 60L * 60L), now))
@@ -36,7 +37,7 @@ final class AnalyticsReportingServiceSpec extends CatsEffectSuite {
   }
 
   test("HAL-03.3 analytics accepts the exact 30-day inclusive period") {
-    val admin = User(adminId, None, "Admin", UserRole.Admin, None, now, adminSingleton = true)
+    val admin = User(adminId, None, "Admin", UserRole.Admin, None, now)
     val service = new AnalyticsReportingService(new TestUsers(Map(adminId -> admin)), new TestReports(Some(snapshot)))
     val from = now.minusSeconds(30L * 24L * 60L * 60L)
     service.report(ActorContext(adminId, UserRole.Admin), AnalyticsPeriod(from, now)).value.map { result =>
@@ -45,7 +46,7 @@ final class AnalyticsReportingServiceSpec extends CatsEffectSuite {
   }
 
   test("analytics returns only daily rows inside the requested inclusive period and preserves asOf") {
-    val admin = User(adminId, None, "Admin", UserRole.Admin, None, now, adminSingleton = true)
+    val admin = User(adminId, None, "Admin", UserRole.Admin, None, now)
     val before = now.minusSeconds(2L * 24L * 60L * 60L)
     val from = now.minusSeconds(24L * 60L * 60L)
     val after = now.plusSeconds(24L * 60L * 60L)
@@ -60,7 +61,7 @@ final class AnalyticsReportingServiceSpec extends CatsEffectSuite {
   }
 
   test("analytics rejects a reversed period") {
-    val admin = User(adminId, None, "Admin", UserRole.Admin, None, now, adminSingleton = true)
+    val admin = User(adminId, None, "Admin", UserRole.Admin, None, now)
     val service = new AnalyticsReportingService(new TestUsers(Map(adminId -> admin)), new TestReports(Some(snapshot)))
     service.report(ActorContext(adminId, UserRole.Admin), AnalyticsPeriod(now, now.minusSeconds(1))).value.map {
       result =>
@@ -69,7 +70,7 @@ final class AnalyticsReportingServiceSpec extends CatsEffectSuite {
   }
 
   test("analytics rejects an extreme period without epoch arithmetic overflow") {
-    val admin = User(adminId, None, "Admin", UserRole.Admin, None, now, adminSingleton = true)
+    val admin = User(adminId, None, "Admin", UserRole.Admin, None, now)
     val service = new AnalyticsReportingService(new TestUsers(Map(adminId -> admin)), new TestReports(Some(snapshot)))
     service.report(ActorContext(adminId, UserRole.Admin), AnalyticsPeriod(Instant.MIN, Instant.MAX)).value.map {
       result =>
@@ -90,9 +91,12 @@ final class AnalyticsReportingServiceSpec extends CatsEffectSuite {
   }
 
   test("HCS-01.4 a non-singleton Admin cannot read aggregate analytics") {
-    val duplicate = User(adminId, None, "Admin", UserRole.Admin, None, now, adminSingleton = false)
+    val duplicate = User(adminId, None, "Admin", UserRole.Admin, None, now)
     val service =
-      new AnalyticsReportingService(new TestUsers(Map(adminId -> duplicate)), new TestReports(Some(snapshot)))
+      new AnalyticsReportingService(
+        new TestUsers(Map(adminId -> duplicate), Set(adminId)),
+        new TestReports(Some(snapshot))
+      )
     service.report(ActorContext(adminId, UserRole.Admin), AnalyticsPeriod(now.minusSeconds(60), now)).value.map {
       result =>
         assertEquals(result, Left(UseCaseError.Authentication(AuthenticationError.Unauthorized)))
@@ -100,9 +104,8 @@ final class AnalyticsReportingServiceSpec extends CatsEffectSuite {
   }
 
   test("HCS-01.4 a deleted Admin cannot read aggregate analytics") {
-    val deletedAdmin = User(adminId, None, "Admin", UserRole.Admin, None, now, adminSingleton = true).copy(
-      accountStatus = AccountStatus.Deleted,
-      deletedAt = Some(now)
+    val deletedAdmin = User(adminId, None, "Admin", UserRole.Admin, None, now).copy(
+      state = AccountState.Deleted(now)
     )
     val service =
       new AnalyticsReportingService(new TestUsers(Map(adminId -> deletedAdmin)), new TestReports(Some(snapshot)))
@@ -115,7 +118,7 @@ final class AnalyticsReportingServiceSpec extends CatsEffectSuite {
   }
 
   test("analytics reports a typed unavailable outcome when no published snapshot exists") {
-    val admin = User(adminId, None, "Admin", UserRole.Admin, None, now, adminSingleton = true)
+    val admin = User(adminId, None, "Admin", UserRole.Admin, None, now)
     val service = new AnalyticsReportingService(new TestUsers(Map(adminId -> admin)), new TestReports(None))
     service.report(ActorContext(adminId, UserRole.Admin), AnalyticsPeriod(now.minusSeconds(60), now)).value.map {
       result =>
@@ -124,7 +127,7 @@ final class AnalyticsReportingServiceSpec extends CatsEffectSuite {
   }
 
   test("analytics reports a typed unavailable outcome when the report store fails") {
-    val admin = User(adminId, None, "Admin", UserRole.Admin, None, now, adminSingleton = true)
+    val admin = User(adminId, None, "Admin", UserRole.Admin, None, now)
     val service = new AnalyticsReportingService(
       new TestUsers(Map(adminId -> admin)),
       new TestReports(None, Some(RepositoryError.Unavailable))
@@ -143,7 +146,10 @@ final class AnalyticsReportingServiceSpec extends CatsEffectSuite {
       com.example.graphQL.cats.service.port.RepositoryF.fromFEither(IO.pure(failure.toLeft(value)))
   }
 
-  private final class TestUsers(values: Map[UserId, User]) extends ServiceFixtures.VersionedUserRepositoryTestAdapter {
+  private final class TestUsers(
+      values: Map[UserId, User],
+      override protected val unmarkedAdmins: Set[UserId] = Set.empty
+  ) extends ServiceFixtures.VersionedUserRepositoryTestAdapter {
     override def find(id: UserId): RepositoryF[IO, Option[User]] =
       com.example.graphQL.cats.service.port.RepositoryF.fromFEither(IO.pure(Right(values.get(id))))
     override def updateEmbedding(id: UserId, embedding: EntityEmbedding): RepositoryF[IO, Unit] =

@@ -11,6 +11,36 @@ enum JobStatus {
   case Draft, Open, Closed
 }
 
+/** The state of a [[Job]]. A closed job always carries the instant it was closed, so the pair (status, closedAt) cannot
+  * disagree; [[JobStatus]] is its label (what a client filters, an event reports and a store compares).
+  */
+enum JobState {
+  case Draft
+  case Open
+  case Closed(at: Instant)
+
+  def status: JobStatus = this match {
+    case Draft     => JobStatus.Draft
+    case Open      => JobStatus.Open
+    case Closed(_) => JobStatus.Closed
+  }
+
+  def closedAt: Option[Instant] = this match {
+    case Closed(at)   => Some(at)
+    case Draft | Open => None
+  }
+}
+
+object JobState {
+
+  /** The state a job created with the requested status has at `now`; a closed request is stamped with `now`. */
+  def requested(status: JobStatus, now: Instant): JobState = status match {
+    case JobStatus.Draft  => JobState.Draft
+    case JobStatus.Open   => JobState.Open
+    case JobStatus.Closed => JobState.Closed(now)
+  }
+}
+
 final case class GeoPoint(latitude: Double, longitude: Double) {
   def isValid: Boolean = latitude.isFinite && longitude.isFinite && latitude >= -90d && latitude <= 90d &&
     longitude >= -180d && longitude <= 180d
@@ -51,12 +81,15 @@ final case class Job(
     requirements: List[String],
     skills: Set[String],
     location: Location,
-    status: JobStatus,
+    state: JobState,
     createdAt: Instant,
     updatedAt: Instant,
-    closedAt: Option[Instant] = None,
     embedding: Option[EntityEmbedding] = None
-)
+) {
+  def status: JobStatus = state.status
+
+  def closedAt: Option[Instant] = state.closedAt
+}
 
 object Job {
   def validate(
@@ -67,10 +100,9 @@ object Job {
       requirements: List[String],
       skills: Set[String],
       location: Location,
-      status: JobStatus,
+      state: JobState,
       createdAt: Instant,
       updatedAt: Instant,
-      closedAt: Option[Instant] = None,
       embedding: Option[EntityEmbedding] = None
   ): ValidatedNel[DomainValidationError, Job] =
     (
@@ -88,10 +120,9 @@ object Job {
         validRequirements,
         validSkills,
         validLocation,
-        status,
+        state,
         createdAt,
         updatedAt,
-        closedAt,
         embedding
       )
     }

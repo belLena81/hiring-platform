@@ -29,7 +29,7 @@ final class InterviewRescheduleWorkerIntegrationSpec extends MongoIntegrationSui
   ): IO[InterviewWorkflow] =
     s.applied(
       InterviewLifecycleEvent.Propose(replacement.startsAt, replacement.endsAt, s.workflow.recruiterId, at, ttl),
-      s.actor(UserRole.Recruiter, s.workflow.recruiterId, input = s"propose-$expected"),
+      s.actor(UserRole.Recruiter, s.workflow.recruiterId),
       expected,
       at
     )
@@ -37,7 +37,7 @@ final class InterviewRescheduleWorkerIntegrationSpec extends MongoIntegrationSui
   private def accept(s: InterviewLifecycleScenario, expected: Long, at: Instant = now): IO[InterviewWorkflow] =
     s.applied(
       InterviewLifecycleEvent.AcceptProposal(at),
-      s.actor(UserRole.Candidate, s.workflow.candidateId, input = s"accept-$expected"),
+      s.actor(UserRole.Candidate, s.workflow.candidateId),
       expected,
       at
     )
@@ -94,7 +94,7 @@ final class InterviewRescheduleWorkerIntegrationSpec extends MongoIntegrationSui
         proposed <- propose(s)
         _ <- s.applied(
           InterviewLifecycleEvent.DeclineProposal(now),
-          s.actor(UserRole.Candidate, s.workflow.candidateId, input = "decline"),
+          s.actor(UserRole.Candidate, s.workflow.candidateId),
           proposed.revision,
           now
         )
@@ -225,7 +225,7 @@ final class InterviewRescheduleWorkerIntegrationSpec extends MongoIntegrationSui
         // The proposal cannot be accepted at or after its expiry, even though the expiry command has not run.
         late <- s.apply(
           InterviewLifecycleEvent.AcceptProposal(dueAt),
-          s.actor(UserRole.Candidate, s.workflow.candidateId, input = "late-accept"),
+          s.actor(UserRole.Candidate, s.workflow.candidateId),
           proposed.revision,
           dueAt
         )
@@ -293,7 +293,7 @@ final class InterviewRescheduleWorkerIntegrationSpec extends MongoIntegrationSui
         proposed <- s.applied(
           InterviewLifecycleEvent
             .Propose(soon.startsAt, soon.endsAt, s.workflow.recruiterId, now, InterviewProposalTtl.Default),
-          s.actor(UserRole.Recruiter, s.workflow.recruiterId, input = "propose-soon"),
+          s.actor(UserRole.Recruiter, s.workflow.recruiterId),
           0L,
           now
         )
@@ -320,13 +320,13 @@ final class InterviewRescheduleWorkerIntegrationSpec extends MongoIntegrationSui
         proposed <- propose(s)
         withdrawn <- s.applied(
           InterviewLifecycleEvent.WithdrawProposal(now),
-          s.actor(UserRole.Recruiter, s.workflow.recruiterId, input = "withdraw"),
+          s.actor(UserRole.Recruiter, s.workflow.recruiterId),
           proposed.revision,
           now
         )
         cancelling <- s.applied(
           InterviewLifecycleEvent.Cancel(InterviewCancellationInitiator.Recruiter, now),
-          s.actor(UserRole.Recruiter, s.workflow.recruiterId, input = "cancel"),
+          s.actor(UserRole.Recruiter, s.workflow.recruiterId),
           withdrawn.revision,
           now
         )
@@ -368,13 +368,13 @@ final class InterviewRescheduleWorkerIntegrationSpec extends MongoIntegrationSui
         proposed <- propose(s)
         withdrawn <- s.applied(
           InterviewLifecycleEvent.WithdrawProposal(now),
-          s.actor(UserRole.Recruiter, s.workflow.recruiterId, input = "withdraw"),
+          s.actor(UserRole.Recruiter, s.workflow.recruiterId),
           proposed.revision,
           now
         )
         cancelling <- s.applied(
           InterviewLifecycleEvent.Cancel(InterviewCancellationInitiator.Recruiter, now),
-          s.actor(UserRole.Recruiter, s.workflow.recruiterId, input = "cancel"),
+          s.actor(UserRole.Recruiter, s.workflow.recruiterId),
           withdrawn.revision,
           now
         )

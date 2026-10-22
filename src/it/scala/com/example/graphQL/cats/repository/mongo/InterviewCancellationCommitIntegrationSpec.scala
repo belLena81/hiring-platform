@@ -54,8 +54,11 @@ final class InterviewCancellationCommitIntegrationSpec extends MongoIntegrationS
           held,
           Instant.now().plusSeconds(300),
           UUID.randomUUID(),
-          ApplicationStatus.Accepted
+          ApplicationStatus.Accepted,
+          UserId(UUID.randomUUID()),
+          com.example.graphQL.cats.domain.model.UserRole.Recruiter
         )
+        .map(workflow => workflow.copy(initiatedBy = workflow.recruiterId))
         .fold(error => fail(s"invalid workflow $error"), identity)
       for {
         _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
@@ -64,9 +67,8 @@ final class InterviewCancellationCommitIntegrationSpec extends MongoIntegrationS
           .create(
             base,
             InterviewWorkflow.initialCommand(base),
-            UUID.randomUUID(),
-            MutationReceiptFingerprint.fromCanonicalInput("arrangement"),
-            now
+            now,
+            MutationWriteContext.directWrite
           )
           .value
           .flatMap(_.fold(error => IO.raiseError(new AssertionError(s"$error")), _ => IO.unit))
@@ -105,12 +107,7 @@ final class InterviewCancellationCommitIntegrationSpec extends MongoIntegrationS
 
   extension (values: List[String]) private def asJavaList = scala.jdk.CollectionConverters.SeqHasAsJava(values).asJava
 
-  private def actor(role: UserRole, id: UserId, key: UUID = UUID.randomUUID(), input: String = "cancel") =
-    InterviewLifecycleOrigin.Actor(
-      InterviewWorkflowAccess(id, role),
-      key,
-      MutationReceiptFingerprint.fromCanonicalInput(input)
-    )
+  private def actor(role: UserRole, id: UserId) = InterviewLifecycleOrigin.Actor(InterviewWorkflowAccess(id, role))
 
   private def apply(
       a: Arrangement,
@@ -151,6 +148,7 @@ final class InterviewCancellationCommitIntegrationSpec extends MongoIntegrationS
         next = applied(result)
         stored <- a.current
         application <- a.application
+        _ <- ApplicationStatusInvariant.assertAgrees(a.fixture.database, a.workflow.applicationId)
         history <- MongoRepositoryTestSupport.findOne(
           a.fixture.database,
           MongoCollections.ApplicationEvents,
@@ -158,7 +156,6 @@ final class InterviewCancellationCommitIntegrationSpec extends MongoIntegrationS
         )
         outbox <- a.count(MongoCollections.EventOutbox)
         step <- a.repository.findCommand(a.workflow.id, s"${a.workflow.id.value}:1:0").value
-        replay <- apply(a, InterviewLifecycleEvent.Cancel(InterviewCancellationInitiator.Candidate, now), origin)
         historyAfter <- a.count(MongoCollections.ApplicationEvents)
       } yield {
         assertEquals(stored, next)
@@ -174,7 +171,6 @@ final class InterviewCancellationCommitIntegrationSpec extends MongoIntegrationS
           Some(InterviewLifecycleCommand.CancelCalendarSlot(InterviewWorkflow.cancellationKey(a.workflow.id, 0)))
         )
         assertEquals(step.toOption.flatten.map(_.state), Some(InterviewWorkflowCommandState.Pending))
-        assertEquals(replay, Right(InterviewLifecycleOutcome.Duplicate(stored)))
         assertEquals(historyAfter, 1L)
       }
     }
@@ -196,6 +192,7 @@ final class InterviewCancellationCommitIntegrationSpec extends MongoIntegrationS
           InterviewLifecycleEvent.Cancel(InterviewCancellationInitiator.Recruiter, now),
           actor(UserRole.Recruiter, a.workflow.recruiterId)
         )
+        _ <- ApplicationStatusInvariant.assertAgrees(a.fixture.database, a.workflow.applicationId)
         history <- MongoRepositoryTestSupport.findOne(
           a.fixture.database,
           MongoCollections.ApplicationEvents,
@@ -260,7 +257,7 @@ final class InterviewCancellationCommitIntegrationSpec extends MongoIntegrationS
         now,
         None,
         None,
-        None
+        UserRole.Candidate
       )
       for {
         _ <- MongoRepositoryTestSupport.insertOne(
@@ -274,10 +271,10 @@ final class InterviewCancellationCommitIntegrationSpec extends MongoIntegrationS
           actor(UserRole.Candidate, a.workflow.candidateId)
         )
         _ <- untouched(a, history = 1L)
-        receipts <- a.count(MongoCollections.InterviewWorkflows)
+        workflowDocuments <- a.count(MongoCollections.InterviewWorkflows)
       } yield {
         assert(failed.isLeft)
-        assertEquals(receipts, 2L) // the workflow and its creation receipt: no cancellation receipt was kept
+        assertEquals(workflowDocuments, 1L) // only the workflow: the interview store keeps no request receipts
       }
     }
   }
@@ -286,7 +283,7 @@ final class InterviewCancellationCommitIntegrationSpec extends MongoIntegrationS
     "DHW-20 a proposal persists its state, expiry intent and notification, leaves retention and is cleared by cancellation"
   ) {
     arranged() { a =>
-      val proposer = actor(UserRole.Recruiter, a.workflow.recruiterId, input = "propose")
+      val proposer = actor(UserRole.Recruiter, a.workflow.recruiterId)
       val propose = InterviewLifecycleEvent.Propose(
         replacement.startsAt,
         replacement.endsAt,
@@ -310,7 +307,7 @@ final class InterviewCancellationCommitIntegrationSpec extends MongoIntegrationS
         cancelled <- apply(
           a,
           InterviewLifecycleEvent.Cancel(InterviewCancellationInitiator.Recruiter, now),
-          actor(UserRole.Recruiter, a.workflow.recruiterId, input = "cancel"),
+          actor(UserRole.Recruiter, a.workflow.recruiterId),
           expected = 1L
         )
         afterCancel <- a.workflowDocument
@@ -337,31 +334,6 @@ final class InterviewCancellationCommitIntegrationSpec extends MongoIntegrationS
     }
   }
 
-  test("DHW-23 a reused request key with different input is a conflict and writes nothing") {
-    arranged() { a =>
-      val key = UUID.randomUUID()
-      for {
-        first <- apply(
-          a,
-          InterviewLifecycleEvent.RequestReschedule(now),
-          actor(UserRole.Candidate, a.workflow.candidateId, key, "request")
-        )
-        reused <- apply(
-          a,
-          InterviewLifecycleEvent.Cancel(InterviewCancellationInitiator.Candidate, now),
-          actor(UserRole.Candidate, a.workflow.candidateId, key, "cancel")
-        )
-        application <- a.application
-        stored <- a.current
-      } yield {
-        applied(first)
-        assertEquals(reused, Left(com.example.graphQL.cats.service.RepositoryError.Conflict))
-        assertEquals(application.map(_.getString(MongoFields.Status)), Some("Interview"))
-        assertEquals(stored.rescheduleRequestedAt, Some(now))
-      }
-    }
-  }
-
   private def expiryOf(a: Arrangement, collection: String, id: String): IO[Option[Instant]] =
     a.stored(collection, id)
       .map(_.flatMap(document => Option(document.getDate(MongoFields.RetentionExpiresAt))).map(_.toInstant))
@@ -369,12 +341,12 @@ final class InterviewCancellationCommitIntegrationSpec extends MongoIntegrationS
   private val retention = 8.days.toMillis
   private def datedExpiry(held: InterviewInterval = interval) = held.endsAt.plusMillis(retention)
 
-  private def propose(a: Arrangement, expected: Long, key: String) =
+  private def propose(a: Arrangement, expected: Long) =
     apply(
       a,
       InterviewLifecycleEvent
         .Propose(replacement.startsAt, replacement.endsAt, a.workflow.recruiterId, now, InterviewProposalTtl.Default),
-      actor(UserRole.Recruiter, a.workflow.recruiterId, input = key),
+      actor(UserRole.Recruiter, a.workflow.recruiterId),
       expected
     )
 
@@ -387,25 +359,25 @@ final class InterviewCancellationCommitIntegrationSpec extends MongoIntegrationS
       val id = a.workflow.id.value.toString
       for {
         // decline
-        _ <- propose(a, 0L, "p1").map(applied)
+        _ <- propose(a, 0L).map(applied)
         _ <- apply(
           a,
           InterviewLifecycleEvent.DeclineProposal(now),
-          actor(UserRole.Candidate, candidate, input = "d"),
+          actor(UserRole.Candidate, candidate),
           1L
         ).map(applied)
         afterDecline <- expiryOf(a, MongoCollections.InterviewWorkflows, id)
         // withdraw
-        _ <- propose(a, 2L, "p2").map(applied)
+        _ <- propose(a, 2L).map(applied)
         _ <- apply(
           a,
           InterviewLifecycleEvent.WithdrawProposal(now),
-          actor(UserRole.Recruiter, recruiter, input = "w"),
+          actor(UserRole.Recruiter, recruiter),
           3L
         ).map(applied)
         afterWithdraw <- expiryOf(a, MongoCollections.InterviewWorkflows, id)
         // expiry
-        proposed <- propose(a, 4L, "p3").map(applied)
+        proposed <- propose(a, 4L).map(applied)
         dueAt = proposed.proposal.map(_.expiresAt).getOrElse(now)
         _ <- apply(
           a,
@@ -434,11 +406,11 @@ final class InterviewCancellationCommitIntegrationSpec extends MongoIntegrationS
     arranged(farOut) { a =>
       val id = a.workflow.id.value.toString
       for {
-        _ <- propose(a, 0L, "p1").map(applied)
+        _ <- propose(a, 0L).map(applied)
         _ <- apply(
           a,
           InterviewLifecycleEvent.DeclineProposal(now),
-          actor(UserRole.Candidate, a.workflow.candidateId, input = "d"),
+          actor(UserRole.Candidate, a.workflow.candidateId),
           1L
         ).map(applied)
         workflowExpiry <- expiryOf(a, MongoCollections.InterviewWorkflows, id)
@@ -455,66 +427,57 @@ final class InterviewCancellationCommitIntegrationSpec extends MongoIntegrationS
     }
   }
 
-  test("retention: request and dismiss on a settled workflow give their receipts and intents the dated expiry") {
+  test("retention: request and dismiss on a settled workflow give their intents the dated expiry") {
     arranged() { a =>
       val candidate = a.workflow.candidateId
       val recruiter = a.workflow.recruiterId
       val id = a.workflow.id.value.toString
-      val requestKey = UUID.randomUUID()
-      val dismissKey = UUID.randomUUID()
       for {
-        _ <- propose(a, 0L, "p1").map(applied)
+        _ <- propose(a, 0L).map(applied)
         _ <- apply(
           a,
           InterviewLifecycleEvent.DeclineProposal(now),
-          actor(UserRole.Candidate, candidate, input = "d"),
+          actor(UserRole.Candidate, candidate),
           1L
         ).map(applied)
         requested <- apply(
           a,
           InterviewLifecycleEvent.RequestReschedule(now),
-          actor(UserRole.Candidate, candidate, requestKey, "r"),
+          actor(UserRole.Candidate, candidate),
           2L
         ).map(applied)
-        requestReceipt <- expiryOf(a, MongoCollections.InterviewWorkflows, s"request:${candidate.value}:$requestKey")
         notifyIntent <- expiryOf(a, MongoCollections.InterviewWorkflowCommands, s"$id:$id:3:0")
         _ <- apply(
           a,
           InterviewLifecycleEvent.DismissRescheduleRequest,
-          actor(UserRole.Recruiter, recruiter, dismissKey, "x"),
+          actor(UserRole.Recruiter, recruiter),
           3L
         ).map(applied)
-        dismissReceipt <- expiryOf(a, MongoCollections.InterviewWorkflows, s"request:${recruiter.value}:$dismissKey")
-        // A repeated request is a no-op decision: it answers with the stored workflow and stores nothing at all.
-        noopKey = UUID.randomUUID()
+        // A repeated request is a no-op decision: it answers with the stored workflow and writes no workflow state.
         _ <- apply(
           a,
           InterviewLifecycleEvent.RequestReschedule(now),
-          actor(UserRole.Candidate, candidate, UUID.randomUUID(), "r2"),
+          actor(UserRole.Candidate, candidate),
           4L
         ).map(applied)
-        receiptsBefore <- a.count(MongoCollections.InterviewWorkflows)
+        commandsBefore <- a.count(MongoCollections.InterviewWorkflowCommands)
         noop <- apply(
           a,
           InterviewLifecycleEvent.RequestReschedule(now),
-          actor(UserRole.Candidate, candidate, noopKey, "r3"),
+          actor(UserRole.Candidate, candidate),
           5L
         )
-        noopReceipt <- a.stored(MongoCollections.InterviewWorkflows, s"request:${candidate.value}:$noopKey")
-        receiptsAfter <- a.count(MongoCollections.InterviewWorkflows)
+        commandsAfter <- a.count(MongoCollections.InterviewWorkflowCommands)
         reused <- apply(
           a,
           InterviewLifecycleEvent.DismissRescheduleRequest,
-          actor(UserRole.Candidate, candidate, noopKey, "other"),
+          actor(UserRole.Candidate, candidate),
           5L
         )
       } yield {
         assertEquals(requested.rescheduleRequestedAt, Some(now))
-        assertEquals(requestReceipt, Some(datedExpiry()))
         assertEquals(notifyIntent, Some(datedExpiry()))
-        assertEquals(dismissReceipt, Some(datedExpiry()))
-        assertEquals(noopReceipt, None)
-        assertEquals(receiptsAfter, receiptsBefore)
+        assertEquals(commandsAfter, commandsBefore)
         assert(noop.exists(_.isInstanceOf[InterviewLifecycleOutcome.Duplicate]), clue(noop))
         // A candidate may not dismiss at all, whatever the key was used for before.
         assertEquals(reused, Left(com.example.graphQL.cats.service.RepositoryError.InvalidEvent))
@@ -533,7 +496,7 @@ final class InterviewCancellationCommitIntegrationSpec extends MongoIntegrationS
       .insertOne(
         a.fixture.database,
         MongoCollections.Users,
-        MongoHiringCodecs.user(User(id, None, s"Admin-${id.value}", UserRole.Admin, None, now, adminSingleton = true))
+        MongoHiringCodecs.user(User(id, None, s"Admin-${id.value}", UserRole.Admin, None, now))
       )
       .as(id)
   }
@@ -600,7 +563,7 @@ final class InterviewCancellationCommitIntegrationSpec extends MongoIntegrationS
     }
   }
 
-  test("DHW-16 a failure after the outbox event and request receipt were written rolls everything back") {
+  test("DHW-16 a failure after the outbox event was written rolls everything back") {
     arranged() { a =>
       for {
         commands <- a.collection(MongoCollections.InterviewWorkflowCommands)
@@ -628,12 +591,12 @@ final class InterviewCancellationCommitIntegrationSpec extends MongoIntegrationS
         application <- a.application
         history <- a.count(MongoCollections.ApplicationEvents)
         outbox <- a.count(MongoCollections.EventOutbox)
-        receipts <- a.count(MongoCollections.InterviewWorkflows)
+        workflowDocuments <- a.count(MongoCollections.InterviewWorkflows)
       } yield {
         assert(failed.isLeft, clue(failed))
         assertEquals(workflow.phase, InterviewWorkflowPhase.Completed)
         assertEquals(application.map(_.getString(MongoFields.Status)), Some("Interview"))
-        assertEquals((history, outbox, receipts), (0L, 0L, 2L))
+        assertEquals((history, outbox, workflowDocuments), (0L, 0L, 1L))
       }
     }
   }

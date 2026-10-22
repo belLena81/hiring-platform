@@ -37,7 +37,8 @@ object InterviewLifecycleFixtures extends Assertions {
         revision = revision,
         phase = phase,
         notified = Set.empty,
-        initiatedBy = recruiterId
+        initiatedBy = recruiterId,
+        initiatedByRole = com.example.graphQL.cats.domain.model.UserRole.Recruiter
       )
     )
 

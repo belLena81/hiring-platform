@@ -15,6 +15,7 @@ import com.example.graphQL.cats.service.{
   ServiceFixtures,
   UseCaseError
 }
+import com.example.graphQL.cats.service.mutation.{Idempotent, TestIdempotency}
 import com.example.graphQL.cats.service.protocol.IdempotencyRequest
 import java.time.Instant
 import java.util.UUID
@@ -50,7 +51,8 @@ final class InterviewCancellationServiceSpec extends CatsEffectSuite {
         3L,
         phase,
         bothNotified,
-        recruiterId
+        recruiterId,
+        initiatedByRole = com.example.graphQL.cats.domain.model.UserRole.Recruiter
       )
     )
 
@@ -100,12 +102,14 @@ final class InterviewCancellationServiceSpec extends CatsEffectSuite {
       events <- Ref.of[IO, Vector[ApplicationEvent]](Vector.empty)
       errors <- Ref.of[IO, Option[RepositoryError]](None)
       repository <- InMemoryInterviewWorkflowRepository.create(workflow, status)
+      receipts <- TestIdempotency.remembering
     } yield Arrangement(
       new InterviewSchedulingService[IO](
         new InMemoryUsers(users),
         new InMemoryJobs(jobs),
         new InMemoryApplications(applications, events, errors),
         repository,
+        Idempotent(receipts),
         5.minutes,
         IO.pure(clock),
         proposalTtl = ttl
@@ -129,7 +133,7 @@ final class InterviewCancellationServiceSpec extends CatsEffectSuite {
       actor: ActorContext,
       expectedRevision: Long = 3L,
       key: UUID = UUID.randomUUID()
-  ): IO[Either[InterviewActionError, InterviewWorkflow]] = {
+  ): IO[Either[UseCaseError, InterviewWorkflow]] = {
     val id = workflowId
     val result = action match {
       case Action.Cancel  => a.service.cancel(actor, id, expectedRevision, key)
@@ -151,8 +155,8 @@ final class InterviewCancellationServiceSpec extends CatsEffectSuite {
   }
 
   private val unauthorized = UseCaseError.Authentication(AuthenticationError.Unauthorized)
-  private val forbidden = InterviewActionError.UseCase(UseCaseError.Domain(DomainError.Forbidden))
-  private val notFound = InterviewActionError.UseCase(UseCaseError.Domain(DomainError.NotFound("interviewWorkflow")))
+  private val forbidden = UseCaseError.Domain(DomainError.Forbidden)
+  private val notFound = UseCaseError.Domain(DomainError.NotFound("interviewWorkflow"))
 
   private enum Expectation { case Allowed, Forbidden, NotFound }
   import Expectation.*
@@ -289,16 +293,16 @@ final class InterviewCancellationServiceSpec extends CatsEffectSuite {
     }
   }
 
-  test("DHW-19 typed outcomes leave no command, revision or status change") {
+  test("AC-06.7 DHW-19 typed outcomes leave no command, revision or status change") {
     val started = now.plusSeconds(172800)
-    val cases: List[(String, InterviewWorkflow, Action, Instant, ApplicationStatus, InterviewActionError)] = List(
+    val cases: List[(String, InterviewWorkflow, Action, Instant, ApplicationStatus, UseCaseError)] = List(
       (
         "a started interval",
         workflowIn(InterviewWorkflowPhase.Completed),
         Action.Cancel,
         started,
         ApplicationStatus.Interview,
-        InterviewActionError.Workflow(InterviewWorkflowError.InterviewAlreadyStarted)
+        UseCaseError.InterviewRule(InterviewWorkflowError.InterviewAlreadyStarted)
       ),
       (
         "an already cancelled workflow",
@@ -306,7 +310,7 @@ final class InterviewCancellationServiceSpec extends CatsEffectSuite {
         Action.Cancel,
         now,
         ApplicationStatus.Rejected,
-        InterviewActionError.Workflow(InterviewWorkflowError.InterviewAlreadyCancelled)
+        UseCaseError.InterviewRule(InterviewWorkflowError.InterviewAlreadyCancelled)
       ),
       (
         "an unsettled phase",
@@ -314,7 +318,7 @@ final class InterviewCancellationServiceSpec extends CatsEffectSuite {
         Action.Propose,
         now,
         ApplicationStatus.Interview,
-        InterviewActionError.Workflow(InterviewWorkflowError.InterviewNotSettled)
+        UseCaseError.InterviewRule(InterviewWorkflowError.InterviewNotSettled)
       ),
       (
         "an open proposal",
@@ -322,7 +326,7 @@ final class InterviewCancellationServiceSpec extends CatsEffectSuite {
         Action.Propose,
         now,
         ApplicationStatus.Interview,
-        InterviewActionError.Workflow(InterviewWorkflowError.ProposalAlreadyOpen)
+        UseCaseError.InterviewRule(InterviewWorkflowError.ProposalAlreadyOpen)
       ),
       (
         "a request while a proposal is open",
@@ -330,7 +334,7 @@ final class InterviewCancellationServiceSpec extends CatsEffectSuite {
         Action.Request,
         now,
         ApplicationStatus.Interview,
-        InterviewActionError.Workflow(InterviewWorkflowError.ProposalAlreadyOpen)
+        UseCaseError.InterviewRule(InterviewWorkflowError.ProposalAlreadyOpen)
       ),
       (
         "no open proposal to accept",
@@ -338,7 +342,7 @@ final class InterviewCancellationServiceSpec extends CatsEffectSuite {
         Action.Accept,
         now,
         ApplicationStatus.Interview,
-        InterviewActionError.Workflow(InterviewWorkflowError.NoOpenProposal)
+        UseCaseError.InterviewRule(InterviewWorkflowError.NoOpenProposal)
       ),
       (
         "no open proposal to withdraw",
@@ -346,7 +350,7 @@ final class InterviewCancellationServiceSpec extends CatsEffectSuite {
         Action.Withdraw,
         now,
         ApplicationStatus.Interview,
-        InterviewActionError.Workflow(InterviewWorkflowError.NoOpenProposal)
+        UseCaseError.InterviewRule(InterviewWorkflowError.NoOpenProposal)
       ),
       (
         "an expired proposal that the expiry command has not yet closed",
@@ -354,7 +358,7 @@ final class InterviewCancellationServiceSpec extends CatsEffectSuite {
         Action.Accept,
         now.plusSeconds(60),
         ApplicationStatus.Interview,
-        InterviewActionError.Workflow(InterviewWorkflowError.ProposalExpired)
+        UseCaseError.InterviewRule(InterviewWorkflowError.ProposalExpired)
       ),
       (
         "a stale revision",
@@ -362,7 +366,7 @@ final class InterviewCancellationServiceSpec extends CatsEffectSuite {
         Action.Request,
         now,
         ApplicationStatus.Interview,
-        InterviewActionError.Workflow(InterviewWorkflowError.StaleRevision)
+        UseCaseError.InterviewRule(InterviewWorkflowError.StaleRevision)
       )
     )
     cases.traverse_ { case (label, workflow, action, clock, status, expected) =>
@@ -384,7 +388,9 @@ final class InterviewCancellationServiceSpec extends CatsEffectSuite {
     }
   }
 
-  test("DHW-19 a hired or rejected application refuses cancel, propose, accept and request with a typed transition") {
+  test(
+    "AC-06.7 DHW-19 a hired or rejected application refuses cancel, propose, accept and request with a typed transition"
+  ) {
     List(Action.Cancel, Action.Propose, Action.Request).traverse_ { action =>
       List(ApplicationStatus.Hired, ApplicationStatus.Rejected).traverse_ { status =>
         val actor = if (action == Action.Propose) recruiterActor else candidateActor
@@ -397,7 +403,7 @@ final class InterviewCancellationServiceSpec extends CatsEffectSuite {
             assertEquals(
               result,
               Left(
-                InterviewActionError.UseCase(UseCaseError.Domain(DomainError.InvalidStatusTransition(status, target)))
+                UseCaseError.Domain(DomainError.InvalidStatusTransition(status, target))
               )
             )
             assertEquals(commands, 0)
@@ -419,10 +425,8 @@ final class InterviewCancellationServiceSpec extends CatsEffectSuite {
         assertEquals(
           accepted,
           Left(
-            InterviewActionError.UseCase(
-              UseCaseError.Domain(
-                DomainError.InvalidStatusTransition(ApplicationStatus.Hired, ApplicationStatus.Interview)
-              )
+            UseCaseError.Domain(
+              DomainError.InvalidStatusTransition(ApplicationStatus.Hired, ApplicationStatus.Interview)
             )
           )
         )
@@ -472,11 +476,11 @@ final class InterviewCancellationServiceSpec extends CatsEffectSuite {
         assert(first.isRight)
         assertEquals(
           otherOperation,
-          Left(InterviewActionError.UseCase(UseCaseError.Repository(RepositoryError.Conflict)))
+          Left(UseCaseError.Repository(RepositoryError.Conflict))
         )
         assertEquals(
           otherRevision,
-          Left(InterviewActionError.UseCase(UseCaseError.Repository(RepositoryError.Conflict)))
+          Left(UseCaseError.Repository(RepositoryError.Conflict))
         )
         assertEquals(status, ApplicationStatus.Interview)
       }
@@ -493,8 +497,8 @@ final class InterviewCancellationServiceSpec extends CatsEffectSuite {
         history <- a.history
       } yield {
         assertEquals(cancelled.map(_.phase), Right(InterviewWorkflowPhase.CancelPending))
-        assertEquals(late, Left(InterviewActionError.Workflow(InterviewWorkflowError.NoOpenProposal)))
-        assertEquals(stale, Left(InterviewActionError.Workflow(InterviewWorkflowError.StaleRevision)))
+        assertEquals(late, Left(UseCaseError.InterviewRule(InterviewWorkflowError.NoOpenProposal)))
+        assertEquals(stale, Left(UseCaseError.InterviewRule(InterviewWorkflowError.StaleRevision)))
         assertEquals(stored.proposal, None)
         assertEquals(history.size, 1)
       }
@@ -510,8 +514,8 @@ final class InterviewCancellationServiceSpec extends CatsEffectSuite {
         history <- a.history
       } yield {
         assert(first.isRight)
-        assertEquals(second, Left(InterviewActionError.Workflow(InterviewWorkflowError.StaleRevision)))
-        assertEquals(third, Left(InterviewActionError.Workflow(InterviewWorkflowError.InterviewAlreadyCancelled)))
+        assertEquals(second, Left(UseCaseError.InterviewRule(InterviewWorkflowError.StaleRevision)))
+        assertEquals(third, Left(UseCaseError.InterviewRule(InterviewWorkflowError.InterviewAlreadyCancelled)))
         assertEquals(history.size, 1)
       }
     }
@@ -526,9 +530,9 @@ final class InterviewCancellationServiceSpec extends CatsEffectSuite {
         proposeAgain <- run(a, Action.Propose, recruiterActor, expectedRevision = 4L)
       } yield {
         assertEquals(accepted.map(_.phase), Right(InterviewWorkflowPhase.RescheduleHoldPending))
-        assertEquals(withdraw, Left(InterviewActionError.Workflow(InterviewWorkflowError.StaleRevision)))
-        assertEquals(withdrawFresh, Left(InterviewActionError.Workflow(InterviewWorkflowError.NoOpenProposal)))
-        assertEquals(proposeAgain, Left(InterviewActionError.Workflow(InterviewWorkflowError.InterviewNotSettled)))
+        assertEquals(withdraw, Left(UseCaseError.InterviewRule(InterviewWorkflowError.StaleRevision)))
+        assertEquals(withdrawFresh, Left(UseCaseError.InterviewRule(InterviewWorkflowError.NoOpenProposal)))
+        assertEquals(proposeAgain, Left(UseCaseError.InterviewRule(InterviewWorkflowError.InterviewNotSettled)))
       }
     }
   }
@@ -542,7 +546,7 @@ final class InterviewCancellationServiceSpec extends CatsEffectSuite {
         third <- run(a, Action.Propose, adminActor, expectedRevision = 5L)
       } yield {
         assert(first.isRight)
-        assertEquals(second, Left(InterviewActionError.Workflow(InterviewWorkflowError.ProposalAlreadyOpen)))
+        assertEquals(second, Left(UseCaseError.InterviewRule(InterviewWorkflowError.ProposalAlreadyOpen)))
         assert(third.isRight, clue(third))
       }
     }
@@ -554,21 +558,21 @@ final class InterviewCancellationServiceSpec extends CatsEffectSuite {
         result <- run(a, Action.Dismiss, recruiterActor)
         commands <- a.commands
       } yield {
-        assertEquals(result, Left(InterviewActionError.Workflow(InterviewWorkflowError.NoRescheduleRequest)))
+        assertEquals(result, Left(UseCaseError.InterviewRule(InterviewWorkflowError.NoRescheduleRequest)))
         assertEquals(commands, 0)
       }
     }
   }
 
-  test("DHW-23 repeating a request whose flag is already set returns the workflow and stores no receipt") {
+  test("DHW-23 repeating a request whose flag is already set returns the workflow and writes no workflow state") {
     arranged(workflowIn(InterviewWorkflowPhase.Completed, _.copy(rescheduleRequestedAt = Some(now)))).flatMap { a =>
       for {
         results <- List.fill(5)(run(a, Action.Request, candidateActor)).sequence
-        receipts <- a.repository.store.get.map(_.requestReceipts.size)
+        commands <- a.commands
         stored <- a.stored
       } yield {
         assert(results.forall(_ == Right(stored)), clue(results))
-        assertEquals(receipts, 0)
+        assertEquals(commands, 0)
       }
     }
   }
@@ -601,9 +605,9 @@ final class InterviewCancellationServiceSpec extends CatsEffectSuite {
           .value
         commands <- a.commands
       } yield {
-        assertEquals(past, Left(InterviewActionError.Workflow(InterviewWorkflowError.StartMustBeInFuture)))
-        assertEquals(reversed, Left(InterviewActionError.Workflow(InterviewWorkflowError.EndMustFollowStart)))
-        assertEquals(unchanged, Left(InterviewActionError.Workflow(InterviewWorkflowError.RescheduleIntervalUnchanged)))
+        assertEquals(past, Left(UseCaseError.InterviewRule(InterviewWorkflowError.StartMustBeInFuture)))
+        assertEquals(reversed, Left(UseCaseError.InterviewRule(InterviewWorkflowError.EndMustFollowStart)))
+        assertEquals(unchanged, Left(UseCaseError.InterviewRule(InterviewWorkflowError.RescheduleIntervalUnchanged)))
         assertEquals(commands, 0)
       }
     }

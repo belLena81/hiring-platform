@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.repository.mongo.MongoF.asRepository
 import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.infrastructure.kafka.KafkaProducerGenerationRetirement
@@ -44,24 +45,22 @@ final class MongoProducerGenerationMaintenance(
           .all
       )
     ).flatMap { batch =>
-      RepositoryF
-        .at[IO]
-        .fromEither(
-          batch.toVector
-            .traverse { row =>
-              for {
-                cursor <- text(row, MongoFields.Id)
-                id <- text(row, MongoFields.TransactionalId)
-                _ <- KafkaProducerGenerationRetirement.canonicalPrefix(id)
-              } yield cursor -> id
-            }
-            .map { decoded =>
-              ProducerGenerationInventoryPage(
-                decoded.map(_._2).distinct,
-                if (decoded.size == MongoProducerRegistrations.BatchSize) decoded.lastOption.map(_._1) else None
-              )
-            }
-        )
+      MongoF.fromEither(
+        batch.toVector
+          .traverse { row =>
+            for {
+              cursor <- text(row, MongoFields.Id)
+              id <- text(row, MongoFields.TransactionalId)
+              _ <- KafkaProducerGenerationRetirement.canonicalPrefix(id)
+            } yield cursor -> id
+          }
+          .map { decoded =>
+            ProducerGenerationInventoryPage(
+              decoded.map(_._2).distinct,
+              if (decoded.size == MongoProducerRegistrations.BatchSize) decoded.lastOption.map(_._1) else None
+            )
+          }
+      )
     }
   }
 
@@ -79,10 +78,10 @@ final class MongoProducerGenerationMaintenance(
           ).sort(Sorts.ascending(MongoFields.Id)).limit(MongoProducerRegistrations.BatchSize).all
         )
       ).flatMap { batch =>
-        if (batch.isEmpty) ().pure[[A] =>> RepositoryF[IO, A]]
+        if (batch.isEmpty) ().asRepository
         else
           for {
-            ids <- RepositoryF.at[IO].fromEither(batch.toList.traverse(text(_, MongoFields.Id)))
+            ids <- MongoF.fromEither(batch.toList.traverse(text(_, MongoFields.Id)))
             now <- RepositoryF.lift(currentTime)
             _ <- boundary(
               MongoSessionOperations.updateMany(
@@ -103,8 +102,7 @@ final class MongoProducerGenerationMaintenance(
             _ <- checkpoint
           } yield ()
       }
-    RepositoryF
-      .at[IO]
+    MongoF
       .fromEither(KafkaProducerGenerationRetirement.canonicalPrefix(transactionalId))
       .flatMap(_ => fence(transactionalId) *> checkpoint)
   }

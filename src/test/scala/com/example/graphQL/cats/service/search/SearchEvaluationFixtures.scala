@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.service.search
 
-import com.example.graphQL.cats.domain.model.{EmbeddingMeta, JobStatus, SearchMode}
+import com.example.graphQL.cats.domain.model.{EmbeddingMeta, JobState, SearchMode}
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.service.ServiceFixtures
 import com.example.graphQL.cats.shared.crypto.SourceHash
@@ -257,7 +257,7 @@ object SearchEvaluationFixtures {
                 title = value.intendedRole,
                 description = value.summary,
                 skills = value.skills,
-                status = JobStatus.Open
+                state = JobState.Open
               ),
               1.0,
               SearchMode.HYBRID,
