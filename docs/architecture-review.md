@@ -76,7 +76,8 @@ Gaps:
 
 - Circe is imported in four `service/` files (`events/OperationalEvent*`, `search/SearchContracts`, `search/SearchSessionRecording`), leaking wire codecs into the service layer.
 - No architecture test enforces the layer rules; they rest on docs and review.
-- Several Mongo adapters are very large (`MongoInterviewCommandQueue` 793 lines, `MongoOperationalEventRepositories` 716, `MongoSemanticSearchRepository` 642, `MongoHiringMigrations` 629, `MongoHiringCodecs` 610).
+- Several Mongo adapters are very large (`MongoInterviewCommandQueue` 793 lines, `MongoOperationalEventRepositories` 716, `MongoSemanticSearchRepository` 642, `MongoHiringMigrations` 629, `MongoHiringCodecs` 610). Migration steps are still grouped in `MongoHiringMigrations` rather than owned per collection.
+- `MongoHiringPersistenceCodecs` still bridges the Java `Document` API through a `BsonDocumentWriter`/`BsonDocumentReader` round-trip. Removing it requires repositories to use typed persistence collections instead of heterogeneous `Document` collections.
 - CLI `*Main` objects sit inside `repository.mongo`.
 - `ARCHITECTURE.md`'s package tree omits `service/read`, `service/mutation`, `api/admission`, `domain/workflow`, `domain/search`.
 
