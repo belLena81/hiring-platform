@@ -1,0 +1,133 @@
+# Analytics erasure completion window
+
+## Identity and scope
+
+- Task: make the time from an account-erasure request to verified physical erasure a configured, tested budget, and record the architecture and best-practice review that motivates it. Source of the request: the article framing in the ignored `.local/articles/10-lakehouse-personal-data-erasure.md` (enhancements E1–E10) and its retention-window draft. Roadmap: Phase 6/7 refinement before Phase 14 production hardening; no deployed gate is closed by this work.
+- Status: in progress (2026-10-22). Architecture review and best-practice check complete. The user authorized implementation of the plan on 2026-10-22 and added one requirement: Delta tables hold only pseudonymized and necessary data (slice 3 below is therefore authorized in its Bronze-minimization form). Decisions D1–D3 are taken as recommended.
+- Coordinator: Product Manager. Proposed owners: Big Data Engineer (analytics build), Scala Developer (root build items only if slice 3 is authorized), Technical Writer (canonical docs), then Code Reviewer, Security Engineer and QA.
+- User outcome: an operator can state, from configuration alone, the worst-case time a deleted account remains physically recoverable in the lakehouse, and the system refuses a configuration that exceeds the chosen budget. Erasure of one account no longer freezes the Admin report for a month.
+- Authorized scope: slices 1, 2 and 3 in the analytics build, configuration, tests and canonical docs. Slice 3 is Bronze minimization inside the analytics build: the Kafka envelope and the root build are unchanged; raw identifiers stop at the in-memory parse and never reach a Delta table. Tokenizing in the outbox publisher (article option E3) stays out of scope.
+- Non-goals: crypto-shredding, per-subject keys, differential privacy, analytics consent modelling, backup/restore design (owned by [production readiness](production-readiness.md) PRD-09), real-horizon or deployed evidence, new dependencies, Kafka compaction, a metrics exporter.
+
+## Verified source baseline (2026-10-22)
+
+Operational build (`src/main/scala/com/example/graphQL/cats`):
+
+- `service/auth/UserAccountService.scala:152-184` — `deleteMyAccount` runs in one receipt-owned transaction: worker-heartbeat precondition, erasure request `{_id: raw user UUID, state: Pending}`, report control `$inc generation` + `Hidden`, tombstone, subject fence `deleted:true`, interview subject cleanup, recruiter job closure.
+- `repository/mongo/MongoUserRepository.scala:421-456` — tombstone unsets password, profile, embedding, recruiter profile, email. It keeps `_id`, `role`, `createdAt` and writes `name = "deleted-<uuid>"`, so the raw UUID is stored twice more (`name`, `nameCanonical`).
+- `repository/mongo/MongoOperationalEventRepositories.scala:360-383, 457-476, 528-551` — the publisher fails claimed events of deleted subjects with `SUBJECT_DELETED` and cannot lease a deleted fence.
+- `service/events/OperationalEvent.scala:18-29`, `OperationalEventPayload.scala:13-40`, `infrastructure/events/OperationalEventWireCodec.scala:40-58` — the envelope carries `actorId` as a raw UUID. Payloads carry raw `candidateId` (ApplicationCreated, StatusChanged, CandidateHired) and candidate UUIDs as `resultId` in search events. `aggregateId` is a job, application or search ID, never a user ID.
+
+Analytics build (`analytics/src/main/scala/com/example/hiring/analytics`):
+
+- `service/erasure/AnalyticsErasureWorker.scala:296-307` — `replayHorizonsPassed` is the completion rule: broker `beginningOffsets` past the captured barrier, and `now >= max(purgedAt + vacuumSafety, startOfNextUtcDay(purgedAt) + logRetention)`. The reclamation recheck is a hard-coded `5.minutes` (`:277`), outside `AnalyticsErasureWorkerTimings`.
+- `config/AnalyticsOperationalSettings.scala`, `src/main/resources/application.conf:68-99` — defaults: vacuum safety 7 d, `delta-log-retention = 30 days`, `deletion-marker-days = 31`, published snapshot 30 d, poll 5 s. Four tests pin the 30-day log value: `AnalyticsDeltaPrivacyPropertiesSpec:86`, `AnalyticsRuntimeConfigSpec:353`, `AnalyticsTestOperationalConfig:34`, `AnalyticsPrivacyAndErasurePropertySpec:88`.
+- `adapter/spark/AnalyticsDeltaRetention.scala:45-70` — reconciles `delta.deletedFileRetentionDuration` and `delta.logRetentionDuration` on every start with `ALTER TABLE … SET TBLPROPERTIES`, so a changed default reaches an existing local lakehouse without a reset. `delta.enableDeletionVectors` is never set; no `REORG … APPLY (PURGE)` exists. Physical removal relies on `DeltaPurgeRewrite` plus `VACUUM`.
+- `adapter/spark/AnalyticsBatchErasureStage.scala:87-131` — forces a commit through a nonce table property and calls Delta's `checkpointAndCleanUpDeltaLog`, which is what the Delta implementation needs before expired log files can go (see best practices).
+- `adapter/mongo/MongoActiveDeletionMarkerSource.scala:32-75` — active markers are Pending, Processing, and Complete with `expiresAt > now`. `adapter/spark/SparkStreamingBatchStages.scala:233-238` and `service/batch/HiringAnalyticsBatch.scala:73-76` return `ErasurePending` whenever any marker token exists. Consequence: after the worker publishes its own post-erasure report, every other batch, streaming and maintenance publish stays blocked for `deletion-marker-days` (31 days). One erasure freezes report freshness for a month.
+- `adapter/kafka/KafkaRetentionBarrier.scala:53, 82-87` — barrier is `endOffsets`; expiry is checked against real `beginningOffsets`.
+- `compose.yaml:60, 81` — broker `KAFKA_LOG_RETENTION_HOURS=168`; the operational topic sets no `retention.ms`, `segment.ms` or `cleanup.policy`, so broker defaults apply (segment roll 7 d, 1 GiB). On a quiet topic the earliest offset can need about 14 days to pass the barrier.
+- `cli/AnalyticsErasureRepairMain.scala:59-62` — `inspect` prints raw request UUIDs to stdout.
+- Observability: the analytics build has no metrics library and logs only `claimed analytics erasure request`. Nothing reports the age of the oldest pending request.
+- Raw UUID retention without TTL: `analytics_erasure_completions`, `outbox_subject_fences`, the user tombstone. `analytics_erasure_requests` has a TTL on `expiresAt`; `producer_registrations` fenced rows expire after 8 days.
+- No source or canonical document relates the retention horizons to the GDPR one-month response period; no `versionAsOf`, `timestampAsOf`, `history` or `restoreToVersion` read exists under `analytics/src/main`.
+
+Derived worst case with defaults, from the rule above: purge on day 0 at 10:00 UTC → log deadline day 31 00:00 UTC; Kafka worst case about day 14; completion about 30.6 days after the purge, plus any queueing before the purge. The response period of Art. 12(3) is one month from the request.
+
+## Best-practice check (official sources, 2026-10-22)
+
+| Practice | Source | Current state | Plan |
+|---|---|---|---|
+| Delete bronze first from a control table of requests, propagate to silver/gold, then VACUUM; also delete upstream copies (queues, storage) | Databricks "Prepare your data for GDPR compliance" | Done: marker collection, MERGE delete across raw tables, Gold rebuild, outbox purge, Kafka barrier | Keep |
+| Tables with deletion vectors need `REORG TABLE … APPLY (PURGE)` before VACUUM; the purge commit time starts the VACUUM clock | Delta deletion-vectors docs | DVs never enabled explicitly; rewrite + VACUUM makes the point moot today, but an inherited default could silently change it | AEC-04: pin `delta.enableDeletionVectors=false` on every managed table and assert it |
+| Log files are cleaned only when a checkpoint is written; the cutoff is `now − logRetention` truncated to the UTC day (`MetadataCleanup.cleanUpExpiredLogs`), and only versions below the latest checkpoint are eligible | Delta source, Delta batch docs | Done: forced checkpoint and day-truncated deadline in the worker | Keep; make the day-truncation rule pure and tested (AEC-01) |
+| Shorten history to what operators use; the 30-day log default is a time-travel convenience, not a safety bound; `deletedFileRetentionDuration` below 7 d disables Delta's concurrent-reader safety | Delta batch docs | 30 d log, 7 d vacuum | AEC-02: log 14 d, vacuum stays 7 d |
+| Kafka: cap raw-topic retention so personal data ages out inside the deadline; retention deletes whole closed segments, so set `segment.ms` on quiet topics; compaction/tombstones only for entity-keyed topics; crypto-shredding for logs that must outlive the deadline | Kafka docs, Confluent "How does a log forget", Conduktor | Topic uses broker defaults; no explicit topic config | AEC-05: explicit `retention.ms` and `segment.ms` on the topic; crypto-shredding stays out of scope |
+| Pseudonymised data remains personal data; deleting the key does not make it anonymous; keep the re-identification material separate | EDPB Guidelines 01/2025 | HMAC tokens in Silver; raw UUIDs in Kafka, Bronze, fences, completions | Slice 3 (E3/E4) and AEC-07 reduce raw copies; tokens are still treated as personal data |
+| Backups: data may be "put beyond use" until deletion is possible, but a restore must not reintroduce it; keep a suppression list outside the backup and re-apply on restore | ICO right-to-erasure guidance, CNIL | No backup system; completion ledger exists but no restore procedure | Stays with PRD-09; this spec only requires the ledger to remain restore-independent (AEC-07 keeps it) |
+| Record erasure latency and alert before the legal deadline | general operational guidance | Nothing | AEC-06 |
+
+## Decisions (accepted 2026-10-22 with the implementation go-ahead)
+
+| # | Question | Decision |
+|---|---|---|
+| D1 | Erasure budget value: the configured bound on worst-case completion from purge, asserted at startup | 21 days (14 d log + 1 d UTC rollover leaves ≈6 d for queueing, outages, repair) |
+| D2 | Shorten `delta-log-retention` to 14 days although [deployed analytics performance](deployed-analytics-performance.md) rejects shortened retention as a cost optimization | Yes, framed as a privacy requirement; the cost spec's rule targets cost-motivated cuts. The reduced rollback window (14 d) is an accepted trade-off |
+| D3 | Report blocking after completion: keep `Complete` markers active for ingestion exclusion but stop treating them as "erasure pending" for publication | Yes. A completed marker still excludes replayed events (fence of last resort) but does not block publication; only Pending/Processing markers hide the report |
+| D4 | Delta content (user requirement) | Only pseudonymized and necessary fields are persisted. Bronze drops `rawValue`, `actorId` and the `payload` struct (raw `candidateId`, search `resultId`s) and stores the event fingerprint plus the normalized fields Silver already uses. Quarantine and late facts already comply. Bronze and quarantine are reclassified `PseudonymousSubjects`; `delta.dataSkippingNumIndexedCols = 0` stays on every subject-attributed table so tokens do not enter log statistics |
+
+## Behavior and contracts
+
+- Completion rule: pure domain function `ErasureCompletionRule` (name open; `analytics/.../domain`) computes `deltaDeadline(purgedAt, retention)` and `worstCaseCompletion(retention, kafkaWorstCase)`. The worker calls it; no behaviour change to the gate itself.
+- Configuration: `AnalyticsRetentionSettings` gains `erasure-completion-budget` (default per D1). Decoding accumulates, with the existing `ValidatedNec` problems, the failure "worst-case erasure completion <computed> exceeds budget <budget>" so the worker refuses to start on an over-long configuration. Kafka worst case for this check is `retention.ms + segment.ms` from configuration, not the broker (the broker is still the runtime truth for the gate).
+- `AnalyticsErasureWorkerTimings` gains `reclamation-recheck-interval` (default 5 minutes) replacing the literal.
+- Delta properties: `configureRawTablePrivacy` also reconciles `delta.enableDeletionVectors = false`.
+- Marker semantics (D3): `ActiveDeletionMarkerSource` exposes two views, exclusion tokens (all active markers) and pending tokens (Pending/Processing). Ingestion filters use exclusion; publication decisions use pending. Contract note: this changes when `ERASURE_PENDING` manifests appear; no stored shape changes.
+- Kafka topic: `compose.yaml` creates the operational topic with explicit `cleanup.policy=delete`, `retention.ms`, `segment.ms` (local values; deployment values are an operator decision recorded in docs).
+- Operator visibility: the worker logs, on each poll that finds work and at least every poll interval when idle work exists, a sanitized line `erasure backlog: pending=<n> oldestRequestedAgeHours=<h> phase=<p>` with no identifiers. A repair CLI `inspect` output replaces the raw UUID with the receipt ID or a masked form.
+- No API, event or Delta schema change in slices 1–2. Pre-MVP single-shape policy applies to slice 3.
+
+## Domain language and examples
+
+- Context: analytics lakehouse erasure. Aggregate: erasure request (`analytics_erasure_requests`). Invariant: a marked subject is absent from every published report and from all retained physical files before the request completes. Terms used: erasure marker, subject fence, retention horizon. Term added: **erasure completion budget** — the configured upper bound on the time from Delta purge to verified physical erasure, derived from the retention horizons.
+
+| Rule | Tag | Scenario |
+|---|---|---|
+| Delta deadline is the later of data and log deadlines, with the log deadline rounded to the next UTC day | AEC-01.1 | Given purge at 2026-03-02T10:00Z, vacuum 7 d, log 14 d, then deadline is 2026-03-17T00:00Z |
+| Same | AEC-01.2 | Given purge at 2026-03-02T23:59:59Z, vacuum 1 d, log 1 s, then deadline is 2026-03-04T00:00:01Z |
+| Same | AEC-01.3 | Given purge exactly at 2026-03-03T00:00Z, log 1 s, vacuum 1 s, then deadline is 2026-03-04T00:00:01Z (a purge at midnight still waits a full day) |
+| Worst-case completion must fit the budget | AEC-02.1 | Given defaults (log 14 d, vacuum 7 d, Kafka 7 d + 7 d), then worst case is 15 d from purge, under the 21 d budget, and the worker starts |
+| Same | AEC-02.2 | Given `delta-log-retention = 30 days`, then startup fails with one accumulated configuration problem naming the computed 31 d and the budget |
+| Same | AEC-02.3 | Given the budget is set to 10 d and defaults otherwise, then startup fails (budget below Kafka worst case) |
+| Existing lakehouse adopts the new default | AEC-03.1 | Given a Delta table with `logRetentionDuration = interval 30 days`, when the worker starts, then the property reads `interval 14 days` and the rule's deadline uses it |
+| Deletion vectors are pinned off | AEC-04.1 | Given a managed table without the property, when retention is configured, then `delta.enableDeletionVectors = false` is set; given a table where it is `true`, then startup fails closed with a schema/property mismatch |
+| Topic retention is explicit | AEC-05.1 | Given the local Compose broker, when the topic exists, then `kafka-configs --describe` shows the configured `retention.ms`, `segment.ms`, `cleanup.policy=delete` |
+| Backlog is visible without identifiers | AEC-06.1 | Given one Pending request 3 days old, when the worker polls, then a log line reports pending count 1 and age ≥72 h and contains no UUID |
+| Same | AEC-06.2 | Given a repair-required request, when `inspect 10` runs, then stdout shows receipt/masked ID and phase, not the subject UUID |
+| Completed markers exclude but do not block | AEC-07.1 | Given a Complete marker younger than 31 d and no Pending/Processing request, when a batch runs, then marked events are still dropped and the report is published |
+| Same | AEC-07.2 | Given one Processing request, when streaming publishes, then the result is `ErasurePending` |
+| Same | AEC-07.3 | Given a Complete marker, when a late-fact replay contains that subject, then the rows are excluded (regression of today's behaviour) |
+| Bronze holds only pseudonymized, necessary fields | AEC-09.1 | Given a valid ApplicationCreated event with actor A and candidate C, when the batch ingests it, then the Bronze row has `subjectToken`, `subjectTokens`, `eventFingerprint`, `applicationId`, `jobId` and no column or value containing A, C or the raw envelope |
+| Same | AEC-09.2 | Given a SearchPerformed event with 3 candidate `resultId`s, when ingested, then Bronze holds their tokens in `subjectTokens` and no raw result IDs, ranks or scores |
+| Same | AEC-09.3 | Given a Bronze table whose stored schema still has `rawValue`, when any job starts, then it fails closed with `InvalidBronzeSchema` (pre-MVP: reset the local lakehouse explicitly; no migration) |
+| Replay and restart still detect changed bytes | AEC-09.4 | Given an event already in Bronze and a re-delivery at the same offset with different bytes, when streaming admits the batch, then it is quarantined as a coordinate conflict using the stored `eventFingerprint` |
+| Key retirement still finds nothing forbidden | AEC-09.5 | Given a retiring key audit over Bronze, when it scans checkpoints and lineage, then `"payload"`, `"rawValue"` and `"actorId"` remain forbidden fields and the audit passes on the new shape |
+| Documentation states the window | AEC-08.1 | `docs/big-data-architecture.md` and the lakehouse spec state the worst case formula and default numbers, the one-month response period as the motivation, the 14-day rollback window trade-off, and that local evidence does not prove deployed horizons |
+
+## Acceptance and evidence
+
+| ID | Criterion | Implementation and test paths | Verification | Outcome |
+|---|---|---|---|---|
+| AEC-01 | Pure completion rule with day-truncation, replacing the inline arithmetic; existing worker gate tests still pass | `domain/ErasureCompletionRule.scala` (new), worker; `AnalyticsErasureWorkerSpec` boundaries retagged | `sbt "analytics/testOnly *ErasureCompletionRule* *AnalyticsErasureWorkerSpec*"` | Not run |
+| AEC-02 | Startup refuses a configuration whose worst-case completion exceeds the budget; defaults pass | config readers/settings, `application.conf`; `AnalyticsRuntimeConfigSpec` | analytics unit suite | Not run |
+| AEC-03 | New log default reconciles onto existing tables | `AnalyticsDeltaRetention`; `AnalyticsDeltaPrivacyPropertiesSpec` | analytics unit suite (local Delta) | Not run |
+| AEC-04 | Deletion vectors explicitly off, mismatch fails closed | `AnalyticsDeltaRetention`, `AnalyticsTableSchemas` validation | analytics unit suite | Not run |
+| AEC-05 | Explicit topic retention in local Compose | `compose.yaml`; `scripts/run-local-tests.sh retention` fixture if applicable | `docker compose` + `kafka-configs --describe` | Not run |
+| AEC-06 | Sanitized backlog visibility; repair CLI prints no subject UUID | worker, `AnalyticsErasureRepairMain`; `AnalyticsErasureRepairCommandSpec` | analytics unit suite; log capture | Not run |
+| AEC-07 | Completed markers exclude ingestion but do not block publication (D3) | `MongoActiveDeletionMarkerSource`, batch/streaming publish stages; `AnalyticsPrivacyAndErasurePropertySpec`, streaming erasure race integration spec | analytics unit + integration suites | Not run |
+| AEC-09 | Bronze persists only pseudonymized, necessary fields; in-memory parse keeps raw fields only until projection; streaming coordinate checks use the stored fingerprint | `OperationalEventTransforms`, `AnalyticsTableSchemas.bronze`, `AnalyticsBatchIngestionStage`, `SparkStreamingBatchStages`, `AnalyticsStorageInventory`; `AnalyticsTransformsSpec`, `HiringAnalyticsSchemaContractsSpec`, streaming ingestion/recovery specs | analytics unit + integration suites | Not run |
+| AEC-08 | Canonical docs updated | `docs/big-data-architecture.md`, `docs/specs/hiring-analytics-lakehouse.md`, `docs/infrastructure-cost-and-sizing.md:218` | Technical Writer + reviewer read | Not run |
+
+Reviews required: Code Reviewer (all), Security Engineer (AEC-05, 06, 07 touch retention, logging and the publication guard), final QA.
+
+## Slice 3: Bronze minimization (D4)
+
+- Facts: raw user UUIDs reach Kafka in `actorId`, `candidateId` and candidate `resultId`; Bronze stores them in `rawValue`, `actorId` and `payload`. Silver, late facts and quarantine already persist only tokens, hashes and normalized fields. Erasure matching works on tokens; `aggregateId` is never a user ID. Stored Bronze is read by the streaming admission stage (coordinate fingerprint comparison, `SparkStreamingBatchStages:402-430`), key continuity/retirement scans and the erasure stage; the batch Silver stage and streaming preparation use the in-memory parsed frame.
+- Target Bronze shape: Kafka coordinates and timestamp, `eventId`, `eventType`, `occurredAt`, `aggregateType`, `aggregateId`, `eventFingerprint` (SHA-256 of the envelope bytes, replacing `rawValue`), `applicationId`, `jobId`, `newStatus`, `jobSkills`, `subjectToken`, `subjectTokens`, `ingestedAt`, `expiresAt`. Search ranks and scores are not used by any Gold report and are dropped.
+- Not in scope: tokenizing in the outbox publisher (E3), Kafka content, retained identifiers in Mongo (E6: tombstone `name`, fences, completions need a stated retention purpose first).
+
+## Implementation handoff
+
+1. Slice 1 — Big Data Engineer: AEC-01, 02, 03, 04. Write paths: `analytics/src/main/scala/com/example/hiring/analytics/{domain,config,service/erasure}/**`, `adapter/spark/AnalyticsDeltaRetention.scala`, `analytics/src/main/resources/application.conf`, tests for those. Runs in parallel with slice 3.
+2. Slice 3 — Big Data Engineer: AEC-09. Write paths: `adapter/spark/{OperationalEventTransforms,AnalyticsTableSchemas,AnalyticsBatchIngestionStage,AnalyticsBatchSilverStage,SparkStreamingBatchStages,AnalyticsSubjectPrivacy,AnalyticsKeyRetirement,AnalyticsKeyContinuityStage,Columns}.scala`, `service/batch/AnalyticsStorageInventory.scala`, tests and fixtures. Must not edit `AnalyticsDeltaRetention.scala` or any slice-1 path.
+3. Slice 2 — Big Data Engineer after slices 1 and 3: AEC-05, 06, 07. Write paths: `compose.yaml` (topic block only), `adapter/mongo/MongoActiveDeletionMarkerSource.scala`, `service/batch/ActiveDeletionMarkerSource` port, publish decisions in `SparkStreamingBatchStages`, `HiringAnalyticsBatch`, `StreamingMaintenanceTick`, worker logging, `cli/AnalyticsErasureRepairMain.scala`, tests.
+4. Docs — Technical Writer: AEC-08 after the code slices are reviewed.
+4. Reviews: Code Reviewer and Security Engineer on the integrated diff, then QA on the final state. Run `scripts/check-local.sh`, analytics unit and integration suites, `scalafmtCheckAll`.
+- Risks: the D3 change alters publication timing after erasure and must keep AEC-07.3 exclusion; the shorter log window reduces time-travel rollback to 14 days; broker `segment.ms` on a deployed cluster is an operator setting outside this repo.
+
+## Checkpoint and review
+
+- Completed criteria and changed files: none; this document only.
+- Latest commands/results: read-only architecture walk and source greps on branch `refactor` (clean tree); web check of Delta, Databricks, Kafka, EDPB and ICO guidance.
+- Blockers: decisions D1–D3.
+- Code Reviewer verdict: pending. Security Engineer verdict: pending. Final QA: pending.
