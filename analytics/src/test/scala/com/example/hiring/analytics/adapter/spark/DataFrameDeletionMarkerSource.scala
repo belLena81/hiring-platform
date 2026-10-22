@@ -4,12 +4,14 @@ import cats.effect.Sync
 import cats.syntax.all.*
 import com.example.hiring.analytics.domain.SubjectToken
 import com.example.hiring.analytics.errors.AnalyticsError
-import com.example.hiring.analytics.service.batch.ActiveDeletionMarkerSource
+import com.example.hiring.analytics.service.batch.{ActiveDeletionMarkerSource, ActiveDeletionMarkers}
 import org.apache.spark.sql.DataFrame
 import scala.util.control.NonFatal
 
-final case class DataFrameDeletionMarkerSource[F[_]: Sync](tokens: DataFrame) extends ActiveDeletionMarkerSource[F] {
-  override def activeSubjectTokens: F[Vector[SubjectToken]] =
+/** `erasureInProgress = false` models markers that are all Complete: they exclude rows but do not hide the report. */
+final case class DataFrameDeletionMarkerSource[F[_]: Sync](tokens: DataFrame, erasureInProgress: Boolean = true)
+    extends ActiveDeletionMarkerSource[F] {
+  override def activeDeletionMarkers: F[ActiveDeletionMarkers] =
     Sync[F]
       .delay {
         if (!tokens.columns.contains("subjectToken")) Left(AnalyticsError.InvalidSourceSchema(Vector("subjectToken")))
@@ -21,6 +23,7 @@ final case class DataFrameDeletionMarkerSource[F[_]: Sync](tokens: DataFrame) ex
             .traverse(row => SubjectToken.fromHmac(row.getString(0)).leftMap(AnalyticsError.InvalidConfiguration(_)))
       }
       .flatMap(Sync[F].fromEither)
+      .map(found => ActiveDeletionMarkers(found, erasureInProgress && found.nonEmpty))
       .handleErrorWith {
         case error: AnalyticsError => Sync[F].raiseError(error)
         case NonFatal(cause)       => Sync[F].raiseError(AnalyticsError.LakehouseFailure(cause))

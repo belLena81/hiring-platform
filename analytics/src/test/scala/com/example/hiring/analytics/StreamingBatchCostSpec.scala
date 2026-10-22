@@ -5,6 +5,7 @@ import cats.effect.testkit.TestControl
 import com.example.hiring.analytics.adapter.spark.StreamingBatchCost
 import com.example.hiring.analytics.domain.*
 import com.example.hiring.analytics.service.batch.{
+  ActiveDeletionMarkers,
   AnalyticsLakehouseLock,
   AnalyticsReportPublicationReceipt,
   AnalyticsReportReservation
@@ -41,29 +42,33 @@ final class StreamingBatchCostSpec extends CatsEffectSuite {
       )
     override def assess(
         p: StreamingInputPreparation,
-        tokens: Vector[SubjectToken],
+        tokens: ActiveDeletionMarkers,
         recovery: BatchAttempt
     ): IO[StreamingIngestionResult] =
-      IO { assertEquals(p, preparation); assertEquals(tokens, Vector.empty); assert(recovery.isRecovery) } *> action.as(
+      IO {
+        assertEquals(p, preparation); assertEquals(tokens, ActiveDeletionMarkers.none); assert(recovery.isRecovery)
+      } *> action.as(
         assessment
       )
     override def ingest(
         p: StreamingInputPreparation,
-        tokens: Vector[SubjectToken],
+        tokens: ActiveDeletionMarkers,
         a: StreamingIngestionResult,
         d: StreamingDecisionRevision,
         recovery: BatchAttempt
     ): IO[Unit] =
       IO {
-        assertEquals(p, preparation); assertEquals(tokens, Vector.empty); assertEquals(a, assessment);
+        assertEquals(p, preparation); assertEquals(tokens, ActiveDeletionMarkers.none); assertEquals(a, assessment);
         assertEquals(d, decision); assert(recovery.isRecovery)
       } *> action
     override def publish(
         p: StreamingInputPreparation,
         d: StreamingDecisionRevision,
-        tokens: Vector[SubjectToken]
+        tokens: ActiveDeletionMarkers
     ): IO[StreamingPublicationResult] =
-      IO { assertEquals(p, preparation); assertEquals(d, decision); assertEquals(tokens, Vector.empty) } *> action.as(
+      IO {
+        assertEquals(p, preparation); assertEquals(d, decision); assertEquals(tokens, ActiveDeletionMarkers.none)
+      } *> action.as(
         StreamingPublicationResult.Published
       )
   }
@@ -77,9 +82,9 @@ final class StreamingBatchCostSpec extends CatsEffectSuite {
         wrapped = cost.wrap(stages(IO.sleep(2.seconds) *> counter.update(v => v.copy(tasks = v.tasks + 3L))))
         r <- wrapped.reservePublication(preparation, 7L)
         receipt <- wrapped.publicationReceipt(preparation, decision)
-        a <- wrapped.assess(preparation, Vector.empty, BatchAttempt.Recovery)
-        _ <- wrapped.ingest(preparation, Vector.empty, assessment, decision, BatchAttempt.Recovery)
-        p <- wrapped.publish(preparation, decision, Vector.empty)
+        a <- wrapped.assess(preparation, ActiveDeletionMarkers.none, BatchAttempt.Recovery)
+        _ <- wrapped.ingest(preparation, ActiveDeletionMarkers.none, assessment, decision, BatchAttempt.Recovery)
+        p <- wrapped.publish(preparation, decision, ActiveDeletionMarkers.none)
         recorded <- summaries.get
         _ <- IO {
           assertEquals(r, reservation)
@@ -114,7 +119,10 @@ final class StreamingBatchCostSpec extends CatsEffectSuite {
         IO.pure(StreamingBatchCost.Counters()),
         value => summaries.update(_ :+ value) *> IO.raiseError(new Exception("observer"))
       )
-      result <- cost.wrap(stages(IO.raiseError(failure))).publish(preparation, decision, Vector.empty).attempt
+      result <- cost
+        .wrap(stages(IO.raiseError(failure)))
+        .publish(preparation, decision, ActiveDeletionMarkers.none)
+        .attempt
       recorded <- summaries.get
       _ <- IO {
         assertEquals(result, Left(failure))
@@ -130,7 +138,7 @@ final class StreamingBatchCostSpec extends CatsEffectSuite {
       summaries <- Ref.of[IO, Vector[StreamingBatchCost.Summary]](Vector.empty)
       cost = new StreamingBatchCost[IO](IO.pure(StreamingBatchCost.Counters()), value => summaries.update(_ :+ value))
       wrapped = cost.wrap(stages((entered.complete(()).void *> IO.never[Unit]).onCancel(released.set(true))))
-      _ <- wrapped.publish(preparation, decision, Vector.empty).background.use(_ => entered.get)
+      _ <- wrapped.publish(preparation, decision, ActiveDeletionMarkers.none).background.use(_ => entered.get)
       wasReleased <- released.get
       recorded <- summaries.get
       _ <- IO {

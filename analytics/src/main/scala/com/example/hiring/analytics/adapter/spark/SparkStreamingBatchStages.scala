@@ -6,6 +6,7 @@ import com.example.hiring.analytics.config.AnalyticsRetentionSettings
 import com.example.hiring.analytics.domain.*
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.batch.{
+  ActiveDeletionMarkers,
   AnalyticsLakehousePaths,
   AnalyticsReportPublicationReceipt,
   AnalyticsReportPublisher,
@@ -203,12 +204,12 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
 
   override def assess(
       preparation: StreamingInputPreparation,
-      activeTokens: Vector[SubjectToken],
+      markers: ActiveDeletionMarkers,
       attempt: BatchAttempt
   ): F[StreamingIngestionResult] =
-    withMarkers(activeTokens).flatMap { markerFrame =>
-      analyze(preparation, markerFrame, activeTokens.nonEmpty, attempt).use { facts =>
-        if (facts.deletionSuppressedCount > 0L) F.pure(StreamingIngestionResult.ErasurePending)
+    withMarkers(markers.exclusionTokens).flatMap { markerFrame =>
+      analyze(preparation, markerFrame, markers.exclusionTokens.nonEmpty, attempt).use { facts =>
+        if (erasurePending(markers, facts)) F.pure(StreamingIngestionResult.ErasurePending)
         else if (facts.qualityBlocked)
           F.pure(StreamingIngestionResult.QualityBlocked)
         else
@@ -218,11 +219,12 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
 
   override def ingest(
       preparation: StreamingInputPreparation,
-      activeTokens: Vector[SubjectToken],
+      markers: ActiveDeletionMarkers,
       assessment: StreamingIngestionResult,
       decision: StreamingDecisionRevision,
       attempt: BatchAttempt
-  ): F[Unit] =
+  ): F[Unit] = {
+    val activeTokens = markers.exclusionTokens
     for {
       _ <- validateDecision(preparation, activeTokens, decision)
       _ <- if (activeTokens.nonEmpty) applyActiveDeletions(activeTokens) else F.unit
@@ -242,21 +244,22 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
             _ <- lateFactStage.persistClosedDayFacts(lateEvents, markerFrame, preparation.observedAt)
             openEvents <- openSilverFacts(preparation, prepared)
             _ <- silverStage.mergeSilver(prepared.copy(incomingSilver = openEvents), preparation.observedAt)
-            _ <- ensureAssessmentOutcome(assessment, admission)
+            _ <- ensureAssessmentOutcome(assessment, markers, admission)
           } yield ()
         }
       }
     } yield ()
+  }
 
   override def publish(
       preparation: StreamingInputPreparation,
       decision: StreamingDecisionRevision,
-      activeTokens: Vector[SubjectToken]
+      markers: ActiveDeletionMarkers
   ): F[StreamingPublicationResult] =
-    if (activeTokens.nonEmpty) F.pure(StreamingPublicationResult.ErasurePending)
+    if (markers.erasureInProgress) F.pure(StreamingPublicationResult.ErasurePending)
     else
       for {
-        _ <- validateDecision(preparation, activeTokens, decision)
+        _ <- validateDecision(preparation, markers.exclusionTokens, decision)
         _ <- authorizePublication
         receipt <- reportPublisher.publicationReceipt(decision.publicationReservation)
         result <- receipt match {
@@ -646,12 +649,17 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
     )(AnalyticsError.DataIntegrityViolation("streaming batch decision does not match its input or deletion markers"))
   }
 
+  /** Rows of a completed subject are dropped; only a request still in progress hides the report. */
+  private def erasurePending(markers: ActiveDeletionMarkers, facts: AdmissionFacts): Boolean =
+    markers.erasureInProgress && facts.deletionSuppressedCount > 0L
+
   private def ensureAssessmentOutcome(
       assessment: StreamingIngestionResult,
+      markers: ActiveDeletionMarkers,
       facts: AdmissionFacts
   ): F[Unit] = {
     val shouldBeQualityBlocked = facts.qualityBlocked
-    val shouldBeErasurePending = facts.deletionSuppressedCount > 0L
+    val shouldBeErasurePending = erasurePending(markers, facts)
     val valid = assessment match {
       case StreamingIngestionResult.Ready(_)       => !shouldBeQualityBlocked && !shouldBeErasurePending
       case StreamingIngestionResult.QualityBlocked => shouldBeQualityBlocked

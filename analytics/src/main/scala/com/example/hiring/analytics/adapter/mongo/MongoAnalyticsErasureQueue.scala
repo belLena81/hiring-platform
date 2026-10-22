@@ -34,6 +34,7 @@ final class MongoAnalyticsErasureQueue[F[_]: Async: UUIDGen] private (
 
   final case class RepairRequest(
       requestId: AccountSubjectId,
+      receiptId: Option[String],
       phase: ErasurePhase,
       attemptCount: Int,
       failureCategory: ErasureFailureCategory
@@ -50,7 +51,7 @@ final class MongoAnalyticsErasureQueue[F[_]: Async: UUIDGen] private (
       category <- document.failureCategory
         .flatMap(stored => ErasureFailureCategory.values.find(_.persistedName == stored))
         .toRight(malformed)
-    } yield RepairRequest(subjectId, phase, attempt, category)
+    } yield RepairRequest(subjectId, document.receiptId, phase, attempt, category)
   }
 
   def inspectRepairRequests(limit: Int): F[Vector[RepairRequest]] =
@@ -65,6 +66,7 @@ final class MongoAnalyticsErasureQueue[F[_]: Async: UUIDGen] private (
               .projection(
                 Projections.include(
                   AnalyticsCollections.Fields.Id,
+                  AnalyticsCollections.Fields.ReceiptId,
                   AnalyticsCollections.Fields.Phase,
                   AnalyticsCollections.Fields.AttemptCount,
                   AnalyticsCollections.Fields.FailureCategory
@@ -347,6 +349,53 @@ final class MongoAnalyticsErasureQueue[F[_]: Async: UUIDGen] private (
           )
           .void
       }
+
+  /** Counts and the oldest unfinished request use the (state, requestedAt) index; no identifier leaves the adapter. */
+  def backlog(now: Instant): F[ErasureBacklog] = {
+    def count(state: ErasureRequestState): F[Long] =
+      streams
+        .one(requests.underlying.countDocuments(Filters.eq(AnalyticsCollections.Fields.State, state.persistedName)))
+        .map(_.longValue)
+    def oldest(state: ErasureRequestState): F[Option[AnalyticsMongoRecords.ErasureRequest]] =
+      streams
+        .stream(capacity =>
+          requests
+            .find(Filters.eq(AnalyticsCollections.Fields.State, state.persistedName))
+            .projection(Projections.include(AnalyticsCollections.Fields.Phase, AnalyticsCollections.Fields.RequestedAt))
+            .sort(Sorts.ascending(AnalyticsCollections.Fields.RequestedAt))
+            .limit(1)
+            .boundedStream(capacity)
+        )
+        .take(1)
+        .compile
+        .toVector
+        .map(_.headOption)
+    mongoStorage {
+      for {
+        pending <- count(ErasureRequestState.Pending)
+        processing <- count(ErasureRequestState.Processing)
+        oldestPending <- oldest(ErasureRequestState.Pending)
+        oldestProcessing <- oldest(ErasureRequestState.Processing)
+        oldestRequest = (oldestPending.toVector ++ oldestProcessing.toVector)
+          .flatMap(request => request.requestedAt.map(request -> _))
+          .minByOption(_._2)
+        phase <- oldestRequest.traverse { case (request, _) =>
+          Async[F].fromEither(
+            request.phase
+              .fold(Option(ErasurePhase.Requested))(ErasurePhase.fromString)
+              .toRight(AnalyticsError.MalformedMarker)
+          )
+        }
+      } yield ErasureBacklog(
+        pending,
+        processing,
+        oldestRequest.map { case (_, requestedAt) =>
+          FiniteDuration(math.max(0L, now.toEpochMilli - requestedAt.toEpochMilli), MILLISECONDS)
+        },
+        phase
+      )
+    }
+  }
 
   def preflight: F[Unit] = mongo {
     // Delta file evidence is empty until the first erasure reaches physical reclamation;

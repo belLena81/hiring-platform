@@ -115,6 +115,35 @@ final class AnalyticsLateFactReplayServiceSpec extends CatsEffectSuite {
     }
   }
 
+  test("AEC-07.3 a Complete marker is still applied to a late-fact replay and does not block its publication") {
+    val completed = SubjectToken.fromHmac("done_" + "d" * 43).toOption.get
+    fixture(markerView = ActiveDeletionMarkers(Vector(completed), erasureInProgress = false)).flatMap { value =>
+      for {
+        result <- value.service.run(request)
+        calls <- value.calls.get
+        merged <- value.mergedWith.get
+        _ = assertEquals(result, AnalyticsLateFactReplayOutcome.Published)
+        _ = assertEquals(merged, Vector(Vector(completed)))
+        _ = assert(calls.contains("deletions"), clue(calls))
+        _ = assert(calls.contains("publish"), clue(calls))
+      } yield ()
+    }
+  }
+
+  test("AEC-07.2 a request still in progress hides the replayed report while its tokens are excluded") {
+    val pending = SubjectToken.fromHmac("busy_" + "e" * 43).toOption.get
+    fixture(markerView = ActiveDeletionMarkers(Vector(pending), erasureInProgress = true)).flatMap { value =>
+      for {
+        result <- value.service.run(request)
+        calls <- value.calls.get
+        merged <- value.mergedWith.get
+        _ = assertEquals(result, AnalyticsLateFactReplayOutcome.ErasurePending)
+        _ = assertEquals(merged, Vector(Vector(pending)))
+        _ = assert(!calls.contains("publish"), clue(calls))
+      } yield ()
+    }
+  }
+
   test("an interrupted merge resumes using its persisted reservation") {
     fixture().flatMap { value =>
       for {
@@ -131,7 +160,8 @@ final class AnalyticsLateFactReplayServiceSpec extends CatsEffectSuite {
   private case class Fixture(
       service: AnalyticsLateFactReplayService[IO],
       calls: Ref[IO, Vector[String]],
-      state: Ref[IO, Option[AnalyticsLateFactReplayRecord]]
+      state: Ref[IO, Option[AnalyticsLateFactReplayRecord]],
+      mergedWith: Ref[IO, Vector[Vector[SubjectToken]]]
   )
 
   private def fixture(
@@ -139,12 +169,14 @@ final class AnalyticsLateFactReplayServiceSpec extends CatsEffectSuite {
       publishedReceipt: Boolean = false,
       alwaysSuperseded: Boolean = false,
       supersedeFirstReceipt: Boolean = false,
-      deleteDuringReport: Boolean = false
+      deleteDuringReport: Boolean = false,
+      markerView: ActiveDeletionMarkers = ActiveDeletionMarkers.none
   ): IO[Fixture] =
     for {
       calls <- Ref.of[IO, Vector[String]](Vector.empty)
       state <- Ref.of[IO, Option[AnalyticsLateFactReplayRecord]](None)
       generation <- Ref.of[IO, Long](0L)
+      mergedWith <- Ref.of[IO, Vector[Vector[SubjectToken]]](Vector.empty)
       lock <- AnalyticsTestLakehouseLocks.processLocal[IO].allocated.map(_._1)
     } yield {
       def trace(name: String): IO[Unit] = calls.update(_ :+ name)
@@ -184,7 +216,7 @@ final class AnalyticsLateFactReplayServiceSpec extends CatsEffectSuite {
           trace("published") *> state.update(_.map(_.copy(progress = AnalyticsLateFactReplayProgress.Published)))
       }
       val markers = new ActiveDeletionMarkerSource[IO] {
-        override def activeSubjectTokens: IO[Vector[SubjectToken]] = trace("markers").as(Vector.empty)
+        override def activeDeletionMarkers: IO[ActiveDeletionMarkers] = trace("markers").as(markerView)
       }
       val stages = new AnalyticsLateFactReplayStages[IO] {
         override def validateHmacConfiguration: IO[Unit] = trace("hmac")
@@ -199,7 +231,7 @@ final class AnalyticsLateFactReplayServiceSpec extends CatsEffectSuite {
             request: AnalyticsLateFactReplayRequest,
             activeTokens: Vector[SubjectToken],
             observedAt: Instant
-        ): IO[Unit] = trace("merge")
+        ): IO[Unit] = trace("merge") *> mergedWith.update(_ :+ activeTokens)
         override def rebuildGoldAndExtractReport(asOf: Instant): IO[AnalyticsReportOutput] = trace("report") *>
           (if (deleteDuringReport) generation.update(_ + 1L) else IO.unit).as(Report)
       }
@@ -253,7 +285,8 @@ final class AnalyticsLateFactReplayServiceSpec extends CatsEffectSuite {
           AnalyticsTestClocks.fixed(Now)
         ),
         calls,
-        state
+        state,
+        mergedWith
       )
     }
 

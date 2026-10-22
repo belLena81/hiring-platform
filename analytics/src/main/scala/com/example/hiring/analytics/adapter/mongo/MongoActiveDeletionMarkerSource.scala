@@ -6,7 +6,7 @@ import com.example.hiring.analytics.domain.SubjectToken
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.errors.AnalyticsErrorTranslation.translating
 import com.example.hiring.analytics.service.erasure.ErasureRequestState
-import com.example.hiring.analytics.service.batch.ActiveDeletionMarkerSource
+import com.example.hiring.analytics.service.batch.{ActiveDeletionMarkerSource, ActiveDeletionMarkers}
 
 import cats.effect.{Async, Clock}
 import cats.syntax.all.*
@@ -92,7 +92,7 @@ private[analytics] final class MongoActiveDeletionMarkerSource[F[_]: Async](
         case cause                        => Stream.raiseError[F](AnalyticsError.MarkerStorageFailure(cause))
       }
 
-  override def activeSubjectTokens: F[Vector[SubjectToken]] =
+  override def activeDeletionMarkers: F[ActiveDeletionMarkers] =
     for {
       _ <- Async[F].raiseWhen(maximumPendingMarkers <= 0)(
         AnalyticsError.InvalidConfiguration("maximum pending marker count must be positive")
@@ -101,19 +101,22 @@ private[analytics] final class MongoActiveDeletionMarkerSource[F[_]: Async](
       collectionExists = collectionNames.exists(_ == requestCollection)
       _ <- Async[F].raiseUnless(collectionExists)(AnalyticsError.MissingMarkerCollection)
       now <- Clock[F].realTimeInstant
-      tokens <- activeRequests(now)
+      markers <- activeRequests(now)
         .evalMap(request =>
-          Async[F].fromEither(MongoActiveDeletionMarkerSource.activeTokens(request, now, pseudonymizer))
+          Async[F].fromEither(
+            MongoActiveDeletionMarkerSource
+              .activeTokens(request, now, pseudonymizer)
+              .map(_.map(_ -> MongoActiveDeletionMarkerSource.inProgress(request)))
+          )
         )
         .unNone
         .take(maximumPendingMarkers.toLong + 1L)
         .compile
         .toVector
-      _ <- Async[F].raiseWhen(tokens.size > maximumPendingMarkers)(
+      _ <- Async[F].raiseWhen(markers.size > maximumPendingMarkers)(
         AnalyticsError.MarkerLimitExceeded(maximumPendingMarkers)
       )
-      distinctTokens = tokens.flatten.distinct
-    } yield distinctTokens
+    } yield ActiveDeletionMarkers(markers.flatMap(_._1).distinct, markers.exists(_._2))
 }
 
 private[analytics] object MongoActiveDeletionMarkerSource {
@@ -135,6 +138,13 @@ private[analytics] object MongoActiveDeletionMarkerSource {
       pseudonymizer.matchingTokens(id).leftMap(AnalyticsError.InvalidConfiguration(_))
     }
   }
+
+  /** Only a request that has not completed hides the report. Call after `activeTokens` accepted the state. */
+  private[analytics] def inProgress(request: AnalyticsMongoRecords.ErasureRequest): Boolean =
+    request.state.flatMap(ErasureRequestState.fromString).exists {
+      case ErasureRequestState.Pending | ErasureRequestState.Processing => true
+      case ErasureRequestState.Complete                                 => false
+    }
 
   private[analytics] def activeTokens(
       request: AnalyticsMongoRecords.ErasureRequest,

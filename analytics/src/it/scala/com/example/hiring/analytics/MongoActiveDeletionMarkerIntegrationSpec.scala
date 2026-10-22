@@ -84,7 +84,7 @@ class MongoActiveDeletionMarkerIntegrationSpec extends AnalyticsMongoIntegration
         .append("state", "Complete")
         .append("expiresAt", Date.from(Instant.parse("2026-09-23T12:00:00Z")))
     )
-    val retainedOnly = source.activeSubjectTokens.map(_.map(_.value).toSet).unsafeRunSync()
+    val retainedOnly = source.activeDeletionMarkers.map(_.exclusionTokens.map(_.value).toSet).unsafeRunSync()
     assertEquals(retainedOnly, Set(AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, retainedSubject)))
 
     val pendingSubject = UUID.randomUUID().toString
@@ -92,7 +92,7 @@ class MongoActiveDeletionMarkerIntegrationSpec extends AnalyticsMongoIntegration
     val processingSubject = UUID.randomUUID().toString
     requests.insertOne(new Document("_id", processingSubject).append("state", "Processing"))
 
-    val tokens = source.activeSubjectTokens.map(_.map(_.value).toSet).unsafeRunSync()
+    val tokens = source.activeDeletionMarkers.map(_.exclusionTokens.map(_.value).toSet).unsafeRunSync()
 
     assertEquals(
       tokens,
@@ -102,6 +102,34 @@ class MongoActiveDeletionMarkerIntegrationSpec extends AnalyticsMongoIntegration
         AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, processingSubject)
       )
     )
+  }
+
+  test("AEC-07.1 AEC-07.2 only a Pending or Processing request marks erasure in progress; Complete only excludes") {
+    val database = mongoClient.getDatabase(testDatabaseName)
+    val requests = database.getCollection("analytics_erasure_requests")
+    val source = new MongoActiveDeletionMarkerSource[IO](
+      mongo4catsDatabase(database.getName),
+      pseudonymizer,
+      streams = AnalyticsTestOperationalConfig.streams
+    )
+    val completedSubject = UUID.randomUUID().toString
+    requests.insertOne(
+      new Document("_id", completedSubject)
+        .append("state", "Complete")
+        .append("expiresAt", Date.from(Instant.parse("2099-01-01T00:00:00Z")))
+    )
+    val completedOnly = source.activeDeletionMarkers.unsafeRunSync()
+    assertEquals(
+      completedOnly.exclusionTokens.map(_.value).toSet,
+      Set(AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, completedSubject))
+    )
+    assertEquals(completedOnly.erasureInProgress, false)
+
+    val processingSubject = UUID.randomUUID().toString
+    requests.insertOne(new Document("_id", processingSubject).append("state", "Processing"))
+    val withProcessing = source.activeDeletionMarkers.unsafeRunSync()
+    assertEquals(withProcessing.exclusionTokens.size, 2)
+    assertEquals(withProcessing.erasureInProgress, true)
   }
 
   test("Mongo marker source fails closed for an array-valued completed expiry") {
@@ -119,7 +147,7 @@ class MongoActiveDeletionMarkerIntegrationSpec extends AnalyticsMongoIntegration
       streams = AnalyticsTestOperationalConfig.streams
     )
 
-    val error = intercept[AnalyticsError](source.activeSubjectTokens.unsafeRunSync())
+    val error = intercept[AnalyticsError](source.activeDeletionMarkers.unsafeRunSync())
     assertEquals(error, AnalyticsError.MalformedMarker)
   }
 
@@ -342,7 +370,7 @@ class MongoActiveDeletionMarkerIntegrationSpec extends AnalyticsMongoIntegration
         pseudonymizer,
         streams = AnalyticsTestOperationalConfig.streams
       )
-    val failure = intercept[AnalyticsError.MarkerStorageFailure](source.activeSubjectTokens.unsafeRunSync())
+    val failure = intercept[AnalyticsError.MarkerStorageFailure](source.activeDeletionMarkers.unsafeRunSync())
     assert(failure.getCause.isInstanceOf[IllegalStateException], "assertion failed")
   }
 }

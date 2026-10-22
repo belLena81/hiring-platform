@@ -22,7 +22,10 @@ acls() { "$bin/kafka-acls.sh" --bootstrap-server "$bootstrap" --command-config "
 until topics --create --if-not-exists --topic "$topic" --partitions "${KAFKA_TOPIC_PARTITIONS:-1}" --replication-factor 1 >/dev/null 2>&1; do
   sleep 2
 done
-configs --entity-type topics --entity-name "$topic" --alter --add-config max.message.bytes=1048576
+# Explicit retention and segment roll: the analytics erasure budget assumes kafka-retention + kafka-segment-roll
+# (application.conf analytics.operational.retention), so the topic must not inherit silent broker defaults.
+configs --entity-type topics --entity-name "$topic" --alter \
+  --add-config max.message.bytes=1048576,cleanup.policy=delete,retention.ms=604800000,segment.ms=604800000
 
 acls --add --allow-principal User:hiring_publisher_v2 --operation WRITE --operation DESCRIBE --topic "$topic"
 acls --add --allow-principal User:hiring_publisher_v2 --operation IdempotentWrite --cluster

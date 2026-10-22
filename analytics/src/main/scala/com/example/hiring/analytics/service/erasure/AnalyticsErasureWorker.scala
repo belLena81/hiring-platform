@@ -58,10 +58,23 @@ final class AnalyticsErasureWorker[F[_]: Async](
       until <- leaseUntil
       _ <- queue.heartbeat(current, until)
       claims <- queue.claim(current, until, limit = 1)
+      _ <- logBacklog(current)
       _ <- claims.headOption.fold(Temporal[F].sleep(pollInterval))(claim =>
         logger.info("claimed analytics erasure request") *> runClaim(claim).void
       )
     } yield ()).foreverM
+
+  /** One aggregate line per poll while work remains; it never names a request or subject. */
+  private def logBacklog(current: Instant): F[Unit] =
+    queue.backlog(current).flatMap { backlog =>
+      Async[F].unlessA(backlog.isEmpty)(
+        logger.info(
+          "erasure backlog: pending=" + backlog.pending + " processing=" + backlog.processing +
+            " oldestRequestedAgeHours=" + backlog.oldestAge.fold("unknown")(_.toHours.toString) +
+            " phase=" + backlog.oldestPhase.fold("unknown")(_.persistedName)
+        )
+      )
+    }
 
   private[analytics] def runClaim(claim: ErasureClaim): F[ErasureClaimOutcome] = {
     val work = for {
@@ -215,7 +228,7 @@ final class AnalyticsErasureWorker[F[_]: Async](
           _ <-
             if (deltaGeneration.contains(refreshed.generation)) EitherT.rightT(())
             else refreshErasureProjection(claim, refreshed.generation)
-          markerTokens <- lift(markers.activeSubjectTokens)
+          markerTokens <- lift(markers.activeDeletionMarkers.map(_.exclusionTokens))
           report <- lift(lakehouseLock.resource(paths.root).use { _ =>
             for {
               _ <- lakehouse.verifyMarkedSubjectsAbsent(markerTokens)
@@ -236,7 +249,7 @@ final class AnalyticsErasureWorker[F[_]: Async](
     for {
       _ <- EitherT(lakehouseLock.resource(paths.root).use { _ =>
         (for {
-          markerTokens <- lift(markers.activeSubjectTokens)
+          markerTokens <- lift(markers.activeDeletionMarkers.map(_.exclusionTokens))
           affectedRows <- lift(lakehouse.countMarkedRows(markerTokens))
           affectedFiles <- lift(lakehouse.captureMarkedFiles(markerTokens))
           countedAt <- lift(now)
@@ -272,7 +285,7 @@ final class AnalyticsErasureWorker[F[_]: Async](
       )
       ready <- lift(replayHorizonsPassed(barrier, purgedAt))
       _ <- if (ready) EitherT.rightT(()) else defer(claim, policy.timings.reclamationRecheckInterval)
-      markerTokens <- lift(markers.activeSubjectTokens)
+      markerTokens <- lift(markers.activeDeletionMarkers.map(_.exclusionTokens))
       _ <- lift(lakehouseLock.resource(paths.root).use { _ =>
         lakehouse.reclaimRetainedFiles *> lakehouse.verifyMarkedSubjectsAbsent(markerTokens)
       })

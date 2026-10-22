@@ -910,7 +910,7 @@ class AnalyticsTransformsSpec extends FunSuite {
     val paths = TestAnalyticsLakehousePaths.unsafe(lakehouse)
     val source = records(Seq(("hiring.operational-events", 0, 1L, event("created", "APPLICATION_CREATED"))))
     val markers = new ActiveDeletionMarkerSource[IO] {
-      override def activeSubjectTokens: IO[Vector[SubjectToken]] =
+      override def activeDeletionMarkers: IO[ActiveDeletionMarkers] =
         IO.raiseError(AnalyticsError.MissingMarkerCollection)
     }
     val batch = newBatch(paths, pseudonymizer, markers)
@@ -1228,9 +1228,9 @@ class AnalyticsTransformsSpec extends FunSuite {
   test("batch reads deletion markers before reserving its publication generation") {
     val reserved = new AtomicBoolean(false)
     val markers = new ActiveDeletionMarkerSource[IO] {
-      override def activeSubjectTokens: IO[Vector[SubjectToken]] = IO.delay {
+      override def activeDeletionMarkers: IO[ActiveDeletionMarkers] = IO.delay {
         assert(!reserved.get(), "the marker snapshot must be read before publication is reserved")
-        Vector.empty
+        ActiveDeletionMarkers.none
       }
     }
     val publisher = new AnalyticsReportPublisher[IO] {
@@ -1373,6 +1373,102 @@ class AnalyticsTransformsSpec extends FunSuite {
     assertEquals(spark.read.format("delta").load(paths.quarantine).count(), 0L)
     assertEquals(spark.read.format("delta").load(paths.funnelGold).count(), 0L)
     maintenance.verifyMarkedSubjectsAbsent(Vector(token)).unsafeRunSync()
+  }
+
+  test("AEC-07.1 a Complete marker drops its subject's replayed rows and the report is still published") {
+    val lakehouse = Files.createTempDirectory("hiring-analytics-completed-marker").toUri.toString.stripSuffix("/")
+    val paths = TestAnalyticsLakehousePaths.unsafe(lakehouse)
+    val erasedCandidate = "19b46da1-bee5-3018-b5f7-abe9a9fdfb29"
+    val keptCandidate = "2e6a1d7c-4d0b-3d58-9b7a-0c7a1f2f6a11"
+    val input = records(
+      Seq(
+        (
+          "hiring.operational-events",
+          0,
+          21L,
+          event(
+            "f2e7cb06-206a-3ab5-902a-1458ee7d0fe2",
+            "APPLICATION_CREATED",
+            aggregateId = "a053804b-8231-3cb4-8074-834a69aaccab",
+            payload =
+              Some(s"""{"applicationId":"a053804b-8231-3cb4-8074-834a69aaccab","candidateId":"$erasedCandidate"}""")
+          )
+        ),
+        (
+          "hiring.operational-events",
+          0,
+          22L,
+          event(
+            "0b0fb4a4-8f0c-3d6b-8d51-5c1f7d0c9a77",
+            "APPLICATION_CREATED",
+            aggregateId = "b1d0a3f2-2f6e-3f55-9d8c-6f3a3b7f1c22",
+            payload =
+              Some(s"""{"applicationId":"b1d0a3f2-2f6e-3f55-9d8c-6f3a3b7f1c22","candidateId":"$keptCandidate"}""")
+          )
+        )
+      )
+    )
+    val token = SubjectToken
+      .fromHmac(AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, erasedCandidate))
+      .toOption
+      .get
+    val manifest = validatedManifest(
+      "run-complete-marker",
+      Vector(TestPartitionOffsetRange.unsafe("hiring.operational-events", 0, 21L, 23L))
+    )
+    val publication = newBatch(
+      paths,
+      pseudonymizer,
+      DataFrameDeletionMarkerSource[IO](markerFrame(Seq(token.value)), erasureInProgress = false),
+      fixedClock(Instant.parse("2026-09-22T13:00:00Z"))
+    ).run(spark, DataFrameBatchSource[IO](input), manifest).unsafeRunSync()
+
+    assertEquals(publication.outcome, AnalyticsRunOutcome.Published)
+    assertEquals(publication.suppressedRecords, 1L)
+    assertEquals(spark.read.format("delta").load(paths.silver).count(), 1L)
+    assertEquals(spark.read.format("delta").load(paths.manifests).filter(col("status") === "PUBLISHED").count(), 1L)
+  }
+
+  test("AEC-07.2 a marker whose request is still in progress hides the batch report") {
+    val lakehouse = Files.createTempDirectory("hiring-analytics-in-progress-marker").toUri.toString.stripSuffix("/")
+    val paths = TestAnalyticsLakehousePaths.unsafe(lakehouse)
+    val erasedCandidate = "19b46da1-bee5-3018-b5f7-abe9a9fdfb29"
+    val input = records(
+      Seq(
+        (
+          "hiring.operational-events",
+          0,
+          21L,
+          event(
+            "f2e7cb06-206a-3ab5-902a-1458ee7d0fe2",
+            "APPLICATION_CREATED",
+            aggregateId = "a053804b-8231-3cb4-8074-834a69aaccab",
+            payload =
+              Some(s"""{"applicationId":"a053804b-8231-3cb4-8074-834a69aaccab","candidateId":"$erasedCandidate"}""")
+          )
+        )
+      )
+    )
+    val token = SubjectToken
+      .fromHmac(AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, erasedCandidate))
+      .toOption
+      .get
+    val manifest = validatedManifest(
+      "run-processing-marker",
+      Vector(TestPartitionOffsetRange.unsafe("hiring.operational-events", 0, 21L, 22L))
+    )
+    val publication = newBatch(
+      paths,
+      pseudonymizer,
+      DataFrameDeletionMarkerSource[IO](markerFrame(Seq(token.value)), erasureInProgress = true),
+      fixedClock(Instant.parse("2026-09-22T13:00:00Z"))
+    ).run(spark, DataFrameBatchSource[IO](input), manifest).unsafeRunSync()
+
+    assertEquals(publication.outcome, AnalyticsRunOutcome.ErasurePending)
+    assertEquals(
+      spark.read.format("delta").load(paths.manifests).filter(col("status") === "ERASURE_PENDING").count(),
+      1L
+    )
   }
 
   test("data frame source honors the manifest offset boundary") {
@@ -1995,7 +2091,7 @@ class AnalyticsTransformsSpec extends FunSuite {
         Files.createTempDirectory("analytics-marker-before-key-registry").toUri.toString
       )
     val unavailableMarkers = new ActiveDeletionMarkerSource[IO] {
-      override def activeSubjectTokens: IO[Vector[SubjectToken]] =
+      override def activeDeletionMarkers: IO[ActiveDeletionMarkers] =
         IO.raiseError(AnalyticsError.MissingMarkerCollection)
     }
     val batch = newBatch(paths, pseudonymizer, unavailableMarkers)

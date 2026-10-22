@@ -13,6 +13,7 @@ import cats.effect.{IO, Outcome, Ref, Resource}
 import cats.effect.testkit.TestControl
 import cats.syntax.all.*
 import munit.CatsEffectSuite
+import org.typelevel.log4cats.Logger
 
 import java.time.Instant
 import scala.concurrent.duration.*
@@ -35,6 +36,57 @@ final class AnalyticsErasureWorkerSpec extends CatsEffectSuite {
         case _                  => false
       })
       _ = assert(counters.claims >= 3, s"expected repeated scheduled polls, saw ${counters.claims}")
+    } yield ()
+  }
+
+  test("AEC-06.1 a poll with unfinished requests logs aggregate backlog counts and age without any identifier") {
+    val backlog = ErasureBacklog(
+      pending = 1L,
+      processing = 0L,
+      oldestAge = Some(3.days),
+      oldestPhase = Some(ErasurePhase.Requested)
+    )
+    for {
+      state <- Ref.of[IO, Counters](Counters())
+      lines <- Ref.of[IO, Vector[String]](Vector.empty)
+      worker = workerForRetention(
+        AnalyticsTestOperationalConfig.operational.retention,
+        0L,
+        state,
+        backlog = backlog,
+        logger = capturingLogger(lines)
+      )
+      _ <- TestControl.executeEmbed {
+        worker.pollForever.start.flatMap(fiber => IO.sleep(1.second) *> fiber.cancel)
+      }
+      captured <- lines.get
+      backlogLines = captured.filter(_.startsWith("erasure backlog:"))
+      _ = assert(backlogLines.nonEmpty, clues(captured))
+      line = backlogLines.head
+      _ = assert(line.contains("pending=1"), clue(line))
+      hours = "oldestRequestedAgeHours=(\\d+)".r.findFirstMatchIn(line).map(_.group(1).toLong)
+      _ = assert(hours.exists(_ >= 72L), clue(line))
+      _ = assert(line.contains("phase=Requested"), clue(line))
+      uuid = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}".r
+      _ = assert(uuid.findFirstIn(line).isEmpty, clue(line))
+    } yield ()
+  }
+
+  test("an idle queue logs no backlog line") {
+    for {
+      state <- Ref.of[IO, Counters](Counters())
+      lines <- Ref.of[IO, Vector[String]](Vector.empty)
+      worker = workerForRetention(
+        AnalyticsTestOperationalConfig.operational.retention,
+        0L,
+        state,
+        logger = capturingLogger(lines)
+      )
+      _ <- TestControl.executeEmbed {
+        worker.pollForever.start.flatMap(fiber => IO.sleep(3.seconds) *> fiber.cancel)
+      }
+      captured <- lines.get
+      _ = assertEquals(captured.filter(_.startsWith("erasure backlog:")), Vector.empty[String])
     } yield ()
   }
 
@@ -177,12 +229,27 @@ final class AnalyticsErasureWorkerSpec extends CatsEffectSuite {
     }
   }
 
+  private def capturingLogger(lines: Ref[IO, Vector[String]]): Logger[IO] = new Logger[IO] {
+    private def add(message: => String): IO[Unit] = lines.update(_ :+ message)
+    override def error(message: => String): IO[Unit] = add(message)
+    override def warn(message: => String): IO[Unit] = add(message)
+    override def info(message: => String): IO[Unit] = add(message)
+    override def debug(message: => String): IO[Unit] = add(message)
+    override def trace(message: => String): IO[Unit] = add(message)
+    override def error(t: Throwable)(message: => String): IO[Unit] = add(message)
+    override def warn(t: Throwable)(message: => String): IO[Unit] = add(message)
+    override def info(t: Throwable)(message: => String): IO[Unit] = add(message)
+    override def debug(t: Throwable)(message: => String): IO[Unit] = add(message)
+    override def trace(t: Throwable)(message: => String): IO[Unit] = add(message)
+  }
+
   private final case class Counters(claims: Int = 0, heartbeats: Int = 0, renewals: Int = 0)
 
   private final class TestErasureStore(
       state: Ref[IO, Counters],
       renewal: ErasureUpdate,
-      renewalFailure: Option[Throwable]
+      renewalFailure: Option[Throwable],
+      pendingBacklog: ErasureBacklog
   ) extends ErasureQueue[IO],
         ErasureProgress[IO],
         ErasureBarrier[IO] {
@@ -202,6 +269,7 @@ final class AnalyticsErasureWorkerSpec extends CatsEffectSuite {
     override def heartbeat(now: Instant, leaseUntil: Instant): IO[Unit] =
       state.update(value => value.copy(heartbeats = value.heartbeats + 1))
     override def preflight: IO[Unit] = IO.unit
+    override def backlog(now: Instant): IO[ErasureBacklog] = IO.pure(pendingBacklog)
 
     override def persistBarrier(claim: ErasureClaim, barrier: KafkaRetentionBarrier, now: Instant): IO[ErasureUpdate] =
       IO.pure(ErasureUpdate.LeaseLost)
@@ -258,12 +326,14 @@ final class AnalyticsErasureWorkerSpec extends CatsEffectSuite {
       state: Ref[IO, Counters],
       renewal: ErasureUpdate = ErasureUpdate.Applied,
       leaseDuration: FiniteDuration = 90.seconds,
-      renewalFailure: Option[Throwable] = None
+      renewalFailure: Option[Throwable] = None,
+      backlog: ErasureBacklog = ErasureBacklog(0L, 0L, None, None),
+      logger: Logger[IO] = org.typelevel.log4cats.slf4j.Slf4jLogger.getLogger[IO]
   ): AnalyticsErasureWorker[IO] = {
-    val store = new TestErasureStore(state, renewal, renewalFailure)
+    val store = new TestErasureStore(state, renewal, renewalFailure, backlog)
     val lock: AnalyticsLakehouseLock[IO] = (_: String) => Resource.pure[IO, Unit](())
     val markers: ActiveDeletionMarkerSource[IO] = new ActiveDeletionMarkerSource[IO] {
-      override def activeSubjectTokens: IO[Vector[SubjectToken]] = IO.pure(Vector.empty)
+      override def activeDeletionMarkers: IO[ActiveDeletionMarkers] = IO.pure(ActiveDeletionMarkers.none)
     }
     val lakehouse = new AnalyticsErasureLakehouse[IO] {
       override def validateHmacConfiguration: IO[Unit] = IO.unit
@@ -327,7 +397,7 @@ final class AnalyticsErasureWorkerSpec extends CatsEffectSuite {
       markers,
       lakehouse,
       lock,
-      org.typelevel.log4cats.slf4j.Slf4jLogger.getLogger[IO],
+      logger,
       AnalyticsErasureWorkerPolicy(
         retention,
         AnalyticsErasureWorkerTimings(leaseDuration, 1.second, 1.second, 5.minutes)

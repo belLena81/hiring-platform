@@ -688,6 +688,41 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends AnalyticsMongoIntegra
     }
   }
 
+  test("AEC-06.1 backlog counts unfinished requests and reports the oldest age and phase without identifiers") {
+    val client = syncClient(endpointUri)
+    try {
+      val database = client.getDatabase(testDatabaseName)
+      val collection = database.getCollection(AnalyticsCollections.ErasureRequests)
+      val now = Instant.now()
+      collection.insertOne(
+        new Document("_id", UUID.randomUUID().toString)
+          .append("state", "Pending")
+          .append("requestedAt", Date.from(now.minusSeconds(3L * 24L * 3600L)))
+      )
+      collection.insertOne(
+        new Document("_id", UUID.randomUUID().toString)
+          .append("state", "Processing")
+          .append("phase", "DeltaPurged")
+          .append("requestedAt", Date.from(now.minusSeconds(24L * 3600L)))
+      )
+      collection.insertOne(
+        new Document("_id", UUID.randomUUID().toString)
+          .append("state", "Complete")
+          .append("requestedAt", Date.from(now.minusSeconds(10L * 24L * 3600L)))
+          .append("expiresAt", Date.from(now.plusSeconds(24L * 3600L)))
+      )
+      val store =
+        AnalyticsErasureWorkerTestSupport.stores(mongo4catsClient(client), mongo4catsDatabase(client, database.getName))
+      val backlog = store.queue.backlog(now).unsafeRunSync()
+      assertEquals(backlog.pending, 1L)
+      assertEquals(backlog.processing, 1L)
+      assertEquals(backlog.oldestPhase, Some(ErasurePhase.Requested))
+      assert(backlog.oldestAge.exists(_.toHours >= 72L), backlog.toString)
+    } finally {
+      client.close()
+    }
+  }
+
   test("repair-required erasure stays pending and can be requeued only against observed attempt and lease state") {
     val client = syncClient(
       endpointUri

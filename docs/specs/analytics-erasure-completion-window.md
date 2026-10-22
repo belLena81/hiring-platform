@@ -127,7 +127,8 @@ Reviews required: Code Reviewer (all), Security Engineer (AEC-05, 06, 07 touch r
 
 ## Checkpoint and review
 
-- Completed criteria and changed files: none for code. AEC-08.1 documentation (Technical Writer, 2026-10-22, not reviewed): `docs/big-data-architecture.md`, `docs/specs/hiring-analytics-lakehouse.md` (dated note), `docs/infrastructure-cost-and-sizing.md`, `docs/domain-language.md`. Slice 2 items (AEC-05–07) are documented as in progress until verified in source.
-- Latest commands/results: read-only architecture walk and source greps on branch `refactor` (clean tree); web check of Delta, Databricks, Kafka, EDPB and ICO guidance.
-- Blockers: decisions D1–D3.
+- Completed criteria and commits (branch `refactor`, 2026-10-22): spec `eaa6d68`; slice 1 AEC-01–04 `142ff2b`; slice 3 AEC-09 `79ab272`; docs AEC-08 `24ad8e6`; slice 2 AEC-05–07 (this commit: `ActiveDeletionMarkers` port, backlog logging, receipt-only repair output, explicit topic retention in `docker/kafka/provision-access.sh`).
+- Latest commands/results: combined slice 1+3 analytics `scalafmtCheckAll test` 481 passed, 0 failed (`.local/logs/aec-unit-combined.log`); slice 3 Bronze-touching integration suites 42 passed (`.local/logs/aec09-it.log`); slice 2 analytics `sbt test` 490 passed, 0 failed, and Docker integration suites (streaming erasure race, Mongo marker, Mongo erasure adapters, key retirement, late-fact replay recovery, streaming recovery) 52 passed, 0 failed. AEC-05.1: script change verified with `bash -n` only; `kafka-configs --describe` on a running Compose broker not run. Root `sbt test` and the full `scripts/check-local.sh` not yet run on the final state.
+- Known limits: the AEC-02 budget check uses pureconfig `emap` on the retention product, so it accumulates with sibling sections but not with a retention field that itself fails to parse; `StreamingMaintenanceTick` has no direct unit test (compile-checked, exercised by integration suites); the backlog line logs every poll (5 s) while work is pending; the Mongo `backlog` query plan was not inspected.
+- Blockers: none for code. Independent reviews and final QA pending.
 - Code Reviewer verdict: pending. Security Engineer verdict: pending. Final QA: pending.

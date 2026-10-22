@@ -20,11 +20,17 @@ import scala.concurrent.duration.*
 final class HiringAnalyticsStreamingErasureRaceIntegrationSpec extends SharedRecoveryRuntimeSuite {
   override val munitIOTimeout: FiniteDuration = 20.minutes
 
-  private def requestErasure(harness: Harness, subject: String): IO[Unit] =
+  private def requestErasure(harness: Harness, subject: String, state: String = "Pending"): IO[Unit] =
     harness
       .sync(
         _.getCollection("analytics_erasure_requests")
-          .insertOne(new Document("_id", subject).append("state", "Pending"))
+          .insertOne(
+            if (state == "Complete")
+              new Document("_id", subject)
+                .append("state", state)
+                .append("expiresAt", java.util.Date.from(Instant.now().plus(31, ChronoUnit.DAYS)))
+            else new Document("_id", subject).append("state", state)
+          )
       )
       .void
 
@@ -108,6 +114,46 @@ final class HiringAnalyticsStreamingErasureRaceIntegrationSpec extends SharedRec
         _ = assertEquals(silver, 11L)
         _ = assertEquals(bronze, 11L, "Bronze excludes the deleted subject's event")
         _ = assertEquals(bronzeSubject.toOption, Some(0L), s"marked subject rows in Bronze: $bronzeSubject")
+        published <- snapshots(harness)
+        _ = assertEquals(published, 0L)
+      } yield ()
+    }
+  }
+
+  test("AEC-07.1 a Complete marker excludes the subject's replayed rows and the batch still publishes") {
+    resource.use { runtime =>
+      for {
+        harness <- runtime.harness("erasure-completed-marker-publishes")
+        observed = harness.at.truncatedTo(ChronoUnit.MICROS)
+        deleted = harness.subjects(3)
+        _ <- requestErasure(harness, deleted, "Complete")
+        frame <- timedFrame(harness, 0L, observed)
+        result <- processAt(harness, frame, 0L, observed)
+        _ = assertEquals(result.outcome, StreamingTerminalOutcome.Published)
+        silver <- harness.count(harness.paths.silver)
+        _ = assertEquals(silver, 11L, "the completed subject's replayed event is dropped")
+        silverSubject <- subjectRows(harness, harness.paths.silver, deleted)
+        _ = assertEquals(silverSubject, 0L)
+        bronzeSubject <- subjectRows(harness, harness.paths.bronze, deleted)
+        _ = assertEquals(bronzeSubject, 0L)
+        published <- snapshots(harness)
+        _ = assertEquals(published, 1L)
+      } yield ()
+    }
+  }
+
+  test("AEC-07.2 a Processing request hides the streaming report and still excludes the subject's rows") {
+    resource.use { runtime =>
+      for {
+        harness <- runtime.harness("erasure-processing-marker-hides")
+        observed = harness.at.truncatedTo(ChronoUnit.MICROS)
+        deleted = harness.subjects(4)
+        _ <- requestErasure(harness, deleted, "Processing")
+        frame <- timedFrame(harness, 0L, observed)
+        result <- processAt(harness, frame, 0L, observed)
+        _ = assertEquals(result.outcome, StreamingTerminalOutcome.ErasurePending)
+        silverSubject <- subjectRows(harness, harness.paths.silver, deleted)
+        _ = assertEquals(silverSubject, 0L)
         published <- snapshots(harness)
         _ = assertEquals(published, 0L)
       } yield ()

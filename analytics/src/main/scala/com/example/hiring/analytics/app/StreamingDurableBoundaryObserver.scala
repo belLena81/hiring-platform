@@ -4,7 +4,11 @@ import cats.effect.Async
 import cats.syntax.all.*
 import com.example.hiring.analytics.adapter.spark.DeltaWriter
 import com.example.hiring.analytics.domain.*
-import com.example.hiring.analytics.service.batch.{AnalyticsLakehousePaths, AnalyticsReportReservation}
+import com.example.hiring.analytics.service.batch.{
+  ActiveDeletionMarkers,
+  AnalyticsLakehousePaths,
+  AnalyticsReportReservation
+}
 import com.example.hiring.analytics.service.streaming.*
 import org.apache.spark.sql.DataFrame
 import java.time.Instant
@@ -76,22 +80,22 @@ private[analytics] object StreamingDurableBoundaryObserver {
       delegate.reservePublication(value, revision)
     override def publicationReceipt(value: StreamingInputPreparation, decision: StreamingDecisionRevision) =
       delegate.publicationReceipt(value, decision)
-    override def assess(value: StreamingInputPreparation, tokens: Vector[SubjectToken], recovery: BatchAttempt) =
-      delegate.assess(value, tokens, recovery)
+    override def assess(value: StreamingInputPreparation, markers: ActiveDeletionMarkers, recovery: BatchAttempt) =
+      delegate.assess(value, markers, recovery)
     override def ingest(
         value: StreamingInputPreparation,
-        tokens: Vector[SubjectToken],
+        markers: ActiveDeletionMarkers,
         assessment: StreamingIngestionResult,
         decision: StreamingDecisionRevision,
         recovery: BatchAttempt
     ) =
-      delegate.ingest(value, tokens, assessment, decision, recovery)
+      delegate.ingest(value, markers, assessment, decision, recovery)
     override def publish(
         value: StreamingInputPreparation,
         decision: StreamingDecisionRevision,
-        tokens: Vector[SubjectToken]
+        markers: ActiveDeletionMarkers
     ) =
-      delegate.publish(value, decision, tokens).flatTap {
+      delegate.publish(value, decision, markers).flatTap {
         case StreamingPublicationResult.Published =>
           observer.completed(StreamingDurableBoundary.PublicationCommitted, value.identity)
         case _ => Async[F].unit

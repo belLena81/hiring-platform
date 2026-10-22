@@ -3,8 +3,9 @@ package com.example.hiring.analytics.adapter.spark
 import cats.effect.{Async, Outcome, Resource}
 import cats.effect.syntax.all.*
 import cats.syntax.all.*
-import com.example.hiring.analytics.domain.{StreamingBatchId, StreamingBatchIdentity, StreamingLineage, SubjectToken}
+import com.example.hiring.analytics.domain.{StreamingBatchId, StreamingBatchIdentity, StreamingLineage}
 import com.example.hiring.analytics.service.batch.{
+  ActiveDeletionMarkers,
   AnalyticsLakehouseLock,
   AnalyticsReportPublicationReceipt,
   AnalyticsReportReservation
@@ -91,24 +92,24 @@ final class StreamingBatchCost[F[_]: Async] private[analytics] (
 
     override def assess(
         preparation: StreamingInputPreparation,
-        activeTokens: Vector[SubjectToken],
+        markers: ActiveDeletionMarkers,
         attempt: BatchAttempt
-    ): F[StreamingIngestionResult] = timed(Stage.Assess)(stages.assess(preparation, activeTokens, attempt))
+    ): F[StreamingIngestionResult] = timed(Stage.Assess)(stages.assess(preparation, markers, attempt))
 
     override def ingest(
         preparation: StreamingInputPreparation,
-        activeTokens: Vector[SubjectToken],
+        markers: ActiveDeletionMarkers,
         assessment: StreamingIngestionResult,
         decision: StreamingDecisionRevision,
         attempt: BatchAttempt
     ): F[Unit] =
-      timed(Stage.Ingest)(stages.ingest(preparation, activeTokens, assessment, decision, attempt))
+      timed(Stage.Ingest)(stages.ingest(preparation, markers, assessment, decision, attempt))
 
     override def publish(
         preparation: StreamingInputPreparation,
         decision: StreamingDecisionRevision,
-        activeTokens: Vector[SubjectToken]
-    ): F[StreamingPublicationResult] = timed(Stage.Publish)(stages.publish(preparation, decision, activeTokens))
+        markers: ActiveDeletionMarkers
+    ): F[StreamingPublicationResult] = timed(Stage.Publish)(stages.publish(preparation, decision, markers))
   }
 }
 

@@ -15,6 +15,19 @@ trait ErasureQueue[F[_]] {
   def hasNonReadyOtherRequests(requestId: AccountSubjectId): F[Boolean]
   def heartbeat(now: Instant, leaseUntil: Instant): F[Unit]
   def preflight: F[Unit]
+
+  /** Aggregate view of requests that still hide the report. It carries no request or subject identifiers. */
+  def backlog(now: Instant): F[ErasureBacklog]
+}
+
+/** Operator-facing size and age of the unfinished erasure queue. */
+final case class ErasureBacklog(
+    pending: Long,
+    processing: Long,
+    oldestAge: Option[FiniteDuration],
+    oldestPhase: Option[ErasurePhase]
+) {
+  def isEmpty: Boolean = pending == 0L && processing == 0L
 }
 
 /** Durable barriers and erasure completion evidence. */

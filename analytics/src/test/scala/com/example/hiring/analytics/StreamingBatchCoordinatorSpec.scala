@@ -4,6 +4,7 @@ import cats.effect.{IO, Ref}
 import cats.syntax.all.*
 import com.example.hiring.analytics.domain.*
 import com.example.hiring.analytics.service.batch.{
+  ActiveDeletionMarkers,
   ActiveDeletionMarkerSource,
   AnalyticsReportPublicationReceipt,
   AnalyticsReportReservation
@@ -214,6 +215,36 @@ final class StreamingBatchCoordinatorSpec extends CatsEffectSuite {
     }
   }
 
+  test("AEC-07.1 a Complete marker excludes rows but the batch still publishes and advances the watermark") {
+    val token = right(SubjectToken.fromHmac("done_" + "f" * 43))
+    for {
+      state <- Ref.of[IO, FakeState](
+        FakeState(markerSnapshots = Vector(Vector(token), Vector(token)), markersCompleted = true)
+      )
+      harness = new Harness(state)
+      result <- harness.coordinator.process(prep)
+      observed <- state.get
+    } yield {
+      assertEquals(result.outcome, StreamingTerminalOutcome.Published)
+      assert(observed.events.contains("publish"))
+    }
+  }
+
+  test("AEC-07.2 a Processing request keeps publication hidden even though only one marker is active") {
+    val token = right(SubjectToken.fromHmac("busy_" + "a" * 43))
+    for {
+      state <- Ref.of[IO, FakeState](
+        FakeState(markerSnapshots = Vector(Vector(token), Vector(token)), markersCompleted = false)
+      )
+      harness = new Harness(state)
+      result <- harness.coordinator.process(prep)
+      observed <- state.get
+    } yield {
+      assertEquals(result.outcome, StreamingTerminalOutcome.ErasurePending)
+      assert(!observed.events.contains("publish"))
+    }
+  }
+
   test("reused batch identity with changed immutable input is rejected before effects") {
     val changed = prep.copy(inputFingerprint = right(RangeFingerprint.from("b" * 64)))
     for {
@@ -357,6 +388,7 @@ final class StreamingBatchCoordinatorSpec extends CatsEffectSuite {
       latestWatermark: Option[Instant] = None,
       failPublishCount: Int = 0,
       markerSnapshots: Vector[Vector[SubjectToken]] = Vector(Vector.empty),
+      markersCompleted: Boolean = false,
       markerReadCount: Int = 0,
       failIngestAfterWriteCount: Int = 0,
       ingestionResult: StreamingIngestionResult = StreamingIngestionResult.Ready(Vector(eventTime)),
@@ -440,12 +472,15 @@ final class StreamingBatchCoordinatorSpec extends CatsEffectSuite {
     }
 
     private val markers = new ActiveDeletionMarkerSource[IO] {
-      override def activeSubjectTokens: IO[Vector[SubjectToken]] = state.modify { current =>
+      override def activeDeletionMarkers: IO[ActiveDeletionMarkers] = state.modify { current =>
         val index = current.markerReadCount.min(current.markerSnapshots.size - 1)
         current.copy(
           markerReadCount = current.markerReadCount + 1,
           authorizationValid = current.authorizationValid && !current.expireWhenMarkersRead
-        ) -> current.markerSnapshots(index)
+        ) -> {
+          val snapshot = current.markerSnapshots(index)
+          ActiveDeletionMarkers(snapshot, snapshot.nonEmpty && !current.markersCompleted)
+        }
       }
     }
 
@@ -466,7 +501,7 @@ final class StreamingBatchCoordinatorSpec extends CatsEffectSuite {
 
       override def assess(
           preparation: StreamingInputPreparation,
-          activeTokens: Vector[SubjectToken],
+          activeTokens: ActiveDeletionMarkers,
           attempt: BatchAttempt
       ): IO[StreamingIngestionResult] =
         state
@@ -475,7 +510,7 @@ final class StreamingBatchCoordinatorSpec extends CatsEffectSuite {
 
       override def ingest(
           preparation: StreamingInputPreparation,
-          activeTokens: Vector[SubjectToken],
+          activeTokens: ActiveDeletionMarkers,
           assessment: StreamingIngestionResult,
           decision: StreamingDecisionRevision,
           attempt: BatchAttempt
@@ -495,7 +530,7 @@ final class StreamingBatchCoordinatorSpec extends CatsEffectSuite {
       override def publish(
           preparation: StreamingInputPreparation,
           decision: StreamingDecisionRevision,
-          activeTokens: Vector[SubjectToken]
+          activeTokens: ActiveDeletionMarkers
       ): IO[StreamingPublicationResult] =
         state
           .modify { s =>

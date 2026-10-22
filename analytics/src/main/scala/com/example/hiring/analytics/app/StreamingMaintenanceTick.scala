@@ -39,14 +39,17 @@ private[app] final class StreamingMaintenanceTick[F[_]: Async: UUIDGen](
       _ <- maintenance.configureRawTables
       runId <- UUIDGen[F].randomUUID.map(value => RunId.prefixed("stream-maintenance-", value.toString))
       fingerprint = RangeFingerprint.ofSha256(s"${identity.canonical}\n$at")
-      existingMarkers <- markers.activeSubjectTokens
+      existingMarkers <- markers.activeDeletionMarkers
       reservation <-
-        if (existingMarkers.nonEmpty) Async[F].pure(Option.empty[AnalyticsReportReservation])
+        if (existingMarkers.erasureInProgress) Async[F].pure(Option.empty[AnalyticsReportReservation])
         else publisher.reservePinned(runId, fingerprint, at).map(Some(_))
-      activeMarkers <- markers.activeSubjectTokens
+      currentView <- markers.activeDeletionMarkers
+      activeMarkers = currentView.exclusionTokens
       _ <- maintenance.expireStored(at)
       _ <- Async[F].whenA(activeMarkers.nonEmpty)(maintenance.purgeMarkedSubjects(activeMarkers))
-      _ <- Async[F].whenA(activeMarkers.isEmpty)(reservation.traverse_(publishRefreshedReport(_, authorize, at)))
+      _ <- Async[F].whenA(!currentView.erasureInProgress)(
+        reservation.traverse_(publishRefreshedReport(_, authorize, at))
+      )
       retained <- retainedCheckpoint()
       _ <- journal.prune(lineage, retained.map(_.batchId).toSet, at, progressRetention)
       _ <- replayJournal.ensureIndexes
@@ -66,9 +69,9 @@ private[app] final class StreamingMaintenanceTick[F[_]: Async: UUIDGen](
   ): F[Unit] =
     for {
       report <- maintenance.rebuildGoldAndExtractReport(at)
-      currentMarkers <- markers.activeSubjectTokens
+      currentMarkers <- markers.activeDeletionMarkers
       _ <- authorize
-      _ <- Async[F].whenA(currentMarkers.isEmpty)(
+      _ <- Async[F].whenA(!currentMarkers.erasureInProgress)(
         publisher
           .publish(reservation, report, retention.publishedSnapshotExpiry(at))
           .recover { case AnalyticsError.GuardedErasurePublicationRejected => () }

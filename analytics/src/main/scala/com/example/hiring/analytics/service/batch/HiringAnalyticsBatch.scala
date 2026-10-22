@@ -37,14 +37,14 @@ final class HiringAnalyticsBatch[F[_]: Async](
       publication <- lakehouseLock.resource(paths.root).use { _ =>
         for {
           _ <- streamingRegistry.rejectBatchIfRegistered(paths.root)
-          markerTokens <- deletionMarkers.activeSubjectTokens
+          markers <- deletionMarkers.activeDeletionMarkers
           _ <- lakehouse.validateHmacConfiguration
           reservedAt <- now
           fingerprint = rangeFingerprint(manifest)
           reservation <- reportPublisher.reserve(manifest.runId, fingerprint, reservedAt)
-          result <- lakehouse.prepare(manifest, markerTokens)
+          result <- lakehouse.prepare(manifest, markers.exclusionTokens)
           completedAt <- now
-          outcome <- finishRun(manifest, markerTokens.nonEmpty, result, completedAt, reservation)
+          outcome <- finishRun(manifest, markers.erasureInProgress, result, completedAt, reservation)
         } yield AnalyticsPublication(
           manifest.runId,
           outcome,
@@ -63,7 +63,7 @@ final class HiringAnalyticsBatch[F[_]: Async](
 
   private def finishRun(
       manifest: AnalyticsRunManifest,
-      activeMarkersPresent: Boolean,
+      erasureInProgress: Boolean,
       result: AnalyticsBatchResult,
       completedAt: Instant,
       reservation: AnalyticsReportReservation
@@ -71,7 +71,7 @@ final class HiringAnalyticsBatch[F[_]: Async](
     if (result.quarantinedRecords > 0L)
       persistManifest(manifest, AnalyticsManifestStatus.QualityBlocked, completedAt)
         .as(AnalyticsRunOutcome.QualityBlocked)
-    else if (activeMarkersPresent)
+    else if (erasureInProgress)
       persistManifest(manifest, AnalyticsManifestStatus.ErasurePending, completedAt)
         .as(AnalyticsRunOutcome.ErasurePending)
     else

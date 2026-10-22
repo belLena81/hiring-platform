@@ -2,6 +2,7 @@ package com.example.hiring.analytics.cli
 
 import com.example.hiring.analytics.domain.AccountSubjectId
 import com.example.hiring.analytics.errors.AnalyticsError
+import com.example.hiring.analytics.service.erasure.{ErasureFailureCategory, ErasurePhase}
 import com.monovore.decline.Command
 import munit.FunSuite
 
@@ -21,6 +22,23 @@ final class AnalyticsErasureRepairCommandSpec extends FunSuite {
     assertEquals(
       command.parse(Seq("requeue", requestId, "3")),
       Right(AnalyticsErasureRepairMain.RepairAction.Requeue(AccountSubjectId.from(requestId).toOption.get, 3))
+    )
+  }
+
+  test("AEC-06.2 inspect output shows the receipt, phase, attempts and category and never a subject UUID") {
+    val line = AnalyticsErasureRepairMain.inspectionLine(
+      Some("receipt-4f2a"),
+      ErasurePhase.DeltaPurged,
+      3,
+      ErasureFailureCategory.TransientStorage
+    )
+    assertEquals(line, "receipt=receipt-4f2a phase=DeltaPurged attempts=3 category=TRANSIENT_STORAGE")
+    assert(!line.contains("request="), clue(line))
+    val uuid = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}".r
+    assert(uuid.findFirstIn(line).isEmpty, clue(line))
+    assertEquals(
+      AnalyticsErasureRepairMain.inspectionLine(None, ErasurePhase.Requested, 1, ErasureFailureCategory.Unknown),
+      "receipt=none phase=Requested attempts=1 category=UNKNOWN"
     )
   }
 

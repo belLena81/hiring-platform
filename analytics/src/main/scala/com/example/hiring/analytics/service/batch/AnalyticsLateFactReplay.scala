@@ -122,7 +122,7 @@ final class AnalyticsLateFactReplayService[F[_]: Async](
   ): F[AnalyticsLateFactReplayOutcome] =
     for {
       observedAt <- now
-      tokens <- deletionMarkers.activeSubjectTokens
+      tokens <- deletionMarkers.activeDeletionMarkers.map(_.exclusionTokens)
       _ <- stages.validateHmacConfiguration
       _ <- stages.validateSelectedFacts(request, tokens, observedAt)
       _ <- stages.applyActiveDeletions(tokens)
@@ -139,18 +139,20 @@ final class AnalyticsLateFactReplayService[F[_]: Async](
   ): F[AnalyticsLateFactReplayOutcome] =
     for {
       observedAt <- now
-      beforeReport <- deletionMarkers.activeSubjectTokens
+      beforeReportMarkers <- deletionMarkers.activeDeletionMarkers
+      beforeReport = beforeReportMarkers.exclusionTokens
       _ <- stages.validateHmacConfiguration
       _ <- stages.validateSelectedFacts(request, beforeReport, observedAt)
       _ <- stages.applyActiveDeletions(beforeReport)
       report <- stages.rebuildGoldAndExtractReport(observedAt)
-      beforePublish <- deletionMarkers.activeSubjectTokens
+      beforePublishMarkers <- deletionMarkers.activeDeletionMarkers
+      beforePublish = beforePublishMarkers.exclusionTokens
       outcome <-
         if (beforeReport.toSet != beforePublish.toSet && refreshes + 1 < MaximumPublicationAttempts)
           rebuildAndPublish(request, record, refreshes + 1)
         else if (beforeReport.toSet != beforePublish.toSet)
           Async[F].raiseError[AnalyticsLateFactReplayOutcome](AnalyticsError.LateFactReplayRejected)
-        else if (beforePublish.nonEmpty) Async[F].pure(AnalyticsLateFactReplayOutcome.ErasurePending)
+        else if (beforePublishMarkers.erasureInProgress) Async[F].pure(AnalyticsLateFactReplayOutcome.ErasurePending)
         else {
           val expiresAt = retention.publishedSnapshotExpiry(observedAt)
           reportPublisher
@@ -188,7 +190,7 @@ final class AnalyticsLateFactReplayService[F[_]: Async](
   private def validateSelection(request: AnalyticsLateFactReplayRequest, observedAt: Instant): F[Unit] =
     for {
       _ <- stages.validateHmacConfiguration
-      tokens <- deletionMarkers.activeSubjectTokens
+      tokens <- deletionMarkers.activeDeletionMarkers.map(_.exclusionTokens)
       _ <- stages.validateSelectedFacts(request, tokens, observedAt)
     } yield ()
 

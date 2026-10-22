@@ -4,7 +4,7 @@ import com.example.hiring.analytics.app.AppModule
 import com.example.hiring.analytics.config.AnalyticsRuntimeConfig
 import com.example.hiring.analytics.adapter.mongo.MongoAnalyticsErasureQueue
 import com.example.hiring.analytics.domain.AccountSubjectId
-import com.example.hiring.analytics.service.erasure.ErasureUpdate
+import com.example.hiring.analytics.service.erasure.{ErasureFailureCategory, ErasurePhase, ErasureUpdate}
 
 import cats.data.Validated
 import cats.effect.{ExitCode, IO}
@@ -45,6 +45,15 @@ object AnalyticsErasureRepairMain
       ).mapN(RepairAction.Requeue.apply)
     }
 
+  /** The receipt is the random, non-subject handle; the subject identity is never printed. */
+  private[analytics] def inspectionLine(
+      receiptId: Option[String],
+      phase: ErasurePhase,
+      attemptCount: Int,
+      category: ErasureFailureCategory
+  ): String =
+    s"receipt=${receiptId.getOrElse("none")} phase=${phase.persistedName} attempts=$attemptCount category=${category.persistedName}"
+
   private[analytics] def requeueExitCode(updated: ErasureUpdate): ExitCode = updated match {
     case ErasureUpdate.Applied   => ExitCode.Success
     case ErasureUpdate.LeaseLost => ExitCode.Error
@@ -58,7 +67,7 @@ object AnalyticsErasureRepairMain
           .flatMap { requests =>
             requests.traverse_(request =>
               IO.println(
-                s"request=${request.requestId.value} phase=${request.phase.persistedName} attempts=${request.attemptCount} category=${request.failureCategory.persistedName}"
+                inspectionLine(request.receiptId, request.phase, request.attemptCount, request.failureCategory)
               )
             )
           }

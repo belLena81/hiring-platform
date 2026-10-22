@@ -13,7 +13,7 @@ import com.example.hiring.analytics.domain.{
   SubjectToken
 }
 import com.example.hiring.analytics.errors.AnalyticsError
-import com.example.hiring.analytics.service.batch.ActiveDeletionMarkerSource
+import com.example.hiring.analytics.service.batch.{ActiveDeletionMarkerSource, ActiveDeletionMarkers}
 import com.example.hiring.analytics.service.batch.{AnalyticsReportPublicationReceipt, AnalyticsReportReservation}
 
 import java.time.Instant
@@ -123,14 +123,14 @@ trait StreamingBatchStages[F[_]] {
   /** Read-only admission pass. It must preserve source event times across durable-sink retries. */
   def assess(
       preparation: StreamingInputPreparation,
-      activeTokens: Vector[SubjectToken],
+      markers: ActiveDeletionMarkers,
       attempt: BatchAttempt
   ): F[StreamingIngestionResult]
 
   /** Must be idempotent by batch identity and write according to the previously persisted decision. */
   def ingest(
       preparation: StreamingInputPreparation,
-      activeTokens: Vector[SubjectToken],
+      markers: ActiveDeletionMarkers,
       assessment: StreamingIngestionResult,
       decision: StreamingDecisionRevision,
       attempt: BatchAttempt
@@ -140,7 +140,7 @@ trait StreamingBatchStages[F[_]] {
   def publish(
       preparation: StreamingInputPreparation,
       decision: StreamingDecisionRevision,
-      activeTokens: Vector[SubjectToken]
+      markers: ActiveDeletionMarkers
   ): F[StreamingPublicationResult]
 }
 
@@ -196,9 +196,10 @@ final class StreamingBatchCoordinator[F[_]: Async](
                 .traverse(decision => stages.publicationReceipt(stable, decision).map(decision -> _))
                 .flatMap {
                   case Some((decision, AnalyticsReportPublicationReceipt.CurrentGeneration)) =>
-                    deletionMarkers.activeSubjectTokens.flatMap { markers =>
+                    deletionMarkers.activeDeletionMarkers.flatMap { markers =>
                       if (
-                        markers.isEmpty && SubjectToken.markerFingerprint(markers) == decision.deletionMarkerFingerprint
+                        !markers.erasureInProgress &&
+                        SubjectToken.markerFingerprint(markers.exclusionTokens) == decision.deletionMarkerFingerprint
                       )
                         publishedResult(decision)
                       else retryRevised(stable, retries = 0)
@@ -235,14 +236,14 @@ final class StreamingBatchCoordinator[F[_]: Async](
       reservation <- previous
         .filter(_.revision == revision)
         .fold(stages.reservePublication(preparation, revision))(value => Async[F].pure(value.publicationReservation))
-      markers <- deletionMarkers.activeSubjectTokens
+      markers <- deletionMarkers.activeDeletionMarkers
       assessment <- stages.assess(preparation, markers, attempt)
       prior <- journal.latestWatermark(preparation.identity.lineage)
       eventTimes = assessment match {
         case StreamingIngestionResult.Ready(times) => times
         case _                                     => Vector.empty
       }
-      fingerprint = SubjectToken.markerFingerprint(markers)
+      fingerprint = SubjectToken.markerFingerprint(markers.exclusionTokens)
       // A retry may find its original facts already merged. Keep the durable admission only under
       // the same deletion view and pinned attempt; publication still fences its current generation.
       recoveredCandidate = previous
@@ -252,7 +253,7 @@ final class StreamingBatchCoordinator[F[_]: Async](
         )
         .flatMap(_.candidateWatermark)
       candidate = assessment match {
-        case StreamingIngestionResult.Ready(_) if markers.isEmpty =>
+        case StreamingIngestionResult.Ready(_) if !markers.erasureInProgress =>
           recoveredCandidate.orElse(
             AnalyticsEventTimePolicy.candidateWatermark(prior, eventTimes, preparation.observedAt)
           )
@@ -273,9 +274,12 @@ final class StreamingBatchCoordinator[F[_]: Async](
               case StreamingIngestionResult.ErasurePending =>
                 complete(preparation.identity, StreamingTerminalOutcome.ErasurePending)
               case StreamingIngestionResult.Ready(_) =>
-                deletionMarkers.activeSubjectTokens.flatMap { refreshed =>
-                  if (refreshed.nonEmpty) complete(preparation.identity, StreamingTerminalOutcome.ErasurePending)
-                  else if (SubjectToken.markerFingerprint(refreshed) != decision.deletionMarkerFingerprint)
+                deletionMarkers.activeDeletionMarkers.flatMap { refreshed =>
+                  if (refreshed.erasureInProgress)
+                    complete(preparation.identity, StreamingTerminalOutcome.ErasurePending)
+                  else if (
+                    SubjectToken.markerFingerprint(refreshed.exclusionTokens) != decision.deletionMarkerFingerprint
+                  )
                     retryRevised(preparation, attempt.retries + 1)
                   else publish(preparation, refreshed, decision, attempt.retries)
                 }
@@ -286,7 +290,7 @@ final class StreamingBatchCoordinator[F[_]: Async](
 
   private def publish(
       preparation: StreamingInputPreparation,
-      markers: Vector[SubjectToken],
+      markers: ActiveDeletionMarkers,
       decision: StreamingDecisionRevision,
       retries: Int
   ): F[StreamingCoordinatorResult] =

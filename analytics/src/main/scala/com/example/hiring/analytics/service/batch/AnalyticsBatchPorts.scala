@@ -11,8 +11,20 @@ enum AnalyticsManifestStatus(val persistedName: String) {
   case Published extends AnalyticsManifestStatus("PUBLISHED")
 }
 
+/** One consistent view of the account-erasure markers.
+  *
+  * `exclusionTokens` covers every active marker (Pending, Processing and unexpired Complete) and keeps replayed rows of
+  * those subjects out of ingestion. `erasureInProgress` is true only while a request is Pending or Processing; a
+  * completed marker excludes rows but must not hide the report.
+  */
+final case class ActiveDeletionMarkers(exclusionTokens: Vector[SubjectToken], erasureInProgress: Boolean)
+
+object ActiveDeletionMarkers {
+  val none: ActiveDeletionMarkers = ActiveDeletionMarkers(Vector.empty, erasureInProgress = false)
+}
+
 trait ActiveDeletionMarkerSource[F[_]] {
-  def activeSubjectTokens: F[Vector[SubjectToken]]
+  def activeDeletionMarkers: F[ActiveDeletionMarkers]
 }
 
 trait AnalyticsRunManifestStore[F[_]] {

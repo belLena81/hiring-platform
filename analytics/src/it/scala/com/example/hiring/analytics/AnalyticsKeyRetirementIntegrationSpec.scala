@@ -313,7 +313,7 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.CatsEffectSuite 
         markerDatabase._1,
         afterRotation,
         AnalyticsTestOperationalConfig.streams
-      ).activeSubjectTokens.unsafeRunSync().map(_.value)
+      ).activeDeletionMarkers.unsafeRunSync().exclusionTokens.map(_.value)
       assert(active.contains(storedUnderOldKey), "the rotated key ring must still match rows stored under the old key")
       assert(active.size >= 2, "the marker also matches rows written under the new key")
     } finally markerDatabase._2.unsafeRunSync()
