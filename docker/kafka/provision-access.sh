@@ -13,6 +13,9 @@ unset broker_password
 
 bootstrap="kafka:9092"
 topic="${KAFKA_TOPIC:-hiring.operational-events}"
+# Keep these aligned with ANALYTICS_RETENTION_KAFKA_RETENTION and ANALYTICS_RETENTION_KAFKA_SEGMENT_ROLL (milliseconds).
+topic_retention_ms="${KAFKA_TOPIC_RETENTION_MS:-604800000}"
+topic_segment_ms="${KAFKA_TOPIC_SEGMENT_MS:-604800000}"
 bin=/opt/kafka/bin
 
 topics() { "$bin/kafka-topics.sh" --bootstrap-server "$bootstrap" --command-config "$admin_properties" "$@"; }
@@ -25,7 +28,7 @@ done
 # Explicit retention and segment roll: the analytics erasure budget assumes kafka-retention + kafka-segment-roll
 # (application.conf analytics.operational.retention), so the topic must not inherit silent broker defaults.
 configs --entity-type topics --entity-name "$topic" --alter \
-  --add-config max.message.bytes=1048576,cleanup.policy=delete,retention.ms=604800000,segment.ms=604800000
+  --add-config max.message.bytes=1048576,cleanup.policy=delete,retention.ms=${topic_retention_ms},segment.ms=${topic_segment_ms}
 
 acls --add --allow-principal User:hiring_publisher_v2 --operation WRITE --operation DESCRIBE --topic "$topic"
 acls --add --allow-principal User:hiring_publisher_v2 --operation IdempotentWrite --cluster

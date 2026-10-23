@@ -40,7 +40,7 @@ private[analytics] object AnalyticsTestOperationalConfig {
     mongoTransactionWindow = 120.seconds,
     maximumErasureEvidenceFiles = maximumEvidence(100000),
     mongoPublisherBufferSize = publisherBuffer(256),
-    erasureWorkerTimings = AnalyticsErasureWorkerTimings(90.seconds, 30.seconds, 5.seconds, 5.minutes)
+    erasureWorkerTimings = AnalyticsErasureWorkerTimings(90.seconds, 30.seconds, 5.seconds, 5.minutes, 1.hour)
   )
 
   def streams: MongoPublisherStream = new MongoPublisherStream(operational)

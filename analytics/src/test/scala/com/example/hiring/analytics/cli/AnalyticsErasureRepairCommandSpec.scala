@@ -1,6 +1,5 @@
 package com.example.hiring.analytics.cli
 
-import com.example.hiring.analytics.domain.AccountSubjectId
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.erasure.{ErasureFailureCategory, ErasurePhase}
 import com.monovore.decline.Command
@@ -18,10 +17,10 @@ final class AnalyticsErasureRepairCommandSpec extends FunSuite {
       command.parse(Seq("inspect", "25")),
       Right(AnalyticsErasureRepairMain.RepairAction.Inspect(25))
     )
-    val requestId = UUID.randomUUID().toString
+    val receiptId = UUID.randomUUID().toString
     assertEquals(
-      command.parse(Seq("requeue", requestId, "3")),
-      Right(AnalyticsErasureRepairMain.RepairAction.Requeue(AccountSubjectId.from(requestId).toOption.get, 3))
+      command.parse(Seq("requeue", receiptId, "3")),
+      Right(AnalyticsErasureRepairMain.RepairAction.Requeue(receiptId, 3))
     )
   }
 
@@ -46,11 +45,27 @@ final class AnalyticsErasureRepairCommandSpec extends FunSuite {
     assert(command.parse(Seq("inspect", "0")).isLeft)
     assert(command.parse(Seq("inspect", "not-an-int")).isLeft)
     assert(command.parse(Seq("requeue", UUID.randomUUID().toString, "-1")).isLeft)
-    val secretLikeId = "credential-bearing-request-id"
+    val secretLikeId = "credential=bearing/request-id"
     val failure = command.parse(Seq("requeue", secretLikeId, "1")).swap.toOption.get.toString
     assert(failure.contains("invalid repair request identity"))
     assert(!failure.contains(secretLikeId))
+    assert(command.parse(Seq("requeue", "a" * 65, "1")).isLeft)
     assert(command.parse(Seq("--help")).isLeft)
+  }
+
+  test("AEC-06.2 requeue takes the receipt printed by inspect and its parse result never carries a subject identity") {
+    val receipt = "receipt-4f2a"
+    val inspected = AnalyticsErasureRepairMain.inspectionLine(
+      Some(receipt),
+      ErasurePhase.Requested,
+      2,
+      ErasureFailureCategory.Unknown
+    )
+    val printedReceipt = inspected.stripPrefix("receipt=").takeWhile(_ != ' ')
+    assertEquals(
+      command.parse(Seq("requeue", printedReceipt, "2")),
+      Right(AnalyticsErasureRepairMain.RepairAction.Requeue(receipt, 2))
+    )
   }
 
   test("CLI error summaries include safe cause types without raw exception details") {

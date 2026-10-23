@@ -1712,10 +1712,10 @@ class AnalyticsTransformsSpec extends FunSuite {
     )
 
     assertEquals(
-      MongoActiveDeletionMarkerSource.activeTokens(missingExpiry, now, pseudonymizer),
+      MongoActiveDeletionMarkerSource.activeMarker(missingExpiry, now, pseudonymizer),
       Left(AnalyticsError.MalformedMarker)
     )
-    assertEquals(MongoActiveDeletionMarkerSource.activeTokens(expired, now, pseudonymizer), Right(None))
+    assertEquals(MongoActiveDeletionMarkerSource.activeMarker(expired, now, pseudonymizer), Right(None))
   }
 
   test("active deletion tokens are excluded before Silver persistence without retaining raw identities") {

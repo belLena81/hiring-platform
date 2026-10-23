@@ -3,7 +3,6 @@ package com.example.hiring.analytics.cli
 import com.example.hiring.analytics.app.AppModule
 import com.example.hiring.analytics.config.AnalyticsRuntimeConfig
 import com.example.hiring.analytics.adapter.mongo.MongoAnalyticsErasureQueue
-import com.example.hiring.analytics.domain.AccountSubjectId
 import com.example.hiring.analytics.service.erasure.{ErasureFailureCategory, ErasurePhase, ErasureUpdate}
 
 import cats.data.Validated
@@ -21,7 +20,7 @@ object AnalyticsErasureRepairMain
     ) {
   private[analytics] enum RepairAction {
     case Inspect(limit: Int)
-    case Requeue(requestId: AccountSubjectId, observedAttemptCount: Int)
+    case Requeue(receiptId: String, observedAttemptCount: Int)
   }
 
   private def positiveInt(name: String): Opts[Int] =
@@ -30,16 +29,17 @@ object AnalyticsErasureRepairMain
       else Validated.invalidNel(s"$name must be positive")
     }
 
+  /** The receipt printed by `inspect`: a bounded token, never a subject identity. */
+  private val ReceiptHandle = "[A-Za-z0-9-]{1,64}".r.pattern
+
   private[analytics] val repairOptions: Opts[RepairAction] =
     Opts.subcommand("inspect", "List repair requests") {
       positiveInt("positive-limit").map(RepairAction.Inspect.apply)
-    } orElse Opts.subcommand("requeue", "Requeue a matching repair request") {
+    } orElse Opts.subcommand("requeue", "Requeue the repair request with this receipt") {
       (
-        Opts.argument[String](metavar = "request-id").mapValidated { value =>
-          AccountSubjectId.from(value) match {
-            case Right(id) => Validated.valid(id)
-            case Left(_)   => Validated.invalidNel("invalid repair request identity")
-          }
+        Opts.argument[String](metavar = "receipt-id").mapValidated { value =>
+          if (ReceiptHandle.matcher(value).matches()) Validated.valid(value)
+          else Validated.invalidNel("invalid repair request identity")
         },
         positiveInt("observed-attempt-count")
       ).mapN(RepairAction.Requeue.apply)
@@ -73,9 +73,9 @@ object AnalyticsErasureRepairMain
           }
           .as(ExitCode.Success)
       }
-    case RepairAction.Requeue(subjectId, attempt) =>
+    case RepairAction.Requeue(receiptId, attempt) =>
       program { store =>
-        IO.realTimeInstant.flatMap(now => store.requeueRepair(subjectId, attempt, now)).flatMap {
+        IO.realTimeInstant.flatMap(now => store.requeueRepair(receiptId, attempt, now)).flatMap {
           case ErasureUpdate.Applied =>
             IO.println("requeued the matching repair request").as(requeueExitCode(ErasureUpdate.Applied))
           case ErasureUpdate.LeaseLost =>

@@ -95,6 +95,8 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
 |      poll-interval = ${?ANALYTICS_ERASURE_POLL_INTERVAL}
 |      reclamation-recheck-interval = 5 minutes
 |      reclamation-recheck-interval = ${?ANALYTICS_ERASURE_RECLAMATION_RECHECK_INTERVAL}
+|      backlog-log-interval = 1 hour
+|      backlog-log-interval = ${?ANALYTICS_ERASURE_BACKLOG_LOG_INTERVAL}
 |    }
 |  }
 |  key-retirement-audit {
@@ -392,6 +394,33 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
     assert(message.contains("15 days"), message)
     assert(message.contains("10 days"), message)
     assert(message.contains("mongo-transaction-window"), message)
+  }
+
+  test("AEC-02.4 a budget beyond the one-month response period is rejected and accumulates with other problems") {
+    val failure = operational(
+      Map(
+        "ANALYTICS_RETENTION_ERASURE_COMPLETION_BUDGET" -> "45 days",
+        "ANALYTICS_MONGO_TRANSACTION_WINDOW" -> "0 seconds"
+      )
+    ).swap.toOption.getOrElse(fail("expected the over-long budget to be rejected"))
+    val message = failure.getMessage
+    assert(message.contains("erasure-completion-budget 45 days exceeds the one-month response period 30 days"), message)
+    assert(message.contains("mongo-transaction-window"), message)
+    val atCap = operational(Map("ANALYTICS_RETENTION_ERASURE_COMPLETION_BUDGET" -> "30 days"))
+    assertEquals(atCap.map(_.retention.erasureCompletionBudget), Right(30.days))
+  }
+
+  test("backlog-log-interval defaults to one hour and can be set from the environment") {
+    assertEquals(
+      operational(Map.empty).map(_.erasureWorkerTimings.backlogLogInterval),
+      Right(1.hour)
+    )
+    assertEquals(
+      operational(Map("ANALYTICS_ERASURE_BACKLOG_LOG_INTERVAL" -> "15 minutes")).map(
+        _.erasureWorkerTimings.backlogLogInterval
+      ),
+      Right(15.minutes)
+    )
   }
 
   test("bounded operational refinements accept their limits and reject values outside them") {

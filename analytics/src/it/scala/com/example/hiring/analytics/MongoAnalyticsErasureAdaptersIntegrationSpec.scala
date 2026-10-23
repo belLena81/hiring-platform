@@ -723,7 +723,9 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends AnalyticsMongoIntegra
     }
   }
 
-  test("repair-required erasure stays pending and can be requeued only against observed attempt and lease state") {
+  test(
+    "AEC-06.2 repair-required erasure stays pending and is requeued by receipt only against observed attempt and lease state"
+  ) {
     val client = syncClient(
       endpointUri
     )
@@ -731,6 +733,7 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends AnalyticsMongoIntegra
       val database = client.getDatabase(testDatabaseName)
       val collection = database.getCollection(AnalyticsCollections.ErasureRequests)
       val requestId = UUID.randomUUID().toString
+      val receiptId = UUID.randomUUID().toString
       val now = Instant.now()
       collection.insertOne(
         new Document("_id", requestId)
@@ -738,6 +741,7 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends AnalyticsMongoIntegra
           .append("fencingVersion", 1)
           .append("producerRegistry", true)
           .append("requestedAt", Date.from(now))
+          .append("receiptId", receiptId)
       )
       val store =
         AnalyticsErasureWorkerTestSupport.stores(mongo4catsClient(client), mongo4catsDatabase(client, database.getName))
@@ -752,12 +756,17 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends AnalyticsMongoIntegra
       assertEquals(repair.attemptCount, 1)
       assertEquals(repair.failureCategory, ErasureFailureCategory.InvalidState)
       assertEquals(store.queue.claim(now.plusSeconds(2L), now.plusSeconds(62L), 1).unsafeRunSync(), Vector.empty)
+      assertEquals(repair.receiptId, Some(receiptId))
       assertEquals(
-        store.queue.requeueRepair(asAccountSubjectId(requestId), 2, now.plusSeconds(3L)).unsafeRunSync(),
+        store.queue.requeueRepair(receiptId, 2, now.plusSeconds(3L)).unsafeRunSync(),
         ErasureUpdate.LeaseLost
       )
       assertEquals(
-        store.queue.requeueRepair(asAccountSubjectId(requestId), 1, now.plusSeconds(3L)).unsafeRunSync(),
+        store.queue.requeueRepair(requestId, 1, now.plusSeconds(3L)).unsafeRunSync(),
+        ErasureUpdate.LeaseLost
+      )
+      assertEquals(
+        store.queue.requeueRepair(receiptId, 1, now.plusSeconds(3L)).unsafeRunSync(),
         ErasureUpdate.Applied
       )
       val resumed = store.queue.claim(now.plusSeconds(4L), now.plusSeconds(64L), 1).unsafeRunSync().head
@@ -806,6 +815,7 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends AnalyticsMongoIntegra
     try {
       val database = currentClient.getDatabase(databaseName)
       val requestId = UUID.randomUUID().toString
+      val receiptId = UUID.randomUUID().toString
       val now = Instant.now()
       val requests = database.getCollection(AnalyticsCollections.ErasureRequests)
       requests.insertOne(
@@ -814,6 +824,7 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends AnalyticsMongoIntegra
           .append("fencingVersion", 1)
           .append("producerRegistry", true)
           .append("requestedAt", Date.from(now))
+          .append("receiptId", receiptId)
       )
       val staleStore =
         AnalyticsErasureWorkerTestSupport.stores(
@@ -838,7 +849,7 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends AnalyticsMongoIntegra
           .start
         _ <- IO.blocking(assert(staleWriteStarted.await(30, TimeUnit.SECONDS), "assertion failed"))
         currentClaim <- currentStore.queue.claim(now.plusSeconds(2), now.plusSeconds(62), 1).map(_.head)
-        staleRequeue <- staleStore.queue.requeueRepair(asAccountSubjectId(requestId), 1, now.plusSeconds(3))
+        staleRequeue <- staleStore.queue.requeueRepair(receiptId, 1, now.plusSeconds(3))
         _ <- IO.blocking(releaseStaleWrite.countDown())
         staleSaved <- delayed.joinWithNever
         currentSaved <- currentStore.progress.recordFailure(
@@ -876,6 +887,7 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends AnalyticsMongoIntegra
       val users = database.getCollection("users")
       val reportControl = database.getCollection("analytics_report_control")
       val requestId = UUID.randomUUID().toString
+      val receiptId = UUID.randomUUID().toString
       val now = Instant.now()
       val phase = ErasurePhase.OutboxPurged
       val progress = 37
@@ -886,6 +898,7 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends AnalyticsMongoIntegra
           .append("fencingVersion", 1)
           .append("producerRegistry", true)
           .append("requestedAt", Date.from(now))
+          .append("receiptId", receiptId)
           .append("phase", phase.persistedName)
           .append("progress", progress)
           .append("progressKey", progressKey)
@@ -913,7 +926,7 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends AnalyticsMongoIntegra
             )
           )
         }
-        liveLeaseRequeue <- store.queue.requeueRepair(asAccountSubjectId(requestId), 1, now.plusSeconds(2L))
+        liveLeaseRequeue <- store.queue.requeueRepair(receiptId, 1, now.plusSeconds(2L))
         _ = assertEquals(liveLeaseRequeue, ErasureUpdate.LeaseLost)
         _ <- IO.blocking {
           collection.updateOne(
@@ -925,9 +938,9 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends AnalyticsMongoIntegra
         firstReady <- Deferred[IO, Unit]
         secondReady <- Deferred[IO, Unit]
         first <- (firstReady.complete(()) *> gate.get *>
-          store.queue.requeueRepair(asAccountSubjectId(requestId), 1, now.plusSeconds(3L))).start
+          store.queue.requeueRepair(receiptId, 1, now.plusSeconds(3L))).start
         second <- (secondReady.complete(()) *> gate.get *>
-          store.queue.requeueRepair(asAccountSubjectId(requestId), 1, now.plusSeconds(3L))).start
+          store.queue.requeueRepair(receiptId, 1, now.plusSeconds(3L))).start
         _ <- firstReady.get *> secondReady.get *> gate.complete(())
         firstResult <- first.joinWithNever
         secondResult <- second.joinWithNever
@@ -949,7 +962,7 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends AnalyticsMongoIntegra
         claimFiber <- (claimReady.complete(()) *> claimGate.get *>
           store.queue.claim(now.plusSeconds(6L), now.plusSeconds(66L), 1)).start
         requeueFiber <- (requeueReady.complete(()) *> claimGate.get *>
-          store.queue.requeueRepair(asAccountSubjectId(requestId), 2, now.plusSeconds(6L))).start
+          store.queue.requeueRepair(receiptId, 2, now.plusSeconds(6L))).start
         _ <- claimReady.get *> requeueReady.get *> claimGate.complete(())
         racingClaims <- claimFiber.joinWithNever
         racingRequeue <- requeueFiber.joinWithNever

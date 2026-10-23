@@ -93,7 +93,9 @@ final class HiringAnalyticsStreamingStorageMaintenanceIntegrationSpec extends Sh
     }
   }
 
-  test("HCS-11.2 maintenance with an active deletion marker purges the subject and does not refresh the report") {
+  test(
+    "HCS-11.2 AEC-07.2 maintenance with an in-progress deletion marker purges the subject and does not publish the report"
+  ) {
     resource.use { runtime =>
       for {
         harness <- runtime.harness("maintenance-marker")
@@ -118,6 +120,34 @@ final class HiringAnalyticsStreamingStorageMaintenanceIntegrationSpec extends Sh
         _ = assertEquals(remaining, 11L)
         after <- revision(harness)
         _ = assertEquals(after, published, "the report is not republished while a marker is active")
+      } yield ()
+    }
+  }
+
+  test("AEC-07.1 maintenance with only a Complete marker purges with its tokens and publishes the refreshed report") {
+    resource.use { runtime =>
+      for {
+        harness <- runtime.harness("maintenance-completed-marker")
+        observed = harness.at.truncatedTo(ChronoUnit.MICROS)
+        lineage = harness.preparation().identity.lineage
+        frame <- timedFrame(harness, 0L, observed)
+        _ <- processAt(harness, frame, 0L, observed)
+        published <- revision(harness)
+        deleted = harness.subjects(2)
+        _ <- harness.sync(
+          _.getCollection("analytics_erasure_requests").insertOne(
+            new Document("_id", deleted)
+              .append("state", "Complete")
+              .append("expiresAt", java.util.Date.from(Instant.now().plus(31L, ChronoUnit.DAYS)))
+          )
+        )
+        _ <- subjectRows(harness, harness.paths.silver, deleted).map(rows => assertEquals(rows, 1L))
+        maintenance = StreamingMaintenanceFixtures.maintenance(harness, harness.operational, 7.days)
+        _ <- maintenance.run(lineage, Instant.now())
+        silver <- subjectRows(harness, harness.paths.silver, deleted)
+        _ = assertEquals(silver, 0L, "the completed marker's tokens are still purged")
+        after <- revision(harness)
+        _ = assert(after > published, s"the refreshed report is published: $published -> $after")
       } yield ()
     }
   }

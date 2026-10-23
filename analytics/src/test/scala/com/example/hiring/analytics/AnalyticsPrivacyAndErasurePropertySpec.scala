@@ -90,7 +90,7 @@ final class AnalyticsPrivacyAndErasurePropertySpec extends ScalaCheckSuite {
        |   mongo-transaction-window = 120 seconds
        |   maximum-erasure-evidence-files = 100000
 |   mongo-publisher-buffer-size = 256
-|   erasure-worker { lease-duration = 90 seconds, delivery-timeout = 30 seconds, poll-interval = 5 seconds, reclamation-recheck-interval = 5 minutes }
+|   erasure-worker { lease-duration = 90 seconds, delivery-timeout = 30 seconds, poll-interval = 5 seconds, reclamation-recheck-interval = 5 minutes, backlog-log-interval = 1 hour }
 | }
        |}""".stripMargin
 

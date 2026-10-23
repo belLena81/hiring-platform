@@ -10,7 +10,7 @@ import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
 import com.example.hiring.analytics.service.batch.AnalyticsReportPublisher
 import com.example.hiring.analytics.service.batch.AnalyticsReportReservation
 
-import cats.effect.{Async, Clock, Outcome, Temporal}
+import cats.effect.{Async, Clock, Outcome, Ref, Temporal}
 import cats.Monad
 import cats.data.EitherT
 import cats.syntax.all.*
@@ -46,6 +46,7 @@ final class AnalyticsErasureWorker[F[_]: Async](
       _ <- queue.preflight
       _ <- lakehouse.validateHmacConfiguration
       _ <- kafka.retention.capture()
+      _ <- logger.info(startupLine)
       current <- now
       until <- leaseUntil
       _ <- queue.heartbeat(current, until)
@@ -64,17 +65,27 @@ final class AnalyticsErasureWorker[F[_]: Async](
       )
     } yield ()).foreverM
 
-  /** One aggregate line per poll while work remains; it never names a request or subject. */
+  private val lastBacklogLine = Ref.unsafe[F, Option[ErasureBacklogLogPolicy.LoggedLine]](None)
+
+  /** Best-effort aggregate line; it never names a request or subject and a failure never ends the poll loop. */
   private def logBacklog(current: Instant): F[Unit] =
-    queue.backlog(current).flatMap { backlog =>
-      Async[F].unlessA(backlog.isEmpty)(
-        logger.info(
-          "erasure backlog: pending=" + backlog.pending + " processing=" + backlog.processing +
-            " oldestRequestedAgeHours=" + backlog.oldestAge.fold("unknown")(_.toHours.toString) +
-            " phase=" + backlog.oldestPhase.fold("unknown")(_.persistedName)
-        )
+    queue
+      .backlog(current)
+      .flatMap { backlog =>
+        lastBacklogLine
+          .modify { last =>
+            val decision = ErasureBacklogLogPolicy.decide(last, backlog, current, policy.timings.backlogLogInterval)
+            (decision.next, decision.log)
+          }
+          .flatMap(Async[F].whenA(_)(logger.info(ErasureBacklogLogPolicy.render(backlog))))
+      }
+      .handleErrorWith(error =>
+        logger.warn("erasure backlog could not be read; errorCode=" + AnalyticsErrorText.code(error))
       )
-    }
+
+  private[analytics] def startupLine: String =
+    "analytics erasure worker starting: worstCaseCompletion=" + retention.worstCaseErasureCompletion +
+      " erasureCompletionBudget=" + retention.erasureCompletionBudget
 
   private[analytics] def runClaim(claim: ErasureClaim): F[ErasureClaimOutcome] = {
     val work = for {

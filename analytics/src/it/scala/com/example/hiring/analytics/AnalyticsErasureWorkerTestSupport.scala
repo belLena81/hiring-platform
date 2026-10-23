@@ -129,7 +129,7 @@ private[analytics] object AnalyticsErasureWorkerTestSupport {
       Slf4jLogger.getLogger[IO],
       AnalyticsErasureWorkerPolicy(
         operational.retention,
-        AnalyticsErasureWorkerTimings(leaseDuration, deliveryTimeout, pollInterval, 5.minutes)
+        AnalyticsErasureWorkerTimings(leaseDuration, deliveryTimeout, pollInterval, 5.minutes, 1.hour)
       ),
       clock
     )

@@ -103,11 +103,7 @@ private[analytics] final class MongoActiveDeletionMarkerSource[F[_]: Async](
       now <- Clock[F].realTimeInstant
       markers <- activeRequests(now)
         .evalMap(request =>
-          Async[F].fromEither(
-            MongoActiveDeletionMarkerSource
-              .activeTokens(request, now, pseudonymizer)
-              .map(_.map(_ -> MongoActiveDeletionMarkerSource.inProgress(request)))
-          )
+          Async[F].fromEither(MongoActiveDeletionMarkerSource.activeMarker(request, now, pseudonymizer))
         )
         .unNone
         .take(maximumPendingMarkers.toLong + 1L)
@@ -116,7 +112,7 @@ private[analytics] final class MongoActiveDeletionMarkerSource[F[_]: Async](
       _ <- Async[F].raiseWhen(markers.size > maximumPendingMarkers)(
         AnalyticsError.MarkerLimitExceeded(maximumPendingMarkers)
       )
-    } yield ActiveDeletionMarkers(markers.flatMap(_._1).distinct, markers.exists(_._2))
+    } yield ActiveDeletionMarkers(markers.flatMap(_.tokens).distinct, markers.exists(_.inProgress))
 }
 
 private[analytics] object MongoActiveDeletionMarkerSource {
@@ -139,27 +135,24 @@ private[analytics] object MongoActiveDeletionMarkerSource {
     }
   }
 
-  /** Only a request that has not completed hides the report. Call after `activeTokens` accepted the state. */
-  private[analytics] def inProgress(request: AnalyticsMongoRecords.ErasureRequest): Boolean =
-    request.state.flatMap(ErasureRequestState.fromString).exists {
-      case ErasureRequestState.Pending | ErasureRequestState.Processing => true
-      case ErasureRequestState.Complete                                 => false
-    }
+  /** The tokens an active request excludes and whether it still hides the report (it has not completed). */
+  private[analytics] final case class ActiveMarker(tokens: Vector[SubjectToken], inProgress: Boolean)
 
-  private[analytics] def activeTokens(
+  private[analytics] def activeMarker(
       request: AnalyticsMongoRecords.ErasureRequest,
       now: Instant,
       pseudonymizer: SubjectPseudonymizer
-  ): Either[AnalyticsError, Option[Vector[SubjectToken]]] =
+  ): Either[AnalyticsError, Option[ActiveMarker]] =
     request.state.flatMap(ErasureRequestState.fromString).toRight(AnalyticsError.MalformedMarker).flatMap {
       case ErasureRequestState.Pending | ErasureRequestState.Processing =>
-        tokensFor(request, pseudonymizer).map(Some(_))
+        tokensFor(request, pseudonymizer).map(tokens => Some(ActiveMarker(tokens, inProgress = true)))
       case ErasureRequestState.Complete =>
         request.expiresAt
           .map(Date.from)
           .toRight(AnalyticsError.MalformedMarker)
           .flatMap(expiresAt =>
-            if (expiresAt.after(Date.from(now))) tokensFor(request, pseudonymizer).map(Some(_))
+            if (expiresAt.after(Date.from(now)))
+              tokensFor(request, pseudonymizer).map(tokens => Some(ActiveMarker(tokens, inProgress = false)))
             else Right(None)
           )
     }

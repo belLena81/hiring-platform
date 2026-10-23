@@ -43,6 +43,9 @@ final case class AnalyticsRetentionSettings(
 
 object AnalyticsRetentionSettings {
   val DeltaMinimumSafeVacuum: FiniteDuration = 7.days
+
+  /** The one-month response period: a completion budget beyond it could not be met for a data subject. */
+  val MaximumErasureCompletionBudget: FiniteDuration = 30.days
 }
 
 final case class AnalyticsOperationalSettings(
@@ -58,7 +61,8 @@ final case class AnalyticsErasureWorkerTimings(
     leaseDuration: FiniteDuration,
     deliveryTimeout: FiniteDuration,
     pollInterval: FiniteDuration,
-    reclamationRecheckInterval: FiniteDuration
+    reclamationRecheckInterval: FiniteDuration,
+    backlogLogInterval: FiniteDuration
 )
 
 final case class AnalyticsErasureWorkerPolicy(

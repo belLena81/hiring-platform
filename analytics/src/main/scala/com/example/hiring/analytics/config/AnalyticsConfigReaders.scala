@@ -138,23 +138,40 @@ private[analytics] object AnalyticsConfigReaders {
       )
       .emap { retention =>
         val worstCase = retention.worstCaseErasureCompletion
-        Either.cond(
-          worstCase <= retention.erasureCompletionBudget,
-          retention,
-          UserValidationFailed(
-            s"worst-case erasure completion $worstCase exceeds erasure-completion-budget ${retention.erasureCompletionBudget}"
+        val budget = retention.erasureCompletionBudget
+        val cap = AnalyticsRetentionSettings.MaximumErasureCompletionBudget
+        if (budget > cap)
+          Left(UserValidationFailed(s"erasure-completion-budget $budget exceeds the one-month response period $cap"))
+        else
+          Either.cond(
+            worstCase <= budget,
+            retention,
+            UserValidationFailed(s"worst-case erasure completion $worstCase exceeds erasure-completion-budget $budget")
           )
-        )
       }
 
   given ConfigReader[AnalyticsErasureWorkerTimings] =
-    ConfigReader.forProduct4("lease-duration", "delivery-timeout", "poll-interval", "reclamation-recheck-interval")(
+    ConfigReader.forProduct5(
+      "lease-duration",
+      "delivery-timeout",
+      "poll-interval",
+      "reclamation-recheck-interval",
+      "backlog-log-interval"
+    )(
       (
           leaseDuration: AnalyticsMillisecondDuration,
           deliveryTimeout: AnalyticsMillisecondDuration,
           pollInterval: AnalyticsMillisecondDuration,
-          reclamationRecheckInterval: AnalyticsMillisecondDuration
-      ) => AnalyticsErasureWorkerTimings(leaseDuration, deliveryTimeout, pollInterval, reclamationRecheckInterval)
+          reclamationRecheckInterval: AnalyticsMillisecondDuration,
+          backlogLogInterval: AnalyticsMillisecondDuration
+      ) =>
+        AnalyticsErasureWorkerTimings(
+          leaseDuration,
+          deliveryTimeout,
+          pollInterval,
+          reclamationRecheckInterval,
+          backlogLogInterval
+        )
     )
 
   given ConfigReader[AnalyticsOperationalSettings] =

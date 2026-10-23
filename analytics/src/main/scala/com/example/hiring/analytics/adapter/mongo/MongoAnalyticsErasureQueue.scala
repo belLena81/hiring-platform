@@ -83,15 +83,14 @@ final class MongoAnalyticsErasureQueue[F[_]: Async: UUIDGen] private (
           }
       }
 
-  /** Explicitly requeues one observed repair request without altering its durable phase or progress. */
-
-  def requeueRepair(requestId: AccountSubjectId, expectedAttempt: Int, now: Instant): F[ErasureUpdate] =
-    if (expectedAttempt < 1)
+  /** Explicitly requeues the request with this receipt, unique per request, without altering its phase or progress. */
+  def requeueRepair(receiptId: String, expectedAttempt: Int, now: Instant): F[ErasureUpdate] =
+    if (expectedAttempt < 1 || receiptId.isBlank)
       Async[F].raiseError(AnalyticsError.InvalidConfiguration("invalid repair request identity"))
     else
       mongo {
         val observedState = Filters.and(
-          Filters.eq(AnalyticsCollections.Fields.Id, requestId.value),
+          Filters.eq(AnalyticsCollections.Fields.ReceiptId, receiptId),
           Filters.eq(AnalyticsCollections.Fields.State, ErasureRequestState.Processing.persistedName),
           Filters.eq(AnalyticsCollections.Fields.RepairRequired, true),
           Filters.eq(AnalyticsCollections.Fields.AttemptCount, expectedAttempt),

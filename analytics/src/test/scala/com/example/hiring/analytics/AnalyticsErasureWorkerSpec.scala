@@ -90,6 +90,83 @@ final class AnalyticsErasureWorkerSpec extends CatsEffectSuite {
     } yield ()
   }
 
+  private def backlogLinesAfter(sleep: FiniteDuration, backlog: IO[ErasureBacklog]): IO[(Vector[String], Counters)] =
+    for {
+      state <- Ref.of[IO, Counters](Counters())
+      lines <- Ref.of[IO, Vector[String]](Vector.empty)
+      worker = workerForRetention(
+        AnalyticsTestOperationalConfig.operational.retention,
+        0L,
+        state,
+        logger = capturingLogger(lines),
+        backlogQuery = Some(backlog)
+      )
+      _ <- TestControl.executeEmbed {
+        worker.pollForever.start.flatMap(fiber => IO.sleep(sleep) *> fiber.cancel)
+      }
+      captured <- lines.get
+      counters <- state.get
+    } yield (captured, counters)
+
+  private val unchangedBacklog = ErasureBacklog(2L, 1L, Some(5.hours), Some(ErasurePhase.DeltaPurged))
+
+  test("AEC-06.1 an unchanged backlog is logged once while polling continues, then again after the log interval") {
+    for {
+      (quick, counters) <- backlogLinesAfter(30.seconds, IO.pure(unchangedBacklog))
+      _ = assertEquals(quick.count(_.startsWith("erasure backlog:")), 1, clues(quick))
+      _ = assert(counters.claims >= 25, s"polling continued: ${counters.claims}")
+      (later, _) <- backlogLinesAfter(90.minutes, IO.pure(unchangedBacklog))
+      _ = assertEquals(later.count(_.startsWith("erasure backlog:")), 2, clues(later))
+    } yield ()
+  }
+
+  test("AEC-06.1 a changed backlog summary is logged immediately") {
+    for {
+      calls <- Ref.of[IO, Int](0)
+      backlog = calls
+        .getAndUpdate(_ + 1)
+        .map(call => if (call < 3) unchangedBacklog else unchangedBacklog.copy(pending = 3L))
+      (lines, _) <- backlogLinesAfter(10.seconds, backlog)
+      _ = assertEquals(lines.count(_.startsWith("erasure backlog:")), 2, clues(lines))
+      _ = assert(lines.exists(_.contains("pending=3")), clues(lines))
+    } yield ()
+  }
+
+  test("AEC-06.1 a failing backlog query logs a sanitized warning and the poll loop continues") {
+    val failure = new IllegalStateException("password=hunter2 credential leak")
+    for {
+      (lines, counters) <- backlogLinesAfter(5.seconds, IO.raiseError(failure))
+      warnings = lines.filter(_.startsWith("erasure backlog could not be read"))
+      _ = assert(warnings.nonEmpty, clues(lines))
+      _ = assert(lines.forall(!_.contains("hunter2")), clues(lines))
+      _ = assert(counters.claims >= 4, s"the loop survived the failing query: ${counters.claims}")
+    } yield ()
+  }
+
+  test("AEC-02.5 the worker logs its worst-case completion and budget once at start") {
+    val barrier = KafkaRetentionBarrier.from("hiring.operational-events", Vector(0 -> 1L)).toOption.get
+    for {
+      state <- Ref.of[IO, Counters](Counters())
+      lines <- Ref.of[IO, Vector[String]](Vector.empty)
+      retention = AnalyticsTestOperationalConfig.operational.retention
+      worker = workerForRetention(
+        retention,
+        0L,
+        state,
+        logger = capturingLogger(lines),
+        barrierCapture = Some(IO.pure(barrier))
+      )
+      _ <- TestControl.executeEmbed {
+        worker.run.start.flatMap(fiber => IO.sleep(2.seconds) *> fiber.cancel)
+      }
+      captured <- lines.get
+      starts = captured.filter(_.startsWith("analytics erasure worker starting:"))
+      _ = assertEquals(starts.size, 1, clues(captured))
+      _ = assert(starts.head.contains("worstCaseCompletion=" + retention.worstCaseErasureCompletion), clues(starts))
+      _ = assert(starts.head.contains("erasureCompletionBudget=" + retention.erasureCompletionBudget), clues(starts))
+    } yield ()
+  }
+
   test("lease renewal is clock controlled, stops on lease loss, and can be cancelled") {
     for {
       applied <- Ref.of[IO, Counters](Counters())
@@ -249,7 +326,7 @@ final class AnalyticsErasureWorkerSpec extends CatsEffectSuite {
       state: Ref[IO, Counters],
       renewal: ErasureUpdate,
       renewalFailure: Option[Throwable],
-      pendingBacklog: ErasureBacklog
+      backlogQuery: IO[ErasureBacklog]
   ) extends ErasureQueue[IO],
         ErasureProgress[IO],
         ErasureBarrier[IO] {
@@ -269,7 +346,7 @@ final class AnalyticsErasureWorkerSpec extends CatsEffectSuite {
     override def heartbeat(now: Instant, leaseUntil: Instant): IO[Unit] =
       state.update(value => value.copy(heartbeats = value.heartbeats + 1))
     override def preflight: IO[Unit] = IO.unit
-    override def backlog(now: Instant): IO[ErasureBacklog] = IO.pure(pendingBacklog)
+    override def backlog(now: Instant): IO[ErasureBacklog] = backlogQuery
 
     override def persistBarrier(claim: ErasureClaim, barrier: KafkaRetentionBarrier, now: Instant): IO[ErasureUpdate] =
       IO.pure(ErasureUpdate.LeaseLost)
@@ -328,9 +405,11 @@ final class AnalyticsErasureWorkerSpec extends CatsEffectSuite {
       leaseDuration: FiniteDuration = 90.seconds,
       renewalFailure: Option[Throwable] = None,
       backlog: ErasureBacklog = ErasureBacklog(0L, 0L, None, None),
-      logger: Logger[IO] = org.typelevel.log4cats.slf4j.Slf4jLogger.getLogger[IO]
+      logger: Logger[IO] = org.typelevel.log4cats.slf4j.Slf4jLogger.getLogger[IO],
+      backlogQuery: Option[IO[ErasureBacklog]] = None,
+      barrierCapture: Option[IO[KafkaRetentionBarrier]] = None
   ): AnalyticsErasureWorker[IO] = {
-    val store = new TestErasureStore(state, renewal, renewalFailure, backlog)
+    val store = new TestErasureStore(state, renewal, renewalFailure, backlogQuery.getOrElse(IO.pure(backlog)))
     val lock: AnalyticsLakehouseLock[IO] = (_: String) => Resource.pure[IO, Unit](())
     val markers: ActiveDeletionMarkerSource[IO] = new ActiveDeletionMarkerSource[IO] {
       override def activeDeletionMarkers: IO[ActiveDeletionMarkers] = IO.pure(ActiveDeletionMarkers.none)
@@ -383,7 +462,9 @@ final class AnalyticsErasureWorkerSpec extends CatsEffectSuite {
     val noFencing: TransactionalProducerFencer[IO] = (_: KafkaConnection, _: Vector[String]) => IO.unit
     val noRetention: KafkaRetention[IO] = new KafkaRetention[IO] {
       override def capture(): IO[KafkaRetentionBarrier] =
-        IO.raiseError(new AssertionError("polling and renewal tests do not capture retention barriers"))
+        barrierCapture.getOrElse(
+          IO.raiseError(new AssertionError("polling and renewal tests do not capture retention barriers"))
+        )
       override def retentionPassed(barrier: KafkaRetentionBarrier): IO[Boolean] =
         IO.pure(barrier.partitions.forall(_.endOffsetExclusive.asInstanceOf[Long] <= earliestOffset))
     }
@@ -400,7 +481,7 @@ final class AnalyticsErasureWorkerSpec extends CatsEffectSuite {
       logger,
       AnalyticsErasureWorkerPolicy(
         retention,
-        AnalyticsErasureWorkerTimings(leaseDuration, 1.second, 1.second, 5.minutes)
+        AnalyticsErasureWorkerTimings(leaseDuration, 1.second, 1.second, 5.minutes, 1.hour)
       ),
       cats.effect.Clock[IO]
     )
