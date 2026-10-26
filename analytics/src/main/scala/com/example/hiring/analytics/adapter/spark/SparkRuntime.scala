@@ -91,6 +91,9 @@ private[analytics] object SparkRuntime {
         .config("spark.sql.session.timeZone", "UTC")
       sparkUiEnabled.foreach(enabled => builder.config("spark.ui.enabled", enabled.toString))
       builder
+        // Delta 4.4 defaults this to true, which makes VACUUM ignore the requested retention and skip the retention
+        // safety check. Keep the explicit retention and the safety check authoritative, as in Delta 4.0.
+        .config("spark.databricks.delta.vacuum.retentionWindowIgnore.enabled", "false")
         .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
         .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
         .getOrCreate()

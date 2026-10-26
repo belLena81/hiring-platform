@@ -26,10 +26,12 @@ private[analytics] object DeltaVacuumEligibility {
       val rounded = roundedRetentionMillis(hours)
       val safetyEnabled = spark.conf.get("spark.databricks.delta.retentionDurationCheck.enabled", "true").toBoolean
       val liteEnabled = spark.conf.get("spark.databricks.delta.vacuum.lite.enabled", "false").toBoolean
+      val ignoresRetentionWindow =
+        spark.conf.get("spark.databricks.delta.vacuum.retentionWindowIgnore.enabled", "false").toBoolean
       val knownProtocol = snapshot.protocol.readerFeatures.forall(_.isEmpty) &&
         snapshot.protocol.writerFeatures.forall(_.isEmpty)
       if (
-        snapshot.version < 0L || snapshot.isCatalogOwned || liteEnabled || !knownProtocol || maximumEntries <= 0 ||
+        snapshot.version < 0L || snapshot.isCatalogOwned || liteEnabled || ignoresRetentionWindow || !knownProtocol || maximumEntries <= 0 ||
         rounded.isEmpty || (safetyEnabled && rounded.get < DeltaLog.tombstoneRetentionMillis(snapshot.metadata))
       ) false
       else {

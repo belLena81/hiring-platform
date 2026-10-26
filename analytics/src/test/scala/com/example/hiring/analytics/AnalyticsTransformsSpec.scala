@@ -49,6 +49,7 @@ class AnalyticsTransformsSpec extends FunSuite {
     .appName("AnalyticsTransformsSpec")
     .config("spark.ui.enabled", "false")
     .config("spark.sql.shuffle.partitions", "2")
+    .config("spark.databricks.delta.vacuum.retentionWindowIgnore.enabled", "false")
     .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
     .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
     .getOrCreate()

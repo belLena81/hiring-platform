@@ -77,7 +77,7 @@ class MongoActiveDeletionMarkerIntegrationSpec extends AnalyticsMongoIntegration
     requests.insertOne(
       new Document("_id", retainedSubject)
         .append("state", "Complete")
-        .append("expiresAt", Date.from(Instant.parse("2026-10-25T12:00:00Z")))
+        .append("expiresAt", Date.from(Instant.parse("2099-01-01T00:00:00Z")))
     )
     requests.insertOne(
       new Document("_id", UUID.randomUUID().toString)

@@ -198,7 +198,7 @@ class HiringAnalyticsWorkloadSpec extends FunSuite {
           s"""HAL-07 local workload: seed=$Seed host=$host os=${System
               .getProperty("os.name")} java=${System.getProperty(
               "java.version"
-            )} scala=${scala.util.Properties.versionNumberString} spark=${spark.version} deltaBuild=4.0.0 cores=${runtime
+            )} scala=${scala.util.Properties.versionNumberString} spark=${spark.version} deltaBuild=${io.delta.VERSION} cores=${runtime
               .availableProcessors()} shufflePartitions=${spark.conf.get("spark.sql.shuffle.partitions")}
              |generated: total=100000 applicationCreated=80000 applicationStatus=10000 jobCreated=8000 malformed=1000 identicalRetries=500 conflictingRetries=500 eventDays=30 partition=0 offsets=[0,100000)
              |reconciled: source=${publication.bronzeRecords} valid=${publication.validRecords} suppressed=${publication.suppressedRecords} quarantined=${publication.quarantinedRecords} conflictingEventIds=${publication.conflictingEventIds} bronzeDelta=99000 silverDelta=97500 quarantineDelta=2000 outcome=QUALITY_BLOCKED

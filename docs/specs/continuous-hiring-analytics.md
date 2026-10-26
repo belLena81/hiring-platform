@@ -174,7 +174,7 @@ Give the singleton Admin continuously refreshed versions of the existing hiring 
 
 ## Source facts
 
-- `analytics/` is a separate Scala 3.7.4 build using Spark 4.0.1, Delta 4.0.0, and Java 17. It already has bounded Kafka batch ingestion, Bronze/Silver/Gold datasets, quarantine, report generation/suppression, Mongo generation/revision publication, erasure controls, and a shared lakehouse mutex.
+- `analytics/` is a separate Scala 3.7.4 build using Spark 4.2.0, Delta 4.4.1, and Java 17. It already has bounded Kafka batch ingestion, Bronze/Silver/Gold datasets, quarantine, report generation/suppression, Mongo generation/revision publication, erasure controls, and a shared lakehouse mutex.
 - `OperationalEventTransforms` parses the existing seven-field envelope, deduplicates Bronze by Kafka coordinate and Silver by event ID, and derives event time from `occurredAt`.
 - Production Phase6 genuine-horizon physical-retention and writer-exclusion rollout gates remain open. Isolated test activation uses the independently bound HAL evidence and complete storage inventory recorded in the October1 checkpoint.
 - The initial healthy-load assumption is at most 500 committed records/minute across three partitions. Use local `local[2]`, fixed-seed synthetic fixtures, and report bursts/backlogs separately. No infrastructure budget or cloud deployment is in scope.

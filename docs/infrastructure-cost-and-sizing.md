@@ -36,7 +36,7 @@ Re-run the tables with measured figures before any deployment decision.
 | Unavailable search | Fails closed with `VECTOR_SEARCH_UNAVAILABLE` | Safe; no keyword fallback if `mongot` is down. |
 | Local search | `compose.atlas-local.yaml` (`mongodb-atlas-local`, includes `mongot`) | $0; correctness only. |
 | Kafka | KRaft, 1 broker, RF=1, `min.insync.replicas=1`, 1 partition per topic, 7-day retention, transactional producers (`compose.yaml`) | Cheapest shape. Broker loss would lose data; confirm each topic is replayable from a Mongo outbox before relying on this. |
-| Spark and Delta | Spark 4.0.1, Delta 4.0.0, Scala 3.7.4 with 2.13 artifacts, Java 17 (`analytics/build.sbt`); local one-shot batch over an explicit offset range; opt-in streaming with a 10 s trigger | Batch is idempotent via run manifest and mutex, so it suits spot or serverless compute. Streaming is always-on cost. |
+| Spark and Delta | Spark 4.2.0, Delta 4.4.1, Scala 3.7.4 with 2.13 artifacts, Java 17 (`analytics/build.sbt`); local one-shot batch over an explicit offset range; opt-in streaming with a 10 s trigger | Batch is idempotent via run manifest and mutex, so it suits spot or serverless compute. Streaming is always-on cost. |
 | Delta properties | `dataSkippingNumIndexedCols`, log and deleted-file retention, `checkpointInterval=100`; Bronze column statistics disabled for privacy | Sensible. No scheduled compaction or VACUUM was found by search; confirm in source. |
 
 The pre-MVP policy (one active schema, no migration code) makes dimension or quantization changes cheap now: the cost is re-embedding.
@@ -184,7 +184,7 @@ Notes: MSK t3.small is a development size. Option B needs a check of ACL and tra
 | `AvailableNow` hourly | ≈ 720 | ≈ 2,900 | ≈ $11 |
 | `AvailableNow` daily | 30 | ≈ 120 | ≈ $2–3 (10 min per run) |
 
-`AGENTS.md` prefers batch when freshness permits. Forum reports say `maxOffsetsPerTrigger` may not be honored under `AvailableNow`; test it on Spark 4.0.1 before relying on it for cost control.
+`AGENTS.md` prefers batch when freshness permits. Forum reports say `maxOffsetsPerTrigger` may not be honored under `AvailableNow`; test it on Spark 4.2.0 before relying on it for cost control.
 
 ## Analytics: native optimizations
 
@@ -221,7 +221,7 @@ Do not partition tables at this size; the common guideline is to partition only 
 
 ## Spark 4 status
 
-The analytics build already uses Spark 4.0.1 and Delta 4.0.0 on Java 17. Open constraints:
+The analytics build already uses Spark 4.2.0 and Delta 4.4.1 on Java 17. Open constraints:
 
 - Spark 4.0's Scala 2 reflection encoders misread Scala 3 case classes (open as AC-RV-10); keep using DataFrames with explicit schemas.
 - The analytics driver cannot move to Scala 3.9 until Spark's runtime allows it; the main application stays on 3.9.

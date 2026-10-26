@@ -69,7 +69,7 @@ Services built from this repository run with a read-only root filesystem, an exe
 
 The analytics batch is an opt-in, one-shot Compose profile. It reads one explicit Kafka partition/offset range, writes local Delta data under the ignored `.local/data/analytics/` directory, and exits. It is not a streaming daemon and does not run with the default application stack.
 
-The separate analytics build uses Scala 3.7.4 with Spark 4.0.1 and Delta 4.0.0 artifacts compiled for Scala 2.13. Its batch and erasure worker load typed settings from the packaged `application.conf` through PureConfig; environment values are read only as HOCON substitutions. The batch run ID and offset range are configuration inputs, not command-line arguments. Configuration overrides may use the standard `config.file` or `config.resource` selectors. Cats Effect `IO` and `Resource` own blocking work and Spark/Mongo lifetimes, while Cats `ValidatedNec` and Iron refinements validate independent settings before startup. The main application remains on Scala 3.9.
+The separate analytics build uses Scala 3.7.4 with Spark 4.2.0 and Delta 4.4.1 artifacts compiled for Scala 2.13. Its batch and erasure worker load typed settings from the packaged `application.conf` through PureConfig; environment values are read only as HOCON substitutions. The batch run ID and offset range are configuration inputs, not command-line arguments. Configuration overrides may use the standard `config.file` or `config.resource` selectors. Cats Effect `IO` and `Resource` own blocking work and Spark/Mongo lifetimes, while Cats `ValidatedNec` and Iron refinements validate independent settings before startup. The main application remains on Scala 3.9.
 
 ```bash
 docker compose up -d mongodb kafka

@@ -54,6 +54,7 @@ final class DeltaVacuumEligibilitySpec extends CatsEffectSuite {
               .master("local[2]")
               .appName("DeltaVacuumEligibilitySpec")
               .config("spark.ui.enabled", "false")
+              .config("spark.databricks.delta.vacuum.retentionWindowIgnore.enabled", "false")
               .config("spark.sql.shuffle.partitions", "2")
               .config("spark.databricks.delta.snapshotPartitions", "2")
               .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
@@ -300,6 +301,9 @@ final class DeltaVacuumEligibilitySpec extends CatsEffectSuite {
           spark.conf.set("spark.databricks.delta.vacuum.lite.enabled", "true")
           try assert(!DeltaVacuumEligibility.canSkip(spark, paths.bronze, safetyHours, maximumEntries))
           finally spark.conf.set("spark.databricks.delta.vacuum.lite.enabled", "false")
+          spark.conf.set("spark.databricks.delta.vacuum.retentionWindowIgnore.enabled", "true")
+          try assert(!DeltaVacuumEligibility.canSkip(spark, paths.bronze, safetyHours, maximumEntries))
+          finally spark.conf.set("spark.databricks.delta.vacuum.retentionWindowIgnore.enabled", "false")
         }
         unsafe <- execution(DeltaTable.forPath(spark, paths.bronze).vacuum(167d)).attempt
         negative <- execution(DeltaTable.forPath(spark, paths.bronze).vacuum(-1d)).attempt

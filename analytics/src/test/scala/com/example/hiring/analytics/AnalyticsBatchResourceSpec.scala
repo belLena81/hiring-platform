@@ -191,6 +191,24 @@ class AnalyticsBatchResourceSpec extends FunSuite {
     )
   }
 
+  test("the production Spark session keeps the explicit VACUUM retention and its safety check authoritative") {
+    val local = java.nio.file.Files.createTempDirectory("analytics-spark-runtime")
+    val ignoreWindow = SparkRuntime
+      .sparkMongo[IO](
+        "mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=200",
+        "local[1]",
+        "AnalyticsBatchResourceSpec",
+        Some(false),
+        local.toString
+      )
+      .use { case (spark, _, execution) =>
+        execution(spark.conf.get("spark.databricks.delta.vacuum.retentionWindowIgnore.enabled"))
+      }
+      .unsafeRunSync()
+
+    assertEquals(ignoreWindow, "false")
+  }
+
   test("Spark driver execution context is released when Spark startup fails") {
     val acquired =
       new AtomicReference[Option[com.example.hiring.analytics.adapter.spark.SparkBlockingExecution[IO]]](None)

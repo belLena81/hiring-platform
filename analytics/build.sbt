@@ -1,8 +1,8 @@
 ThisBuild / scalaVersion := "3.7.4"
 
-lazy val sparkVersion = "4.0.1"
-lazy val deltaVersion = "4.0.0"
-lazy val scalaReflectVersion = "2.13.17"
+lazy val sparkVersion = "4.2.0"
+lazy val deltaVersion = "4.4.1"
+lazy val scalaReflectVersion = "2.13.18"
 lazy val catsVersion = "2.13.0"
 lazy val catsEffectVersion = "3.7.1"
 lazy val catsRetryVersion = "4.0.0"
@@ -94,7 +94,8 @@ lazy val analytics = (project in file("."))
     libraryDependencies ++= Seq(
       ("org.apache.spark" %% "spark-sql" % sparkVersion).cross(CrossVersion.for3Use2_13),
       ("org.apache.spark" %% "spark-sql-kafka-0-10" % sparkVersion).cross(CrossVersion.for3Use2_13),
-      ("io.delta" %% "delta-spark" % deltaVersion).cross(CrossVersion.for3Use2_13),
+      // The Spark-suffixed artifact pins the Spark 4.2 build of Delta explicitly (the unsuffixed name only defaults to it).
+      "io.delta" % "delta-spark_4.2_2.13" % deltaVersion,
       "org.typelevel" %% "cats-core" % catsVersion,
       "org.typelevel" %% "cats-effect" % catsEffectVersion,
       "com.github.cb372" %% "cats-retry" % catsRetryVersion,
