@@ -156,6 +156,7 @@ final class HiringAnalyticsStreamingStorageBoundsIntegrationSpec extends CatsEff
         paths = IntegrationAnalyticsLakehousePaths.unsafe(settings.common.lakehouseRoot)
         reduced <- SparkRuntime
           .sparkMongo[IO](
+            IO.unit,
             fixture.namespace.manifest.mongoUri,
             "local[2]",
             "HiringAnalyticsIngestionMaintenance",

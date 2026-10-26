@@ -233,7 +233,9 @@ services:
       ANALYTICS_KAFKA_FENCER_PASSWORD_FILE: /run/secrets/kafka_fencer_password
     secrets: [kafka_reader_password, kafka_fencer_password, analytics_hmac_secret_base64]
     command: ["com.example.hiring.analytics.cli.AnalyticsErasureWorkerMain"]
-    restart: unless-stopped
+    # Bounded: the worker already waits for MongoDB in-process and exits non-zero only when that wait or another
+    # startup check fails, so an unbounded policy would crash-loop forever once its dependencies are gone.
+    restart: on-failure:5
 
 secrets:
   kafka_broker_password:

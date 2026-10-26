@@ -20,7 +20,9 @@ private[analytics] object ErasureFailurePolicy {
 
   /** Exhaustive over every analytics error: a new error case is a compile error until it is categorized here. */
   private def categorize(error: AnalyticsError): ErasureFailureCategory = error match {
-    case _: AnalyticsError.MarkerStorageFailure | _: AnalyticsError.MongoConnectionFailure =>
+    // MongoUnreachable is raised only by the startup check, before the worker loop, so it is classified for exhaustiveness.
+    case _: AnalyticsError.MarkerStorageFailure | _: AnalyticsError.MongoConnectionFailure |
+        _: AnalyticsError.MongoUnreachable =>
       ErasureFailureCategory.TransientStorage
     case _: AnalyticsError.SourceReadFailure | _: AnalyticsError.LakehouseFailure |
         _: AnalyticsError.SparkStartupFailure | AnalyticsError.LakehouseLockOwnershipLost |

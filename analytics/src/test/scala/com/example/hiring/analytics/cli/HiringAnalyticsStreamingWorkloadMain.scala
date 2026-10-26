@@ -320,6 +320,7 @@ object HiringAnalyticsStreamingWorkloadMain extends IOApp {
               .use { mongo =>
                 SparkRuntime
                   .sparkMongo[IO](
+                    IO.unit,
                     settings.common.mongoUri,
                     "local[1]",
                     "hiring-streaming-workload-observer",

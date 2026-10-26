@@ -17,6 +17,7 @@ private[analytics] object SparkRuntime {
 
   /** Shared resource boundary for operator diagnostics that need Spark and Mongo without batch services. */
   def sparkMongo[F[_]: Async](
+      awaitMongo: F[Unit],
       mongoUri: String,
       sparkMaster: String,
       appName: String,
@@ -24,15 +25,19 @@ private[analytics] object SparkRuntime {
       sparkLocalDirectory: String = AnalyticsRuntimeDirectory.container(AnalyticsRuntimeDirectory.SparkTemp).toString
   ): Resource[F, (SparkSession, MongoClient[F], SparkBlockingExecution[F])] =
     managedSparkMongo(
+      awaitMongo,
       execution => sparkSession(sparkMaster, appName, sparkUiEnabled, sparkLocalDirectory, execution),
       mongoClient[F](mongoUri)
     )
 
+  /** `awaitMongo` runs before anything else is acquired, so an unreachable Mongo never costs a Spark session. */
   private[analytics] def managedSparkMongo[F[_]: Async](
+      awaitMongo: F[Unit],
       acquireSpark: SparkBlockingExecution[F] => F[SparkSession],
       acquireMongo: Resource[F, MongoClient[F]]
   ): Resource[F, (SparkSession, MongoClient[F], SparkBlockingExecution[F])] =
     for {
+      _ <- Resource.eval(awaitMongo)
       sparkExecution <- SparkBlockingExecution.resource[F]
       shutdown <- Resource.eval(Async[F].ref(Option.empty[SparkShutdownDrain]))
       spark <- Resource.make(

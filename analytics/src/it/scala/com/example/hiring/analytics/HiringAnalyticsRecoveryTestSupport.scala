@@ -74,6 +74,7 @@ private[analytics] object HiringAnalyticsRecoveryTestSupport {
     )
     uri = endpoint.uri
     managed <- SparkRuntime.sparkMongo[IO](
+      IO.unit,
       uri,
       "local[2]",
       "HiringAnalyticsDurableSinkRecovery",

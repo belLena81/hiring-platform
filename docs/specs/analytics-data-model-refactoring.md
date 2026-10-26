@@ -132,6 +132,17 @@ Metrics in `gold/hiring_stage_durations`:
 - **Compaction.** The streaming maintenance tick runs `OPTIMIZE` per table once its configured interval has elapsed, under the lakehouse mutex. It runs before vacuum eligibility, never while an erasure purge for that table is in progress, and is disabled when the interval is zero. `OPTIMIZE` is idempotent and uses snapshot isolation, so concurrent readers are safe. The files it replaces still hold subject tokens until VACUUM, so the erasure data-file horizon is measured from the later of the purge and the last `OPTIMIZE` that replaced files holding the erased subject's rows; AC-04.4 tests this.
 - **Alternatives rejected.** Auto compaction and optimized write run synchronously inside the writer, outside the mutex and the erasure ordering. Z-ORDER and liquid clustering are non-goals.
 
+### W — Analytics worker startup resilience
+
+An analytics process whose MongoDB is unreachable must not crash-loop. Observed 2026-10-26: an orphaned erasure worker from an ad-hoc Compose project restarted 182 times. Its `mongodb` host no longer resolved, each start built a Spark session before failing on Mongo server selection, the driver logged a stack trace every second, and `restart: unless-stopped` restarted it indefinitely.
+
+- Mongo is checked (DNS resolution and server selection) before the Spark session is created, for every analytics command.
+- Long-running workers (erasure worker, streaming) wait for Mongo in-process with capped exponential backoff. Each attempt logs one sanitized WARN line and no stack trace. They continue normally once Mongo is reachable, and exit non-zero with one sanitized ERROR line after a configured maximum wait.
+- One-shot commands fail fast with one sanitized line.
+- Compose analytics services use a bounded restart policy (`on-failure:N`), not `unless-stopped`.
+- Mongo driver cluster-monitor logging is WARN or higher in the analytics image.
+- The README explains how to remove leftover ad-hoc Compose projects.
+
 ### S6 — Documentation and admission expression
 
 - **Bronze description.** The wiki's Bronze description matches the code, and states that Bronze keeps no raw envelope, so it departs from the raw-and-immutable Bronze convention in the Medallion literature, for erasure and privacy reasons.
@@ -167,11 +178,12 @@ Metrics in `gold/hiring_stage_durations`:
 | AC-02 | Output is identical on existing fixtures (AC-02.1). Tokenization runs once (AC-02.2). Plans contain no nested-loop join for marker exclusion and no repeated JSON parse (AC-02.3). | Not run |
 | AC-03 | AC-03.1 through AC-03.5. The report snapshot and GraphQL expose `stageDurations`, and the GraphQL schema and operation fixtures are updated. | Not run |
 | AC-04 | No token stats (AC-04.1). The merge scans fewer files, with a local before/after count (AC-04.2). The maintenance tick compacts and records file counts before and after (AC-04.3). Compaction does not shorten the erasure horizon (AC-04.4). | Not run |
+| AC-07 | Given the erasure worker starts while `mongodb` does not resolve, then no Spark session is created, it logs one WARN line per backoff attempt, and it exits non-zero after the configured maximum wait. When Mongo becomes reachable within the wait, it proceeds normally. One-shot commands fail fast. Compose restarts are bounded. | Observed 2026-10-26. `MongoStartupResilienceSpec` AC-07.1 to AC-07.10 pass (10/10; virtual-time backoff 1, 2, 4 s capped, give-up after the maximum wait with 3 warnings and one error, one-shot fail-fast, `managedSparkMongo` never acquires Spark, sanitized text, DNS versus server-selection, invalid URI not retried, real driver ping bounded against a closed port, defaults and `ANALYTICS_MONGO_STARTUP_*` overrides and validation). `scalafmtCheckAll scalafmtSbtCheck` pass; full `sbt test` 510 tests, 509 passed on the first run, the one failure (a log-text assertion in AC-07.1) was fixed and the affected specs rerun green (57/57). Compose uses `restart: on-failure:5` for `analytics-erasure-worker` (the only analytics service with a restart policy); `log4j2.properties` sets `org.mongodb.driver.cluster` to WARN. Review fixes (2026-10-26): the three `src/it` callers of `sparkMongo` pass `IO.unit`; DNS runs on the blocking pool; the README wording is exact (backoff sleep sums to `max-wait`, each attempt adds up to twice `check-timeout`). `log4j2.properties` keeps plain-text console logging explicitly, because with a log4j2 configuration on the classpath Spark skips its own defaults and `spark.log.structuredLogging.enabled` could select the JSON layout (I could not read its default from the jar; the integration run logged plain-text lines in the `yy/MM/dd` format). After the fixes: `scalafmtCheckAll scalafmtSbtCheck test IntegrationTest/compile` all pass (511/511 unit, clean IT compile); `scripts/run-local-tests.sh analytics` on the Ingestion, StorageBounds, Recovery and ErasureRetention integration specs: 23/23 pass. Compose and the container image were not run (project hook). |
 | AC-06 | Docs match the code, and the admission UDF is either replaced with an equivalence property test or its retention is justified. | Not run |
 
 ## Implementation handoff
 
-- Order: S5 → S1 → S2 → S3 → S4 → S6. One owner per slice, and each slice is committed only after its review gates pass.
+- Order: S5 → W → S1 → S2 → S3 → S4 → S6. One owner per slice, and each slice is committed only after its review gates pass.
 - Write paths:
   - S1, S2, S4 and S5: `analytics/` and analytics tests.
   - S3: `analytics/`, plus `src/main` and `src/test` for the report snapshot, GraphQL types and any Mongo migration.
@@ -183,7 +195,7 @@ Metrics in `gold/hiring_stage_durations`:
 
 ## Checkpoint and review
 
-- Completed: none committed yet.
+- Committed: S5 (`a6369d6`), W.
 - S5: done. Code Reviewer PASS (2026-10-26); findings M1 (test sessions now pin the vacuum key, and a test asserts the `SparkRuntime` setting), L1, L2 and L3 (`DeltaVacuumEligibility` fails closed when the key is true) fixed; `sbt test` 501/501 and `AnalyticsKeyRetirementIntegrationSpec` 6/6 after the fixes. Delta 4.4 defaults `spark.databricks.delta.vacuum.retentionWindowIgnore.enabled` to true; `SparkRuntime` pins it to false to keep the explicit VACUUM retention check.
-- Verification policy (2026-10-26): the full analytics suite takes about 3 h 13 min. Each slice runs formatting, unit tests and the integration specs it touches. The full suite runs once on the final state for QA.
-- Next action: commit S5 after review, then S1.
+- W: done (2026-10-26). Security Engineer PASS; Code Reviewer FAIL (integration sources did not compile), fixed, then PASS; unit 511/511 and the four affected integration specs 23/23. `MongoStartupCheck` (adapter/mongo) runs DNS plus a bounded server-selection ping before the Spark session in `SparkRuntime.managedSparkMongo`; the erasure worker and streaming use `Mode.AwaitReachable` (cats-retry capped exponential backoff, `limitRetriesByCumulativeDelay` on `analytics.mongo.startup.max-wait`, one sanitized WARN per attempt, then `MongoUnreachable` with one ERROR line from the CLI), batch, late-fact replay, repair and audit use `Mode.FailFast`. Settings: `analytics.mongo.startup.{check-timeout,initial-backoff,max-backoff,max-wait}` (defaults 5 s, 1 s, 60 s, 10 min; `ANALYTICS_MONGO_STARTUP_*`). `max-wait` bounds total backoff sleeping, so the wall-clock wait can exceed it by up to one `check-timeout`.- Verification policy (2026-10-26): the full analytics suite takes about 3 h 13 min. Each slice runs formatting, unit tests and the integration specs it touches. The full suite runs once on the final state for QA.
+- Next action: S1, then reset the local lakehouse under `.local/data/analytics/` (D4).

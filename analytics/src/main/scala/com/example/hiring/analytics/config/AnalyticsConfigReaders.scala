@@ -174,6 +174,24 @@ private[analytics] object AnalyticsConfigReaders {
         )
     )
 
+  given ConfigReader[AnalyticsMongoStartupSettings] =
+    ConfigReader
+      .forProduct4("check-timeout", "initial-backoff", "max-backoff", "max-wait")(
+        (
+            checkTimeout: AnalyticsMillisecondDuration,
+            initialBackoff: AnalyticsMillisecondDuration,
+            maxBackoff: AnalyticsMillisecondDuration,
+            maxWait: AnalyticsMillisecondDuration
+        ) => AnalyticsMongoStartupSettings(checkTimeout, initialBackoff, maxBackoff, maxWait)
+      )
+      .emap(settings =>
+        Either.cond(
+          settings.initialBackoff <= settings.maxBackoff,
+          settings,
+          UserValidationFailed("initial-backoff must not exceed max-backoff")
+        )
+      )
+
   given ConfigReader[AnalyticsOperationalSettings] =
     ConfigReader.forProduct6(
       "retention",

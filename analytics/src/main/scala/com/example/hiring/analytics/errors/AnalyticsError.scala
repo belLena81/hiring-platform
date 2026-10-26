@@ -2,6 +2,8 @@ package com.example.hiring.analytics.errors
 
 import cats.data.NonEmptyChain
 
+import scala.concurrent.duration.FiniteDuration
+
 sealed abstract class AnalyticsError(message: String, cause: Option[Throwable] = None)
     extends RuntimeException(message, cause.orNull)
 
@@ -74,6 +76,20 @@ object AnalyticsError {
     val ClientDetail = "analytics Mongo client could not start"
     val EmptyResultDetail = "analytics Mongo operation returned no result"
   }
+
+  /** MongoDB did not answer the startup check; `waited` is set once a long-running command exhausted its maximum wait.
+    * The text carries no host, URI or credentials.
+    */
+  enum MongoUnreachableReason(val text: String) {
+    case DnsResolution extends MongoUnreachableReason("DNS resolution failed")
+    case ServerSelection extends MongoUnreachableReason("server selection failed")
+  }
+  final case class MongoUnreachable(reason: MongoUnreachableReason, waited: Option[FiniteDuration] = None)
+      extends AnalyticsError(
+        waited.fold(s"analytics MongoDB is unreachable: ${reason.text}")(duration =>
+          s"analytics MongoDB stayed unreachable for the configured maximum wait ($duration): ${reason.text}"
+        )
+      )
   case object LakehouseLockOwnershipLost extends AnalyticsError("lakehouse mutex owner changed before release")
   case object LakehouseLockOwnershipUncertain
       extends AnalyticsError("lakehouse mutex acquisition is uncertain; manual ownership recovery required")

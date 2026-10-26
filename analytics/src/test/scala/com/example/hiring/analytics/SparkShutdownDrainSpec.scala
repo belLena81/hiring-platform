@@ -153,6 +153,7 @@ final class SparkShutdownDrainSpec extends CatsEffectSuite {
     val tasks = new AtomicInteger(0)
     SparkRuntime
       .managedSparkMongo[IO](
+        IO.unit,
         execution =>
           execution {
             org.apache.spark.sql.classic.SparkSession

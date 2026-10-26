@@ -159,6 +159,7 @@ class AnalyticsBatchResourceSpec extends FunSuite {
       Option[(SparkSession, MongoClient[IO], com.example.hiring.analytics.adapter.spark.SparkBlockingExecution[IO])]
     ](None)
     val resources = SparkRuntime.managedSparkMongo[IO](
+      IO.unit,
       execution =>
         execution {
           org.apache.spark.sql.classic.SparkSession
@@ -195,6 +196,7 @@ class AnalyticsBatchResourceSpec extends FunSuite {
     val local = java.nio.file.Files.createTempDirectory("analytics-spark-runtime")
     val ignoreWindow = SparkRuntime
       .sparkMongo[IO](
+        IO.unit,
         "mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=200",
         "local[1]",
         "AnalyticsBatchResourceSpec",
@@ -213,6 +215,7 @@ class AnalyticsBatchResourceSpec extends FunSuite {
     val acquired =
       new AtomicReference[Option[com.example.hiring.analytics.adapter.spark.SparkBlockingExecution[IO]]](None)
     val resources = SparkRuntime.managedSparkMongo[IO](
+      IO.unit,
       execution =>
         IO.delay(acquired.set(Some(execution))) *> IO.raiseError(new IllegalStateException("startup failed")),
       MongoClient.fromConnectionString[IO]("mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=200")

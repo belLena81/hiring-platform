@@ -68,7 +68,7 @@ object AppModule {
   def batch[F[_]: Async](settings: AnalyticsBatchSettings): Resource[F, F[AnalyticsPublication]] =
     withSecureUuids[F, F[AnalyticsPublication]] {
       for {
-        shared <- shared[F](settings.common, appName = "hiring-analytics-batch")
+        shared <- shared[F](settings.common, appName = "hiring-analytics-batch", MongoStartupCheck.Mode.FailFast)
       } yield {
         val common = settings.common
         val manifestStore = new DeltaManifestStore[F](shared.spark, shared.paths, shared.sparkExecution)
@@ -128,7 +128,11 @@ object AppModule {
   def worker[F[_]: Async](settings: AnalyticsWorkerSettings): Resource[F, F[Unit]] =
     withSecureUuids[F, F[Unit]] {
       for {
-        shared <- shared[F](settings.common, appName = "hiring-analytics-erasure-worker")
+        shared <- shared[F](
+          settings.common,
+          appName = "hiring-analytics-erasure-worker",
+          MongoStartupCheck.Mode.AwaitReachable
+        )
         program <- MongoAnalyticsErasureStores.resource(shared.client, shared.database, shared.streams).map { stores =>
           val common = settings.common
           val job = new AnalyticsErasureWorker[F](
@@ -172,7 +176,7 @@ object AppModule {
       for {
         localDirectory <- ownedStreamingDirectory[F](settings.common.sparkLocalDirectory)
         common = settings.common.copy(sparkLocalDirectory = localDirectory)
-        shared <- shared[F](common, appName = "hiring-analytics-streaming")
+        shared <- shared[F](common, appName = "hiring-analytics-streaming", MongoStartupCheck.Mode.AwaitReachable)
         streamingLock <- AnalyticsLakehouseLock.serialized(shared.lock)
         cost <- costObserver.traverse(emit => StreamingBatchCost.resource(shared.spark, emit))
         program <- Resource.eval {
@@ -229,7 +233,7 @@ object AppModule {
   ): Resource[F, F[AnalyticsLateFactReplayOutcome]] =
     withSecureUuids[F, F[AnalyticsLateFactReplayOutcome]] {
       for {
-        shared <- shared[F](settings.common, appName = "hiring-analytics-late-replay")
+        shared <- shared[F](settings.common, appName = "hiring-analytics-late-replay", MongoStartupCheck.Mode.FailFast)
       } yield {
         val common = settings.common
         val journal = new MongoAnalyticsLateFactReplayJournal[F](shared.database, shared.streams, common.lakehouseRoot)
@@ -263,6 +267,8 @@ object AppModule {
       for {
         paths <- Resource.eval(Async[F].fromEither(resolveLakehousePaths(settings.lakehouseRoot)))
         (spark, client, sparkExecution) <- SparkRuntime.sparkMongo[F](
+          MongoStartupCheck
+            .ensureReachable[F](MongoStartupCheck.Mode.FailFast, settings.mongoUri, settings.mongoStartup),
           settings.mongoUri,
           settings.sparkMaster,
           appName = "hiring-analytics-key-retirement-audit",
@@ -292,6 +298,13 @@ object AppModule {
   def repair[F[_]: Async](settings: AnalyticsWorkerSettings): Resource[F, MongoAnalyticsErasureQueue[F]] =
     withSecureUuids[F, MongoAnalyticsErasureQueue[F]] {
       for {
+        _ <- Resource.eval(
+          MongoStartupCheck.ensureReachable[F](
+            MongoStartupCheck.Mode.FailFast,
+            settings.common.mongoUri,
+            settings.common.mongoStartup
+          )
+        )
         client <- SparkRuntime.mongoClient[F](settings.common.mongoUri)
         database <- Resource.eval(SparkRuntime.mongoDatabase[F](client, settings.common.mongoDatabase))
         queue <- MongoAnalyticsErasureQueue.resource(database, new MongoPublisherStream(settings.common.operational))
@@ -300,12 +313,14 @@ object AppModule {
 
   private def shared[F[_]: Async: UUIDGen](
       common: AnalyticsCommonSettings,
-      appName: String
+      appName: String,
+      mongoStartupMode: MongoStartupCheck.Mode
   ): Resource[F, Shared[F]] =
     for {
       _ <- Resource.eval(KafkaConnection.preflight[F](common.kafka))
       paths <- Resource.eval(Async[F].fromEither(resolveLakehousePaths(common.lakehouseRoot)))
       (spark, client, sparkExecution) <- SparkRuntime.sparkMongo[F](
+        MongoStartupCheck.ensureReachable[F](mongoStartupMode, common.mongoUri, common.mongoStartup),
         common.mongoUri,
         common.sparkMaster,
         appName,

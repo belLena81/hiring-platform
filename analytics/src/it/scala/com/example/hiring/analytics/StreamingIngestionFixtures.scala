@@ -263,6 +263,7 @@ private[analytics] object StreamingIngestionFixtures {
     val paths = IntegrationAnalyticsLakehousePaths.unsafe(settings.common.lakehouseRoot)
     SparkRuntime
       .sparkMongo[IO](
+        IO.unit,
         fixture.namespace.manifest.mongoUri,
         "local[2]",
         "HiringAnalyticsIngestionRead",

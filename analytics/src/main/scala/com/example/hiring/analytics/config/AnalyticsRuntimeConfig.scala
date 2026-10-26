@@ -33,6 +33,7 @@ type AnalyticsNonBlank = String :| Not[Blank]
 final case class AnalyticsCommonSettings(
     mongoUri: AnalyticsNonBlank,
     mongoDatabase: AnalyticsNonBlank,
+    mongoStartup: AnalyticsMongoStartupSettings,
     sparkMaster: AnalyticsNonBlank,
     sparkLocalDirectory: AnalyticsNonBlank,
     kafka: KafkaConnection,
@@ -83,6 +84,7 @@ final case class AnalyticsWorkerSettings(
 private[analytics] final case class AnalyticsKeyRetirementAuditSettings(
     mongoUri: AnalyticsNonBlank,
     mongoDatabase: AnalyticsNonBlank,
+    mongoStartup: AnalyticsMongoStartupSettings,
     sparkMaster: AnalyticsNonBlank,
     lakehouseRoot: AnalyticsNonBlank,
     operational: AnalyticsOperationalSettings,
@@ -122,7 +124,11 @@ object AnalyticsRuntimeConfig {
         KafkaRetentionEvidence(barrier, earliest, reference.getOrElse(""))
     )
 
-  private final case class MongoInput(uri: AnalyticsNonBlank, database: AnalyticsNonBlank) derives ConfigReader
+  private final case class MongoInput(
+      uri: AnalyticsNonBlank,
+      database: AnalyticsNonBlank,
+      startup: AnalyticsMongoStartupSettings
+  ) derives ConfigReader
   private final case class SparkInput(master: AnalyticsNonBlank, localDirectory: AnalyticsNonBlank) derives ConfigReader
   private final case class LakehouseInput(root: AnalyticsNonBlank) derives ConfigReader
   private final case class KafkaInput(
@@ -249,6 +255,7 @@ object AnalyticsRuntimeConfig {
         AnalyticsKeyRetirementAuditSettings(
           raw.mongo.uri,
           raw.mongo.database,
+          raw.mongo.startup,
           raw.spark.master,
           raw.lakehouse.root,
           raw.operational,
@@ -289,6 +296,7 @@ object AnalyticsRuntimeConfig {
       AnalyticsCommonSettings(
         uri,
         raw.mongo.database,
+        raw.mongo.startup,
         raw.spark.master,
         localDirectory,
         connection,
