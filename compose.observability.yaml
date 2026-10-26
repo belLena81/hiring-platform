@@ -1,6 +1,7 @@
 # Local observability overlay: OTLP collector -> Prometheus -> Grafana, with the API exporting HTTP metrics.
 #   docker compose -f compose.yaml -f compose.observability.yaml --profile api up -d --build
-# Grafana: http://127.0.0.1:3000 (anonymous viewer, local only). Prometheus: http://127.0.0.1:9090.
+# Grafana: http://127.0.0.1:3000 (login admin / $GRAFANA_ADMIN_PASSWORD, default admin; local only; not for production). Prometheus: http://127.0.0.1:9090.
+# Metrics -> Prometheus, traces -> Tempo, api container logs -> Loki (via Alloy). Tempo/Loki data is ephemeral (tmpfs).
 services:
   api:
     environment:
@@ -24,6 +25,48 @@ services:
     security_opt: [no-new-privileges:true]
     read_only: true
     mem_limit: 256m
+    depends_on: [tempo]
+    restart: unless-stopped
+
+  tempo:
+    image: grafana/tempo:2.7.1@sha256:4443be217c396b065ee34845534199c36fdba4dc619cb96550e228d73fba6e69
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    volumes:
+      - ./docker/observability/tempo.yaml:/etc/tempo/tempo.yaml:ro
+    tmpfs:
+      - /var/tempo:mode=1777,size=512m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:3.3.2@sha256:8af2de1abbdd7aa92b27c9bcc96f0f4140c9096b507c77921ffddf1c6ad6c48f
+    command: ["-config.file=/etc/loki/loki.yaml"]
+    volumes:
+      - ./docker/observability/loki.yaml:/etc/loki/loki.yaml:ro
+    tmpfs:
+      - /loki:mode=1777,size=512m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+    restart: unless-stopped
+
+  # Alloy discovers the api container through the Docker API. The socket is mounted read-only, but Docker does not
+  # enforce read-only on socket calls, so treat this container as privileged on a local workstation only.
+  alloy:
+    image: grafana/alloy:v1.5.1@sha256:01a63f4e032ce54ee94b22049bc27f597e74f85566478c377f4b5c7f020c1eb3
+    command: ["run", "--storage.path=/tmp/alloy", "/etc/alloy/config.alloy"]
+    user: "0:0"
+    volumes:
+      - ./docker/observability/alloy.config:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    tmpfs:
+      - /tmp/alloy:mode=1777,size=64m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 256m
+    depends_on: [loki]
     restart: unless-stopped
 
   prometheus:
@@ -44,16 +87,17 @@ services:
   grafana:
     image: grafana/grafana:11.4.0@sha256:d8ea37798ccc41061a62ab080f2676dda6bf7815558499f901bdb0f533a456fb
     environment:
-      GF_AUTH_ANONYMOUS_ENABLED: "true"
-      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
-      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SECURITY_COOKIE_SAMESITE: strict
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
       GF_ANALYTICS_REPORTING_ENABLED: "false"
     volumes:
       - ./docker/observability/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./docker/observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
     ports:
       - "127.0.0.1:3000:3000"
-    depends_on: [prometheus]
+    depends_on: [prometheus, tempo, loki]
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     mem_limit: 512m

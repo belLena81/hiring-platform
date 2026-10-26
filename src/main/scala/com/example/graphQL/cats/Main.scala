@@ -25,7 +25,13 @@ import com.example.graphQL.cats.service.{
 import com.example.graphQL.cats.service.Diagnostics.*
 import com.example.graphQL.cats.config.{AppConfig, ConfigError}
 import com.example.graphQL.cats.infrastructure.logging.SafeDiagnostics
-import com.example.graphQL.cats.infrastructure.telemetry.TelemetryRuntime
+import com.example.graphQL.cats.infrastructure.telemetry.{
+  BacklogCapability,
+  BacklogMetrics,
+  BacklogSampler,
+  TelemetryRuntime
+}
+import com.example.graphQL.cats.repository.mongo.{MongoBacklogSources, MongoDatabaseProbe}
 import com.example.graphQL.cats.runtime.{HiringLogValues, HiringPlatformServer, MongoHiringRuntime}
 
 object Main extends IOApp {
@@ -41,6 +47,21 @@ object Main extends IOApp {
   ): Resource[IO, Unit] = for {
     telemetry <- TelemetryRuntime.resource
     runtime <- MongoHiringRuntime.resource(config, diagnostics)
+    // Read-only sampling uses its own small client so a slow sample cannot take a connection from hiring work.
+    samplingClient <- MongoDatabaseProbe.clientResource(config.mongoUri)
+    samplingDatabase <- Resource.eval(samplingClient.getDatabase(config.mongoDatabase))
+    backlogSampler <- Resource.eval(
+      BacklogSampler.create(
+        List(
+          BacklogCapability.EmbeddingWork -> MongoBacklogSources.embeddingWork(samplingDatabase),
+          BacklogCapability.OperationalEventOutbox -> MongoBacklogSources.operationalEventOutbox(samplingDatabase)
+        ),
+        config.telemetry.backlogSampleInterval,
+        diagnostics
+      )
+    )
+    _ <- BacklogMetrics.register(telemetry.meterProvider, backlogSampler)
+    _ <- backlogSampler.background
     contextFactory <- RequestContextFactory.resource
     documentCache <- GraphQLDocumentCache.resource
     rateLimiter <- Resource.eval(AuthRateLimiter.create(config.authRateLimit))

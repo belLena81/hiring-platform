@@ -10,6 +10,20 @@ groups:
           severity: page
         annotations:
           summary: More than 5% of API requests returned 5xx for 2 minutes.
+      - alert: HiringBacklogOldestPendingTooOld
+        expr: hiring_backlog_oldest_pending_age_seconds > 300
+        for: 2m
+        labels:
+          severity: ticket
+        annotations:
+          summary: Oldest pending {{ $labels.hiring_capability }} item is older than 5 minutes.
+      - alert: HiringBacklogUnobserved
+        expr: hiring_backlog_sample_age_seconds > 60 or absent(hiring_backlog_sample_age_seconds)
+        for: 2m
+        labels:
+          severity: ticket
+        annotations:
+          summary: Backlog sampling is stale or absent; backlog state is unknown, not zero.
       - alert: HiringApiSlowRequests
         expr: |
           histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket[1m]))) > 0.3

@@ -229,14 +229,7 @@ final class MongoOperationalEventOutboxRepository(
         .getOrElse(Nil)
     )
 
-  private def due(now: Instant): MongoFilter = MongoLeaseQueue.claimable(
-    MongoFilter.and(
-      MongoFilter.eq(MongoFields.State, OutboxState.Retryable.toString),
-      MongoFilter.lte(MongoFields.AvailableAt, now.toDate)
-    ),
-    inFlight,
-    now
-  )
+  private def due(now: Instant): MongoFilter = MongoOperationalEventOutboxRepository.Claimable.filter(now)
 
   override def markPublished(
       eventId: UUID,
@@ -657,6 +650,19 @@ final class MongoOperationalEventOutboxRepository(
 }
 
 object MongoOperationalEventOutboxRepository {
+
+  /** The stored states and predicate by which the outbox claim selects work; backlog sampling reuses them. */
+  private[mongo] object Claimable {
+    val Retryable = "Retryable"
+    val InFlight = "InFlight"
+
+    def retryableDue(now: Instant): MongoFilter = MongoLeaseQueue.readyDue(List(Retryable), now)
+    def expiredInFlight(now: Instant): MongoFilter = MongoLeaseQueue.leaseExpired(InFlight, now)
+
+    /** Due `Retryable` entries plus `InFlight` entries whose lease expired. */
+    def filter(now: Instant): MongoFilter =
+      MongoLeaseQueue.claimable(retryableDue(now), MongoFilter.eq(MongoFields.State, InFlight), now)
+  }
 
   /** Oldest due outbox entry: the claim index (`state`, `availableAt`, ...) yields the first due `Retryable` row
     * without a sort stage. Its age is measured from `occurredAt`, so repeated retries do not hide a stuck event.

@@ -266,6 +266,17 @@ private[mongo] object MongoLeaseQueue {
 
   def leaseHeld(now: Instant): MongoFilter = Standard.held(now)
 
+  /** Ready work that is due at `now`. */
+  def readyDue(readyStates: List[String], now: Instant): MongoFilter =
+    MongoFilter.and(
+      MongoFilter.in(MongoFields.State, readyStates),
+      MongoFilter.lte(MongoFields.AvailableAt, now.toDate)
+    )
+
+  /** In-progress work whose lease has expired at `now`. */
+  def leaseExpired(inProgressState: String, now: Instant): MongoFilter =
+    MongoFilter.and(MongoFilter.eq(MongoFields.State, inProgressState), Standard.expired(now))
+
   /** Work is claimable when it is available or when its in-progress lease has expired at `now`. */
   def claimable(available: MongoFilter, inProgress: MongoFilter, now: Instant): MongoFilter =
     MongoFilter.or(available, MongoFilter.and(inProgress, Standard.expired(now)))
@@ -320,14 +331,10 @@ private[mongo] object MongoLeaseQueue {
       sort: Bson
   )(decode: Document => RepositoryF[IO, A]): RepositoryF[IO, Option[A]] =
     LeaseRequest.whenValid(workerId, now, leaseUntil) {
-      val available = MongoFilter.and(
-        MongoFilter.in(MongoFields.State, readyStates),
-        MongoFilter.lte(MongoFields.AvailableAt, now.toDate)
-      )
       claimNext(
         collection,
         None,
-        claimable(available, MongoFilter.eq(MongoFields.State, inProgressState), now),
+        claimable(readyDue(readyStates, now), MongoFilter.eq(MongoFields.State, inProgressState), now),
         leaseStamp(inProgressState, workerId, token, leaseUntil, now),
         sort
       )(decode)

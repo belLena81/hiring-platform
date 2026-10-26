@@ -10,10 +10,14 @@ processors:
 exporters:
   prometheus:
     endpoint: 0.0.0.0:8889
+    # Default is 5m: a gauge the app stops emitting (unobserved backlog) would keep its last value that long.
+    metric_expiration: 45s
     resource_to_telemetry_conversion:
       enabled: true
-  debug:
-    verbosity: basic
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
 
 service:
   pipelines:
@@ -24,4 +28,4 @@ service:
     traces:
       receivers: [otlp]
       processors: [batch]
-      exporters: [debug]
+      exporters: [otlp/tempo]

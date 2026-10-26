@@ -98,6 +98,8 @@ enum ConfigError(val key: String, val paths: Set[String] = Set.empty) {
   case InvalidReadinessClosureWorkAge
       extends ConfigError("READINESS_MAX_CLOSURE_WORK_AGE_SECONDS", Set("readiness.max-closure-work-age-seconds"))
   case InvalidReadinessCache extends ConfigError("READINESS_REPORT_CACHE_MILLIS", Set("readiness.report-cache-millis"))
+  case InvalidBacklogSampleInterval
+      extends ConfigError("TELEMETRY_BACKLOG_SAMPLE_SECONDS", Set("telemetry.backlog-sample-seconds"))
   case InvalidVectorSearchEnabled extends ConfigError("VECTOR_SEARCH_ENABLED", Set("vector-search.enabled"))
   case InvalidVoyageApiKey extends ConfigError("VOYAGE_API_KEY", Set("vector-search.voyage.api-key"))
   case InvalidVoyageEndpoint extends ConfigError("VOYAGE_ENDPOINT", Set("vector-search.voyage.endpoint"))
@@ -449,6 +451,7 @@ type DiscoveryLexicalFacetMatchLimit = Int :| Interval.Closed[1, 5000]
 type EmbeddingDurableRetryAttempts = Int :| Interval.Closed[1, 100]
 type ReadinessSeconds = Int :| Interval.Closed[1, 604800]
 type ReadinessCacheMillis = Int :| Interval.Closed[100, 10000]
+type BacklogSampleSeconds = Int :| Interval.Closed[1, 3600]
 type CostBudgetWindowSeconds = Int :| Interval.Closed[1, 3600]
 // The floor at the per-query cap is a relation between two settings, checked by `GraphQLConfigValidation`.
 type CostBudgetMaxCost = Int :| Interval.Closed[1, 1000000]

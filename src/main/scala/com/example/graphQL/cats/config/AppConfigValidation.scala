@@ -34,9 +34,21 @@ private[config] object AppConfigValidation {
       resilienceSection(source),
       graphQLSection(source),
       recruiterJobClosureSection(source),
-      readinessSection(source)
+      readinessSection(source),
+      telemetrySection(source)
     ).mapN {
-      (transport, logging, authSettings, kafkaSettings, vectorSettings, resilience, graphql, closure, readiness) =>
+      (
+          transport,
+          logging,
+          authSettings,
+          kafkaSettings,
+          vectorSettings,
+          resilience,
+          graphql,
+          closure,
+          readiness,
+          telemetry
+      ) =>
         AppConfig(
           transport.host,
           transport.port,
@@ -58,7 +70,8 @@ private[config] object AppConfigValidation {
           resilience,
           graphql,
           closure,
-          readiness
+          readiness,
+          telemetry
         )
     }.toEither
 
@@ -102,6 +115,16 @@ private[config] object AppConfigValidation {
       .fold(
         _ => ReadinessConfig().validNel,
         _ => loadSection[RawReadinessConfig](source, "readiness").map(ReadinessConfigValidation.read)
+      )
+
+  /** An absent section keeps the default sampling interval; a present one is validated. */
+  private def telemetrySection(source: ConfigSource): ValidatedNel[ConfigError, TelemetryConfig] =
+    source
+      .at("telemetry")
+      .cursor()
+      .fold(
+        _ => TelemetryConfig().validNel,
+        _ => loadSection[RawTelemetryConfig](source, "telemetry").map(TelemetryConfigValidation.read)
       )
 
   private def loadSection[A: ConfigReader](source: ConfigSource, section: String): ValidatedNel[ConfigError, A] =
