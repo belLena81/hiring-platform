@@ -1,0 +1,20 @@
+groups:
+  - name: hiring-api
+    rules:
+      - alert: HiringApiHighErrorRate
+        expr: |
+          sum(rate(http_server_request_duration_seconds_count{http_response_status_code=~"5.."}[1m]))
+            / sum(rate(http_server_request_duration_seconds_count[1m])) > 0.05
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: More than 5% of API requests returned 5xx for 2 minutes.
+      - alert: HiringApiSlowRequests
+        expr: |
+          histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket[1m]))) > 0.3
+        for: 2m
+        labels:
+          severity: ticket
+        annotations:
+          summary: API p95 latency above 300 ms for 2 minutes.
