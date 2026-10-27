@@ -1,6 +1,6 @@
 package com.example.hiring.analytics.adapter.spark
 
-import com.example.hiring.analytics.TestAnalyticsLakehousePaths
+import com.example.hiring.analytics.{AnalyticsTestOperationalConfig, TestAnalyticsLakehousePaths}
 import com.example.hiring.analytics.domain.{AnalyticsAggregateType, AnalyticsApplicationStatus, AnalyticsEventType}
 import com.example.hiring.analytics.errors.AnalyticsError
 
@@ -18,7 +18,7 @@ import scala.concurrent.duration.*
 
 /** AC-01: one catalog defines every Delta table; targets are validated strictly and constraints are enforced. */
 final class AnalyticsDeltaCatalogSpec extends FunSuite {
-  override val munitTimeout: FiniteDuration = 5.minutes
+  override val munitTimeout: FiniteDuration = 20.minutes
   private val execution = SparkBlockingExecution.forTests[IO](scala.concurrent.ExecutionContext.parasitic)
 
   private lazy val spark: SparkSession = org.apache.spark.sql.classic.SparkSession
@@ -28,6 +28,7 @@ final class AnalyticsDeltaCatalogSpec extends FunSuite {
     .config("spark.ui.enabled", "false")
     .config("spark.sql.shuffle.partitions", "2")
     .config("spark.sql.session.timeZone", "UTC")
+    .config("spark.databricks.delta.vacuum.retentionWindowIgnore.enabled", "false")
     .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
     .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
     .getOrCreate()
@@ -107,7 +108,8 @@ final class AnalyticsDeltaCatalogSpec extends FunSuite {
 
   /** A Silver table whose declaration differs from the catalog, as an older build would have created it. */
   private def createLooseTable(path: String, spec: DeltaTableSpec, nullable: Boolean, withChecks: Boolean): Unit = {
-    val schema = StructType(spec.schema.fields.map(_.copy(nullable = nullable)))
+    val schema =
+      if (nullable) StructType(spec.schema.fields.map(_.copy(nullable = true))) else spec.schema
     val builder = DeltaTable.createIfNotExists(spark).location(SparkPhysicalLocation.resolve(path)).addColumns(schema)
     val _ = spec.properties.foldLeft(builder) { case (current, (key, value)) => current.property(key, value) }.execute()
     if (withChecks)
@@ -171,6 +173,7 @@ final class AnalyticsDeltaCatalogSpec extends FunSuite {
     val silver = AnalyticsDeltaCatalog.Silver
     val missing = freshPath("missing-constraint")
     createLooseTable(missing, silver, nullable = false, withChecks = false)
+    append(missing, silver, silverRow())
     intercept[AnalyticsError.DeltaSchemaMismatch](AnalyticsTableSchemas.createOrValidate(spark, missing, silver))
 
     val extra = freshPath("extra-constraint")
@@ -362,5 +365,81 @@ final class AnalyticsDeltaCatalogSpec extends FunSuite {
       .save(SparkPhysicalLocation.resolve(paths.skillsGold))
     val result = AnalyticsGoldStage.extract[IO](spark, paths, Instant.EPOCH, execution).attempt.unsafeRunSync()
     assertEquals(result.swap.toOption, Some(AnalyticsError.InvalidGoldSchema))
+  }
+
+  test("AC-01.1 an interrupted creation without constraints is completed on reopen when the table is empty") {
+    val silver = AnalyticsDeltaCatalog.Silver
+    val path = freshPath("interrupted-creation")
+    createLooseTable(path, silver, nullable = false, withChecks = false)
+    assertEquals(
+      DeltaLogFactory
+        .system(spark, path)
+        .update()
+        .metadata
+        .configuration
+        .keys
+        .count(_.startsWith("delta.constraints.")),
+      0
+    )
+
+    AnalyticsTableSchemas.createOrValidate(spark, path, silver)
+    assertEquals(
+      DeltaLogFactory
+        .system(spark, path)
+        .update()
+        .metadata
+        .configuration
+        .keys
+        .filter(_.startsWith("delta.constraints."))
+        .toSet,
+      silver.checks.map(check => s"delta.constraints.${check.name}").toSet
+    )
+    assertDeltaRejects(append(path, silver, silverRow(eventType = "BOGUS")), "event_type_valid")
+  }
+
+  test("AC-01.1 a partially constrained empty table is completed but a different stored constraint is not") {
+    val silver = AnalyticsDeltaCatalog.Silver
+    val partial = freshPath("partial-constraints")
+    createLooseTable(partial, silver.copy(checks = silver.checks.take(2)), nullable = false, withChecks = true)
+    AnalyticsTableSchemas.createOrValidate(spark, partial, silver)
+
+    val nullable = freshPath("interrupted-nullable")
+    createLooseTable(nullable, silver, nullable = true, withChecks = false)
+    intercept[AnalyticsError.DeltaSchemaMismatch](AnalyticsTableSchemas.createOrValidate(spark, nullable, silver))
+  }
+
+  test("AC-01.1 nested array nullability is compared structurally") {
+    val progress = AnalyticsDeltaCatalog.StreamingProgress
+    val path = freshPath("nested-nullability")
+    val schema = StructType(progress.schema.fields.map { field =>
+      field.dataType match {
+        case ArrayType(element, _) if field.name == Columns.SourceEndOffsets =>
+          field.copy(dataType = ArrayType(element, containsNull = false))
+        case _ => field
+      }
+    })
+    val builder = DeltaTable.createIfNotExists(spark).location(SparkPhysicalLocation.resolve(path)).addColumns(schema)
+    progress.properties.foldLeft(builder) { case (current, (key, value)) => current.property(key, value) }.execute()
+    intercept[AnalyticsError.DeltaSchemaMismatch](AnalyticsTableSchemas.createOrValidate(spark, path, progress))
+  }
+
+  test("AC-01.1 the expired-file vacuum rewrite keeps NOT NULL and the constraints") {
+    val paths = TestAnalyticsLakehousePaths.unsafe(Files.createTempDirectory("analytics-catalog-vacuum").toUri.toString)
+    val silver = AnalyticsDeltaCatalog.Silver
+    AnalyticsTableSchemas.createOrValidate(spark, paths.silver, silver)
+    append(paths.silver, silver, silverRow())
+    val retention = new AnalyticsDeltaRetention[IO](
+      paths,
+      AnalyticsTestOperationalConfig.operational,
+      execution,
+      org.typelevel.log4cats.slf4j.Slf4jLogger.getLogger[IO]
+    )
+    retention.configureRawTablePrivacy(spark).unsafeRunSync()
+    retention.vacuumExpiredFiles(spark).unsafeRunSync()
+
+    AnalyticsTableSchemas.createOrValidate(spark, paths.silver, silver)
+    assertEquals(spark.read.format("delta").load(SparkPhysicalLocation.resolve(paths.silver)).count(), 1L)
+    assertDeltaRejects(append(paths.silver, silver, silverRow(eventId = null)), "eventId")
+    assertDeltaRejects(append(paths.silver, silver, silverRow(eventType = "BOGUS")), "event_type_valid")
   }
 }

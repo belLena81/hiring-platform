@@ -171,10 +171,10 @@ private[analytics] object AnalyticsDeltaCatalog {
       required(Columns.Topic, StringType),
       required(Columns.Partition, IntegerType),
       required(Columns.Offset, LongType),
-      optional("payloadHash", StringType),
+      optional(Columns.PayloadHash, StringType),
       required(Columns.SubjectTokens, tokenArray),
-      required("quarantineId", StringType),
-      required("quarantineReason", StringType),
+      required(Columns.QuarantineId, StringType),
+      required(Columns.QuarantineReason, StringType),
       required(Columns.ExpiresAt, TimestampType)
     ),
     Vector(partitionNonNegative, offsetNonNegative),
@@ -235,19 +235,22 @@ private[analytics] object AnalyticsDeltaCatalog {
   val RunManifests: DeltaTableSpec = table(
     "control_run_manifests",
     Vector(
-      required("runId", StringType),
+      required(Columns.RunId, StringType),
       required(Columns.Topic, StringType),
       required(Columns.Partition, IntegerType),
-      required("startOffset", LongType),
-      required("endOffsetExclusive", LongType),
-      required("status", StringType),
-      required("updatedAt", StringType)
+      required(Columns.StartOffset, LongType),
+      required(Columns.EndOffsetExclusive, LongType),
+      required(Columns.Status, StringType),
+      required(Columns.UpdatedAt, StringType)
     ),
     Vector(
       partitionNonNegative,
-      DeltaCheck("start_offset_non_negative", s"${quoted("startOffset")} >= 0"),
-      DeltaCheck("end_offset_not_before_start", s"${quoted("endOffsetExclusive")} >= ${quoted("startOffset")}"),
-      DeltaCheck("status_valid", in("status", ManifestStatuses))
+      DeltaCheck("start_offset_non_negative", s"${quoted(Columns.StartOffset)} >= 0"),
+      DeltaCheck(
+        "end_offset_not_before_start",
+        s"${quoted(Columns.EndOffsetExclusive)} >= ${quoted(Columns.StartOffset)}"
+      ),
+      DeltaCheck("status_valid", in(Columns.Status, ManifestStatuses))
     )
   )
 
@@ -257,47 +260,47 @@ private[analytics] object AnalyticsDeltaCatalog {
     Vector(
       StructField(Columns.Topic, StringType, nullable = true),
       StructField(Columns.Partition, IntegerType, nullable = true),
-      StructField("minimumDeliveredOffset", LongType, nullable = true),
-      StructField("maximumDeliveredOffset", LongType, nullable = true),
-      StructField("deliveredRecordCount", LongType, nullable = true)
+      StructField(Columns.MinimumDeliveredOffset, LongType, nullable = true),
+      StructField(Columns.MaximumDeliveredOffset, LongType, nullable = true),
+      StructField(Columns.DeliveredRecordCount, LongType, nullable = true)
     )
   )
   private val EndOffsetType = StructType(
     Vector(
       StructField(Columns.Topic, StringType, nullable = true),
       StructField(Columns.Partition, IntegerType, nullable = true),
-      StructField("endOffset", LongType, nullable = true)
+      StructField(Columns.EndOffset, LongType, nullable = true)
     )
   )
 
   val StreamingProgress: DeltaTableSpec = table(
     "control_streaming_progress",
     Vector(
-      required("lineage", StringType),
-      required("batchId", LongType),
-      required("observedAt", TimestampType),
-      optional("priorWatermark", TimestampType),
-      required("inputFingerprint", StringType),
-      required("sourceEndOffsets", ArrayType(EndOffsetType, containsNull = true)),
-      required("deliveredOffsets", ArrayType(OffsetType, containsNull = true)),
-      required("outcome", StringType),
-      optional("candidateWatermark", TimestampType),
-      optional("completedAt", TimestampType)
+      required(Columns.Lineage, StringType),
+      required(Columns.BatchId, LongType),
+      required(Columns.ObservedAt, TimestampType),
+      optional(Columns.PriorWatermark, TimestampType),
+      required(Columns.InputFingerprint, StringType),
+      required(Columns.SourceEndOffsets, ArrayType(EndOffsetType, containsNull = true)),
+      required(Columns.DeliveredOffsets, ArrayType(OffsetType, containsNull = true)),
+      required(Columns.Outcome, StringType),
+      optional(Columns.CandidateWatermark, TimestampType),
+      optional(Columns.CompletedAt, TimestampType)
     )
   )
 
   val StreamingDecisions: DeltaTableSpec = table(
     "control_streaming_decisions",
     Vector(
-      required("lineage", StringType),
-      required("batchId", LongType),
-      required("revision", LongType),
-      required("deletionMarkerFingerprint", StringType),
-      optional("candidateWatermark", TimestampType),
-      required("publicationRunId", StringType),
-      required("publicationRangeFingerprint", StringType),
-      required("publicationGeneration", LongType),
-      required("publicationRevision", LongType)
+      required(Columns.Lineage, StringType),
+      required(Columns.BatchId, LongType),
+      required(Columns.Revision, LongType),
+      required(Columns.DeletionMarkerFingerprint, StringType),
+      optional(Columns.CandidateWatermark, TimestampType),
+      required(Columns.PublicationRunId, StringType),
+      required(Columns.PublicationRangeFingerprint, StringType),
+      required(Columns.PublicationGeneration, LongType),
+      required(Columns.PublicationRevision, LongType)
     )
   )
 
