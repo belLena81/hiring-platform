@@ -150,16 +150,15 @@ private[analytics] final class AnalyticsKeyContinuityStage[F[_]: Async](
               )
           )
           .map { added =>
-            if (!registryExists) {
-              createVerifierFrame(spark, pseudonymizer.keyVerifiers).write
-                .format("delta")
-                .mode("errorifexists")
-                .save(SparkPhysicalLocation.resolve(paths.hmacKeyRegistry))
-            } else if (added.nonEmpty)
-              createVerifierFrame(spark, added).write
-                .format("delta")
-                .mode("append")
-                .save(SparkPhysicalLocation.resolve(paths.hmacKeyRegistry))
+            AnalyticsTableSchemas.createOrValidate(spark, paths.hmacKeyRegistry, AnalyticsDeltaCatalog.HmacKeyRegistry)
+            val missing = if (registryExists) added else pseudonymizer.keyVerifiers
+            if (missing.nonEmpty) {
+              val _ = DeltaTables
+                .mergeOn(spark, paths.hmacKeyRegistry, createVerifierFrame(spark, missing), Seq(Columns.KeyId))
+                .whenNotMatched()
+                .insertAll()
+                .execute()
+            }
           }
       }
     }

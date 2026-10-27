@@ -77,13 +77,21 @@ final class AnalyticsTableInitializationSpec extends CatsEffectSuite {
     } finally spark.sparkContext.clearJobGroup()
   }
 
-  private val shape = AnalyticsTableSchemas.silver
+  private val spec = AnalyticsDeltaCatalog.Silver
 
-  private def original(spark: SparkSession, path: String, raw: Boolean): Unit = {
+  /** The same creation through the native builder and ALTER statements, without the catalog helper. */
+  private def original(spark: SparkSession, path: String, table: DeltaTableSpec = spec): Unit = {
     val location = SparkPhysicalLocation.resolve(path)
-    val builder = DeltaTable.createIfNotExists(spark).location(location).addColumns(AnalyticsTableSchemas.struct(shape))
-    (if (raw) builder.property("delta.dataSkippingNumIndexedCols", "0") else builder).execute()
-    assert(AnalyticsTableSchemas.matches(spark.read.format("delta").load(location).schema, shape))
+    val existed = DeltaTable.isDeltaTable(spark, location)
+    val builder = DeltaTable.createIfNotExists(spark).location(location).addColumns(table.schema)
+    table.properties.foldLeft(builder) { case (current, (key, value)) => current.property(key, value) }.execute()
+    if (!existed)
+      table.checks.foreach { check =>
+        spark.sql(
+          s"ALTER TABLE ${DeltaTables.sqlIdentifier(path)} ADD CONSTRAINT ${check.name} CHECK (${check.expression})"
+        )
+      }
+    assert(AnalyticsTableSchemas.matches(spark.read.format("delta").load(location).schema, table.shape))
   }
 
   test("existing native Delta initialization compares repeated builder work and preserves schema and version") {
@@ -100,8 +108,8 @@ final class AnalyticsTableInitializationSpec extends CatsEffectSuite {
             execution {
               val started = System.nanoTime()
               (0 until 12).foreach { _ =>
-                if (optimized) AnalyticsTableSchemas.createOrValidate(spark, path, shape)
-                else original(spark, path, false)
+                if (optimized) AnalyticsTableSchemas.createOrValidate(spark, path, spec)
+                else original(spark, path)
               }
               val elapsed = System.nanoTime() - started
               completed(spark, work, group)
@@ -110,7 +118,7 @@ final class AnalyticsTableInitializationSpec extends CatsEffectSuite {
           }
       }
       for {
-        _ <- execution(AnalyticsTableSchemas.createOrValidate(spark, path, shape))
+        _ <- execution(AnalyticsTableSchemas.createOrValidate(spark, path, spec))
         prior <- execution(DeltaLogFactory.system(spark, path).update().version)
         _ <- (0 until 3).toVector.traverse_ { index =>
           val pair = if (index % 2 == 0) (trial(false), trial(true)) else (trial(true), trial(false))
@@ -128,7 +136,7 @@ final class AnalyticsTableInitializationSpec extends CatsEffectSuite {
         }
         _ <- execution {
           assertEquals(DeltaLogFactory.system(spark, path).update().version, prior)
-          assert(AnalyticsTableSchemas.matches(spark.read.format("delta").load(path).schema, shape))
+          assert(AnalyticsTableSchemas.matches(spark.read.format("delta").load(path).schema, spec.shape))
         }
       } yield ()
     }
@@ -138,33 +146,33 @@ final class AnalyticsTableInitializationSpec extends CatsEffectSuite {
     withSpark { (spark, execution, root) =>
       for {
         _ <- execution {
-          Vector(false, true).foreach { raw =>
-            val baseline = root.resolve(s"baseline-$raw").toString
-            val optimized = root.resolve(s"optimized-$raw").toString
-            original(spark, baseline, raw)
-            AnalyticsTableSchemas.createOrValidate(spark, optimized, shape, raw)
+          Vector(AnalyticsDeltaCatalog.Silver, AnalyticsDeltaCatalog.RunManifests).foreach { table =>
+            val baseline = root.resolve(s"baseline-${table.name}").toString
+            val optimized = root.resolve(s"optimized-${table.name}").toString
+            original(spark, baseline, table)
+            AnalyticsTableSchemas.createOrValidate(spark, optimized, table)
             val oldSnapshot = DeltaLogFactory.system(spark, baseline).update()
             val newSnapshot = DeltaLogFactory.system(spark, optimized).update()
             assertEquals(newSnapshot.version, oldSnapshot.version)
             assertEquals(newSnapshot.metadata.configuration, oldSnapshot.metadata.configuration)
+            assertEquals(newSnapshot.metadata.schema, oldSnapshot.metadata.schema)
             assertEquals(
-              spark.read.format("delta").load(optimized).schema,
-              spark.read.format("delta").load(baseline).schema
+              newSnapshot.metadata.configuration.get("delta.dataSkippingNumIndexedCols"),
+              Option.when(table.subjectAttributed)("0")
             )
-            if (raw) assertEquals(newSnapshot.metadata.configuration.get("delta.dataSkippingNumIndexedCols"), Some("0"))
           }
           val mismatch = root.resolve("mismatch").toString
-          AnalyticsTableSchemas.createOrValidate(spark, mismatch, AnalyticsTableSchemas.bronze, true)
+          AnalyticsTableSchemas.createOrValidate(spark, mismatch, AnalyticsDeltaCatalog.Bronze)
           val prior = DeltaLogFactory.system(spark, mismatch).update().version
           intercept[com.example.hiring.analytics.errors.AnalyticsError.DeltaSchemaMismatch] {
-            AnalyticsTableSchemas.createOrValidate(spark, mismatch, shape)
+            AnalyticsTableSchemas.createOrValidate(spark, mismatch, spec)
           }
           assertEquals(DeltaLogFactory.system(spark, mismatch).update().version, prior)
           val occupied = root.resolve("occupied").toString
           spark.range(1).write.parquet(occupied)
-          val oldFailure = scala.util.Try(original(spark, occupied, false)).failed.toOption
+          val oldFailure = scala.util.Try(original(spark, occupied)).failed.toOption
           val newFailure =
-            scala.util.Try(AnalyticsTableSchemas.createOrValidate(spark, occupied, shape)).failed.toOption
+            scala.util.Try(AnalyticsTableSchemas.createOrValidate(spark, occupied, spec)).failed.toOption
           assert(oldFailure.nonEmpty && newFailure.nonEmpty)
           assertEquals(newFailure.map(_.getClass), oldFailure.map(_.getClass))
         }
@@ -175,18 +183,18 @@ final class AnalyticsTableInitializationSpec extends CatsEffectSuite {
   test("parallel initialization retains native create if absent arbitration") {
     withSpark { (spark, execution, root) =>
       val path = root.resolve("parallel").toString
-      val create = IO.blocking(AnalyticsTableSchemas.createOrValidate(spark, path, shape, true))
+      val create = IO.blocking(AnalyticsTableSchemas.createOrValidate(spark, path, spec))
       for {
         results <- (create.attempt, create.attempt).parTupled
         _ <- IO(assert(results._1.isRight || results._2.isRight))
         _ <- execution {
-          AnalyticsTableSchemas.createOrValidate(spark, path, shape, true)
-          assert(AnalyticsTableSchemas.matches(spark.read.format("delta").load(path).schema, shape))
+          AnalyticsTableSchemas.createOrValidate(spark, path, spec)
+          assert(AnalyticsTableSchemas.matches(spark.read.format("delta").load(path).schema, spec.shape))
           assertEquals(
             DeltaLogFactory.system(spark, path).update().metadata.configuration.get("delta.dataSkippingNumIndexedCols"),
             Some("0")
           )
-          assertEquals(DeltaLogFactory.system(spark, path).update().version, 0L)
+          assertEquals(DeltaLogFactory.system(spark, path).update().version, spec.checks.size.toLong)
         }
       } yield ()
     }

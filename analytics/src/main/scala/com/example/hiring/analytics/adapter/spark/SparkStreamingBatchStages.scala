@@ -717,7 +717,7 @@ private[analytics] object StreamingWatermarkAdmission {
           AnalyticsEventType.ApplicationStatusChanged.wire
         )
       )
-      .withColumn(Columns.Day, date_trunc(Columns.Day, col(Columns.OccurredAt)))
+      .withColumn(Columns.Day, HiringGoldTransforms.utcDay(col(Columns.OccurredAt)))
       .join(visibleFunnelDays.select(Columns.Day), Seq(Columns.Day), "inner")
       .select(col(effectiveTimeColumn))
     val visibleSkills = HiringGoldTransforms

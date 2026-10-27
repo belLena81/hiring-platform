@@ -568,10 +568,10 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]](
   }
 
   private def ensureProgressTable(): Unit =
-    AnalyticsTableSchemas.createOrValidate(spark, paths.streamingProgress, ProgressShape)
+    AnalyticsTableSchemas.createOrValidate(spark, paths.streamingProgress, AnalyticsDeltaCatalog.StreamingProgress)
 
   private def ensureDecisionTable(): Unit =
-    AnalyticsTableSchemas.createOrValidate(spark, paths.streamingDecisions, DecisionShape)
+    AnalyticsTableSchemas.createOrValidate(spark, paths.streamingDecisions, AnalyticsDeltaCatalog.StreamingDecisions)
 
   private def withProgress[A](absent: A)(present: => Either[AnalyticsError, A]): Either[AnalyticsError, A] =
     withTable(paths.streamingProgress, ProgressShape, absent)(present)
@@ -650,46 +650,8 @@ private object DeltaStreamingBatchJournal {
   private def progressOf(row: Row): Option[StreamingJournalProgress] =
     Option(row.getAs[String](OutcomeColumn)).flatMap(ProgressByName.get)
 
-  // Delta cannot enforce NOT NULL inside arrays. Required values are checked by the typed journal decoder.
-  private val OffsetType = StructType(
-    Vector(
-      StructField(Columns.Topic, StringType, nullable = true),
-      StructField(Columns.Partition, IntegerType, nullable = true),
-      StructField("minimumDeliveredOffset", LongType, nullable = true),
-      StructField("maximumDeliveredOffset", LongType, nullable = true),
-      StructField("deliveredRecordCount", LongType, nullable = true)
-    )
-  )
-  private val EndOffsetType = StructType(
-    Vector(
-      StructField(Columns.Topic, StringType, nullable = true),
-      StructField(Columns.Partition, IntegerType, nullable = true),
-      StructField("endOffset", LongType, nullable = true)
-    )
-  )
-  private val ProgressShape: AnalyticsTableSchemas.Shape = Vector(
-    LineageColumn -> StringType,
-    BatchIdColumn -> LongType,
-    ObservedAtColumn -> TimestampType,
-    PriorWatermarkColumn -> TimestampType,
-    InputFingerprintColumn -> StringType,
-    SourceEndOffsetsColumn -> ArrayType(EndOffsetType, containsNull = true),
-    DeliveredOffsetsColumn -> ArrayType(OffsetType, containsNull = true),
-    OutcomeColumn -> StringType,
-    CandidateWatermarkColumn -> TimestampType,
-    CompletedAtColumn -> TimestampType
-  )
-  private val DecisionShape: AnalyticsTableSchemas.Shape = Vector(
-    LineageColumn -> StringType,
-    BatchIdColumn -> LongType,
-    RevisionColumn -> LongType,
-    MarkerFingerprintColumn -> StringType,
-    CandidateWatermarkColumn -> TimestampType,
-    PublicationRunIdColumn -> StringType,
-    PublicationRangeFingerprintColumn -> StringType,
-    PublicationGenerationColumn -> LongType,
-    PublicationRevisionColumn -> LongType
-  )
+  private val ProgressShape: AnalyticsTableSchemas.Shape = AnalyticsDeltaCatalog.StreamingProgress.shape
+  private val DecisionShape: AnalyticsTableSchemas.Shape = AnalyticsDeltaCatalog.StreamingDecisions.shape
   private val ProgressSchema = AnalyticsTableSchemas.struct(ProgressShape)
   private val DecisionSchema = AnalyticsTableSchemas.struct(DecisionShape)
   private val IdentityKeys = Seq(LineageColumn, BatchIdColumn)

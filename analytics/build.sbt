@@ -64,7 +64,11 @@ lazy val analytics = (project in file("."))
       .withFormats(JacocoReportFormats.ScalaHTML, JacocoReportFormats.XML),
     Test / unmanagedSourceDirectories += baseDirectory.value.getParentFile / "test-support" / "src" / "main" / "scala",
     Test / parallelExecution := false,
-    Test / javaOptions += "--add-opens=java.base/sun.security.action=ALL-UNNAMED",
+    // Same module opens as spark-jvm.args: Spark materializes DATE cells through sun.util.calendar.
+    Test / javaOptions ++= Seq(
+      "--add-opens=java.base/sun.security.action=ALL-UNNAMED",
+      "--add-opens=java.base/sun.util.calendar=ALL-UNNAMED"
+    ),
     IntegrationTest / scalaSource := baseDirectory.value / "src" / "it" / "scala",
     IntegrationTest / parallelExecution := false,
     // sbt-jacoco hands the exec-file location to the JVM through javaOptions, so only a forked JVM records data.
@@ -78,7 +82,10 @@ lazy val analytics = (project in file("."))
         .concatDistinct(IntegrationTest / exportedProducts, IntegrationTest / dependencyClasspath)
         .value
     },
-    IntegrationTest / javaOptions += "--add-opens=java.base/sun.security.action=ALL-UNNAMED",
+    IntegrationTest / javaOptions ++= Seq(
+      "--add-opens=java.base/sun.security.action=ALL-UNNAMED",
+      "--add-opens=java.base/sun.util.calendar=ALL-UNNAMED"
+    ),
     scalacOptions ++= Seq(
       "-encoding",
       "utf-8",

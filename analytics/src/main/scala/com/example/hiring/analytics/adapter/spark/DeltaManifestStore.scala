@@ -34,7 +34,7 @@ private[analytics] final class DeltaManifestStore[F[_]: Async](
           updatedAt.toString
         )
       )
-      AnalyticsTableSchemas.createOrValidate(spark, paths.manifests, AnalyticsTableSchemas.manifests)
+      AnalyticsTableSchemas.createOrValidate(spark, paths.manifests, AnalyticsDeltaCatalog.RunManifests)
       val frame = spark.createDataFrame(rows.asJava, AnalyticsTableSchemas.struct(AnalyticsTableSchemas.manifests))
       DeltaTables
         .mergeOn(spark, paths.manifests, frame, Seq("runId", Columns.Topic, Columns.Partition))

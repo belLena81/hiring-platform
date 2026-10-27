@@ -27,9 +27,9 @@ private[analytics] final class DeltaBatchWriter[F[_]](
       condition: String,
       freshness: Option[() => Instant]
   ): F[Unit] = execution.either {
-    val (shape, raw) = AnalyticsTableSchemas.targetOf(paths, path)
-    AnalyticsTableSchemas.createOrValidate(source.sparkSession, path, shape, raw)
-    if (!AnalyticsTableSchemas.matches(source.schema, shape)) throw AnalyticsError.DeltaSchemaMismatch(path)
+    val target = AnalyticsTableSchemas.targetOf(paths, path)
+    AnalyticsTableSchemas.createOrValidate(source.sparkSession, path, target)
+    if (!AnalyticsTableSchemas.matches(source.schema, target.shape)) throw AnalyticsError.DeltaSchemaMismatch(path)
     val mutation = DeltaTables
       .forPath(source.sparkSession, path)
       .as("target")

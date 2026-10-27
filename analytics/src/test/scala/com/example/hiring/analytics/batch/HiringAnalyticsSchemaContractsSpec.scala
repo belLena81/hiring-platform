@@ -33,17 +33,15 @@ class HiringAnalyticsSchemaContractsSpec extends FunSuite {
   override def afterAll(): Unit =
     if (!spark.sparkContext.isStopped) spark.stop()
 
-  test("merge targets resolve their stored shape and raw-record scope from the lakehouse paths") {
+  test("merge targets resolve their declared table from the lakehouse paths") {
     val paths = TestAnalyticsLakehousePaths.unsafe("file:///tmp/hiring-targets")
-    val raw = Vector(
-      paths.bronze -> AnalyticsTableSchemas.bronze,
-      paths.quarantine -> AnalyticsTableSchemas.quarantine,
-      paths.lateFacts -> AnalyticsTableSchemas.lateFacts
-    )
-    raw.foreach { case (path, shape) => assertEquals(AnalyticsTableSchemas.targetOf(paths, path), (shape, true)) }
+    AnalyticsDeltaCatalog.locations(paths).foreach { case (path, spec) =>
+      assertEquals(AnalyticsTableSchemas.targetOf(paths, path), spec)
+    }
+    assertEquals(AnalyticsTableSchemas.targetOf(paths, "file:///tmp/other"), AnalyticsDeltaCatalog.Silver)
     assertEquals(
-      AnalyticsTableSchemas.targetOf(paths, paths.silver),
-      (AnalyticsTableSchemas.silver ++ AnalyticsTableSchemas.expiry, false)
+      AnalyticsDeltaCatalog.Silver.shape,
+      AnalyticsTableSchemas.silver ++ AnalyticsTableSchemas.expiry
     )
   }
 
@@ -201,7 +199,7 @@ class HiringAnalyticsSchemaContractsSpec extends FunSuite {
     assertEquals(funnel.schema.fieldNames.toSeq, Seq("day", "eventType", "newStatus", "contributingApplications"))
     assertEquals(
       funnel.schema.fields.map(_.dataType.simpleString).toSeq,
-      Seq("timestamp", "string", "string", "bigint")
+      Seq("date", "string", "string", "bigint")
     )
     assertEquals(funnel.select("contributingApplications").as[Long].collect().toSeq, Seq(10L, 10L))
 
@@ -212,7 +210,7 @@ class HiringAnalyticsSchemaContractsSpec extends FunSuite {
     )
     assertEquals(
       wide.schema.fields.map(_.dataType.simpleString).toSeq,
-      Seq.fill(1)("timestamp") ++ Seq.fill(6)("bigint")
+      Seq.fill(1)("date") ++ Seq.fill(6)("bigint")
     )
     val wideRow = wide.head()
     assertEquals(wideRow.getAs[Long]("created"), 10L)
@@ -220,7 +218,7 @@ class HiringAnalyticsSchemaContractsSpec extends FunSuite {
 
     val skills = HiringGoldTransforms.skillPostingActivity(silver).toOption.get
     assertEquals(skills.schema.fieldNames.toSeq, Seq("day", "skill", "postings"))
-    assertEquals(skills.schema.fields.map(_.dataType.simpleString).toSeq, Seq("timestamp", "string", "bigint"))
+    assertEquals(skills.schema.fields.map(_.dataType.simpleString).toSeq, Seq("date", "string", "bigint"))
     assertEquals(
       skills.select("skill", "postings").collect().toSeq.map(r => r.getString(0) -> r.getLong(1)),
       Seq("scala" -> 10L)
@@ -280,10 +278,10 @@ class HiringAnalyticsSchemaContractsSpec extends FunSuite {
   test("report extraction schema contract detects field and type drift") {
     val invalid = StructType.fromDDL("day STRING, created BIGINT")
     val valid = StructType.fromDDL(
-      "day TIMESTAMP, created BIGINT, accepted BIGINT, declined BIGINT, interview BIGINT, hired BIGINT, rejected BIGINT"
+      "day DATE, created BIGINT, accepted BIGINT, declined BIGINT, interview BIGINT, hired BIGINT, rejected BIGINT"
     )
     val expected = Vector(
-      "day" -> DataTypes.TimestampType,
+      "day" -> DataTypes.DateType,
       "created" -> DataTypes.LongType,
       "accepted" -> DataTypes.LongType,
       "declined" -> DataTypes.LongType,

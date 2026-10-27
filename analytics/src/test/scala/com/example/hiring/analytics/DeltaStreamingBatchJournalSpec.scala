@@ -107,13 +107,33 @@ final class DeltaStreamingBatchJournalSpec extends CatsEffectSuite {
       val selected = fields.updated(index, fields(index).takeWhile(_ != ',') + ", NULL")
       column -> s"array(named_struct(${selected.mkString(", ")}))"
     }
+    // A null array is a NOT NULL violation that Delta now rejects at write time.
     val cases = Vector(
-      "sourceEndOffsets" -> s"CAST(NULL AS $sourceType)",
       "sourceEndOffsets" -> s"CAST(array(NULL) AS $sourceType)",
-      "deliveredOffsets" -> s"CAST(NULL AS $deliveredType)",
       "deliveredOffsets" -> s"CAST(array(NULL) AS $deliveredType)"
     ) ++ missingFields("sourceEndOffsets", sourceFields) ++ missingFields("deliveredOffsets", deliveredFields)
-    cases.zipWithIndex.traverse_ { case ((column, expression), index) =>
+    val nullArrays = Vector("sourceEndOffsets" -> sourceType, "deliveredOffsets" -> deliveredType)
+    val nullArrayRejected = journal
+      .prepare(
+        prepared
+          .copy(identity = StreamingBatchIdentity(right(StreamingLineage.from("hiring-null-array")), identity.batchId))
+      )
+      .productR(
+        nullArrays.traverse_ { case (column, tpe) =>
+          execution {
+            intercept[Exception] {
+              io.delta.tables.DeltaTable
+                .forPath(spark, paths.streamingProgress)
+                .update(
+                  org.apache.spark.sql.functions.col("lineage") === "hiring-null-array",
+                  Map(column -> org.apache.spark.sql.functions.expr(s"CAST(NULL AS $tpe)"))
+                )
+            }
+            ()
+          }
+        }
+      )
+    nullArrayRejected *> cases.zipWithIndex.traverse_ { case ((column, expression), index) =>
       val invalidIdentity =
         StreamingBatchIdentity(right(StreamingLineage.from(s"hiring-null-offset-$index")), identity.batchId)
       for {
@@ -246,16 +266,22 @@ final class DeltaStreamingBatchJournalSpec extends CatsEffectSuite {
     for {
       _ <- journal.prepare(prepared.copy(identity = malformedIdentity))
       _ <- journal.appendDecision(decision.copy(identity = malformedIdentity))
-      _ <- execution {
-        io.delta.tables.DeltaTable
-          .forPath(spark, paths.streamingDecisions)
-          .update(
-            org.apache.spark.sql.functions.col("lineage") === malformedIdentity.lineage.value,
-            Map("publicationGeneration" -> org.apache.spark.sql.functions.lit(null).cast("long"))
-          )
+      // The column is NOT NULL, so Delta rejects the corrupting update before any decoder sees it.
+      rejected <- execution {
+        scala.util.Try {
+          io.delta.tables.DeltaTable
+            .forPath(spark, paths.streamingDecisions)
+            .update(
+              org.apache.spark.sql.functions.col("lineage") === malformedIdentity.lineage.value,
+              Map("publicationGeneration" -> org.apache.spark.sql.functions.lit(null).cast("long"))
+            )
+        }.isFailure
       }
-      result <- journal.load(malformedIdentity).attempt
-    } yield assert(result.left.exists(_.isInstanceOf[AnalyticsError.DataIntegrityViolation]))
+      loaded <- journal.load(malformedIdentity).attempt
+    } yield {
+      assert(rejected)
+      assert(loaded.isRight)
+    }
   }
 
   test("existing incompatible Delta schema is rejected instead of adopted") {

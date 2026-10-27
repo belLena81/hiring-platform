@@ -138,7 +138,7 @@ private[spark] final class AnalyticsBatchErasureStage[F[_]: Async: UUIDGen](
       val markedSubjects =
         markerTokens.select(col(Columns.SubjectToken)).filter(col(Columns.SubjectToken).isNotNull).distinct()
       val columns = DeltaTables.read(spark, path).columns.toSet
-      val rawScope = AnalyticsTableSchemas.targetOf(paths, path)._2
+      val rawScope = AnalyticsDeltaCatalog.holdsEventRecords(AnalyticsTableSchemas.targetOf(paths, path))
       if (rawScope) {
         val table = DeltaTables.forPath(spark, path)
         if (columns.contains(Columns.SubjectTokens))

@@ -22,7 +22,6 @@ private[analytics] final class AnalyticsDeltaRetention[F[_]: Async: UUIDGen](
     logger: Logger[F]
 ) {
   private val retention = operational.retention
-  private val DeletionVectorsProperty = "delta.enableDeletionVectors"
 
   /** Must run while the caller owns the shared lakehouse mutex. */
   def recoverAbandonedRewrites(spark: SparkSession): F[Unit] =
@@ -35,20 +34,14 @@ private[analytics] final class AnalyticsDeltaRetention[F[_]: Async: UUIDGen](
 
   def configureRawTables(spark: SparkSession): F[Unit] =
     execution {
-      AnalyticsTableSchemas.createOrValidate(spark, paths.bronze, AnalyticsTableSchemas.bronze, raw = true)
-      AnalyticsTableSchemas.createOrValidate(spark, paths.quarantine, AnalyticsTableSchemas.quarantine, raw = true)
-      AnalyticsTableSchemas.createOrValidate(
-        spark,
-        paths.silver,
-        AnalyticsTableSchemas.silver ++ AnalyticsTableSchemas.expiry
-      )
-      AnalyticsTableSchemas.createOrValidate(spark, paths.lateFacts, AnalyticsTableSchemas.lateFacts, raw = true)
+      AnalyticsDeltaCatalog.locations(paths).filter(_._2.subjectAttributed).foreach { case (path, spec) =>
+        AnalyticsTableSchemas.createOrValidate(spark, path, spec)
+      }
     } *> configureRawTablePrivacy(spark)
 
   def configureRawTablePrivacy(spark: SparkSession): F[Unit] = execution {
     val desiredVacuumRetention = s"interval ${retention.deltaVacuumSafety}"
     val desiredLogRetention = s"interval ${retention.deltaLogRetention}"
-    val rawPaths = paths.inventory.subjectDelta.map(_.location).toSet
     val tables = paths.inventory.delta.map(_.location)
     spark.conf.set(
       "spark.databricks.delta.properties.defaults.deletedFileRetentionDuration",
@@ -66,12 +59,14 @@ private[analytics] final class AnalyticsDeltaRetention[F[_]: Async: UUIDGen](
         val properties = DeltaLogFactory.system(spark, path).update().metadata.configuration
         // Deletion vectors would keep purged rows in files that only REORG ... APPLY (PURGE) rewrites.
         // An enabled table is never silently flipped: fail closed so an operator decides how to rewrite it.
-        if (properties.get(DeletionVectorsProperty).contains("true")) throw AnalyticsError.DeltaSchemaMismatch(path)
+        if (properties.get(AnalyticsDeltaCatalog.DeletionVectorsProperty).contains("true"))
+          throw AnalyticsError.DeltaSchemaMismatch(path)
+        // Static properties come from the table's catalog declaration; retention windows come from configuration.
+        val declared = AnalyticsDeltaCatalog.specAt(paths, path).fold(Map.empty[String, String])(_.properties)
         val desired = Map(
           "delta.deletedFileRetentionDuration" -> desiredVacuumRetention,
-          "delta.logRetentionDuration" -> desiredLogRetention,
-          DeletionVectorsProperty -> "false"
-        ) ++ (if (rawPaths.contains(path)) Map("delta.dataSkippingNumIndexedCols" -> "0") else Map.empty)
+          "delta.logRetentionDuration" -> desiredLogRetention
+        ) ++ declared
         val changes = desired.filter { case (key, value) => properties.get(key).forall(_ != value) }
         if (changes.nonEmpty) {
           val rendered = changes.map { case (key, value) => s"'$key' = '$value'" }.mkString(", ")
@@ -111,7 +106,6 @@ private[analytics] final class AnalyticsDeltaRetention[F[_]: Async: UUIDGen](
                     .write
                     .format("delta")
                     .mode("overwrite")
-                    .option("overwriteSchema", "true")
                     .save(SparkPhysicalLocation.resolve(path))
                   // Respect Delta's retention safety horizon. Erasure completes only after this reclaim horizon passes.
                   val retentionHours = retention.deltaVacuumSafety.toMillis.toDouble / 3600000d

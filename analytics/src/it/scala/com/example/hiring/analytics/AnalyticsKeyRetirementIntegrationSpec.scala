@@ -413,12 +413,12 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.CatsEffectSuite 
             _ <- execution(session.conf.set("spark.sql.shuffle.partitions", "2"))
             _ <- continuity(old)
             _ <- execution {
+              AnalyticsTableSchemas.createOrValidate(session, paths.silver, AnalyticsDeltaCatalog.Silver)
               session
                 .createDataFrame(List(retirementFact(oldToken, at, at.plusSeconds(30L * 86400L))).asJava, schema)
                 .write
                 .format("delta")
-                .option("delta.dataSkippingNumIndexedCols", "0")
-                .mode("errorifexists")
+                .mode("append")
                 .save(paths.silver)
             }
             capturedData <- execution(

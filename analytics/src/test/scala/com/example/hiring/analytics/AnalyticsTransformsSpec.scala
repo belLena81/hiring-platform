@@ -1318,8 +1318,25 @@ class AnalyticsTransformsSpec extends FunSuite {
     newKeyContinuityStage(paths, pseudonymizer)
       .validateKeyMaterialContinuity(spark)
       .unsafeRunSync()
-    seedSilver.write.format("delta").save(paths.silver)
-    HiringGoldTransforms.wideFunnelDay(seedSilver).toOption.get.write.format("delta").save(paths.funnelGold)
+    com.example.hiring.analytics.adapter.spark.AnalyticsTableSchemas.createOrValidate(
+      spark,
+      paths.silver,
+      com.example.hiring.analytics.adapter.spark.AnalyticsDeltaCatalog.Silver
+    )
+    seedSilver.write.format("delta").mode("append").save(paths.silver)
+    com.example.hiring.analytics.adapter.spark.AnalyticsTableSchemas.createOrValidate(
+      spark,
+      paths.funnelGold,
+      com.example.hiring.analytics.adapter.spark.AnalyticsDeltaCatalog.FunnelGold
+    )
+    HiringGoldTransforms
+      .wideFunnelDay(seedSilver)
+      .toOption
+      .get
+      .write
+      .format("delta")
+      .mode("append")
+      .save(paths.funnelGold)
     assertEquals(spark.read.format("delta").load(paths.silver).count(), 10L)
     assertEquals(spark.read.format("delta").load(paths.funnelGold).count(), 1L)
 
@@ -2342,7 +2359,12 @@ class AnalyticsTransformsSpec extends FunSuite {
           .otherwise(lit(Timestamp.from(at.plusSeconds(86400))))
       )
     silver.coalesce(1).write.format("delta").save(paths.silver)
-    HiringGoldTransforms.wideFunnelDay(silver).toOption.get.write.format("delta").save(paths.funnelGold)
+    com.example.hiring.analytics.adapter.spark.AnalyticsTableSchemas.createOrValidate(
+      spark,
+      paths.funnelGold,
+      com.example.hiring.analytics.adapter.spark.AnalyticsDeltaCatalog.FunnelGold
+    )
+    HiringGoldTransforms.wideFunnelDay(silver).toOption.get.write.format("delta").mode("append").save(paths.funnelGold)
     assertEquals(spark.read.format("delta").load(paths.funnelGold).select("created").first().getLong(0), 12L)
     val maintenance = AnalyticsBatchTestSupport.newMaintenance(spark, paths, pseudonymizer, fixedClock(at))
     val markers = Vector(deletedToken)

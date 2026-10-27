@@ -12,13 +12,13 @@ import org.apache.spark.sql.functions.{
   col,
   count,
   countDistinct,
-  date_trunc,
   explode,
   length,
   lit,
   lower,
   min,
   percentile_approx,
+  to_date,
   trim,
   unix_timestamp,
   when
@@ -30,6 +30,10 @@ object HiringGoldTransforms {
   private val JobCreated = AnalyticsEventType.JobCreated.wire
   private val Hired = AnalyticsApplicationStatus.Hired.wire
 
+  /** The UTC calendar day of an event time. The Spark session time zone is pinned to UTC by `SparkRuntime`. */
+  private[analytics] def utcDay(occurredAt: org.apache.spark.sql.Column): org.apache.spark.sql.Column =
+    to_date(occurredAt)
+
   private def applicationLifecycle(silver: DataFrame): Either[AnalyticsError, DataFrame] =
     OperationalEventTransforms
       .validateSilverSchema(silver)
@@ -39,7 +43,7 @@ object HiringGoldTransforms {
   def funnelActivity(silver: DataFrame): Either[AnalyticsError, DataFrame] =
     applicationLifecycle(silver).map { validated =>
       validated
-        .withColumn(Columns.Day, date_trunc(Columns.Day, col(Columns.OccurredAt)))
+        .withColumn(Columns.Day, utcDay(col(Columns.OccurredAt)))
         .groupBy(Columns.Day, Columns.EventType, Columns.NewStatus)
         .agg(
           countDistinct(col(Columns.ApplicationId)).as(Columns.ContributingApplications),
@@ -53,7 +57,7 @@ object HiringGoldTransforms {
   private[analytics] def jobSkillDays(frame: DataFrame): DataFrame =
     frame
       .filter(col(Columns.EventType) === lit(JobCreated))
-      .withColumn(Columns.Day, date_trunc(Columns.Day, col(Columns.OccurredAt)))
+      .withColumn(Columns.Day, utcDay(col(Columns.OccurredAt)))
       .withColumn(Columns.RawSkill, explode(col(Columns.JobSkills)))
       .withColumn(Columns.Skill, lower(trim(col(Columns.RawSkill))))
       .filter(length(col(Columns.Skill)) > lit(0))
@@ -89,7 +93,7 @@ object HiringGoldTransforms {
 
     applicationLifecycle(silver).map { validated =>
       validated
-        .withColumn(Columns.Day, date_trunc(Columns.Day, col(Columns.OccurredAt)))
+        .withColumn(Columns.Day, utcDay(col(Columns.OccurredAt)))
         .groupBy(Columns.Day)
         .agg(counts.head, counts.tail*)
         .filter(

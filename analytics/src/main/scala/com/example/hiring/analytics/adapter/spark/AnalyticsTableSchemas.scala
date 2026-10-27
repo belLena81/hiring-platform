@@ -11,111 +11,28 @@ import org.apache.spark.sql.types.*
 
 import scala.jdk.CollectionConverters.*
 
-/** Column order and types shared by projections, Delta initialization, and persisted-schema checks. */
+/** Shapes derived from [[AnalyticsDeltaCatalog]], and strict create-or-validate for the tables it declares. */
 private[analytics] object AnalyticsTableSchemas {
   type Shape = Vector[(String, DataType)]
 
-  val silver: Shape = Vector(
-    Columns.EventId -> StringType,
-    Columns.EventType -> StringType,
-    Columns.OccurredAt -> TimestampType,
-    Columns.AggregateType -> StringType,
-    Columns.AggregateId -> StringType,
-    Columns.ApplicationId -> StringType,
-    Columns.JobId -> StringType,
-    Columns.NewStatus -> StringType,
-    Columns.JobSkills -> ArrayType(StringType),
-    Columns.SubjectToken -> StringType,
-    Columns.SubjectTokens -> ArrayType(StringType, containsNull = false),
-    Columns.EventFingerprint -> StringType
-  )
-  val expiry: Shape = Vector(Columns.IngestedAt -> TimestampType, Columns.ExpiresAt -> TimestampType)
+  private def shapeOf(columns: Vector[DeltaColumn]): Shape = columns.map(column => column.name -> column.dataType)
 
-  /** Closed-day facts retain only normalized, pseudonymized fields needed for bounded replay. */
-  val lateFacts: Shape = Vector(
-    Columns.EventId -> StringType,
-    Columns.EventFingerprint -> StringType,
-    Columns.EventType -> StringType,
-    Columns.Topic -> StringType,
-    Columns.Partition -> IntegerType,
-    Columns.Offset -> LongType,
-    Columns.OccurredAt -> TimestampType,
-    Columns.AggregateType -> StringType,
-    Columns.AggregateId -> StringType,
-    Columns.ApplicationId -> StringType,
-    Columns.JobId -> StringType,
-    Columns.NewStatus -> StringType,
-    Columns.JobSkills -> ArrayType(StringType),
-    Columns.SubjectToken -> StringType,
-    Columns.SubjectTokens -> ArrayType(StringType, containsNull = false),
-    Columns.AdmissionReason -> StringType,
-    Columns.IngestedAt -> TimestampType,
-    Columns.ExpiresAt -> TimestampType
-  )
-  val funnel: Shape = Vector(
-    Columns.Day -> TimestampType,
-    Columns.Created -> LongType,
-    Columns.Accepted -> LongType,
-    Columns.Declined -> LongType,
-    Columns.Interview -> LongType,
-    Columns.Hired -> LongType,
-    Columns.Rejected -> LongType
-  )
-  val timeToHire: Shape = Vector(
-    Columns.P50Hours -> DoubleType,
-    Columns.P75Hours -> DoubleType,
-    Columns.P90Hours -> DoubleType,
-    Columns.P95Hours -> DoubleType,
-    Columns.EligibleCount -> LongType,
-    Columns.ExcludedCount -> LongType
-  )
-  val skills: Shape = Vector(Columns.Day -> TimestampType, Columns.Skill -> StringType, Columns.Postings -> LongType)
-  val manifests: Shape = Vector(
-    "runId" -> StringType,
-    Columns.Topic -> StringType,
-    Columns.Partition -> IntegerType,
-    "startOffset" -> LongType,
-    "endOffsetExclusive" -> LongType,
-    "status" -> StringType,
-    "updatedAt" -> StringType
-  )
-  val quarantine: Shape = Vector(
-    Columns.Topic -> StringType,
-    Columns.Partition -> IntegerType,
-    Columns.Offset -> LongType,
-    "payloadHash" -> StringType,
-    Columns.SubjectTokens -> ArrayType(StringType, containsNull = false),
-    "quarantineId" -> StringType,
-    "quarantineReason" -> StringType,
-    Columns.ExpiresAt -> TimestampType
-  )
+  /** Normalized event fields before the retention columns are added. */
+  val silver: Shape = shapeOf(AnalyticsDeltaCatalog.SilverEventColumns)
+  val expiry: Shape = shapeOf(AnalyticsDeltaCatalog.ExpiryColumns)
+  val lateFacts: Shape = AnalyticsDeltaCatalog.LateFacts.shape
+  val funnel: Shape = AnalyticsDeltaCatalog.FunnelGold.shape
+  val timeToHire: Shape = AnalyticsDeltaCatalog.TimeToHireGold.shape
+  val skills: Shape = AnalyticsDeltaCatalog.SkillsGold.shape
+  val manifests: Shape = AnalyticsDeltaCatalog.RunManifests.shape
+  val quarantine: Shape = AnalyticsDeltaCatalog.Quarantine.shape
+  val bronze: Shape = AnalyticsDeltaCatalog.Bronze.shape
 
-  /** Persisted Bronze: Kafka coordinates, envelope fingerprint, normalized fields and tokens; no raw identifiers. */
-  val bronze: Shape = Vector(
-    Columns.Topic -> StringType,
-    Columns.Partition -> IntegerType,
-    Columns.Offset -> LongType,
-    Columns.KafkaTimestamp -> TimestampType,
-    Columns.EventId -> StringType,
-    Columns.EventType -> StringType,
-    Columns.OccurredAt -> TimestampType,
-    Columns.AggregateType -> StringType,
-    Columns.AggregateId -> StringType,
-    Columns.EventFingerprint -> StringType,
-    Columns.ApplicationId -> StringType,
-    Columns.JobId -> StringType,
-    Columns.NewStatus -> StringType,
-    Columns.JobSkills -> ArrayType(StringType),
-    Columns.SubjectToken -> StringType,
-    Columns.SubjectTokens -> ArrayType(StringType, containsNull = false)
-  ) ++ expiry
+  /** The table a merge target must be, resolved from its location. Unknown locations are Silver, as before. */
+  def targetOf(paths: AnalyticsLakehousePaths, path: String): DeltaTableSpec =
+    AnalyticsDeltaCatalog.specAt(paths, path).getOrElse(AnalyticsDeltaCatalog.Silver)
 
-  /** The shape a merge target must have, and whether it holds raw records (no data-skipping statistics). */
-  def targetOf(paths: AnalyticsLakehousePaths, path: String): (Shape, Boolean) =
-    Map(paths.bronze -> bronze, paths.quarantine -> quarantine, paths.lateFacts -> lateFacts)
-      .get(path)
-      .fold((silver ++ expiry, false))(_ -> true)
-
+  /** Nullable-only schema for source frames, whose Spark-derived nullability is not authoritative. */
   def struct(shape: Shape): StructType = StructType(shape.map { case (name, dataType) =>
     StructField(name, dataType, nullable = true)
   })
@@ -131,18 +48,58 @@ private[analytics] object AnalyticsTableSchemas {
       StructType(Seq(StructField(Columns.SubjectToken, StringType, nullable = false)))
     )
 
+  /** Source frames are compared by names and types only; Delta enforces NOT NULL and CHECK when it writes. */
   def matches(actual: StructType, shape: Shape): Boolean =
     actual.fields.toVector.map(field => field.name -> field.dataType.simpleString) ==
       shape.map { case (name, dataType) => name -> dataType.simpleString }
 
-  def createOrValidate(spark: SparkSession, path: String, shape: Shape, raw: Boolean = false): Unit = {
+  /** Creates the declared table when absent, then requires the stored table to equal the declaration exactly: column
+    * names, types, nullability and the set of CHECK constraints. Any difference fails closed.
+    */
+  def createOrValidate(spark: SparkSession, path: String, spec: DeltaTableSpec): Unit = {
+    if (!DeltaTables.exists(spark, path)) create(spark, path, spec)
+    if (!storedMatches(spark, path, spec)) throw AnalyticsError.DeltaSchemaMismatch(path)
+  }
+
+  private def create(spark: SparkSession, path: String, spec: DeltaTableSpec): Unit = {
     val location = SparkPhysicalLocation.resolve(path)
-    if (!DeltaTables.exists(spark, path)) {
-      val builder = DeltaTable.createIfNotExists(spark).location(location).addColumns(struct(shape))
-      val _ = (if (raw) builder.property("delta.dataSkippingNumIndexedCols", "0") else builder).execute()
+    val builder = DeltaTable.createIfNotExists(spark).location(location).addColumns(spec.schema)
+    val _ = spec.properties.foldLeft(builder) { case (current, (key, value)) => current.property(key, value) }.execute()
+    // Constraints are added to the empty new table, so no existing row needs validation. A concurrent creator may
+    // have added the same constraint first, which the strict validation that follows accepts.
+    spec.checks.foreach { check =>
+      if (!storedConstraints(spark, path).contains(check.name))
+        try {
+          val _ = spark.sql(
+            s"ALTER TABLE ${DeltaTables.sqlIdentifier(path)} ADD CONSTRAINT ${check.name} CHECK (${check.expression})"
+          )
+        } catch {
+          case error: Exception if !storedConstraints(spark, path).contains(check.name) => throw error
+        }
     }
-    val actual = DeltaTables.read(spark, path).schema
-    if (!matches(actual, shape))
-      throw AnalyticsError.DeltaSchemaMismatch(path)
+  }
+
+  /** Delta stores a constraint as the parser's tokens joined by spaces, so compare without whitespace. */
+  private def normalize(expression: String): String = expression.replaceAll("\\s+", "")
+
+  private def storedConstraints(spark: SparkSession, path: String): Map[String, String] =
+    DeltaLogFactory
+      .system(spark, path)
+      .update()
+      .metadata
+      .configuration
+      .collect {
+        case (key, expression) if key.startsWith(AnalyticsDeltaCatalog.ConstraintPropertyPrefix) =>
+          key.stripPrefix(AnalyticsDeltaCatalog.ConstraintPropertyPrefix) -> normalize(expression)
+      }
+
+  private def storedMatches(spark: SparkSession, path: String, spec: DeltaTableSpec): Boolean = {
+    val metadata = DeltaLogFactory.system(spark, path).update().metadata
+    val columns =
+      metadata.schema.fields.toVector.map(field => (field.name, field.dataType.simpleString, field.nullable))
+    val expectedColumns = spec.columns.map(column => (column.name, column.dataType.simpleString, column.nullable))
+    val constraints = storedConstraints(spark, path)
+    columns == expectedColumns &&
+    constraints == spec.checks.map(check => check.name -> normalize(check.expression)).toMap
   }
 }
