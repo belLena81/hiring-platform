@@ -44,7 +44,9 @@ object BacklogMetrics {
         _ <- meter
           .observableGauge[Double]("hiring.backlog.oldest_pending_age")
           .withUnit("s")
-          .withDescription("Age of the oldest pending durable work item; absent for an empty or unobserved backlog.")
+          .withDescription(
+            "Approximate age of the oldest pending durable work item (first row by availability, not an exact minimum); absent for an empty or unobserved backlog."
+          )
           .createWithCallback(measurement =>
             current.flatMap(
               _.filter(_.fresh).traverse_(o =>

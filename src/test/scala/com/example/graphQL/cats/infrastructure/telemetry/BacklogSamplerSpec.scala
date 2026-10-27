@@ -12,7 +12,7 @@ import io.opentelemetry.api.OpenTelemetry
 import io.opentelemetry.sdk.OpenTelemetrySdk
 import java.time.Instant
 import java.util.Collection
-import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField}
+import com.example.graphQL.cats.service.{Diagnostics, FailureReason, LogEvent, LogField, LogFields}
 import munit.CatsEffectSuite
 import org.typelevel.otel4s.oteljava.OtelJava
 import scala.concurrent.duration.*
@@ -287,11 +287,22 @@ final class BacklogSamplerSpec extends CatsEffectSuite {
       _ <- s.sampleAll
       all <- events.get
     } yield {
-      assertEquals(afterEpisode.map(_._2), List(Map(LogField.SpanName -> "backlogSample.embedding_work.failure")))
+      def fieldsOf(events: List[(LogEvent, Map[LogField, String])]) = events.reverse.map(_._2)
+      assert((afterEpisode ++ all).forall(_._1 == LogEvent.BacklogSampleFailed))
       assertEquals(
-        all.map(_._2.values.toList).flatten.reverse,
-        List("backlogSample.embedding_work.failure", "backlogSample.embedding_work.timeout")
+        fieldsOf(afterEpisode),
+        List(Map(LogField.Worker -> "embedding_work", LogField.Reason -> FailureReason.InternalError.reason))
       )
+      assertEquals(
+        fieldsOf(all),
+        List(
+          Map(LogField.Worker -> "embedding_work", LogField.Reason -> FailureReason.InternalError.reason),
+          Map(LogField.Worker -> "embedding_work", LogField.Reason -> FailureReason.DeadlineExceeded.reason)
+        )
+      )
+      // Only bounded values: never the error message or any identifier.
+      assert(all.forall(_._2.values.forall(v => LogFields.validPublic(LogField.Reason, v) || v == "embedding_work")))
+      assert(all.forall(_._2.values.forall(!_.contains("secret"))))
     })
   }
 }

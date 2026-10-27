@@ -105,14 +105,11 @@ final class MongoOperationalEventOutboxRepository(
     diagnostics: Diagnostics[IO],
     uuidGen: UUIDGen[IO] = UUIDGen[IO]
 ) extends OperationalEventOutboxRepository[IO] {
+  import MongoOperationalEventOutboxRepository.OutboxState
   private val outbox = Mongo4catsCollections.documents(database, MongoCollections.EventOutbox)
   private val subjectFences = Mongo4catsCollections.documents(database, MongoCollections.OutboxSubjectFences)
   private val users = Mongo4catsCollections.documents(database, MongoCollections.Users)
 
-  /** Stored outbox lifecycle values; string forms are the persisted contract. */
-  private enum OutboxState {
-    case Retryable, InFlight, Published, Failed
-  }
   private val inFlight = MongoFilter.eq(MongoFields.State, OutboxState.InFlight.toString)
 
   private def updateMany(
@@ -651,10 +648,15 @@ final class MongoOperationalEventOutboxRepository(
 
 object MongoOperationalEventOutboxRepository {
 
+  /** Stored outbox lifecycle values; string forms are the persisted contract and the single source of the names. */
+  private[mongo] enum OutboxState {
+    case Retryable, InFlight, Published, Failed
+  }
+
   /** The stored states and predicate by which the outbox claim selects work; backlog sampling reuses them. */
   private[mongo] object Claimable {
-    val Retryable = "Retryable"
-    val InFlight = "InFlight"
+    val Retryable: String = OutboxState.Retryable.toString
+    val InFlight: String = OutboxState.InFlight.toString
 
     def retryableDue(now: Instant): MongoFilter = MongoLeaseQueue.readyDue(List(Retryable), now)
     def expiredInFlight(now: Instant): MongoFilter = MongoLeaseQueue.leaseExpired(InFlight, now)
@@ -670,7 +672,7 @@ object MongoOperationalEventOutboxRepository {
   private[mongo] object OldestDue {
     def filter(now: Instant): MongoFilter =
       MongoFilter.and(
-        MongoFilter.eq(MongoFields.State, "Retryable"),
+        MongoFilter.eq(MongoFields.State, Claimable.Retryable),
         MongoFilter.lte(MongoFields.AvailableAt, now.toDate)
       )
     val Sort: org.bson.conversions.Bson = Sorts.ascending(MongoFields.AvailableAt)

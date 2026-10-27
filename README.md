@@ -67,6 +67,8 @@ Services built from this repository run with a read-only root filesystem, an exe
 
 ### Local observability (opt-in)
 
+Runbook, first-run checklist and known limitations: [docs/local-observability.md](docs/local-observability.md).
+
 `compose.observability.yaml` adds an OpenTelemetry Collector, Prometheus, Tempo (traces), Loki (logs), Alloy (log shipper) and Grafana, and points the API at the collector over OTLP/HTTP. Start it with `docker compose -f compose.yaml -f compose.observability.yaml --profile api up -d --build`, then generate traffic with `scripts/generate-local-traffic.sh 120`.
 
 - **Grafana** (`127.0.0.1:3000`, login `admin` with `GRAFANA_ADMIN_PASSWORD`, default `admin`, anonymous access and sign-up off, local only) provisions Prometheus, Tempo and Loki datasources and two dashboards: "Hiring API - RED" (request rate, 5xx ratio, p50/p95/p99, status codes) and "Hiring Backlogs" (embedding-work and outbox pending count, oldest pending age, sample age). Explore → Tempo shows request traces; Explore → Loki with `{service_name="api"}` shows the API container logs.

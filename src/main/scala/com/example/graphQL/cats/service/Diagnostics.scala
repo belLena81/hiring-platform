@@ -71,6 +71,13 @@ enum LogEvent(val category: String, val component: String, val message: String, 
         "Dependency circuit breaker is disabled by configuration",
         LogLevel.Warn
       )
+  case BacklogSampleFailed
+      extends LogEvent(
+        "BACKLOG_SAMPLE_FAILED",
+        "TELEMETRY",
+        "A durable backlog sample failed; its metrics are unobserved",
+        LogLevel.Warn
+      )
   case LocalUnmasked
       extends LogEvent("LOCAL_UNMASKED", "SECURITY", "Diagnostic metadata masking is disabled", LogLevel.Warn)
 

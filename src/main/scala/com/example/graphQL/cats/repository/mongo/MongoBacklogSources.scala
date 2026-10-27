@@ -24,9 +24,11 @@ object MongoBacklogSources {
   val MaxCounted: Int = 10000
 
   /** One bounded oldest-row read over a part of the claimable set. */
-  private final case class AgeRead(filter: Instant => MongoFilter, timestampField: String)
+  private[mongo] final case class AgeRead(filter: Instant => MongoFilter, timestampField: String)
 
-  private val ByAvailability = Sorts.ascending(MongoFields.AvailableAt)
+  private[mongo] val ByAvailability = Sorts.ascending(MongoFields.AvailableAt)
+
+  private[mongo] def ageProjection(read: AgeRead) = Projections.include(read.timestampField)
 
   private val EmbeddingReady = List(EmbeddingWorkState.Ready, EmbeddingWorkState.Retry).map(_.toString)
   private val EmbeddingProcessing = EmbeddingWorkState.Processing.toString
@@ -41,6 +43,16 @@ object MongoBacklogSources {
   private[mongo] def outboxClaimable(now: Instant): MongoFilter =
     MongoOperationalEventOutboxRepository.Claimable.filter(now)
 
+  private[mongo] val embeddingAgeReads: List[AgeRead] = List(
+    AgeRead(MongoLeaseQueue.readyDue(EmbeddingReady, _), MongoFields.AvailableAt),
+    AgeRead(MongoLeaseQueue.leaseExpired(EmbeddingProcessing, _), MongoFields.AvailableAt)
+  )
+
+  private[mongo] val outboxAgeReads: List[AgeRead] = List(
+    AgeRead(MongoOperationalEventOutboxRepository.Claimable.retryableDue, MongoFields.OccurredAt),
+    AgeRead(MongoOperationalEventOutboxRepository.Claimable.expiredInFlight, MongoFields.OccurredAt)
+  )
+
   /** Embedding age runs from when the oldest claimable row became available; a retry resets `availableAt`. */
   def embeddingWork(database: MongoDatabase[IO], cap: Int = MaxCounted): BacklogSource =
     queue(
@@ -48,10 +60,7 @@ object MongoBacklogSources {
       MongoCollections.EmbeddingWork,
       cap,
       embeddingClaimable,
-      List(
-        AgeRead(MongoLeaseQueue.readyDue(EmbeddingReady, _), MongoFields.AvailableAt),
-        AgeRead(MongoLeaseQueue.leaseExpired(EmbeddingProcessing, _), MongoFields.AvailableAt)
-      )
+      embeddingAgeReads
     )
 
   /** Outbox age runs from when the oldest claimable event occurred, matching the readiness measurement. */
@@ -61,10 +70,7 @@ object MongoBacklogSources {
       MongoCollections.EventOutbox,
       cap,
       outboxClaimable,
-      List(
-        AgeRead(MongoOperationalEventOutboxRepository.Claimable.retryableDue, MongoFields.OccurredAt),
-        AgeRead(MongoOperationalEventOutboxRepository.Claimable.expiredInFlight, MongoFields.OccurredAt)
-      )
+      outboxAgeReads
     )
 
   private[mongo] def countOptions(cap: Int): CountOptions =
@@ -88,7 +94,7 @@ object MongoBacklogSources {
             collection,
             Some(read.filter(now)),
             ByAvailability,
-            Projections.include(read.timestampField),
+            ageProjection(read),
             read.timestampField,
             now
           )

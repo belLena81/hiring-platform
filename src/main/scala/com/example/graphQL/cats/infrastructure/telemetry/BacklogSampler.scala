@@ -2,7 +2,7 @@ package com.example.graphQL.cats.infrastructure.telemetry
 
 import cats.effect.{Clock, IO, Ref, Resource}
 import cats.syntax.all.*
-import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField}
+import com.example.graphQL.cats.service.{Diagnostics, FailureReason, LogEvent, LogField}
 import com.example.graphQL.cats.service.Diagnostics.*
 import scala.concurrent.TimeoutException
 import scala.concurrent.duration.FiniteDuration
@@ -47,19 +47,21 @@ final class BacklogSampler private (
       )
     } yield ()
 
-  /** One bounded event when a capability becomes unobserved; repeated failures stay silent until it recovers. */
+  /** One bounded event (capability and reason only, never error text) when a capability becomes unobserved; repeated
+    * failures stay silent until it recovers.
+    */
   private def reportFailure(capability: BacklogCapability, error: Throwable): IO[Unit] = {
     val reason = error match {
-      case _: TimeoutException => "timeout"
-      case _                   => "failure"
+      case _: TimeoutException => FailureReason.DeadlineExceeded
+      case _                   => FailureReason.InternalError
     }
     failing
       .modify(current => (current + capability, !current.contains(capability)))
       .flatMap(first =>
         diagnostics
           .emit(
-            LogEvent.MongoRepositoryFailed,
-            fields = Map(LogField.SpanName -> s"backlogSample.${capability.label}.$reason")
+            LogEvent.BacklogSampleFailed,
+            fields = Map(LogField.Worker -> capability.label, LogField.Reason -> reason.reason)
           )
           .whenA(first)
       )

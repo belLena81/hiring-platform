@@ -1,6 +1,7 @@
 package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.IO
+import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.*
 import com.example.graphQL.cats.infrastructure.telemetry.BacklogSnapshot
@@ -91,6 +92,68 @@ final class MongoBacklogSourcesIntegrationSpec extends MongoIntegrationSuite {
     result.fold(error => fail(error.toString), identity)
 
   private def key(n: Int) = EmbeddingWorkKey(EmbeddingWorkKind.Job, s"backlog-$n")
+
+  /** The plan of one `limit(1)` age read: an index scan on the named index, no collection scan, one row returned. */
+  private def explainAgeRead(
+      fixture: MongoAccessEvaluationSupport.Fixture,
+      collection: String,
+      read: MongoBacklogSources.AgeRead,
+      index: String
+  ): IO[String] =
+    MongoAccessEvaluationSupport
+      .command(
+        fixture.database,
+        new Document(
+          "explain",
+          new Document("find", collection)
+            .append("filter", bson(read.filter(now).bson))
+            .append("sort", bson(MongoBacklogSources.ByAvailability))
+            .append("projection", bson(MongoBacklogSources.ageProjection(read)))
+            .append("limit", 1)
+            .append("maxTimeMS", MongoPendingWorkAge.MaxTime.toMillis.toInt)
+        ).append("verbosity", "executionStats")
+      )
+      .map { explained =>
+        val plan = explained.toJson
+        val stats = explained.get("executionStats", classOf[Document])
+        println(
+          s"backlog age read plan collection=$collection filter=${read.filter(now).bson} keys=${stats.get("totalKeysExamined")} docs=${stats.get("totalDocsExamined")} sort=${plan.contains("\"SORT\"")}"
+        )
+        assert(plan.contains("IXSCAN"), clue(plan))
+        assert(plan.contains(index), clue(plan))
+        assert(!plan.contains("COLLSCAN"), clue(plan))
+        plan
+      }
+
+  test("each limit(1) age read is an index scan on the queue claim index, for both capabilities and both parts") {
+    mongoResource.use { fixture =>
+      val owner = UserId(UUID.randomUUID())
+      val work = new MongoEmbeddingWorkRepository(fixture.database, Diagnostics.noop[IO])
+      for {
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
+        // A populated queue, so the plan is not the trivial empty-collection plan.
+        _ <- (1 to 60).toList.traverse_(i => work.enqueue(key(i), now.minusSeconds(i.toLong)).value.map(unwrap))
+        _ <- insertOutbox(
+          fixture,
+          List.tabulate(60)(i =>
+            outboxEntry(
+              owner,
+              now.minusSeconds(i.toLong + 1),
+              now.minusSeconds(i.toLong + 1),
+              state = if (i % 3 == 0) "InFlight" else "Retryable",
+              leaseUntil = Option.when(i % 3 == 0)(now.minusSeconds(5))
+            )
+          )
+        )
+        _ <- MongoBacklogSources.embeddingAgeReads.traverse_(
+          explainAgeRead(fixture, MongoCollections.EmbeddingWork, _, MongoIndexNames.EmbeddingWorkAvailable)
+        )
+        _ <- MongoBacklogSources.outboxAgeReads.traverse_(
+          explainAgeRead(fixture, MongoCollections.EventOutbox, _, MongoIndexNames.EventOutboxClaim)
+        )
+      } yield ()
+    }
+  }
 
   private val expiredAt = now.plusSeconds(120)
 
