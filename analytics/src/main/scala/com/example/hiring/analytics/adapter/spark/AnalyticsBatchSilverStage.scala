@@ -64,17 +64,14 @@ private[analytics] final class AnalyticsBatchSilverStage[F[_]: Async](
       markerTokens: DataFrame,
       activeMarkersPresent: Boolean
   ): F[QuarantineEvidence] = {
-    val parsed = bronze.frame
     for {
+      parsed <- blocking(OperationalEventTransforms.analyzed(bronze.frame, pseudonymizer))
       valid <- blocking(OperationalEventTransforms.validEvents(parsed))
-      pseudonymizedValid <- blocking(AnalyticsSubjectPrivacy.withSubjectToken(valid, pseudonymizer))
-      safeValid <- blocking.either(
-        AnalyticsSubjectPrivacy.excludeActiveDeletionMarkers(pseudonymizedValid, markerTokens)
-      )
+      safeValid <- blocking.either(AnalyticsSubjectPrivacy.excludeActiveDeletionMarkers(valid, markerTokens))
       malformed <- blocking(
         deltaWriter.withExpiry(
-          AnalyticsSubjectPrivacy
-            .withSubjectToken(OperationalEventTransforms.malformedEvents(parsed), pseudonymizer)
+          OperationalEventTransforms
+            .malformedEvents(parsed)
             .withColumn("quarantineId", quarantineId())
             .withColumn("quarantineReason", lit("INVALID_OPERATIONAL_EVENT_ENVELOPE")),
           bronze.startedAt,
@@ -144,8 +141,8 @@ private[analytics] final class AnalyticsBatchSilverStage[F[_]: Async](
       suppressedRecords = bronze.validRecords - conflictCounts.safeValidRecords
       conflictQuarantine <- blocking(
         deltaWriter.withExpiry(
-          AnalyticsSubjectPrivacy
-            .withSubjectToken(safeValid.join(conflicts, Seq(Columns.EventId), "inner"), pseudonymizer)
+          safeValid
+            .join(conflicts, Seq(Columns.EventId), "inner")
             .withColumn("quarantineId", quarantineId())
             .withColumn("quarantineReason", lit("CONFLICTING_EVENT_ID")),
           bronze.startedAt,
@@ -155,7 +152,7 @@ private[analytics] final class AnalyticsBatchSilverStage[F[_]: Async](
       quarantine <- blocking(
         malformedToPersist
           .unionByName(conflictQuarantine)
-          .withColumn("payloadHash", sha2(col(Columns.RawValue), 256))
+          .withColumn("payloadHash", col(Columns.EventFingerprint))
           .drop(Columns.RawValue, "actorId", "payload", Columns.SubjectToken)
           .select(
             Columns.Topic,

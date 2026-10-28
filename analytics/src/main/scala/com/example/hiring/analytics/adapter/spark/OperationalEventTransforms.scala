@@ -120,9 +120,8 @@ object OperationalEventTransforms {
     * normalized fields Silver uses, and subject tokens. The fingerprint equals the one Silver and late facts derive.
     */
   def bronze(tokenized: DataFrame): DataFrame =
-    tokenized
+    withFingerprint(tokenized)
       .dropDuplicates(Columns.Topic, Columns.Partition, Columns.Offset)
-      .withColumn(Columns.EventFingerprint, sha2(col(Columns.RawValue), 256))
       .withColumn(Columns.ApplicationId, lower(col(Columns.PayloadApplicationId)))
       .withColumn(Columns.JobId, lower(col(Columns.PayloadJobId)))
       .withColumn(Columns.NewStatus, col(Columns.PayloadNewStatus))
@@ -131,13 +130,80 @@ object OperationalEventTransforms {
         AnalyticsTableSchemas.bronze.map(_._1).filterNot(AnalyticsTableSchemas.expiry.map(_._1).contains).map(col)*
       )
 
+  /** The persisted parsed frame of one batch: [[parseKafkaRecords]] output plus `isValidEvent`, `eventFingerprint`,
+    * `subjectToken` and `subjectTokens`, each computed once. Every consumer reads these columns instead of recomputing
+    * them. A column that is already present is kept, so the transform is idempotent.
+    */
+  def analyzed(parsed: DataFrame, pseudonymizer: SubjectPseudonymizer): DataFrame =
+    AnalyticsSubjectPrivacy.ensureSubjectTokens(withFingerprint(withValidity(parsed)), pseudonymizer)
+
   def validEvents(parsed: DataFrame): DataFrame =
-    parsed.filter(isValidEvent)
+    if (parsed.columns.contains(Columns.IsValidEvent)) parsed.filter(col(Columns.IsValidEvent))
+    else withValidity(parsed).filter(col(Columns.IsValidEvent)).drop(Columns.IsValidEvent)
 
   def malformedEvents(parsed: DataFrame): DataFrame =
-    parsed.filter(!isValidEvent)
+    if (parsed.columns.contains(Columns.IsValidEvent)) parsed.filter(!col(Columns.IsValidEvent))
+    else withValidity(parsed).filter(!col(Columns.IsValidEvent)).drop(Columns.IsValidEvent)
 
-  private[analytics] def isValidEvent: Column =
+  /** The SHA-256 of the raw envelope. It is computed once into `eventFingerprint` and reused by every consumer. */
+  private[analytics] def withFingerprint(frame: DataFrame): DataFrame =
+    if (frame.columns.contains(Columns.EventFingerprint)) frame
+    else frame.withColumn(Columns.EventFingerprint, sha2(col(Columns.RawValue), 256))
+
+  // Parse-once intermediates. The raw envelope is parsed into a VARIANT once, and each raw-JSON extraction or exact
+  // key-set check that has no VARIANT equivalent runs once; every check below reads these columns. They are dropped
+  // again so the persisted frame carries only `isValidEvent`.
+  private val VariantColumn = "_hiringVariant"
+  private val EnvelopeKeysColumn = "_hiringEnvelopeKeys"
+  private val OccurredAtTextColumn = "_hiringOccurredAtText"
+  private val PayloadJsonColumn = "_hiringPayloadJson"
+  private val PayloadKeysColumn = "_hiringPayloadKeys"
+  private val JobJsonColumn = "_hiringJobJson"
+  private val JobKeysColumn = "_hiringJobKeys"
+  private val ResultsJsonColumn = "_hiringResultsJson"
+  private val PreviousStatusAbsentColumn = "_hiringPreviousStatusAbsent"
+  private val SearchKindAbsentColumn = "_hiringSearchKindAbsent"
+  private val SearchIdAbsentColumn = "_hiringSearchIdAbsent"
+  private val RankAbsentColumn = "_hiringRankAbsent"
+  private val ValidityHelpers = Vector(
+    VariantColumn,
+    EnvelopeKeysColumn,
+    OccurredAtTextColumn,
+    PayloadJsonColumn,
+    PayloadKeysColumn,
+    JobJsonColumn,
+    JobKeysColumn,
+    ResultsJsonColumn,
+    PreviousStatusAbsentColumn,
+    SearchKindAbsentColumn,
+    SearchIdAbsentColumn,
+    RankAbsentColumn
+  )
+
+  private def sortedKeys(json: Column): Column = array_sort(json_object_keys(json))
+
+  private[analytics] def withValidity(frame: DataFrame): DataFrame =
+    if (frame.columns.contains(Columns.IsValidEvent)) frame
+    else {
+      val raw = col(Columns.RawValue)
+      frame
+        .withColumn(VariantColumn, try_parse_json(raw))
+        .withColumn(EnvelopeKeysColumn, sortedKeys(raw))
+        .withColumn(OccurredAtTextColumn, get_json_object(raw, "$.occurredAt"))
+        .withColumn(PayloadJsonColumn, get_json_object(raw, "$.payload"))
+        .withColumn(PayloadKeysColumn, sortedKeys(col(PayloadJsonColumn)))
+        .withColumn(JobJsonColumn, get_json_object(col(PayloadJsonColumn), "$.job"))
+        .withColumn(JobKeysColumn, sortedKeys(col(JobJsonColumn)))
+        .withColumn(ResultsJsonColumn, get_json_object(col(PayloadJsonColumn), "$.results"))
+        .withColumn(PreviousStatusAbsentColumn, get_json_object(col(PayloadJsonColumn), "$.previousStatus").isNull)
+        .withColumn(SearchKindAbsentColumn, get_json_object(col(PayloadJsonColumn), "$.searchKind").isNull)
+        .withColumn(SearchIdAbsentColumn, get_json_object(col(PayloadJsonColumn), "$.searchId").isNull)
+        .withColumn(RankAbsentColumn, get_json_object(col(PayloadJsonColumn), "$.rank").isNull)
+        .withColumn(Columns.IsValidEvent, validityExpression)
+        .drop(ValidityHelpers*)
+    }
+
+  private def validityExpression: Column =
     coalesce(
       requiredEnvelopeFields &&
         col(Columns.EventType).isin(EventTypes*) &&
@@ -154,16 +220,16 @@ object OperationalEventTransforms {
 
   private def payload(name: String): Column = col(s"payload.$name")
   private def uuid(value: Column): Column = value.rlike(UuidPattern)
-  private def keys(json: Column, names: String*): Column =
-    array_sort(json_object_keys(json)) === array_sort(array(names.map(lit)*))
-  private def payloadKeys(names: String*): Column = keys(get_json_object(col(Columns.RawValue), "$.payload"), names*)
+  private def expectedKeys(names: String*): Column = array_sort(array(names.map(lit)*))
+  private def keys(json: Column, names: String*): Column = sortedKeys(json) === expectedKeys(names*)
+  private def payloadKeys(names: String*): Column = col(PayloadKeysColumn) === expectedKeys(names*)
   private def aggregate(kind: String, id: Column): Column =
     col(Columns.AggregateType) === lit(kind) && uuid(id) && col(Columns.AggregateId) === lower(id)
   private def rank(value: Column): Column = value.between(1, 100)
   private def numericVariant(value: Column): Column =
     schema_of_variant(value).rlike("^(BIGINT|DOUBLE|DECIMAL).*")
   private def numericPayloadField(path: String): Column =
-    numericVariant(try_variant_get(try_parse_json(col(Columns.RawValue)), path, "variant"))
+    numericVariant(try_variant_get(col(VariantColumn), path, "variant"))
   private def applicationIds: Column =
     uuid(payload("applicationId")) && uuid(payload("candidateId")) && uuid(payload("jobId"))
 
@@ -177,12 +243,7 @@ object OperationalEventTransforms {
       AnalyticsEventType.JobUpdated.wire,
       AnalyticsEventType.JobClosed.wire
     ) &&
-      payloadKeys("job") && keys(
-        get_json_object(col(Columns.RawValue), "$.payload.job"),
-        "jobId",
-        "skills",
-        "status"
-      ) &&
+      payloadKeys("job") && (col(JobKeysColumn) === expectedKeys("jobId", "skills", "status")) &&
       aggregate("Job", job.getField("jobId")) && job.getField("status").isin("Open", "Closed") &&
       (kind =!= lit(AnalyticsEventType.JobClosed.wire) || job.getField("status") === lit("Closed")) &&
       skills.isNotNull && size(skills) <= lit(100) && size(array_distinct(skills)) === size(skills) &&
@@ -194,7 +255,7 @@ object OperationalEventTransforms {
           ) <= lit(512)
       ) &&
       forall(
-        try_variant_get(try_parse_json(col(Columns.RawValue)), "$.payload.job.skills", "array<variant>"),
+        try_variant_get(col(VariantColumn), "$.payload.job.skills", "array<variant>"),
         skill => schema_of_variant(skill) === lit("STRING")
       )
     val created = kind === lit(AnalyticsEventType.ApplicationCreated.wire) &&
@@ -203,17 +264,16 @@ object OperationalEventTransforms {
     val changed = kind === lit(AnalyticsEventType.ApplicationStatusChanged.wire) &&
       payloadKeys("applicationId", "candidateId", "jobId", "previousStatus", "newStatus") && applicationIds &&
       aggregate("Application", payload("applicationId")) && payload("newStatus").isin(Statuses*) &&
-      ((payload("previousStatus").isNull && get_json_object(
-        col(Columns.RawValue),
-        "$.payload.previousStatus"
-      ).isNull) || payload("previousStatus").isin(Statuses*))
+      ((payload("previousStatus").isNull && col(PreviousStatusAbsentColumn)) || payload(
+        "previousStatus"
+      ).isin(Statuses*))
     val hired = kind === lit(AnalyticsEventType.CandidateHired.wire) &&
       payloadKeys("applicationId", "candidateId", "jobId", "status") && applicationIds &&
       aggregate("Application", payload("applicationId")) && payload("status") === lit("Hired")
     val results = payload("results")
     val resultIds = transform(results, result => result.getField("resultId"))
     val resultRanks = transform(results, result => result.getField("rank"))
-    val rawResults = from_json(get_json_object(col(Columns.RawValue), "$.payload.results"), ArrayType(StringType))
+    val rawResults = from_json(col(ResultsJsonColumn), ArrayType(StringType))
     val searched =
       kind === lit(AnalyticsEventType.SearchPerformed.wire) && payloadKeys("searchId", "searchKind", "results") &&
         aggregate("Search", payload("searchId")) && payload("searchKind").isin(SearchKinds*) &&
@@ -230,7 +290,7 @@ object OperationalEventTransforms {
         ) &&
         forall(rawResults, result => keys(result, "resultId", "rank", "score")) &&
         forall(
-          try_variant_get(try_parse_json(col(Columns.RawValue)), "$.payload.results", "array<variant>"),
+          try_variant_get(col(VariantColumn), "$.payload.results", "array<variant>"),
           result =>
             numericVariant(try_variant_get(result, "$.rank", "variant")) && numericVariant(
               try_variant_get(result, "$.score", "variant")
@@ -239,9 +299,9 @@ object OperationalEventTransforms {
     val viewed =
       kind === lit(AnalyticsEventType.JobViewed.wire) && payloadKeys("searchId", "resultId", "searchKind", "rank") &&
         aggregate("Search", payload("resultId")) && payload("searchKind").isNull &&
-        get_json_object(col(Columns.RawValue), "$.payload.searchKind").isNull &&
-        (!payload("searchId").isNull || get_json_object(col(Columns.RawValue), "$.payload.searchId").isNull) &&
-        (!payload("rank").isNull || get_json_object(col(Columns.RawValue), "$.payload.rank").isNull) &&
+        col(SearchKindAbsentColumn) &&
+        (!payload("searchId").isNull || col(SearchIdAbsentColumn)) &&
+        (!payload("rank").isNull || col(RankAbsentColumn)) &&
         payload("searchId").isNull === payload("rank").isNull &&
         (payload("searchId").isNull || uuid(payload("searchId"))) && (payload("rank").isNull || (rank(
           payload("rank")
@@ -260,14 +320,13 @@ object OperationalEventTransforms {
       payload("searchKind").isin(
         SearchKinds*
       ) && // Read from the raw payload so the retained payload schema is unchanged.
-      get_json_object(col(Columns.RawValue), "$.payload").rlike(
+      col(PayloadJsonColumn).rlike(
         "\"failure\"\\s*:\\s*\"[A-Za-z0-9_.$]{1,100}\"[,}]"
       )
-    get_json_object(col(Columns.RawValue), "$.occurredAt").rlike(InstantPattern) &&
+    col(OccurredAtTextColumn).rlike(InstantPattern) &&
     is_valid_utf8(col(Columns.RawValue)) && uuid(col(Columns.EventId)) && uuid(col(Columns.ActorId)) &&
     length(encode(col(Columns.RawValue), "UTF-8")) <= lit(MaxEnvelopeBytes) &&
-    keys(
-      col(Columns.RawValue),
+    (col(EnvelopeKeysColumn) === expectedKeys(
       Columns.EventId,
       "eventType",
       "occurredAt",
@@ -275,14 +334,13 @@ object OperationalEventTransforms {
       "aggregateId",
       "actorId",
       "payload"
-    ) &&
+    )) &&
     (jobFact || created || changed || hired || searched || viewed || clicked || recordingFailed)
   }
 
   /** Event IDs are idempotency keys. Same bytes are duplicates; different bytes are conflicts. */
   def conflictingEventIds(valid: DataFrame): DataFrame =
-    valid
-      .withColumn(Columns.EventFingerprint, sha2(col(Columns.RawValue), 256))
+    withFingerprint(valid)
       .groupBy(Columns.EventId)
       .agg(countDistinct(col(Columns.EventFingerprint)).as(Columns.DistinctPayloads))
       .filter(col(Columns.DistinctPayloads) > lit(1))
@@ -297,18 +355,19 @@ object OperationalEventTransforms {
       activeMarkerTokens: DataFrame
   ): Either[AnalyticsError, DataFrame] = {
     val conflicts = conflictingEventIds(valid)
+    // Frames from the parsed pipeline already carry their tokens; only a frame without them is tokenized here.
     val privacySafe = AnalyticsSubjectPrivacy.excludeActiveDeletionMarkers(
-      AnalyticsSubjectPrivacy.withSubjectToken(valid.join(conflicts, Seq(Columns.EventId), "left_anti"), pseudonymizer),
+      AnalyticsSubjectPrivacy
+        .ensureSubjectTokens(valid.join(conflicts, Seq(Columns.EventId), "left_anti"), pseudonymizer),
       activeMarkerTokens
     )
     privacySafe.flatMap { safe =>
-      val selected = safe
+      val selected = withFingerprint(safe)
         .dropDuplicates(Columns.EventId)
         .withColumn(Columns.ApplicationId, lower(col(Columns.PayloadApplicationId)))
         .withColumn(Columns.JobId, lower(col(Columns.PayloadJobId)))
         .withColumn(Columns.NewStatus, col(Columns.PayloadNewStatus))
         .withColumn(Columns.JobSkills, col(Columns.PayloadJobSkills))
-        .withColumn(Columns.EventFingerprint, sha2(col(Columns.RawValue), 256))
         // Silver is a derived, 30-day analytics dataset: it does not retain raw envelopes,
         // candidate identifiers, or actor identifiers.
         .select(
@@ -346,9 +405,8 @@ object OperationalEventTransforms {
 
   /** Event IDs whose raw payload fingerprint differs from a previously stored fingerprint for the same event ID. */
   def historicalFingerprintConflicts(incoming: DataFrame, storedFingerprints: DataFrame): DataFrame =
-    incoming
-      .select(Columns.EventId, Columns.RawValue)
-      .withColumn("incomingFingerprint", sha2(col(Columns.RawValue), 256))
+    withFingerprint(incoming)
+      .select(col(Columns.EventId), col(Columns.EventFingerprint).as("incomingFingerprint"))
       .join(
         storedFingerprints.withColumnRenamed(Columns.EventFingerprint, "storedFingerprint"),
         Seq(Columns.EventId),

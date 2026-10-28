@@ -43,7 +43,11 @@ private[analytics] final class AnalyticsBatchIngestionStage[F[_]: Async](
           raw <- source.read(spark, manifest)
           rawSchema <- blocking(raw.schema)
           _ <- KafkaRecordColumns.validate(rawSchema)
-          parsed <- blocking(OperationalEventTransforms.parseKafkaRecords(raw).persist())
+          parsed <- blocking(
+            OperationalEventTransforms
+              .analyzed(OperationalEventTransforms.parseKafkaRecords(raw), pseudonymizer)
+              .persist()
+          )
         } yield parsed
       )(parsed => blocking(parsed.unpersist(blocking = true)).void)
       .evalMap { parsed =>
@@ -62,6 +66,9 @@ private[analytics] final class AnalyticsBatchIngestionStage[F[_]: Async](
 
   /** Persists the shared Bronze representation of an already parsed Kafka frame.
     *
+    * The frame should be [[OperationalEventTransforms.analyzed]] and persisted by its owner, so validity, fingerprint
+    * and subject tokens are computed once; a frame without those columns gets them added here, without a cache.
+    *
     * Streaming callers supply their stable observation time and no batch manifest callback. This method deliberately
     * consumes the provided frame as-is: it neither reads a source nor derives Kafka offset spans.
     */
@@ -74,10 +81,10 @@ private[analytics] final class AnalyticsBatchIngestionStage[F[_]: Async](
   ): F[AnalyticsBronzeInput] =
     for {
       _ <- configureTables
-      valid <- blocking(OperationalEventTransforms.validEvents(parsed))
-      pseudonymized <- blocking(AnalyticsSubjectPrivacy.withSubjectToken(valid, pseudonymizer))
+      analyzed <- blocking(OperationalEventTransforms.analyzed(parsed, pseudonymizer))
+      valid <- blocking(OperationalEventTransforms.validEvents(analyzed))
       safeToPersist <- blocking.either(
-        AnalyticsSubjectPrivacy.excludeActiveDeletionMarkers(pseudonymized, markerTokens)
+        AnalyticsSubjectPrivacy.excludeActiveDeletionMarkers(valid, markerTokens)
       )
       observedAt <- startedAt
       incoming <- blocking(
@@ -88,11 +95,11 @@ private[analytics] final class AnalyticsBatchIngestionStage[F[_]: Async](
         )
       )
       counts <- blocking {
-        val row = parsed
+        val row = analyzed
           .agg(
             count(lit(1)).as("recordCount"),
-            count(when(OperationalEventTransforms.isValidEvent, lit(1))).as("validCount"),
-            count(when(!OperationalEventTransforms.isValidEvent, lit(1))).as("malformedCount")
+            count(when(col(Columns.IsValidEvent), lit(1))).as("validCount"),
+            count(when(!col(Columns.IsValidEvent), lit(1))).as("malformedCount")
           )
           .head()
         (row.getLong(0), row.getLong(1), row.getLong(2))
@@ -103,7 +110,7 @@ private[analytics] final class AnalyticsBatchIngestionStage[F[_]: Async](
         paths.bronze,
         "target.topic = source.topic AND target.partition = source.partition AND target.offset = source.offset"
       )
-    } yield AnalyticsBronzeInput(parsed, observedAt, counts._1, counts._2, counts._3)
+    } yield AnalyticsBronzeInput(analyzed, observedAt, counts._1, counts._2, counts._3)
 
   private def validateRunIdentity(spark: SparkSession, manifest: AnalyticsRunManifest): F[Unit] = blocking.either {
     if (DeltaTables.exists(spark, paths.manifests)) {

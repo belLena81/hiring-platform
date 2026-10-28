@@ -61,8 +61,8 @@ private[analytics] final class AnalyticsLateFactStage[F[_]: Async](
     ) Left(AnalyticsError.InvalidLateFactSchema("required fields have incompatible types"))
     else {
       AnalyticsSubjectPrivacy.excludeActiveDeletionMarkers(events, markerTokens).map { safe =>
-        safe
-          .withColumn(Columns.EventFingerprint, sha2(col(Columns.RawValue), 256))
+        OperationalEventTransforms
+          .withFingerprint(safe)
           .withColumn(Columns.ApplicationId, lower(col(Columns.PayloadApplicationId)))
           .withColumn(Columns.JobId, lower(col(Columns.PayloadJobId)))
           .withColumn(Columns.NewStatus, col(Columns.PayloadNewStatus))

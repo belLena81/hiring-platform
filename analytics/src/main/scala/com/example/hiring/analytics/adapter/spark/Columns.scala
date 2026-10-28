@@ -44,6 +44,7 @@ private[analytics] object Columns {
   val KeyId = "keyId"
   val Verifier = "verifier"
   val EventFingerprint = "eventFingerprint"
+  val IsValidEvent = "isValidEvent"
   val AdmissionReason = "admissionReason"
   val IngestedAt = "ingestedAt"
   val ExpiresAt = "expiresAt"

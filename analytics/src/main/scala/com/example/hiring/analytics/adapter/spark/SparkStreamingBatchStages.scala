@@ -29,9 +29,15 @@ private[analytics] object SparkStreamingBatchStages {
     * only the fingerprint, so the incoming in-memory envelope is hashed and compared with it.
     */
   private[analytics] def coordinateConflicts(incoming: DataFrame, storedBronze: DataFrame): DataFrame =
-    incoming
-      .select(Columns.EventId, Columns.Topic, Columns.Partition, Columns.Offset, Columns.RawValue)
-      .withColumn("incomingFingerprint", sha2(col(Columns.RawValue), 256))
+    OperationalEventTransforms
+      .withFingerprint(incoming)
+      .select(
+        col(Columns.EventId),
+        col(Columns.Topic),
+        col(Columns.Partition),
+        col(Columns.Offset),
+        col(Columns.EventFingerprint).as("incomingFingerprint")
+      )
       .join(
         storedBronze
           .select(Columns.Topic, Columns.Partition, Columns.Offset, Columns.EventFingerprint)
@@ -118,9 +124,11 @@ private[analytics] object SparkStreamingBatchStages {
       authorizePublication: F[Unit]
   ): Resource[F, StreamingBatchStages[F]] =
     Resource
-      .make(execution(parsedEvents.persist(StorageLevel.MEMORY_AND_DISK)))(frame =>
-        execution(frame.unpersist(blocking = true)).void
-      )
+      .make(
+        execution(
+          OperationalEventTransforms.analyzed(parsedEvents, pseudonymizer).persist(StorageLevel.MEMORY_AND_DISK)
+        )
+      )(frame => execution(frame.unpersist(blocking = true)).void)
       .map(frame =>
         new LiveSparkStreamingBatchStages(
           spark,
@@ -303,7 +311,7 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
     Resource
       .eval(for {
         valid <- execution(OperationalEventTransforms.validEvents(parsedEvents))
-        tokenized <- execution(AnalyticsSubjectPrivacy.withSubjectToken(valid, pseudonymizer))
+        tokenized <- execution(AnalyticsSubjectPrivacy.ensureSubjectTokens(valid, pseudonymizer))
         safe <- execution.either(AnalyticsSubjectPrivacy.excludeActiveDeletionMarkers(tokenized, markerFrame))
       } yield (tokenized, safe))
       .flatMap { case (tokenized, safe) =>
@@ -341,7 +349,7 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
 
   private def measureAdmissionFacts(facts: AdmissionFacts, eventTimeCategories: => DataFrame): F[AdmissionFacts] =
     execution {
-      val malformed = parsedEvents.filter(!OperationalEventTransforms.isValidEvent)
+      val malformed = OperationalEventTransforms.malformedEvents(parsedEvents)
       val conflicts = facts.safeValidEvents
         .select(Columns.EventId)
         .join(facts.conflicts, Seq(Columns.EventId), "inner")
