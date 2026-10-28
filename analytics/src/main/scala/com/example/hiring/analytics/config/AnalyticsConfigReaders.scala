@@ -99,10 +99,12 @@ private[analytics] object AnalyticsConfigReaders {
 
   given ConfigReader[AnalyticsRetentionSettings] =
     ConfigReader
-      .forProduct10(
+      .forProduct12(
         "bronze-days",
         "quarantine-days",
         "silver-days",
+        "stage-times-terminal-days",
+        "stage-times-open-days",
         "published-snapshot-days",
         "deletion-marker-days",
         "delta-vacuum-safety",
@@ -115,6 +117,8 @@ private[analytics] object AnalyticsConfigReaders {
             bronzeDays: AnalyticsPositiveInt,
             quarantineDays: AnalyticsPositiveInt,
             silverDays: AnalyticsPositiveInt,
+            stageTimesTerminalDays: StageTimesRetentionDays,
+            stageTimesOpenDays: StageTimesRetentionDays,
             publishedSnapshotDays: AnalyticsPositiveInt,
             deletionMarkerDays: AnalyticsPositiveInt,
             deltaVacuumSafety: AnalyticsPositiveDuration,
@@ -127,6 +131,8 @@ private[analytics] object AnalyticsConfigReaders {
             bronzeDays,
             quarantineDays,
             silverDays,
+            stageTimesTerminalDays,
+            stageTimesOpenDays,
             publishedSnapshotDays,
             deletionMarkerDays,
             deltaVacuumSafety,

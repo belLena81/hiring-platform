@@ -849,6 +849,19 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
           .asJava
       ),
       Updates.set(
+        "stageDurations",
+        report.stageDurations
+          .map(row =>
+            new Document("metric", row.metric.wire)
+              .append("p50Hours", row.p50Hours)
+              .append("p75Hours", row.p75Hours)
+              .append("p90Hours", row.p90Hours)
+              .append("p95Hours", row.p95Hours)
+              .append("eligibleCount", row.eligibleCount)
+          )
+          .asJava
+      ),
+      Updates.set(
         "skillPostingActivity",
         report.skillPostingActivity
           .map(row =>

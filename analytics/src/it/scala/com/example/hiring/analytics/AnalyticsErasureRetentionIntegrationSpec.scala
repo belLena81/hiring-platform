@@ -75,13 +75,22 @@ final class AnalyticsErasureRetentionIntegrationSpec extends SharedRecoveryRunti
     for {
       frame <- timedFrame(harness, 0L, observed)
       _ <- processAt(harness, frame, 0L, observed)
+      applications <- timedFrame(harness, 1L, observed, eventType = "APPLICATION_CREATED")
+      _ <- processAt(harness, applications, 1L, observed)
     } yield ()
 
   private def exists(file: String): Boolean =
     if (file.regionMatches(true, 0, "file:", 0, 5)) Files.exists(Path.of(new java.net.URI(file)))
     else Files.exists(Path.of(file))
 
-  private final case class Erased(files: Vector[String], progressBefore: Long, progressAfter: Long)
+  private final case class Erased(
+      files: Vector[String],
+      progressBefore: Long,
+      progressAfter: Long,
+      stageTimesBefore: Long,
+      stageTimesAfter: Long,
+      stageTimesOfErased: Long
+  )
 
   /** One complete erasure of a populated lakehouse, shared by the criteria that observe its outcome. */
   private lazy val erased: Erased = resource
@@ -93,6 +102,8 @@ final class AnalyticsErasureRetentionIntegrationSpec extends SharedRecoveryRunti
         observed = harness.at.truncatedTo(ChronoUnit.MICROS)
         _ <- seedLakehouse(harness, observed)
         progressBefore <- harness.count(harness.paths.streamingProgress)
+        stageTimesBefore <- harness.count(harness.paths.applicationStageTimes)
+        erasedToken = AnalyticsTestSubjectPseudonymizer.tokenValue(harness.keys, harness.subjects.head)
         request <- seedRequest(harness, runtime, harness.subjects.head, Vector.empty, started)
         passed = new AtomicBoolean(false)
         retention = fixedRetention(passed)
@@ -120,7 +131,20 @@ final class AnalyticsErasureRetentionIntegrationSpec extends SharedRecoveryRunti
         evidenceAfterCompletion <- request.stores.progress.readDeltaFiles(request.id)
         _ = assertEquals(evidenceAfterCompletion, Vector.empty[String])
         progressAfter <- harness.count(harness.paths.streamingProgress)
-      } yield Erased(files, progressBefore, progressAfter)
+        stageTimesAfter <- harness.count(harness.paths.applicationStageTimes)
+        stageTimesOfErased <- harness.execution(
+          harness.spark.read
+            .format("delta")
+            .load(harness.paths.applicationStageTimes)
+            .filter(
+              org.apache.spark.sql.functions.array_contains(
+                org.apache.spark.sql.functions.col("subjectTokens"),
+                org.apache.spark.sql.functions.lit(erasedToken)
+              )
+            )
+            .count()
+        )
+      } yield Erased(files, progressBefore, progressAfter, stageTimesBefore, stageTimesAfter, stageTimesOfErased)
     }
     .unsafeRunSync()
 
@@ -136,6 +160,15 @@ final class AnalyticsErasureRetentionIntegrationSpec extends SharedRecoveryRunti
       assert(result.files.exists(_.endsWith(".parquet")), "data paths are among the captured evidence")
       assertEquals(result.progressAfter, result.progressBefore)
       assert(result.progressAfter > 0L)
+    }
+  }
+
+  test("AC-03.4 the erasure purge removes the erased subject's application stage times and captures their files") {
+    IO.blocking(erased).map { result =>
+      assertEquals(result.stageTimesBefore, 12L)
+      assertEquals(result.stageTimesOfErased, 0L)
+      assert(result.stageTimesAfter < result.stageTimesBefore)
+      assert(result.files.exists(_.contains("application_stage_times")), "stage-times files are erasure evidence")
     }
   }
 

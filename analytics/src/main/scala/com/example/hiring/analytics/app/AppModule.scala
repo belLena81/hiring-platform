@@ -244,6 +244,7 @@ object AppModule {
           shared.reader,
           shared.writer,
           shared.maintenance,
+          common.operational.retention,
           Clock[F]
         )
         val service = new AnalyticsLateFactReplayService[F](

@@ -34,6 +34,8 @@ object AnalyticsError {
   final case class InvalidLateFactSchema(detail: String)
       extends AnalyticsError(s"late hiring fact has an invalid schema: $detail")
   case object InvalidSilverSchema extends AnalyticsError("Silver dataset does not match its declared event schema")
+  case object InvalidStageTimesSchema
+      extends AnalyticsError("application stage times dataset does not match its declared schema")
   final case class EmptyRequestedRange(topic: String, partition: Int, offset: Long)
       extends AnalyticsError(s"requested analytics range is empty: $topic partition $partition at offset $offset")
   final case class ExpiredOffsetRange(topic: String, partition: Int, requestedStart: Long, earliestAvailable: Long)

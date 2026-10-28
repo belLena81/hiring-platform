@@ -186,6 +186,42 @@ final class AnalyticsKeyContinuitySpec extends CatsEffectSuite {
     }
   }
 
+  test("AC-03.9 application stage times keep a key in use until the row expires and reject unknown key tokens") {
+    withLakehouse { (spark, execution, root) =>
+      val cases = Vector(
+        ("expired", Some(at.minusSeconds(1)), false),
+        ("unexpired", Some(at.plusSeconds(1)), true)
+      )
+      cases.traverse_ { case (name, expiry, rejected) =>
+        for {
+          paths <- child(root, s"stage-times-$name")
+          frame <- execution(tokens(spark, Some(previous), Vector(previous), expiry))
+          _ <- write(frame, paths.applicationStageTimes, execution)
+          result <- stage(paths, execution).ensurePrimaryTokenCompatibility(spark, at).attempt
+          _ <- IO(assertEquals(result, if (rejected) Left(primaryError) else Right(())))
+        } yield ()
+      } *> (for {
+        paths <- child(root, "stage-times-unknown")
+        frame <- execution(tokens(spark, Some(current), Vector(current, unknown), Some(at.plusSeconds(1))))
+        _ <- write(frame, paths.applicationStageTimes, execution)
+        result <- stage(paths, execution).validateStoredTokenKeys(spark).attempt
+        _ <- IO(assertEquals(result, Left(unknownKeyError)))
+      } yield ())
+    }
+  }
+
+  test("AC-03.9 a continuity registry without stage-times data is required once the table holds data") {
+    withLakehouse { (spark, execution, root) =>
+      for {
+        paths <- child(root, "stage-times-registry")
+        frame <- execution(tokens(spark, Some(current), Vector(current), Some(at.plusSeconds(1))))
+        _ <- write(frame, paths.applicationStageTimes, execution)
+        result <- stage(paths, execution).validateKeyMaterialContinuity(spark).attempt
+        _ <- IO(assert(result.left.exists(_.getMessage.contains("no HMAC key continuity registry")), result))
+      } yield ()
+    }
+  }
+
   private def legacy(spark: SparkSession, nonempty: Boolean): DataFrame = spark.createDataFrame(
     (if (nonempty) Vector(Row("legacy-value")) else Vector.empty[Row]).asJava,
     StructType(Vector(StructField("legacyValue", StringType, nullable = false)))

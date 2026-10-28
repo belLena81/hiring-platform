@@ -9,6 +9,9 @@ import io.github.iltotore.iron.*
 import io.github.iltotore.iron.constraint.numeric.{Interval, Positive}
 
 type AnalyticsPositiveInt = Int :| Positive
+
+/** At most ten years, so a configured value cannot overflow the retention arithmetic or defeat the privacy bound. */
+type StageTimesRetentionDays = Int :| Interval.Closed[1, 3650]
 type MaximumErasureEvidenceFiles = Int :| Interval.Closed[1, 2147483646]
 type MongoPublisherBufferSize = Int :| Interval.Closed[1, 65536]
 
@@ -16,6 +19,8 @@ final case class AnalyticsRetentionSettings(
     bronzeDays: AnalyticsPositiveInt,
     quarantineDays: AnalyticsPositiveInt,
     silverDays: AnalyticsPositiveInt,
+    stageTimesTerminalDays: StageTimesRetentionDays,
+    stageTimesOpenDays: StageTimesRetentionDays,
     publishedSnapshotDays: AnalyticsPositiveInt,
     deletionMarkerDays: AnalyticsPositiveInt,
     deltaVacuumSafety: FiniteDuration,

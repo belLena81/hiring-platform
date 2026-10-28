@@ -148,6 +148,21 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.CatsEffectSuite 
       oldToken.swap.toOption.get.contains("a current or retained Delta data file references the retiring key"),
       "assertion failed"
     )
+
+    // AC-03.9: a stage-times row holding the retiring key also blocks retirement, in a lakehouse that holds nothing else.
+    val stagePaths = IntegrationAnalyticsLakehousePaths.unsafe(lakehouseRoot.resolve("stage-times-only").toUri.toString)
+    spark
+      .createDataFrame(List(Row(s"${oldKeyId}_stage-times-reference")).asJava, tokenSchema)
+      .write
+      .format("delta")
+      .mode("overwrite")
+      .save(stagePaths.applicationStageTimes)
+    val oldStageTimesToken = audit(stagePaths)
+    assert(
+      oldStageTimesToken.swap.toOption.get
+        .contains("a current or retained Delta data file references the retiring key"),
+      oldStageTimesToken.toString
+    )
   }
 
   test("HAL-06.2 Mongo lakehouse mutex excludes a second independent client until owner release") {
@@ -437,7 +452,7 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.CatsEffectSuite 
             _ <- lock
               .resource(paths.root)
               .use(_ =>
-                maintenance.configureRawTables *> maintenance.expireStored(shifted) *>
+                maintenance.configureRawTables(Vector.empty) *> maintenance.expireStored(shifted) *>
                   IO.sleep(1500.millis) *> maintenance.reclaimExpiredFiles
               )
             _ <- IO.blocking {

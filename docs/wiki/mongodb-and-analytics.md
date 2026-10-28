@@ -63,7 +63,7 @@ See [interview storage and recovery contracts](../mongodb-design.md#local-geogra
 | `analytics_erasure_completions` | Permanent completion ledger for deletion receipt lookup | Unique present receipt ID; no TTL. Completion is distinct from merely deleting current Delta rows. |
 | `analytics_erasure_delta_files` | Worker evidence about physical Delta files requiring erasure verification | Subject-associated evidence; retention follows deletion-marker cleanup, not a blanket automatic TTL promise. |
 | `analytics_worker_heartbeats` | Worker liveness/readiness leases | TTL on `leaseUntil`; process-lifetime operational evidence. |
-| `analytics_report_snapshots` | Bounded, suppressed report projection read by Admin GraphQL | Published-state/as-of index; expiry TTL. Contains funnel, time-to-hire and skill-posting results; UC12/13. |
+| `analytics_report_snapshots` | Bounded, suppressed report projection read by Admin GraphQL | Published-state/as-of index; expiry TTL. Contains funnel, time-to-hire, hiring stage duration and skill-posting results; UC12/13. |
 | `analytics_report_control` | Shared publication generation/revision and visibility control | CAS rejects stale publishers and deletion hides reports; persistent singleton control. |
 | `analytics_report_runs` | Run reservation/publication receipt and range identity | Expiry TTL; guards repeat publication and offset-range identity. UC12/13. |
 | `analytics_late_fact_replay_requests` | Analytics-owned replay request identity, selection digest, coordinates and recovery progress | Natural key combines lakehouse/request identity. Indexes support published detail compaction and receipt dependencies. No TTL removes immutable bindings; detailed coordinates can be compacted. |
@@ -91,12 +91,14 @@ Paths are relative to the configured lakehouse root, from [AnalyticsLakehousePat
 
 | Path | Data and purpose | Privacy / lifecycle |
 |---|---|---|
-| `bronze/operational_events` | Original bounded Kafka records plus coordinates; replayable input | Raw subject data; Bronze retention and physical erasure apply. |
+| `bronze/operational_events` | Kafka coordinates, the envelope fingerprint, the normalized fields Silver uses, and subject tokens. No raw envelope, actor or candidate identifier is stored, so replay reads Kafka within its retention rather than Bronze. This departs on purpose from the raw, immutable Bronze of the medallion convention, for erasure and privacy. | Pseudonymous subjects; Bronze retention and physical erasure apply. |
 | `quarantine/operational_events` | Invalid/conflicting input and quality evidence | Raw subjects possible; quarantine retention and erasure apply. |
 | `silver/operational_events` | Validated, deduplicated operational facts | HMAC-pseudonymized subjects; retained analytical facts, not anonymous data. |
+| `silver/application_stage_times` | One row per application: the earliest time it entered each status, candidate token pinned, candidate and actor tokens in `subjectTokens`. Terminal applications expire 30 days after ending, open ones 180 days after their last event (`stage-times-terminal-days`, `stage-times-open-days`). Merged before Silver from the same frame; backfilled from Silver only when the table is first created (never when it exists, even empty), leaving out applications that involve an active deletion marker. | HMAC-pseudonymized subjects; own retention class (up to 210 days against 30 for Silver); erasure, expiry, vacuum rewrite and key retirement cover it. |
 | `silver/late_operational_events` | Late facts held for controlled replay/admission | Pseudonymous subjects; explicit replay recovery and retention. |
 | `gold/application_funnel` | Lifecycle transition activity | Suppressed aggregate cells; rebuildable, UC12. |
-| `gold/time_to_hire` | Eligible time-to-hire statistics/percentiles | Suppressed aggregates; rebuildable, UC13. |
+| `gold/time_to_hire` | Eligible time-to-hire statistics/percentiles, computed from unexpired stage times (no 30-day truncation) | Suppressed aggregates; rebuildable, UC13. |
+| `gold/hiring_stage_durations` | One row per hiring stage metric: P50/P75/P90/P95 hours and distinct-subject `eligibleCount` (metrics under 10 subjects are omitted) | Suppressed aggregates; rebuildable from stage times, published as `stageDurations`. |
 | `gold/job_skills` | Job-created skill posting activity | Suppressed aggregates; rebuildable. |
 | `control/run_manifests` | Run identity, source-range and outcome evidence | Sanitized permanent Delta control. |
 | `control/streaming_progress` | Durable microbatch progress and recovery journal | Sanitized Delta control; configured recovery retention. |

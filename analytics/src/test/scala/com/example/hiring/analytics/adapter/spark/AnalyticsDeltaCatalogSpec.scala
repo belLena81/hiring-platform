@@ -316,9 +316,20 @@ final class AnalyticsDeltaCatalogSpec extends FunSuite {
     )
   }
 
+  private def rebuildGold(paths: com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths): Unit = {
+    val silver = silverEvents()
+    val stageTimes = ApplicationStageTimes
+      .source(silver, com.example.hiring.analytics.AnalyticsTestOperationalConfig.operational.retention)
+      .toOption
+      .get
+    AnalyticsGoldStage
+      .rebuild[IO](spark, paths, Some(silver), Some(stageTimes), Instant.EPOCH, execution)
+      .unsafeRunSync()
+  }
+
   test("AC-01.3 Gold day is a DateType and extraction yields the UTC start-of-day instant") {
     val paths = TestAnalyticsLakehousePaths.unsafe(Files.createTempDirectory("analytics-catalog-gold").toUri.toString)
-    AnalyticsGoldStage.rebuild[IO](paths, silverEvents(), execution).unsafeRunSync()
+    rebuildGold(paths)
 
     assertEquals(
       DeltaTables.read(spark, paths.funnelGold).schema(Columns.Day).dataType,
@@ -346,7 +357,7 @@ final class AnalyticsDeltaCatalogSpec extends FunSuite {
     oldShape.write.format("delta").save(SparkPhysicalLocation.resolve(paths.funnelGold))
 
     intercept[AnalyticsError.DeltaSchemaMismatch] {
-      AnalyticsGoldStage.rebuild[IO](paths, silverEvents(), execution).unsafeRunSync()
+      rebuildGold(paths)
     }
     assertEquals(DeltaTables.read(spark, paths.funnelGold).schema(Columns.Day).dataType, TimestampType)
     assertEquals(DeltaTables.read(spark, paths.funnelGold).count(), 1L)

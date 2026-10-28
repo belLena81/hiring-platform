@@ -493,6 +493,9 @@ class AnalyticsTransformsSpec extends FunSuite {
     assertEquals(HiringGoldTransforms.wideFunnelDay(silver).toOption.get.count(), 0L)
   }
 
+  private def stageTimesOf(silver: DataFrame): DataFrame =
+    ApplicationStageTimes.source(silver, AnalyticsTestOperationalConfig.operational.retention).toOption.get
+
   test("time-to-hire suppresses eligible and excluded counts when either is below ten") {
     val lifecycle = (1 to 10).flatMap { index =>
       val applicationId = AnalyticsOperationalEventFixtures.id(s"application-$index")
@@ -538,7 +541,10 @@ class AnalyticsTransformsSpec extends FunSuite {
     val silver =
       silverFrame(OperationalEventTransforms.validEvents(parsed), pseudonymizer, emptyMarkers)
 
-    assertEquals(HiringGoldTransforms.timeToHireAction[IO](silver, sparkExecution).unsafeRunSync().count(), 0L)
+    assertEquals(
+      HiringGoldTransforms.timeToHireAction[IO](stageTimesOf(silver), sparkExecution).unsafeRunSync().count(),
+      0L
+    )
   }
 
   test("ten eligible applications from one subject do not satisfy time-to-hire suppression") {
@@ -573,7 +579,10 @@ class AnalyticsTransformsSpec extends FunSuite {
     val silver =
       silverFrame(OperationalEventTransforms.validEvents(parsed), pseudonymizer, emptyMarkers)
 
-    assertEquals(HiringGoldTransforms.timeToHireAction[IO](silver, sparkExecution).unsafeRunSync().count(), 0L)
+    assertEquals(
+      HiringGoldTransforms.timeToHireAction[IO](stageTimesOf(silver), sparkExecution).unsafeRunSync().count(),
+      0L
+    )
   }
 
   test("skill posting activity normalizes only created job skills and applies k anonymity") {

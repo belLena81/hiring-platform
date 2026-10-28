@@ -114,7 +114,7 @@ final class MongoAnalyticsErasureEvidenceLifetimeIntegrationSpec extends Analyti
       )
       val claim =
         ErasureClaim(asAccountSubjectId(subjectId), token, now.plusSeconds(90), ErasurePhase.ReadyToPublish, 0, key)
-      val report = AnalyticsReportOutput(now, Vector.empty, None, Vector.empty)
+      val report = AnalyticsReportOutput(now, Vector.empty, None, Vector.empty, Vector.empty)
 
       // A rejected publication (wrong lease token) rolls back with the evidence untouched.
       val stale = claim.copy(leaseToken = UUID.randomUUID().toString)

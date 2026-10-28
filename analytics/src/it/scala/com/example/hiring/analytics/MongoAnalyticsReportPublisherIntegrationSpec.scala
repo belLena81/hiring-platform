@@ -59,7 +59,7 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends AnalyticsMongoIntegra
         )
       val now = Instant.now()
       val expiry = now.plusSeconds(3600L)
-      val report = AnalyticsReportOutput(now, Vector.empty, None, Vector.empty)
+      val report = AnalyticsReportOutput(now, Vector.empty, None, Vector.empty, Vector.empty)
 
       val result = for {
         older <- publisher.reserve(asRunId("older"), asFingerprint("range-older"), now)
@@ -221,6 +221,10 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends AnalyticsMongoIntegra
         Instant.ofEpochMilli(1789632000000L),
         Vector(AnalyticsFunnelDayOutput(day, 12L, 5L, 1L, 3L, 2L, 1L)),
         Some(AnalyticsTimeToHireOutput(24.5, 48.0, 72.25, 96.0, 2L, 1L)),
+        Vector(
+          AnalyticsStageDurationOutput(AnalyticsHiringStageMetric.TimeToHire, 24.5, 48.0, 72.25, 96.0, 12L),
+          AnalyticsStageDurationOutput(AnalyticsHiringStageMetric.InterviewToHire, 6.0, 12.0, 12.0, 30.5, 10L)
+        ),
         Vector(AnalyticsSkillPostingDayOutput(day, "scala", 12L))
       )
       val stored = (for {
@@ -361,14 +365,22 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends AnalyticsMongoIntegra
       assertEquals(retry, reservation)
       assertEquals(publisher.publicationReceipt(retry).unsafeRunSync(), AnalyticsReportPublicationReceipt.Superseded)
       val stale = publisher
-        .publish(retry, AnalyticsReportOutput(now, Vector.empty, None, Vector.empty), now.plusSeconds(3600))
+        .publish(
+          retry,
+          AnalyticsReportOutput(now, Vector.empty, None, Vector.empty, Vector.empty),
+          now.plusSeconds(3600)
+        )
         .attempt
         .unsafeRunSync()
       assertEquals(stale.left.toOption, Some(AnalyticsError.GuardedErasurePublicationRejected))
       assertEquals(database.getCollection("analytics_report_snapshots").countDocuments(), 0L)
       val next = publisher.reservePinned(asRunId("stream-pinned-next"), fingerprint, now).unsafeRunSync()
       publisher
-        .publish(next, AnalyticsReportOutput(now, Vector.empty, None, Vector.empty), now.plusSeconds(3600))
+        .publish(
+          next,
+          AnalyticsReportOutput(now, Vector.empty, None, Vector.empty, Vector.empty),
+          now.plusSeconds(3600)
+        )
         .unsafeRunSync()
       assertEquals(
         publisher.publicationReceipt(next).unsafeRunSync(),
@@ -574,7 +586,7 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends AnalyticsMongoIntegra
         )
       val claim =
         ErasureClaim(asAccountSubjectId(subjectId), token, now.plusSeconds(90), ErasurePhase.ReadyToPublish, 0, key)
-      val report = AnalyticsReportOutput(now, Vector.empty, None, Vector.empty)
+      val report = AnalyticsReportOutput(now, Vector.empty, None, Vector.empty, Vector.empty)
       val result = for {
         reservation <- publisher.reserve(
           asRunId("analytics-erasure-" + subjectId),
@@ -678,7 +690,7 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends AnalyticsMongoIntegra
         )
       val claim =
         ErasureClaim(asAccountSubjectId(subjectId), token, now.plusSeconds(90), ErasurePhase.ReadyToPublish, 0, key)
-      val report = AnalyticsReportOutput(now, Vector.empty, None, Vector.empty)
+      val report = AnalyticsReportOutput(now, Vector.empty, None, Vector.empty, Vector.empty)
       val result = for {
         reservation <- publisher.reserve(
           asRunId("analytics-erasure-" + subjectId),

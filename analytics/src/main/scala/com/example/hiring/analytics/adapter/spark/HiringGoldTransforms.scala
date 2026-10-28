@@ -2,21 +2,20 @@ package com.example.hiring.analytics.adapter.spark
 
 import com.example.hiring.analytics.domain.AnalyticsApplicationStatus
 import com.example.hiring.analytics.domain.AnalyticsEventType
+import com.example.hiring.analytics.domain.AnalyticsHiringStageMetric
 import com.example.hiring.analytics.domain.AnalyticsRetention
 import com.example.hiring.analytics.errors.AnalyticsError
 
 import cats.effect.Async
 import cats.syntax.all.*
-import org.apache.spark.sql.DataFrame
+import org.apache.spark.sql.{Column, DataFrame}
 import org.apache.spark.sql.functions.{
   col,
-  count,
   countDistinct,
   explode,
   length,
   lit,
   lower,
-  min,
   percentile_approx,
   to_date,
   trim,
@@ -24,11 +23,13 @@ import org.apache.spark.sql.functions.{
   when
 }
 
+import java.sql.Timestamp
+import java.time.Instant
+
 object HiringGoldTransforms {
   private val ApplicationCreated = AnalyticsEventType.ApplicationCreated.wire
   private val ApplicationStatusChanged = AnalyticsEventType.ApplicationStatusChanged.wire
   private val JobCreated = AnalyticsEventType.JobCreated.wire
-  private val Hired = AnalyticsApplicationStatus.Hired.wire
 
   /** The UTC calendar day of an event time. The Spark session time zone is pinned to UTC by `SparkRuntime`. */
   private[analytics] def utcDay(occurredAt: org.apache.spark.sql.Column): org.apache.spark.sql.Column =
@@ -105,39 +106,61 @@ object HiringGoldTransforms {
     }
   }
 
-  /** One K-anonymous distribution, with hours calculated only from application lifecycle events. */
+  /** The stage-time columns a duration runs between: the earlier stage, then the later one. */
+  private def endpoints(metric: AnalyticsHiringStageMetric): (String, String) = metric match {
+    case AnalyticsHiringStageMetric.TimeToAccept        => (Columns.CreatedAt, Columns.AcceptedAt)
+    case AnalyticsHiringStageMetric.TimeToInterview     => (Columns.CreatedAt, Columns.InterviewAt)
+    case AnalyticsHiringStageMetric.TimeToHire          => (Columns.CreatedAt, Columns.HiredAt)
+    case AnalyticsHiringStageMetric.AcceptedToInterview => (Columns.AcceptedAt, Columns.InterviewAt)
+    case AnalyticsHiringStageMetric.InterviewToHire     => (Columns.InterviewAt, Columns.HiredAt)
+  }
+
+  /** Stage-time rows that have not expired at `asOf`, after checking the stored shape. */
+  def currentStageTimes(stageTimes: DataFrame, asOf: Instant): Either[AnalyticsError, DataFrame] =
+    Either
+      .cond(
+        AnalyticsTableSchemas.matches(stageTimes.schema, AnalyticsTableSchemas.stageTimes),
+        stageTimes,
+        AnalyticsError.InvalidStageTimesSchema
+      )
+      .map(_.filter(col(Columns.ExpiresAt) > lit(Timestamp.from(asOf))))
+
+  /** Applications with both stages present and a non-negative duration, with that duration in hours. The one place the
+    * eligibility rule lives: `time_to_hire` and every stage duration share it.
+    */
+  private def eligibleDurations(stageTimes: DataFrame, metric: AnalyticsHiringStageMetric): DataFrame = {
+    val (from, to) = endpoints(metric)
+    stageTimes
+      .filter(col(from).isNotNull && col(to).isNotNull)
+      .withColumn(Columns.Hours, (unix_timestamp(col(to)) - unix_timestamp(col(from))) / lit(3600.0))
+      .filter(col(Columns.Hours) >= lit(0.0))
+  }
+
+  private def percentiles(): Seq[Column] = Seq(
+    percentile_approx(col(Columns.Hours), lit(0.5), lit(10000)).as(Columns.P50Hours),
+    percentile_approx(col(Columns.Hours), lit(0.75), lit(10000)).as(Columns.P75Hours),
+    percentile_approx(col(Columns.Hours), lit(0.9), lit(10000)).as(Columns.P90Hours),
+    percentile_approx(col(Columns.Hours), lit(0.95), lit(10000)).as(Columns.P95Hours)
+  )
+
+  /** One K-anonymous distribution of created-to-hired hours from unexpired stage times. Hours come from the shared
+    * eligibility rule, `eligibleCount` counts distinct candidate subjects, and `excludedCount` counts the subjects that
+    * have an application outside that rule.
+    */
   def timeToHireAction[F[_]: Async](
-      silver: DataFrame,
+      stageTimes: DataFrame,
       sparkExecution: SparkExecution[F]
-  ): F[DataFrame] = sparkExecution.either(applicationLifecycle(silver)).flatMap { valid =>
+  ): F[DataFrame] = sparkExecution.either(validateStageTimes(stageTimes)).flatMap { rows =>
     sparkExecution {
-      val lifecycle = valid
-        .groupBy(Columns.ApplicationId, Columns.SubjectToken)
-        .agg(
-          min(when(col(Columns.EventType) === lit(ApplicationCreated), col(Columns.OccurredAt))).as(Columns.CreatedAt),
-          min(when(col(Columns.NewStatus) === lit(Hired), col(Columns.OccurredAt))).as(Columns.HiredAt)
-        )
-      val eligible = lifecycle
-        .filter(col(Columns.CreatedAt).isNotNull && col(Columns.HiredAt).isNotNull)
-        .withColumn(
-          Columns.Hours,
-          (unix_timestamp(col(Columns.HiredAt)) - unix_timestamp(col(Columns.CreatedAt))) / lit(3600.0)
-        )
-        .filter(col(Columns.Hours) >= lit(0.0))
+      val eligible = eligibleDurations(rows, AnalyticsHiringStageMetric.TimeToHire)
       val eligibleSubjects = eligible.select(Columns.SubjectToken).distinct().count()
-      val excludedSubjects = lifecycle
+      val excludedSubjects = rows
         .join(eligible.select(Columns.ApplicationId).distinct(), Seq(Columns.ApplicationId), "left_anti")
         .select(Columns.SubjectToken)
         .distinct()
         .count()
-      val result = eligible
-        .agg(
-          percentile_approx(col(Columns.Hours), lit(0.5), lit(10000)).as(Columns.P50Hours),
-          percentile_approx(col(Columns.Hours), lit(0.75), lit(10000)).as(Columns.P75Hours),
-          percentile_approx(col(Columns.Hours), lit(0.9), lit(10000)).as(Columns.P90Hours),
-          percentile_approx(col(Columns.Hours), lit(0.95), lit(10000)).as(Columns.P95Hours),
-          count(lit(1)).as(Columns.EligibleApplications)
-        )
+      eligible
+        .agg(percentiles().head, percentiles().tail*)
         .withColumn(Columns.EligibleCount, lit(eligibleSubjects))
         .withColumn(Columns.ExcludedCount, lit(excludedSubjects))
         .filter(
@@ -146,8 +169,30 @@ object HiringGoldTransforms {
               AnalyticsRetention.MinimumContributors
             ))
         )
-        .drop(Columns.EligibleApplications)
-      result
     }
   }
+
+  /** One row per hiring stage metric with at least K distinct candidate subjects; other metrics are omitted. */
+  def stageDurations(stageTimes: DataFrame): Either[AnalyticsError, DataFrame] =
+    validateStageTimes(stageTimes).map { rows =>
+      AnalyticsHiringStageMetric.values.toVector
+        .map { metric =>
+          eligibleDurations(rows, metric)
+            .agg(
+              percentiles().head,
+              percentiles().tail :+ countDistinct(col(Columns.SubjectToken)).as(Columns.EligibleCount)*
+            )
+            .withColumn(Columns.Metric, lit(metric.wire))
+        }
+        .reduce(_.unionByName(_))
+        .filter(col(Columns.EligibleCount) >= lit(AnalyticsRetention.MinimumContributors))
+        .select(AnalyticsTableSchemas.stageDurations.map { case (name, _) => col(name) }*)
+    }
+
+  private def validateStageTimes(stageTimes: DataFrame): Either[AnalyticsError, DataFrame] =
+    Either.cond(
+      AnalyticsTableSchemas.matches(stageTimes.schema, AnalyticsTableSchemas.stageTimes),
+      stageTimes,
+      AnalyticsError.InvalidStageTimesSchema
+    )
 }

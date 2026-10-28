@@ -9,7 +9,8 @@ enum AnalyticsStoragePrivacy {
 /** `RequestCompletion` rows live until their erasure request completes and are deleted in its completion transaction.
   */
 enum AnalyticsStorageRetention {
-  case Bronze, Quarantine, Silver, LateFacts, PublishedSnapshot, DeletionMarker, RequestCompletion
+  case Bronze, Quarantine, Silver, ApplicationStageTimes, LateFacts, PublishedSnapshot, DeletionMarker,
+    RequestCompletion
   case RecoveryProgress, PublicationReceipt, ReplayRecovery, Permanent, ProcessLifetime
 }
 
@@ -48,9 +49,11 @@ object AnalyticsStorageInventory {
       AnalyticsStorageSurface(paths.bronze, Delta, PseudonymousSubjects, Bronze),
       AnalyticsStorageSurface(paths.quarantine, Delta, PseudonymousSubjects, Quarantine),
       AnalyticsStorageSurface(paths.silver, Delta, PseudonymousSubjects, Silver),
+      AnalyticsStorageSurface(paths.applicationStageTimes, Delta, PseudonymousSubjects, ApplicationStageTimes),
       AnalyticsStorageSurface(paths.lateFacts, Delta, PseudonymousSubjects, LateFacts),
       AnalyticsStorageSurface(paths.funnelGold, Delta, SuppressedAggregates, Silver),
       AnalyticsStorageSurface(paths.timeToHireGold, Delta, SuppressedAggregates, Silver),
+      AnalyticsStorageSurface(paths.hiringStageDurationsGold, Delta, SuppressedAggregates, Silver),
       AnalyticsStorageSurface(paths.skillsGold, Delta, SuppressedAggregates, Silver),
       AnalyticsStorageSurface(paths.manifests, Delta, SanitizedControl, Permanent),
       AnalyticsStorageSurface(paths.streamingProgress, Delta, SanitizedControl, RecoveryProgress),

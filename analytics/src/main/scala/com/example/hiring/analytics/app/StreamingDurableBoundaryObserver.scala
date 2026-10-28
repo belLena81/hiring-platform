@@ -3,6 +3,7 @@ package com.example.hiring.analytics.app
 import cats.effect.Async
 import cats.syntax.all.*
 import com.example.hiring.analytics.adapter.spark.DeltaWriter
+import com.example.hiring.analytics.config.AnalyticsRetentionSettings
 import com.example.hiring.analytics.domain.*
 import com.example.hiring.analytics.service.batch.{
   ActiveDeletionMarkers,
@@ -70,6 +71,11 @@ private[analytics] object StreamingDurableBoundaryObserver {
     override def mergeWhenFresh(frame: DataFrame, path: String, condition: String, at: () => Instant) =
       delegate.mergeWhenFresh(frame, path, condition, at) *> observed(path)
     override def withExpiry(frame: DataFrame, at: Instant, days: Int) = delegate.withExpiry(frame, at, days)
+    override def mergeStageTimes(
+        facts: DataFrame,
+        retention: AnalyticsRetentionSettings,
+        freshness: Option[() => Instant]
+    ) = delegate.mergeStageTimes(facts, retention, freshness) *> observed(paths.applicationStageTimes)
   }
 
   def stages[F[_]: Async](

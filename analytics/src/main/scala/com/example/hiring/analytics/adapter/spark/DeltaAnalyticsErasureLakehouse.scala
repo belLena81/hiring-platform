@@ -52,7 +52,8 @@ private[analytics] final class DeltaAnalyticsErasureLakehouse[F[_]: Async: UUIDG
   override def validateHmacConfigurationLocked: F[Unit] =
     retention.recoverAbandonedRewrites(spark) *> keyContinuity.validateHmacConfiguration(spark)
 
-  override def configureRawTables: F[Unit] = retention.configureRawTables(spark)
+  override def configureRawTables(markerTokens: Vector[SubjectToken]): F[Unit] =
+    retention.configureRawTables(spark, markerTokens)
 
   override def expireStored(at: Instant): F[Unit] =
     paths.inventory.subjectDelta.traverse_(surface => retention.expire(spark, surface.location, at))
@@ -105,7 +106,9 @@ private[analytics] final class DeltaAnalyticsErasureLakehouse[F[_]: Async: UUIDG
   private def purgeMarkedSubjectsFrame(markerTokens: DataFrame): F[Unit] =
     paths.inventory.subjectDelta.traverse_(surface =>
       erasure.purgeMarkedSubjectRows(spark, surface.location, markerTokens)
-    ) *> AnalyticsGoldStage.rebuildFromStoredSilver(spark, paths, execution)
+    ) *> now.flatMap(
+      AnalyticsGoldStage.rebuildFromStoredTables(spark, paths, _, execution)
+    )
 
   override def rebuildGoldAndExtractReport(asOf: Instant): F[AnalyticsReportOutput] =
     AnalyticsGoldStage.rebuildAndExtract(spark, paths, asOf, execution)

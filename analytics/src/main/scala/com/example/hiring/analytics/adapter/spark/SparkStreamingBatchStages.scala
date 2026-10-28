@@ -119,7 +119,7 @@ private[analytics] object SparkStreamingBatchStages {
       deltaReader: DeltaBatchReader[F],
       reportPublisher: AnalyticsReportPublisher[F],
       retention: AnalyticsRetentionSettings,
-      configureTables: F[Unit],
+      configureTables: Vector[SubjectToken] => F[Unit],
       applyActiveDeletions: Vector[SubjectToken] => F[Unit],
       authorizePublication: F[Unit]
   ): Resource[F, StreamingBatchStages[F]] =
@@ -163,7 +163,7 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
     deltaReader: DeltaBatchReader[F],
     reportPublisher: AnalyticsReportPublisher[F],
     retention: AnalyticsRetentionSettings,
-    configureTables: F[Unit],
+    configureTables: Vector[SubjectToken] => F[Unit],
     applyActiveDeletions: Vector[SubjectToken] => F[Unit],
     authorizePublication: F[Unit]
 ) extends StreamingBatchStages[F] {
@@ -240,7 +240,7 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
       bronze <- ingestionStage.persistParsed(
         parsedEvents,
         markerFrame,
-        configureTables,
+        configureTables(activeTokens),
         F.pure(preparation.observedAt),
         _ => F.unit
       )

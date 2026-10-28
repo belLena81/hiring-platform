@@ -2,6 +2,7 @@ package com.example.hiring.analytics.adapter.spark
 
 import cats.effect.Async
 import cats.syntax.all.*
+import com.example.hiring.analytics.config.AnalyticsRetentionSettings
 import com.example.hiring.analytics.domain.*
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.batch.*
@@ -22,6 +23,7 @@ private[analytics] final class SparkAnalyticsLateFactReplayStages[F[_]: Async](
     reader: DeltaBatchReader[F],
     writer: DeltaWriter[F],
     maintenance: AnalyticsBatchMaintenance[F],
+    retention: AnalyticsRetentionSettings,
     clock: cats.effect.Clock[F],
     mergeClock: Clock = Clock.systemUTC()
 ) extends AnalyticsLateFactReplayStages[F] {
@@ -47,6 +49,8 @@ private[analytics] final class SparkAnalyticsLateFactReplayStages[F[_]: Async](
       observedAt: Instant
   ): F[Unit] =
     for {
+      // Creates the stage-times table and backfills it from Silver first, so Silver stays a subset of it.
+      _ <- maintenance.configureRawTables(activeTokens)
       selected <- selectedFacts(request, activeTokens, observedAt)
       silver <- execution {
         // Multiple Kafka coordinates can name the same event. Prefer its earliest original expiry.
@@ -64,6 +68,11 @@ private[analytics] final class SparkAnalyticsLateFactReplayStages[F[_]: Async](
           .filter(col("replayRow") === lit(1))
           .select(silverShape.map { case (name, _) => col(name) }*)
       }
+      // Stage times first, under the same freshness guard. The guard is read twice (here and in the Silver merge),
+      // and both reads see the same facts. If the clock passes the earliest expiry between them, only this merge has
+      // run: Silver stays a subset of the stage times, the replay is rejected as a whole and a later idempotent
+      // replay repairs it. The stage times then hold earliest-wins data from still-original facts, which is harmless.
+      _ <- writer.mergeStageTimes(silver, retention, Some(() => mergeClock.instant()))
       _ <- writer.mergeWhenFresh(silver, paths.silver, "target.eventId = source.eventId", () => mergeClock.instant())
     } yield ()
 
@@ -78,7 +87,12 @@ private[analytics] final class SparkAnalyticsLateFactReplayStages[F[_]: Async](
           AnalyticsError.InvalidLateFactSchema("stored Silver schema is incompatible with late replay")
         )
       )
-      _ <- AnalyticsGoldStage.rebuild(paths, silver, execution)
+      stageTimes <- reader.readOrEmpty(
+        spark,
+        paths.applicationStageTimes,
+        AnalyticsTableSchemas.struct(AnalyticsTableSchemas.stageTimes)
+      )
+      _ <- AnalyticsGoldStage.rebuild(spark, paths, Some(silver), Some(stageTimes), asOf, execution)
       report <- AnalyticsGoldStage.extract(spark, paths, asOf, execution)
     } yield report
 

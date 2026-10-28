@@ -1,6 +1,12 @@
 package com.example.hiring.analytics.adapter.spark
 
-import com.example.hiring.analytics.domain.{AnalyticsAggregateType, AnalyticsApplicationStatus, AnalyticsEventType}
+import com.example.hiring.analytics.domain.{
+  AnalyticsAggregateType,
+  AnalyticsApplicationStatus,
+  AnalyticsEventType,
+  AnalyticsHiringStageMetric,
+  AnalyticsRetention
+}
 import com.example.hiring.analytics.service.batch.{AnalyticsLakehousePaths, AnalyticsManifestStatus}
 
 import org.apache.spark.sql.types.*
@@ -109,6 +115,35 @@ private[analytics] object AnalyticsDeltaCatalog {
     "silver_operational_events",
     SilverEventColumns ++ ExpiryColumns,
     eventChecks :+ expiresAfterIngestion,
+    subjectAttributed = true
+  )
+
+  /** One row per application: the earliest time it entered each status, pseudonymized. `subjectToken` is the candidate
+    * token pinned per application and `subjectTokens` also holds the actors' tokens. `terminalAt` and `expiresAt` are
+    * always derived from the stage columns, never merged on their own.
+    */
+  val ApplicationStageTimes: DeltaTableSpec = table(
+    "silver_application_stage_times",
+    Vector(
+      required(Columns.ApplicationId, StringType),
+      required(Columns.SubjectToken, StringType),
+      required(Columns.SubjectTokens, tokenArray),
+      optional(Columns.CreatedAt, TimestampType),
+      optional(Columns.AcceptedAt, TimestampType),
+      optional(Columns.DeclinedAt, TimestampType),
+      optional(Columns.InterviewAt, TimestampType),
+      optional(Columns.HiredAt, TimestampType),
+      optional(Columns.RejectedAt, TimestampType),
+      required(Columns.LastEventAt, TimestampType),
+      optional(Columns.TerminalAt, TimestampType),
+      required(Columns.ExpiresAt, TimestampType)
+    ),
+    Vector(
+      DeltaCheck(
+        "expires_after_terminal",
+        s"${quoted(Columns.TerminalAt)} IS NULL OR ${quoted(Columns.ExpiresAt)} > ${quoted(Columns.TerminalAt)}"
+      )
+    ),
     subjectAttributed = true
   )
 
@@ -222,6 +257,35 @@ private[analytics] object AnalyticsDeltaCatalog {
     )
   )
 
+  private val StageMetrics = AnalyticsHiringStageMetric.values.toVector.map(_.wire)
+
+  val HiringStageDurationsGold: DeltaTableSpec = table(
+    "gold_hiring_stage_durations",
+    Vector(
+      required(Columns.Metric, StringType),
+      required(Columns.P50Hours, DoubleType),
+      required(Columns.P75Hours, DoubleType),
+      required(Columns.P90Hours, DoubleType),
+      required(Columns.P95Hours, DoubleType),
+      required(Columns.EligibleCount, LongType)
+    ),
+    Vector(
+      DeltaCheck("metric_valid", in(Columns.Metric, StageMetrics)),
+      DeltaCheck(
+        "percentiles_ordered",
+        s"${quoted(Columns.P50Hours)} <= ${quoted(Columns.P75Hours)} AND " +
+          s"${quoted(Columns.P75Hours)} <= ${quoted(Columns.P90Hours)} AND " +
+          s"${quoted(Columns.P90Hours)} <= ${quoted(Columns.P95Hours)}"
+      ),
+      nonNegativeCount(Columns.EligibleCount),
+      // K-anonymity: a published metric rests on at least K distinct candidate subjects.
+      DeltaCheck(
+        "eligible_count_minimum",
+        s"${quoted(Columns.EligibleCount)} >= ${AnalyticsRetention.MinimumContributors}"
+      )
+    )
+  )
+
   val SkillsGold: DeltaTableSpec = table(
     "gold_job_skills",
     Vector(
@@ -313,9 +377,11 @@ private[analytics] object AnalyticsDeltaCatalog {
     Bronze,
     Quarantine,
     Silver,
+    ApplicationStageTimes,
     LateFacts,
     FunnelGold,
     TimeToHireGold,
+    HiringStageDurationsGold,
     SkillsGold,
     RunManifests,
     StreamingProgress,
@@ -331,9 +397,11 @@ private[analytics] object AnalyticsDeltaCatalog {
     paths.bronze -> Bronze,
     paths.quarantine -> Quarantine,
     paths.silver -> Silver,
+    paths.applicationStageTimes -> ApplicationStageTimes,
     paths.lateFacts -> LateFacts,
     paths.funnelGold -> FunnelGold,
     paths.timeToHireGold -> TimeToHireGold,
+    paths.hiringStageDurationsGold -> HiringStageDurationsGold,
     paths.skillsGold -> SkillsGold,
     paths.manifests -> RunManifests,
     paths.streamingProgress -> StreamingProgress,

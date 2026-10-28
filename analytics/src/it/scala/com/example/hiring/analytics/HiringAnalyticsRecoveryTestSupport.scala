@@ -250,6 +250,7 @@ private[analytics] object HiringAnalyticsRecoveryTestSupport {
         reader,
         writer,
         maintenance,
+        AnalyticsTestOperationalConfig.operational.retention,
         cats.effect.Clock[IO]
       )
     def replayJournal = new MongoAnalyticsLateFactReplayJournal[IO](database, streams, paths.root)

@@ -239,6 +239,11 @@ final class AnalyticsQuarantineMergeSpec extends CatsEffectSuite {
           native.mergeWhenFresh(frame, path, condition, at)
         override def withExpiry(frame: DataFrame, now: Instant, days: Int): DataFrame =
           native.withExpiry(frame, now, days)
+        override def mergeStageTimes(
+            facts: DataFrame,
+            retention: com.example.hiring.analytics.config.AnalyticsRetentionSettings,
+            freshness: Option[() => Instant]
+        ): IO[Unit] = native.mergeStageTimes(facts, retention, freshness)
       }
       val keys = AnalyticsTestSubjectPseudonymizer.fromSecret(Array.fill[Byte](32)(7))
       val stage = new AnalyticsBatchSilverStage[IO](

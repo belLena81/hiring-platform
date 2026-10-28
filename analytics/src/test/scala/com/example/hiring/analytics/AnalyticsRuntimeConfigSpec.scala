@@ -63,6 +63,10 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
     |      quarantine-days = ${?ANALYTICS_RETENTION_QUARANTINE_DAYS}
     |      silver-days = 30
     |      silver-days = ${?ANALYTICS_RETENTION_SILVER_DAYS}
+    |      stage-times-terminal-days = 30
+    |      stage-times-terminal-days = ${?ANALYTICS_RETENTION_STAGE_TIMES_TERMINAL_DAYS}
+    |      stage-times-open-days = 180
+    |      stage-times-open-days = ${?ANALYTICS_RETENTION_STAGE_TIMES_OPEN_DAYS}
     |      published-snapshot-days = 30
     |      published-snapshot-days = ${?ANALYTICS_RETENTION_PUBLISHED_SNAPSHOT_DAYS}
     |      deletion-marker-days = 31
@@ -243,6 +247,8 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
         "ANALYTICS_RETENTION_BRONZE_DAYS" -> "14",
         "ANALYTICS_RETENTION_QUARANTINE_DAYS" -> "12",
         "ANALYTICS_RETENTION_SILVER_DAYS" -> "60",
+        "ANALYTICS_RETENTION_STAGE_TIMES_TERMINAL_DAYS" -> "45",
+        "ANALYTICS_RETENTION_STAGE_TIMES_OPEN_DAYS" -> "200",
         "ANALYTICS_RETENTION_PUBLISHED_SNAPSHOT_DAYS" -> "15",
         "ANALYTICS_RETENTION_DELETION_MARKER_DAYS" -> "20",
         "ANALYTICS_RETENTION_DELTA_VACUUM_SAFETY" -> "3 days",
@@ -263,6 +269,8 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
     assertEquals(configured.retention.bronzeDays, 14)
     assertEquals(configured.retention.quarantineDays, 12)
     assertEquals(configured.retention.silverDays, 60)
+    assertEquals(configured.retention.stageTimesTerminalDays, 45)
+    assertEquals(configured.retention.stageTimesOpenDays, 200)
     assertEquals(configured.retention.publishedSnapshotDays, 15)
     assertEquals(configured.retention.deletionMarkerDays, 20)
     assertEquals(configured.retention.deltaVacuumSafety, 3.days)
@@ -366,6 +374,37 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
     assertEquals(safeVacuum.erasureWorkerTimings.leaseDuration, 90.seconds)
     assertEquals(safeVacuum.erasureWorkerTimings.deliveryTimeout, 30.seconds)
     assertEquals(safeVacuum.erasureWorkerTimings.pollInterval, 5.seconds)
+  }
+
+  test("AC-03.3 stage-times retention defaults to 30 and 180 days and must be positive") {
+    val defaults = operational(Map.empty).toOption.getOrElse(fail("expected default operational config"))
+    assertEquals(defaults.retention.stageTimesTerminalDays, 30)
+    assertEquals(defaults.retention.stageTimesOpenDays, 180)
+    val invalid = operational(
+      Map(
+        "ANALYTICS_RETENTION_STAGE_TIMES_TERMINAL_DAYS" -> "0",
+        "ANALYTICS_RETENTION_STAGE_TIMES_OPEN_DAYS" -> "-5"
+      )
+    )
+    val message = invalid.swap.toOption.getOrElse(fail("expected rejected stage-times retention")).getMessage
+    assert(message.contains("analytics.operational.retention.stage-times-terminal-days"), message)
+    assert(message.contains("analytics.operational.retention.stage-times-open-days"), message)
+    assert(message.contains("Should be included in [1, 3650]"), message)
+
+    val tooLong = operational(
+      Map(
+        "ANALYTICS_RETENTION_STAGE_TIMES_TERMINAL_DAYS" -> "3651",
+        "ANALYTICS_RETENTION_STAGE_TIMES_OPEN_DAYS" -> "3651"
+      )
+    )
+    assert(tooLong.swap.toOption.exists(_.getMessage.contains("Should be included in [1, 3650]")), tooLong.toString)
+    val atBound = operational(
+      Map(
+        "ANALYTICS_RETENTION_STAGE_TIMES_TERMINAL_DAYS" -> "3650",
+        "ANALYTICS_RETENTION_STAGE_TIMES_OPEN_DAYS" -> "3650"
+      )
+    ).toOption.getOrElse(fail("expected the upper bound to be accepted"))
+    assertEquals(atBound.retention.stageTimesOpenDays, 3650)
   }
 
   test("AEC-02.1 default retention horizons fit the erasure completion budget") {

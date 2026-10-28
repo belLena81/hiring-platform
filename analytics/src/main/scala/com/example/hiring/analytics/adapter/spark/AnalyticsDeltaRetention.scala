@@ -1,6 +1,7 @@
 package com.example.hiring.analytics.adapter.spark
 
 import com.example.hiring.analytics.config.AnalyticsOperationalSettings
+import com.example.hiring.analytics.domain.SubjectToken
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.batch.{AnalyticsLakehousePaths, AnalyticsStoragePrivacy}
 
@@ -32,11 +33,23 @@ private[analytics] final class AnalyticsDeltaRetention[F[_]: Async: UUIDGen](
       execution
     )
 
-  def configureRawTables(spark: SparkSession): F[Unit] =
+  /** Creates or validates every subject-attributed table. Only the first initialization of the stage times (the table
+    * did not exist) backfills them from Silver; an existing table, even an empty one, is never backfilled, so rows
+    * removed by an erasure purge are not rebuilt from the Silver events that survive it.
+    */
+  def configureRawTables(spark: SparkSession, markerTokens: Vector[SubjectToken]): F[Unit] =
     execution {
+      val firstInitialization = !DeltaTables.exists(spark, paths.applicationStageTimes)
       AnalyticsDeltaCatalog.locations(paths).filter(_._2.subjectAttributed).foreach { case (path, spec) =>
         AnalyticsTableSchemas.createOrValidate(spark, path, spec)
       }
+      if (firstInitialization)
+        ApplicationStageTimes.backfillFromSilver(
+          spark,
+          paths,
+          retention,
+          AnalyticsTableSchemas.markerFrame(spark, markerTokens)
+        )
     } *> configureRawTablePrivacy(spark)
 
   def configureRawTablePrivacy(spark: SparkSession): F[Unit] = execution {

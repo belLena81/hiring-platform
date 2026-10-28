@@ -51,6 +51,7 @@ final class HiringAnalyticsBatch[F[_]: Async](
           completedAt,
           paths.funnelGold,
           paths.timeToHireGold,
+          paths.hiringStageDurationsGold,
           paths.skillsGold,
           result.bronzeRecords,
           result.validRecords,

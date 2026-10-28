@@ -12,10 +12,12 @@ final class AnalyticsLakehousePaths private (val root: LakehouseRoot) {
   private val normalizedRoot = root.stripSuffix("/")
   val bronze: String = s"$normalizedRoot/bronze/operational_events"
   val silver: String = s"$normalizedRoot/silver/operational_events"
+  val applicationStageTimes: String = s"$normalizedRoot/silver/application_stage_times"
   val lateFacts: String = s"$normalizedRoot/silver/late_operational_events"
   val quarantine: String = s"$normalizedRoot/quarantine/operational_events"
   val funnelGold: String = s"$normalizedRoot/gold/application_funnel"
   val timeToHireGold: String = s"$normalizedRoot/gold/time_to_hire"
+  val hiringStageDurationsGold: String = s"$normalizedRoot/gold/hiring_stage_durations"
   val skillsGold: String = s"$normalizedRoot/gold/job_skills"
   val manifests: String = s"$normalizedRoot/control/run_manifests"
   val streamingProgress: String = s"$normalizedRoot/control/streaming_progress"

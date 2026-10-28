@@ -61,6 +61,16 @@ final class HiringAnalyticsLateFactReplayRecoveryIntegrationSpec extends SharedR
           _ = assertEquals(times.size, 1)
           _ = assertEquals(times.head.getTimestamp(0).toInstant, ingestedAt)
           _ = assertEquals(times.head.getTimestamp(1).toInstant, expiresAt)
+          stageTimes <- harness.execution(
+            harness.spark.read
+              .format("delta")
+              .load(harness.paths.applicationStageTimes)
+              .select("applicationId", "createdAt")
+              .collect()
+              .toVector
+          )
+          _ = assertEquals(stageTimes.size, 12)
+          _ = assert(stageTimes.forall(row => !row.isNullAt(1)), "replay merges the stage times with the facts")
           complete <- harness.replayJournal.load(request.requestId)
           receipt <- harness.publisher.publicationReceipt(complete.get.reservation)
           _ = assertEquals(receipt, AnalyticsReportPublicationReceipt.CurrentGeneration)

@@ -36,7 +36,8 @@ private[app] final class StreamingMaintenanceTick[F[_]: Async: UUIDGen](
     for {
       _ <- authorize
       _ <- maintenance.validateHmacConfigurationLocked
-      _ <- maintenance.configureRawTables
+      initialMarkers <- markers.activeDeletionMarkers
+      _ <- maintenance.configureRawTables(initialMarkers.exclusionTokens)
       runId <- UUIDGen[F].randomUUID.map(value => RunId.prefixed("stream-maintenance-", value.toString))
       fingerprint = RangeFingerprint.ofSha256(s"${identity.canonical}\n$at")
       existingMarkers <- markers.activeDeletionMarkers

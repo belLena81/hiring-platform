@@ -425,7 +425,7 @@ final class AnalyticsErasureWorkerSpec extends CatsEffectSuite {
       override def verifyFilesAbsent(files: Vector[String]): IO[Unit] = IO.unit
       override def applyDeletionMarkers(markerTokens: Vector[SubjectToken]): IO[Unit] = IO.unit
       override def rebuildGoldAndExtractReport(asOf: Instant): IO[AnalyticsReportOutput] =
-        IO.pure(AnalyticsReportOutput(asOf, Vector.empty, None, Vector.empty))
+        IO.pure(AnalyticsReportOutput(asOf, Vector.empty, None, Vector.empty, Vector.empty))
     }
     val publisher = new AnalyticsReportPublisher[IO] {
       override def publicationReceipt(

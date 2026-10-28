@@ -224,7 +224,7 @@ class HiringAnalyticsSchemaContractsSpec extends FunSuite {
       Seq("scala" -> 10L)
     )
 
-    val timeToHire = HiringGoldTransforms.timeToHireAction[IO](silver, sparkExecution).unsafeRunSync()
+    val timeToHire = HiringGoldTransforms.timeToHireAction[IO](stageTimesOf(silver), sparkExecution).unsafeRunSync()
     assertEquals(
       timeToHire.schema.fieldNames.toSeq,
       Seq("p50Hours", "p75Hours", "p90Hours", "p95Hours", "eligibleCount", "excludedCount")
@@ -236,6 +236,12 @@ class HiringAnalyticsSchemaContractsSpec extends FunSuite {
     assertEquals(timeToHire.head().getAs[Long]("eligibleCount"), 10L)
     assertEquals(timeToHire.head().getAs[Long]("excludedCount"), 0L)
   }
+
+  private def stageTimesOf(silver: org.apache.spark.sql.DataFrame): org.apache.spark.sql.DataFrame =
+    ApplicationStageTimes
+      .source(silver, com.example.hiring.analytics.AnalyticsTestOperationalConfig.operational.retention)
+      .toOption
+      .get
 
   test("Silver schema validation rejects field order and type drift") {
     val silver = silverEvents()
@@ -271,7 +277,7 @@ class HiringAnalyticsSchemaContractsSpec extends FunSuite {
     assertEquals(HiringGoldTransforms.skillPostingActivity(wrongType), Left(AnalyticsError.InvalidSilverSchema))
     assertEquals(
       HiringGoldTransforms.timeToHireAction[IO](wrongType, sparkExecution).attempt.unsafeRunSync().swap.toOption,
-      Some(AnalyticsError.InvalidSilverSchema)
+      Some(AnalyticsError.InvalidStageTimesSchema)
     )
   }
 

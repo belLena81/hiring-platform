@@ -190,6 +190,9 @@ private[analytics] final class AnalyticsBatchSilverStage[F[_]: Async](
           retention.silverDays
         )
       )
+      // Stage times first: a crash between the two commits leaves Silver a subset of the stage times, and the
+      // idempotent replay repairs it.
+      _ <- deltaWriter.mergeStageTimes(silver, retention, None)
       _ <- deltaWriter.merge(silver, paths.silver, "target.eventId = source.eventId")
     } yield silver
 }

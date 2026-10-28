@@ -1,6 +1,6 @@
 package com.example.hiring.analytics.adapter.spark
 
-import com.example.hiring.analytics.AnalyticsTestClocks
+import com.example.hiring.analytics.{AnalyticsTestClocks, AnalyticsTestOperationalConfig}
 
 import cats.effect.{Deferred, IO}
 import cats.effect.unsafe.implicits.global
@@ -57,6 +57,8 @@ final class HiringAnalyticsLateFactReplayStagesSpec extends FunSuite {
     assertEquals(silver.select(Columns.ExpiresAt).distinct().head().getTimestamp(0).toInstant, OriginalExpiry)
     assert(!silver.columns.contains("rawValue"))
     assertEquals(spark.read.format("delta").load(paths.lateFacts).count(), 11L)
+    // The eleventh late fact is still held, so it reaches neither Silver nor the stage times.
+    assertEquals(DeltaTables.read(spark, paths.applicationStageTimes).count(), 10L)
     val report = stages.rebuildGoldAndExtractReport(Now).unsafeRunSync()
     assertEquals(report.funnel.size, 1)
     assertEquals(report.funnel.head.created, 10L)
@@ -78,6 +80,7 @@ final class HiringAnalyticsLateFactReplayStagesSpec extends FunSuite {
       val result = stages.mergeSelectedFacts(request, tokens, at).attempt.unsafeRunSync()
       assertEquals(result.left.toOption, Some(AnalyticsError.LateFactReplayRejected))
       assert(!DeltaTable.isDeltaTable(spark, paths.silver))
+      assert(!DeltaTable.isDeltaTable(spark, paths.applicationStageTimes))
     }
     rejected(selected("missing", Vector(100)))
     rejected(selected("expired", Vector(0)), at = OriginalExpiry)
@@ -181,7 +184,12 @@ final class HiringAnalyticsLateFactReplayStagesSpec extends FunSuite {
       result <- running.joinWithNever
       _ <- IO(assertEquals(result.left.toOption, Some(AnalyticsError.LateFactReplayRejected)))
     } yield ()).unsafeRunSync()
-    assertEquals(spark.read.format("delta").load(paths.silver).count(), 0L)
+    assertEquals(DeltaTables.readIfExists(spark, paths.silver).map(_.count()).getOrElse(0L), 0L)
+    assertEquals(
+      DeltaTables.readIfExists(spark, paths.applicationStageTimes).map(_.count()).getOrElse(0L),
+      0L,
+      "a rejected replay merges no stage times"
+    )
   }
 
   private def stage(
@@ -191,7 +199,7 @@ final class HiringAnalyticsLateFactReplayStagesSpec extends FunSuite {
   ): SparkAnalyticsLateFactReplayStages[IO] = {
     val maintenance = new AnalyticsBatchMaintenance[IO] {
       override def validateHmacConfigurationLocked: IO[Unit] = IO.unit
-      override def configureRawTables: IO[Unit] = IO.unit
+      override def configureRawTables(markerTokens: Vector[SubjectToken]): IO[Unit] = IO.unit
       override def applyActiveDeletions(tokens: Vector[SubjectToken]): IO[Unit] = IO.unit
       override def expireStored(at: Instant): IO[Unit] = IO.unit
     }
@@ -202,6 +210,7 @@ final class HiringAnalyticsLateFactReplayStagesSpec extends FunSuite {
       new DeltaBatchReader[IO](execution),
       writer,
       maintenance,
+      AnalyticsTestOperationalConfig.operational.retention,
       AnalyticsTestClocks.fixed(Now),
       mergeClock
     )

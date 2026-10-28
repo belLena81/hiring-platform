@@ -45,6 +45,11 @@ final class HiringAnalyticsStreamingRecoveryIntegrationSpec extends SharedRecove
                 harness.writer.mergeWhenFresh(source, path, condition, at)
               override def withExpiry(frame: DataFrame, at: Instant, days: Int) =
                 harness.writer.withExpiry(frame, at, days)
+              override def mergeStageTimes(
+                  facts: DataFrame,
+                  retention: com.example.hiring.analytics.config.AnalyticsRetentionSettings,
+                  freshness: Option[() => Instant]
+              ) = harness.writer.mergeStageTimes(facts, retention, freshness)
             }
             publication = new DelegatingPublisher(harness.publisher) {
               override def publish(
@@ -182,6 +187,11 @@ final class HiringAnalyticsStreamingRecoveryIntegrationSpec extends SharedRecove
               harness.writer.mergeWhenFresh(source, path, condition, at)
             override def withExpiry(frame: DataFrame, at: Instant, days: Int) =
               harness.writer.withExpiry(frame, at, days)
+            override def mergeStageTimes(
+                facts: DataFrame,
+                retention: com.example.hiring.analytics.config.AnalyticsRetentionSettings,
+                freshness: Option[() => Instant]
+            ) = harness.writer.mergeStageTimes(facts, retention, freshness)
           }
           failed <- harness.process(frame, sink).attempt
           _ = assertEquals(failed.left.toOption, Some(InjectedFailure))

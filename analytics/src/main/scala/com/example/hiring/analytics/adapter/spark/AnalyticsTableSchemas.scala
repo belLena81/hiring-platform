@@ -23,6 +23,8 @@ private[analytics] object AnalyticsTableSchemas {
   val lateFacts: Shape = AnalyticsDeltaCatalog.LateFacts.shape
   val funnel: Shape = AnalyticsDeltaCatalog.FunnelGold.shape
   val timeToHire: Shape = AnalyticsDeltaCatalog.TimeToHireGold.shape
+  val stageTimes: Shape = AnalyticsDeltaCatalog.ApplicationStageTimes.shape
+  val stageDurations: Shape = AnalyticsDeltaCatalog.HiringStageDurationsGold.shape
   val skills: Shape = AnalyticsDeltaCatalog.SkillsGold.shape
   val manifests: Shape = AnalyticsDeltaCatalog.RunManifests.shape
   val quarantine: Shape = AnalyticsDeltaCatalog.Quarantine.shape

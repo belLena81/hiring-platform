@@ -30,30 +30,31 @@ private[analytics] final class AnalyticsKeyContinuityStage[F[_]: Async](
   private[spark] def ensurePrimaryTokenCompatibility(spark: SparkSession, at: Instant): F[Unit] = blocking.either {
     val failureColumn = "_hiringPrimaryTokenFailure"
     // Priorities retain the original Silver-before-late-facts error order when several tables are invalid.
-    val failures = Vector(paths.silver, paths.lateFacts).zipWithIndex.flatMap { case (path, index) =>
-      if (!DeltaTables.exists(spark, path)) Vector.empty
-      else {
-        val stored = DeltaTables.read(spark, path)
-        val columns = stored.columns.toSet
-        if (!columns.contains(Columns.SubjectToken))
-          Vector(stored.limit(1).select(lit(index * 2).as(failureColumn)))
+    val failures = Vector(paths.silver, paths.lateFacts, paths.applicationStageTimes).zipWithIndex.flatMap {
+      case (path, index) =>
+        if (!DeltaTables.exists(spark, path)) Vector.empty
         else {
-          val activeData =
-            if (columns.contains(Columns.ExpiresAt))
-              col(Columns.ExpiresAt).isNull || col(Columns.ExpiresAt) > lit(Timestamp.from(at))
-            else lit(true)
-          val expectedPrefix = pseudonymizer.primaryKeyId + "_"
-          Vector(
-            stored
-              .filter(
-                activeData && (col(Columns.SubjectToken).isNull || !col(Columns.SubjectToken)
-                  .startsWith(expectedPrefix))
-              )
-              .limit(1)
-              .select(lit(index * 2 + 1).as(failureColumn))
-          )
+          val stored = DeltaTables.read(spark, path)
+          val columns = stored.columns.toSet
+          if (!columns.contains(Columns.SubjectToken))
+            Vector(stored.limit(1).select(lit(index * 2).as(failureColumn)))
+          else {
+            val activeData =
+              if (columns.contains(Columns.ExpiresAt))
+                col(Columns.ExpiresAt).isNull || col(Columns.ExpiresAt) > lit(Timestamp.from(at))
+              else lit(true)
+            val expectedPrefix = pseudonymizer.primaryKeyId + "_"
+            Vector(
+              stored
+                .filter(
+                  activeData && (col(Columns.SubjectToken).isNull || !col(Columns.SubjectToken)
+                    .startsWith(expectedPrefix))
+                )
+                .limit(1)
+                .select(lit(index * 2 + 1).as(failureColumn))
+            )
+          }
         }
-      }
     }
     val firstFailure = failures.reduceOption(_.unionByName(_)).flatMap { frame =>
       Option(frame.agg(min(col(failureColumn))).head().getAs[java.lang.Integer](0)).map(_.intValue())
@@ -74,7 +75,13 @@ private[analytics] final class AnalyticsKeyContinuityStage[F[_]: Async](
   def validateStoredTokenKeys(spark: SparkSession): F[Unit] = blocking.either {
     val allowedKeyIds = pseudonymizer.keyIds.toVector.sorted.mkString("(?:", "|", ")")
     val tokenPattern = s"^${allowedKeyIds}_[A-Za-z0-9_-]{43}$$"
-    val invalidTokens = Vector(paths.bronze, paths.quarantine, paths.silver, paths.lateFacts)
+    val invalidTokens = Vector(
+      paths.bronze,
+      paths.quarantine,
+      paths.silver,
+      paths.applicationStageTimes,
+      paths.lateFacts
+    )
       .flatMap { path =>
         if (DeltaTables.exists(spark, path)) {
           val frame = DeltaTables.read(spark, path)
@@ -112,9 +119,11 @@ private[analytics] final class AnalyticsKeyContinuityStage[F[_]: Async](
           paths.bronze,
           paths.quarantine,
           paths.silver,
+          paths.applicationStageTimes,
           paths.lateFacts,
           paths.funnelGold,
           paths.timeToHireGold,
+          paths.hiringStageDurationsGold,
           paths.skillsGold,
           paths.manifests
         ).exists(path => DeltaTables.exists(spark, path))
@@ -172,7 +181,7 @@ private[analytics] final class AnalyticsKeyContinuityStage[F[_]: Async](
     } yield ()
 
   private def hasStoredTokenForKey(spark: SparkSession, keyId: String): Boolean =
-    Vector(paths.bronze, paths.quarantine, paths.silver, paths.lateFacts).exists { path =>
+    Vector(paths.bronze, paths.quarantine, paths.silver, paths.applicationStageTimes, paths.lateFacts).exists { path =>
       DeltaTables.readIfExists(spark, path).exists { frame =>
         val tokenFrames = Vector(
           Option.when(frame.columns.contains(Columns.SubjectTokens))(

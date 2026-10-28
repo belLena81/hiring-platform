@@ -11,6 +11,7 @@ object AnalyticsErrorText {
     case _: AnalyticsError.DataIntegrityViolation     => "DATA_INTEGRITY_VIOLATION"
     case AnalyticsError.MalformedMarker               => "MALFORMED_MARKER"
     case AnalyticsError.InvalidSilverSchema           => "INVALID_SILVER_SCHEMA"
+    case AnalyticsError.InvalidStageTimesSchema       => "INVALID_STAGE_TIMES_SCHEMA"
     case AnalyticsError.InvalidGoldSchema             => "INVALID_GOLD_SCHEMA"
     case AnalyticsError.PhysicalReclamationUnverified => "PHYSICAL_RECLAMATION_UNVERIFIED"
     case _: AnalyticsError                            => "ANALYTICS_ERROR"

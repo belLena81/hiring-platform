@@ -1,5 +1,6 @@
 package com.example.hiring.analytics.adapter.spark
 
+import com.example.hiring.analytics.config.AnalyticsRetentionSettings
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.keyretirement.HmacKeyRetirementAuthorization
 
@@ -18,6 +19,15 @@ private[analytics] trait DeltaWriter[F[_]] {
   def merge(source: DataFrame, path: String, condition: String): F[Unit]
   def mergeWhenFresh(source: DataFrame, path: String, condition: String, at: () => Instant): F[Unit]
   def withExpiry(frame: DataFrame, now: Instant, days: Int): DataFrame
+
+  /** Merges the application stage times derived from Silver-shaped lifecycle `facts`. With `freshness`, the facts must
+    * all expire after the instant it returns, exactly as for [[mergeWhenFresh]].
+    */
+  def mergeStageTimes(
+      facts: DataFrame,
+      retention: AnalyticsRetentionSettings,
+      freshness: Option[() => Instant]
+  ): F[Unit]
 }
 
 private[analytics] trait KeyRetirementLookup[F[_]] {

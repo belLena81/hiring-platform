@@ -12,7 +12,7 @@ final class AnalyticsStorageInventorySpec extends FunSuite {
     assertEquals(locations.distinct.size, locations.size)
     assertEquals(
       inventory.subjectDelta.map(_.location).toSet,
-      Set(paths.bronze, paths.quarantine, paths.silver, paths.lateFacts)
+      Set(paths.bronze, paths.quarantine, paths.silver, paths.applicationStageTimes, paths.lateFacts)
     )
     assert(
       Set(paths.streamingProgress, paths.streamingDecisions, paths.manifests, paths.hmacKeyRegistry)

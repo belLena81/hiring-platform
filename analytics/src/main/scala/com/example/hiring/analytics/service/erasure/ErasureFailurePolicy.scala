@@ -32,8 +32,8 @@ private[analytics] object ErasureFailurePolicy {
         _: AnalyticsError.ReportRowLimitExceeded | _: AnalyticsError.KeyRetirementAuditUnverified =>
       ErasureFailureCategory.TransientSource
     case AnalyticsError.MalformedMarker | AnalyticsError.InvalidSilverSchema | AnalyticsError.InvalidGoldSchema |
-        _: AnalyticsError.InvalidConfiguration | _: AnalyticsError.DataIntegrityViolation |
-        AnalyticsError.PhysicalReclamationUnverified =>
+        AnalyticsError.InvalidStageTimesSchema | _: AnalyticsError.InvalidConfiguration |
+        _: AnalyticsError.DataIntegrityViolation | AnalyticsError.PhysicalReclamationUnverified =>
       ErasureFailureCategory.InvalidState
     case _: AnalyticsError.InvalidInput | _: AnalyticsError.InvalidSourceSchema |
         _: AnalyticsError.InvalidLateFactSchema | _: AnalyticsError.EmptyRequestedRange |

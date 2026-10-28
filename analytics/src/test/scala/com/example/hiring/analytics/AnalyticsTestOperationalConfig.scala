@@ -7,7 +7,8 @@ import com.example.hiring.analytics.config.{
   AnalyticsPositiveInt,
   AnalyticsRetentionSettings,
   MaximumErasureEvidenceFiles,
-  MongoPublisherBufferSize
+  MongoPublisherBufferSize,
+  StageTimesRetentionDays
 }
 import io.github.iltotore.iron.*
 import io.github.iltotore.iron.constraint.numeric.Positive
@@ -16,6 +17,9 @@ import scala.concurrent.duration.*
 private[analytics] object AnalyticsTestOperationalConfig {
   private def positive(value: Int): AnalyticsPositiveInt =
     value.refineUnsafe[Positive]
+
+  private def stageDays(value: Int): StageTimesRetentionDays =
+    value.refineUnsafe[io.github.iltotore.iron.constraint.numeric.Interval.Closed[1, 3650]]
 
   private def maximumEvidence(value: Int): MaximumErasureEvidenceFiles =
     value.refineUnsafe[io.github.iltotore.iron.constraint.numeric.Interval.Closed[1, 2147483646]]
@@ -28,6 +32,8 @@ private[analytics] object AnalyticsTestOperationalConfig {
       bronzeDays = positive(7),
       quarantineDays = positive(7),
       silverDays = positive(30),
+      stageTimesTerminalDays = stageDays(30),
+      stageTimesOpenDays = stageDays(180),
       publishedSnapshotDays = positive(30),
       deletionMarkerDays = positive(31),
       deltaVacuumSafety = 7.days,

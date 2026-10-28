@@ -37,7 +37,7 @@ private[analytics] final class SparkAnalyticsBatchLakehouse[F[_]: Async](
       for {
         _ <- validateMarkerColumns(markerTokens)
         _ <- if (tokens.nonEmpty) maintenance.applyActiveDeletions(tokens) else async.unit
-        result <- runWithMarkers(manifest, markerTokens, tokens.nonEmpty)
+        result <- runWithMarkers(manifest, markerTokens, tokens)
       } yield result
     }
 
@@ -58,11 +58,11 @@ private[analytics] final class SparkAnalyticsBatchLakehouse[F[_]: Async](
   private def runWithMarkers(
       manifest: AnalyticsRunManifest,
       markerTokens: DataFrame,
-      activeMarkersPresent: Boolean
+      tokens: Vector[SubjectToken]
   ): F[AnalyticsBatchResult] =
-    ingestionStage.ingest(spark, source, manifest, markerTokens, maintenance.configureRawTables).use { bronze =>
+    ingestionStage.ingest(spark, source, manifest, markerTokens, maintenance.configureRawTables(tokens)).use { bronze =>
       for {
-        prepared <- silverStage.separateQuarantine(spark, bronze, markerTokens, activeMarkersPresent)
+        prepared <- silverStage.separateQuarantine(spark, bronze, markerTokens, tokens.nonEmpty)
         silver <- silverStage.mergeSilver(prepared, bronze.startedAt)
         _ <- execution(silver.schema)
         _ <- maintenance.expireStored(bronze.startedAt)

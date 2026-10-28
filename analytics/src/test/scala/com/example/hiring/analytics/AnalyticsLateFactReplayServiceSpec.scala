@@ -10,7 +10,7 @@ import java.time.Instant
 
 final class AnalyticsLateFactReplayServiceSpec extends CatsEffectSuite {
   private val Now = Instant.parse("2026-09-30T12:00:00Z")
-  private val Report = AnalyticsReportOutput(Now, Vector.empty, None, Vector.empty)
+  private val Report = AnalyticsReportOutput(Now, Vector.empty, None, Vector.empty, Vector.empty)
   private val request = replayRequest("replay-selected")
 
   test("invalid selection is rejected before journal preparation or fact/report writes") {

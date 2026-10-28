@@ -13,6 +13,7 @@ final case class AnalyticsPublication(
     completedAt: Instant,
     funnelGoldPath: String,
     timeToHireGoldPath: String,
+    hiringStageDurationsGoldPath: String,
     skillPostingGoldPath: String,
     bronzeRecords: Long,
     validRecords: Long,

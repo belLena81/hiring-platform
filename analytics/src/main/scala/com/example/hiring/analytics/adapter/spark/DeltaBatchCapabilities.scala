@@ -1,5 +1,6 @@
 package com.example.hiring.analytics.adapter.spark
 
+import com.example.hiring.analytics.config.AnalyticsRetentionSettings
 import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
 import com.example.hiring.analytics.errors.AnalyticsError
 
@@ -36,19 +37,33 @@ private[analytics] final class DeltaBatchWriter[F[_]](
       .merge(source.as("source"), condition)
       .whenNotMatched()
       .insertAll()
-    val eligible = freshness match {
-      case None     => Right(())
-      case Some(at) =>
-        val expiry = source.agg(min(col(Columns.ExpiresAt)), count(when(col(Columns.ExpiresAt).isNull, lit(1)))).head()
-        val minimumExpiry = Option(expiry.getAs[Timestamp](0)).map(_.toInstant)
-        // Read the clock after Spark normalization and Delta preparation, on the same serialized executor.
-        Either.cond(
-          expiry.getLong(1) == 0L && minimumExpiry.exists(_.isAfter(at())),
-          (),
-          AnalyticsError.LateFactReplayRejected
-        )
-    }
-    eligible.map(_ => mutation.execute()).map(_ => ())
+    freshnessVerdict(source, freshness).map(_ => mutation.execute()).map(_ => ())
+  }
+
+  private def freshnessVerdict(
+      facts: DataFrame,
+      freshness: Option[() => Instant]
+  ): Either[AnalyticsError, Unit] = freshness match {
+    case None     => Right(())
+    case Some(at) =>
+      val expiry = facts.agg(min(col(Columns.ExpiresAt)), count(when(col(Columns.ExpiresAt).isNull, lit(1)))).head()
+      val minimumExpiry = Option(expiry.getAs[Timestamp](0)).map(_.toInstant)
+      // Read the clock after Spark normalization and Delta preparation, on the same serialized executor.
+      Either.cond(
+        expiry.getLong(1) == 0L && minimumExpiry.exists(_.isAfter(at())),
+        (),
+        AnalyticsError.LateFactReplayRejected
+      )
+  }
+
+  override def mergeStageTimes(
+      facts: DataFrame,
+      retention: AnalyticsRetentionSettings,
+      freshness: Option[() => Instant]
+  ): F[Unit] = execution.either {
+    freshnessVerdict(facts, freshness).flatMap(_ =>
+      ApplicationStageTimes.mergeFacts(facts.sparkSession, paths, facts, retention)
+    )
   }
 
   override def withExpiry(frame: DataFrame, now: Instant, days: Int): DataFrame =
