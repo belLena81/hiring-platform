@@ -6,7 +6,8 @@ import com.example.graphQL.cats.service.{
   AnalyticsHiringStageMetric,
   AnalyticsReportSnapshot,
   AnalyticsSkillPostingDay,
-  AnalyticsTimeToHire
+  AnalyticsTimeToHire,
+  RepositoryError
 }
 import munit.FunSuite
 import org.bson.Document
@@ -71,4 +72,21 @@ class AnalyticsReportSnapshotDocumentSpec extends FunSuite {
   rejects("a percentile is not a number")(durations(_).get(0).put("p95Hours", Double.NaN))
   rejects("eligibleCount is negative")(durations(_).get(0).put("eligibleCount", -1L))
   rejects("eligibleCount is missing")(durations(_).get(0).remove("eligibleCount"))
+
+  rejects("stageDurations has more entries than there are metrics") { document =>
+    val entry = durations(document).get(0)
+    document.put("stageDurations", java.util.Collections.nCopies(6, entry))
+  }
+
+  test("AC-03 an unreadable stageDurations maps to InvalidStoredData, then to a repository failure") {
+    val document = stored
+    document.remove("stageDurations")
+    val repository = MongoDocumentFields.toRepository(AnalyticsReportSnapshotDocument.read(document))
+
+    assertEquals(repository, Left(RepositoryError.InvalidStoredData))
+    assertEquals(
+      repository.left.map(com.example.graphQL.cats.service.protocol.UseCaseF.translate),
+      Left(com.example.graphQL.cats.service.UseCaseError.Repository(RepositoryError.InvalidStoredData))
+    )
+  }
 }

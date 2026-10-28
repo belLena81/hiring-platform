@@ -239,6 +239,57 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     }
   }
 
+  test("AC-03 Recruiter and Candidate are refused stageDurations by the real reporting service") {
+    val roles = List(
+      (ActorContext(recruiterId, UserRole.Recruiter), recruiter),
+      (ActorContext(candidateId, UserRole.Candidate), candidate)
+    )
+    roles.traverse { case (actor, user) =>
+      for {
+        ref <- Ref.of[IO, Map[UserId, User]](Map(adminId -> admin, user.id -> user))
+        reports = new com.example.graphQL.cats.service.port.AnalyticsReportRepository[IO] {
+          override def latest =
+            com.example.graphQL.cats.service.port.RepositoryF.fromFEither(
+              IO.pure(Right(Some(AnalyticsReportSnapshot(now, Nil, None, Vector.empty, Nil))))
+            )
+        }
+        reporting = new com.example.graphQL.cats.service.AnalyticsReportingService[IO](
+          new InMemoryUsers(ref),
+          reports
+        )
+        json <- executeWithUsers(
+          stageDurationsQuery,
+          Some(actor),
+          List(admin, user),
+          analyticsReporting = reporting
+        )
+      } yield {
+        assertEquals(errorCode(json), Right("UNAUTHORIZED"))
+        assert(json.hcursor.downField("data").downField("analyticsReport").focus.forall(_.isNull))
+      }
+    }.void
+  }
+
+  test("AC-03 an unreadable stored snapshot is reported as a sanitized repository failure") {
+    val reporting = new AnalyticsReportingUseCases[IO] {
+      override def report(
+          actor: ActorContext,
+          period: com.example.graphQL.cats.service.AnalyticsPeriod
+      ): UseCaseF[IO, AnalyticsReportSnapshot] =
+        EitherT.leftT(UseCaseError.Repository(RepositoryError.InvalidStoredData))
+    }
+
+    executeWithUsers(
+      stageDurationsQuery,
+      Some(ActorContext(adminId, UserRole.Admin)),
+      List(admin),
+      analyticsReporting = reporting
+    ).map { json =>
+      assertEquals(errorCode(json), Right("UNAVAILABLE"))
+      assert(!json.noSpaces.contains("stageDurations\":["))
+    }
+  }
+
   test("AC-03 stageDurations requires authentication") {
     execute(stageDurationsQuery, None).map(json => assertEquals(errorCode(json), Right("UNAUTHORIZED")))
   }

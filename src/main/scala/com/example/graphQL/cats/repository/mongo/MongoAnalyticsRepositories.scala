@@ -391,6 +391,7 @@ private[mongo] object AnalyticsReportSnapshotDocument {
       skills <- requiredDocumentVector(document, MongoFields.SkillPostingActivity).flatMap(_.toList.traverse(readSkill))
       timeToHire <- optionalDocument(document, MongoFields.TimeToHire).flatMap(_.traverse(readTimeToHire))
       stageDurations <- requiredDocumentVector(document, MongoFields.StageDurations)
+        .flatMap(requireBoundedStageDurations)
         .flatMap(_.toList.traverse(readStageDuration))
         .flatMap(requireDistinctMetrics)
     } yield AnalyticsReportSnapshot(asOf, funnel, timeToHire, stageDurations.toVector, skills)
@@ -466,6 +467,14 @@ private[mongo] object AnalyticsReportSnapshotDocument {
     requiredDouble(document, field).filterOrElse(
       value => java.lang.Double.isFinite(value) && value >= 0.0,
       StoredDocumentError.InvalidField(field)
+    )
+
+  /** One entry per metric at most, so a longer array is rejected before any element is decoded. */
+  private def requireBoundedStageDurations(entries: Vector[Document]): Read[Vector[Document]] =
+    Either.cond(
+      entries.size <= AnalyticsHiringStageMetric.values.length,
+      entries,
+      StoredDocumentError.InvalidField(MongoFields.StageDurations)
     )
 
   private def requireDistinctMetrics(
