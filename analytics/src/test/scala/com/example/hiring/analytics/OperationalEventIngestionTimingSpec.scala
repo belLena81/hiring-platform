@@ -1,7 +1,12 @@
 package com.example.hiring.analytics
 
 import com.example.hiring.analytics.adapter.spark.*
-import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
+import com.example.hiring.analytics.domain.AnalyticsRunManifest
+import com.example.hiring.analytics.service.batch.{
+  AnalyticsLakehousePaths,
+  AnalyticsManifestStatus,
+  AnalyticsRunManifestStore
+}
 
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
@@ -10,15 +15,15 @@ import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.sql.functions.{col, current_timestamp, encode}
 import org.apache.spark.sql.types.{IntegerType, LongType, StringType, StructField, StructType}
 
-import java.nio.file.{Files, Paths}
+import java.nio.file.Files
 import java.time.Instant
 import java.util.UUID
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
 /** Local wall-clock evidence for the parse, Bronze and Silver admission stages on one fixed fixture. It runs only when
-  * `analytics/target/timing-records` holds a record count, so ordinary test runs stay fast. The numbers are local
-  * evidence on one machine, not a benchmark.
+  * the `timing.records` system property or `TIMING_RECORDS` holds a record count, so ordinary test runs stay fast. The
+  * numbers are local evidence on one machine, not a benchmark.
   */
 class OperationalEventIngestionTimingSpec extends FunSuite {
   override val munitTimeout: FiniteDuration = 20.minutes
@@ -70,10 +75,8 @@ class OperationalEventIngestionTimingSpec extends FunSuite {
   }
 
   test("local wall time of parse, Bronze and Silver admission on a fixed fixture") {
-    val marker = Paths.get("target", "timing-records")
-    val size =
-      Option.when(Files.exists(marker))(new String(Files.readAllBytes(marker), "UTF-8").trim).flatMap(_.toIntOption)
-    assume(size.isDefined, "write the record count to analytics/target/timing-records to run")
+    val size = sys.props.get("timing.records").orElse(sys.env.get("TIMING_RECORDS")).flatMap(_.toIntOption)
+    assume(size.isDefined, "set the timing.records system property or TIMING_RECORDS to run")
     val count = size.get
     val paths: AnalyticsLakehousePaths =
       TestAnalyticsLakehousePaths.unsafe(Files.createTempDirectory("analytics-timing-").toUri.toString.stripSuffix("/"))
@@ -106,7 +109,14 @@ class OperationalEventIngestionTimingSpec extends FunSuite {
       paths,
       keys,
       execution,
-      null,
+      new AnalyticsRunManifestStore[IO] {
+        override def persist(
+            manifest: AnalyticsRunManifest,
+            status: AnalyticsManifestStatus,
+            updatedAt: Instant
+        ): IO[Unit] =
+          IO.raiseError(new IllegalStateException("timing fixture has no manifest"))
+      },
       writer,
       retention,
       cats.effect.Clock[IO]

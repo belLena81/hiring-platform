@@ -306,7 +306,7 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
         }
     }
 
-  /** Register the safe source cache before Silver's tokenizer captures its physical RDD. */
+  /** Tokenizes (when needed), excludes active markers and caches the privacy-safe source for the admission phase. */
   private def privacySafeSource(markerFrame: DataFrame): Resource[F, (DataFrame, DataFrame)] =
     Resource
       .eval(for {
@@ -431,8 +431,8 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
       val coordinateConflicts = SparkStreamingBatchStages.coordinateConflicts(safe, storedBronze)
       val conflicts = localConflicts.unionByName(historicalConflicts).unionByName(coordinateConflicts).distinct()
       val incomingPairs = incomingSilver.select(Columns.EventId, Columns.EventFingerprint)
-      val selectedValid = safe
-        .withColumn(Columns.EventFingerprint, sha2(col(Columns.RawValue), 256))
+      val selectedValid = OperationalEventTransforms
+        .withFingerprint(safe)
         .join(incomingPairs, Seq(Columns.EventId, Columns.EventFingerprint), "inner")
         .join(conflicts, Seq(Columns.EventId), "left_anti")
       val classified = withEventTimeAdmission(selectedValid, preparation)

@@ -40,11 +40,11 @@ object AnalyticsSubjectPrivacy {
     @transient private var tokenizer: String => String = null
 
     private def tokenize(subjectId: String): String = {
-      val current = synchronized {
+      // The HMAC Mac inside the tokenizer is not thread-safe, so creation and use share one lock.
+      synchronized {
         if (tokenizer == null) tokenizer = newTokenizer()
-        tokenizer
+        tokenizer(subjectId)
       }
-      current(subjectId)
     }
 
     override def call(actor: String, eventType: String, payload: Row): Row = {
@@ -88,7 +88,8 @@ object AnalyticsSubjectPrivacy {
     attachTokens(events.drop(SubjectTokenColumn, SubjectTokensColumn), tokenizerFor(pseudonymizer))
 
   /** Adds subject tokens only when the frame does not carry both columns yet, so a frame tokenized once is never
-    * tokenized again.
+    * tokenized again. Contract: existing `subjectToken`/`subjectTokens` columns are trusted as they are, so they must
+    * come from this pipeline's own tokenization (`analyzed` or `withSubjectToken`), never from external input.
     */
   private[analytics] def ensureSubjectTokens(events: DataFrame, pseudonymizer: SubjectPseudonymizer): DataFrame =
     if (events.columns.contains(SubjectTokenColumn) && events.columns.contains(SubjectTokensColumn)) events

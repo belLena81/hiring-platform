@@ -68,7 +68,10 @@ class OperationalEventParsedFrameSpec extends FunSuite {
       )}","payload":{"job":{"jobId":"$job","status":"Open","skills":["Scala"]}}}"""
   }
 
-  private def parsed(values: Seq[String]): DataFrame = {
+  private def parsed(values: Seq[String]): DataFrame =
+    OperationalEventTransforms.parseKafkaRecords(rawRecords(values))
+
+  private def rawRecords(values: Seq[String]): DataFrame = {
     val schema = StructType(
       Seq(
         StructField("topic", StringType),
@@ -84,7 +87,7 @@ class OperationalEventParsedFrameSpec extends FunSuite {
       )
       .withColumn("value", encode(col("value"), "UTF-8"))
       .withColumn("timestamp", current_timestamp())
-    OperationalEventTransforms.parseKafkaRecords(raw)
+    raw
   }
 
   private def markers(tokens: Seq[String]): DataFrame =
@@ -163,6 +166,199 @@ class OperationalEventParsedFrameSpec extends FunSuite {
     )
     val silver = OperationalEventTransforms.silver(OperationalEventTransforms.validEvents(analyzed), keys, markers(Nil))
     assertEquals(silver.toOption.get.count(), 4L)
+  }
+
+  private def accepted(values: Seq[String]): Seq[Boolean] =
+    OperationalEventTransforms
+      .analyzed(parsed(values), keys)
+      .select("offset", "isValidEvent")
+      .collect()
+      .sortBy(_.getLong(0))
+      .map(_.getBoolean(1))
+      .toSeq
+
+  private val statusBase = statusChanged("edge-status", "recruiter", "candidate")
+  private val jobBase = jobCreated("edge-job", "recruiter")
+  private def viewed(payload: String): String = {
+    s"""{"eventId":"${id(
+        "edge-view"
+      )}","eventType":"JOB_VIEWED","occurredAt":"$At","aggregateType":"Search","aggregateId":"${id(
+        "edge-result"
+      )}","actorId":"${id("viewer")}","payload":$payload}"""
+  }
+  private def viewedPayload(searchId: String, searchKind: String, rank: String): String =
+    s"""{"searchId":$searchId,"resultId":"${id("edge-result")}","searchKind":$searchKind,"rank":$rank}"""
+
+  test("AC-02.1 duplicate keys and non-object envelopes or payloads are malformed") {
+    val duplicateEnvelope = statusBase.dropRight(1) + s""","actorId":"${id("other")}"}"""
+    val duplicatePayload =
+      statusBase.replace(""""previousStatus":"Created",""", """"previousStatus":"Created","jobId":"x",""")
+    val payloadString = statusBase.replaceFirst(""""payload":\{.*\}\}$""", """"payload":"{}"}""")
+    val payloadArray = statusBase.replaceFirst(""""payload":\{.*\}\}$""", """"payload":[]}""")
+    val payloadNull = statusBase.replaceFirst(""""payload":\{.*\}\}$""", """"payload":null}""")
+    val nonObjects = Seq("[]", "\"x\"", "5", "null", "{}")
+    assertEquals(
+      accepted(
+        Seq(statusBase, duplicateEnvelope, duplicatePayload, payloadString, payloadArray, payloadNull) ++ nonObjects
+      ),
+      Seq(true) ++ Seq.fill(5 + nonObjects.size)(false)
+    )
+  }
+
+  test("AC-02.1 a job that is a string, array, null or missing a key is malformed") {
+    def withJob(job: String) = jobBase.replaceFirst(""""job":\{[^}]*\}""", s""""job":$job""")
+    assertEquals(
+      accepted(
+        Seq(
+          jobBase,
+          withJob("\"x\""),
+          withJob("[]"),
+          withJob("null"),
+          withJob("""{"jobId":"%s","status":"Open"}""".format(id("job-edge-job"))),
+          withJob("""{"jobId":"%s","status":"Open","skills":["Scala"],"x":1}""".format(id("job-edge-job"))),
+          withJob("""{"jobId":"%s","status":"Open","skills":["Sc\\u0061la"]}""".format(id("job-edge-job"))),
+          withJob("""{"jobId":"%s","status":"Open","skills":["Scala",1]}""".format(id("job-edge-job")))
+        )
+      ),
+      Seq(true, false, false, false, false, false, true, false)
+    )
+  }
+
+  test("AC-02.1 escaped and unicode-escaped JSON is read like its decoded form") {
+    val escapedInstant = statusBase.replace(s""""occurredAt":"$At"""", """"occurredAt":"2026-10-02T10:00:00\u005a"""")
+    val escapedKey = statusBase.replace(""""actorId":""", """"actor\u0049d":""")
+    val escapedId = statusBase
+      .replace(id("edge-status"), "\\u0030" + id("edge-status").drop(1))
+      .replace(
+        s""""eventId":"\\u0030${id("edge-status").drop(1)}"""",
+        s""""eventId":"${id("edge-status")}""""
+      )
+    assertEquals(accepted(Seq(statusBase, escapedInstant, escapedKey, escapedId)), Seq(true, true, true, true))
+  }
+
+  test("AC-02.1 null previousStatus is accepted while an absent or non-string previousStatus is malformed") {
+    val nulled = statusBase.replace(""""previousStatus":"Created"""", """"previousStatus":null""")
+    val absent = statusBase.replace(""""previousStatus":"Created",""", "")
+    val number = statusBase.replace(""""previousStatus":"Created"""", """"previousStatus":5""")
+    val objectValue = statusBase.replace(""""previousStatus":"Created"""", """"previousStatus":{}""")
+    assertEquals(accepted(Seq(nulled, absent, number, objectValue)), Seq(true, false, false, false))
+  }
+
+  test("AC-02.1 null versus absent searchKind, searchId and rank on a viewed result") {
+    val search = id("edge-view-search")
+    def view(searchId: String, searchKind: String, rank: String) = viewed(viewedPayload(searchId, searchKind, rank))
+    val q = (value: String) => "\"" + value + "\""
+    assertEquals(
+      accepted(
+        Seq(
+          view("null", "null", "null"),
+          view(q(search), "null", "3"),
+          view("null", "null", "3"),
+          view(q(search), "null", "null"),
+          view(q(search), q("jobs"), "3"),
+          view(q(search), "null", q("3")),
+          view(q(search), "null", "3.5"),
+          viewed(viewedPayload(q(search), "null", "3").replace(""","searchKind":null""", ""))
+        )
+      ),
+      Seq(true, true, false, false, false, false, false, false)
+    )
+  }
+
+  test("AC-02.1 search results with extra fields, string numbers or a non-array are malformed") {
+    val base = search("edge-results", "searcher", "candidateMatches", Seq("r1"))
+    val result = s"""{"resultId":"${id("r1")}","rank":1,"score":0.5}"""
+    assert(base.contains(result))
+    def with_(replacement: String) = base.replace(result, replacement)
+    assertEquals(
+      accepted(
+        Seq(
+          base,
+          with_(s"""{"resultId":"${id("r1")}","rank":1,"score":0.5,"extra":1}"""),
+          with_(s"""{"resultId":"${id("r1")}","rank":1,"score":"0.5"}"""),
+          with_(s"""{"resultId":"${id("r1")}","rank":"1","score":0.5}"""),
+          with_(s"""{"resultId":"${id("r1")}","rank":1}"""),
+          base.replace(s"[$result]", "{}"),
+          base.replace(s"[$result]", "null"),
+          with_(s"""{"resultId":"${id("r1")}","resultId":"${id("r1")}","rank":1,"score":0.5}""")
+        )
+      ),
+      Seq(true, false, false, false, false, false, false, false)
+    )
+  }
+
+  test("AC-02.1 existing isValidEvent and subjectTokens columns are trusted only as the pipeline's own output") {
+    val own = OperationalEventTransforms.analyzed(parsed(Seq(statusBase)), keys)
+    val forged = own.withColumn("isValidEvent", org.apache.spark.sql.functions.lit(false))
+    // Documented contract: analysis keeps an existing column and never recomputes it.
+    assertEquals(OperationalEventTransforms.analyzed(forged, keys).select("isValidEvent").head().getBoolean(0), false)
+    assertEquals(OperationalEventTransforms.validEvents(forged).count(), 0L)
+    assertEquals(OperationalEventTransforms.validEvents(parsed(Seq(statusBase))).count(), 1L)
+  }
+
+  private def tokenRows(rows: Seq[Row], schema: StructType): DataFrame = spark.createDataFrame(rows.asJava, schema)
+  private val coordinateSchema = StructType(
+    Seq(
+      StructField("topic", StringType),
+      StructField("partition", IntegerType),
+      StructField("offset", LongType),
+      StructField("eventId", StringType),
+      StructField("subjectToken", StringType),
+      StructField("subjectTokens", org.apache.spark.sql.types.ArrayType(StringType))
+    )
+  )
+
+  test("AC-02.1 marker exclusion keeps null and empty token lists and over-excludes duplicate coordinates") {
+    val frame = tokenRows(
+      Seq(
+        Row("t", 0, 1L, "nulls", null, null),
+        Row("t", 0, 2L, "empty", null, Seq.empty[String]),
+        Row("t", 0, 3L, "kept", "k", Seq("k")),
+        Row("t", 0, 4L, "dup-a", "m", Seq("m")),
+        Row("t", 0, 4L, "dup-b", "k", Seq("k")),
+        Row("t", 0, 5L, "gone", "m", Seq("x", "m"))
+      ),
+      coordinateSchema
+    )
+    val kept = AnalyticsSubjectPrivacy
+      .excludeActiveDeletionMarkers(frame, markers(Seq("m")))
+      .toOption
+      .get
+      .select("eventId")
+      .collect()
+      .map(_.getString(0))
+      .toSet
+    // The coordinate (t, 0, 4) is shared by dup-a and dup-b: one marked row excludes both. Kafka coordinates are
+    // unique in production, so this only documents the key's granularity.
+    assertEquals(kept, Set("nulls", "empty", "kept"))
+  }
+
+  test("AC-02.1 without Kafka coordinates marker exclusion keys on the event ID and otherwise fails closed") {
+    val byEvent = StructType(coordinateSchema.fields.drop(3))
+    val frame = tokenRows(
+      Seq(
+        Row("a", "m", Seq("m")),
+        Row("a", "k", Seq("k")),
+        Row("b", "k", Seq("k")),
+        Row("c", null, null)
+      ),
+      byEvent
+    )
+    val kept = AnalyticsSubjectPrivacy
+      .excludeActiveDeletionMarkers(frame, markers(Seq("m")))
+      .toOption
+      .get
+      .select("eventId")
+      .collect()
+      .map(_.getString(0))
+      .toList
+      .sorted
+    assertEquals(kept, List("b", "c"))
+    val neither = frame.drop("eventId")
+    assertEquals(
+      AnalyticsSubjectPrivacy.excludeActiveDeletionMarkers(neither, markers(Seq("m"))).left.toOption.map(_.getClass),
+      Some(com.example.hiring.analytics.errors.AnalyticsError.InvalidSourceSchema(Vector.empty).getClass)
+    )
   }
 
   test("AC-02.2 the tokenizer runs once per record for one action and never again on the persisted frame") {
@@ -284,6 +480,15 @@ class OperationalEventParsedFrameSpec extends FunSuite {
     // result. The previous per-branch expression held 16 get_json_object and 11 json_object_keys calls.
     assertEquals(validation.count(_.isInstanceOf[GetJsonObject]), 8)
     assertEquals(validation.count(_.isInstanceOf[JsonObjectKeys]), 4)
+    // On a file-backed source the optimizer keeps the expressions, so the optimized plan has no more calls either.
+    val fileBacked = {
+      val dir = java.nio.file.Files.createTempDirectory("parsed-frame-spec-").resolve("raw").toString
+      rawRecords(mixed).write.parquet(dir)
+      OperationalEventTransforms.parseKafkaRecords(spark.read.parquet(dir))
+    }
+    val optimized = expressions(OperationalEventTransforms.withValidity(fileBacked).queryExecution.optimizedPlan)
+    val optimizedCalls = optimized.count(_.isInstanceOf[GetJsonObject])
+    assert(optimizedCalls >= 1 && optimizedCalls <= 8, s"get_json_object calls in optimized plan: $optimizedCalls")
     // Consumers read the persisted columns: no JSON function is left in their plans.
     val persisted = frame.persist()
     try {

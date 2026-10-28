@@ -182,6 +182,9 @@ object OperationalEventTransforms {
 
   private def sortedKeys(json: Column): Column = array_sort(json_object_keys(json))
 
+  /** Adds `isValidEvent` unless present. Contract: an existing `isValidEvent` column is trusted, so it must come from
+    * this pipeline's own `analyzed` frame, never from external input.
+    */
   private[analytics] def withValidity(frame: DataFrame): DataFrame =
     if (frame.columns.contains(Columns.IsValidEvent)) frame
     else {

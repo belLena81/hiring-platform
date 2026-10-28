@@ -67,7 +67,8 @@ private[analytics] final class AnalyticsBatchIngestionStage[F[_]: Async](
   /** Persists the shared Bronze representation of an already parsed Kafka frame.
     *
     * The frame should be [[OperationalEventTransforms.analyzed]] and persisted by its owner, so validity, fingerprint
-    * and subject tokens are computed once; a frame without those columns gets them added here, without a cache.
+    * and subject tokens are computed once; a frame without those columns gets them added here, without a cache. An
+    * unpersisted frame is evaluated twice by marker exclusion (the token explode and the row anti-join).
     *
     * Streaming callers supply their stable observation time and no batch manifest callback. This method deliberately
     * consumes the provided frame as-is: it neither reads a source nor derives Kafka offset spans.
