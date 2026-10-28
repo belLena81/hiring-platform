@@ -171,6 +171,11 @@ final class HiringGraphQLGraphAccessSpec extends CatsEffectSuite {
       extends HiringReadModel[IO] {
     def viewer(actor: ActorContext) = delegate.viewer(actor)
     def canViewUserEmails(actor: ActorContext, userIds: List[UserId]) = delegate.canViewUserEmails(actor, userIds)
+    def jobApplicationCounts(
+        actor: ActorContext,
+        jobIds: List[com.example.graphQL.cats.domain.model.Identifiers.JobId]
+    ) =
+      delegate.jobApplicationCounts(actor, jobIds)
     def application(id: ApplicationId) = delegate.application(id)
     def canViewApplication(actor: ActorContext, applicationId: ApplicationId) =
       delegate.canViewApplication(actor, applicationId)

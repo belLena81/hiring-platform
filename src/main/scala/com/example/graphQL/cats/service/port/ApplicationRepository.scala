@@ -4,7 +4,7 @@ import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, 
 import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, JobSubmissionSnapshot, UserRole}
 import com.example.graphQL.cats.domain.pagination.{ApplicationEventPageRequest, ApplicationPageRequest}
 import com.example.graphQL.cats.service.events.OperationalEventEnvelope
-import com.example.graphQL.cats.service.read.HiringReadScope
+import com.example.graphQL.cats.service.read.{HiringReadScope, JobApplicationCounts}
 
 /** The authenticated actor of an application write, derived from the trusted context and never from request arguments.
   * The store re-validates it inside the write transaction: the account must still be active in this role (the singleton
@@ -16,6 +16,14 @@ trait ApplicationRepository[F[_]] {
   def find(id: ApplicationId): RepositoryF[F, Option[Application]]
   def findByCandidate(scope: HiringReadScope, page: ApplicationPageRequest): RepositoryF[F, List[Application]]
   def findByJob(scope: HiringReadScope, jobId: JobId, page: ApplicationPageRequest): RepositoryF[F, List[Application]]
+
+  /** Per-status application counts for the given jobs in one read. Only jobs the scope may manage are reported (the
+    * owning Recruiter, or Admin); any other job is absent from the result, as is a missing one.
+    */
+  def applicationCounts(
+      scope: HiringReadScope,
+      jobIds: List[JobId]
+  ): RepositoryF[F, List[JobApplicationCounts]]
   def history(
       scope: HiringReadScope,
       applicationId: ApplicationId,

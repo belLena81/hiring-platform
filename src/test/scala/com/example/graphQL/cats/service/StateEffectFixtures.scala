@@ -129,6 +129,7 @@ private[cats] object StateEffectFixtures {
     override def find(id: ApplicationId): RepositoryF[Program, Option[Application]] = inspect(_.applications.get(id))
     override def findByCandidate(scope: HiringReadScope, page: ApplicationPageRequest) = unavailable
     override def findByJob(scope: HiringReadScope, jobId: JobId, page: ApplicationPageRequest) = unavailable
+    override def applicationCounts(scope: HiringReadScope, jobIds: List[JobId]) = unavailable
     override def history(
         scope: HiringReadScope,
         applicationId: ApplicationId,
@@ -174,6 +175,7 @@ private[cats] object StateEffectFixtures {
     private def unsupported[A]: UseCaseF[Program, A] = UseCaseF.repository(unavailable[A])
     override def relatedUsers(actor: ActorContext, keys: List[UserRelationKey]) = unsupported
     override def relatedJobs(actor: ActorContext, keys: List[JobRelationKey]) = unsupported
+    override def jobApplicationCounts(actor: ActorContext, jobIds: List[JobId]) = unsupported
     override def viewer(actor: ActorContext) = unsupported
     override def canViewUserEmails(actor: ActorContext, userIds: List[UserId]) = unsupported
     override def application(id: ApplicationId) = unsupported

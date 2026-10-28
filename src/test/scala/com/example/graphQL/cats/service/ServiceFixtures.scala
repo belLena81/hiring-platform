@@ -541,6 +541,28 @@ private[cats] object ServiceFixtures {
         }
       )
 
+    override def applicationCounts(
+        scope: HiringReadScope,
+        jobIds: List[JobId]
+    ): RepositoryF[IO, List[JobApplicationCounts]] =
+      com.example.graphQL.cats.service.port.RepositoryF.fromFEither(
+        for {
+          all <- applications.get
+          managed <- jobIds.distinct.traverse(id => jobLookup(id))
+        } yield Right(
+          managed.flatten
+            .filter(job =>
+              scope.role == UserRole.Admin || (scope.role == UserRole.Recruiter && job.recruiterId == scope.userId)
+            )
+            .map(job =>
+              JobApplicationCounts.of(
+                job.id,
+                all.values.filter(_.jobId == job.id).groupMapReduce(_.status)(_ => 1)(_ + _)
+              )
+            )
+        )
+      )
+
     override def history(
         scope: HiringReadScope,
         applicationId: ApplicationId,

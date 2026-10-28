@@ -13,6 +13,7 @@ import com.example.graphQL.cats.api.graphql.HiringGraphQLDsl.{
 }
 import com.example.graphQL.cats.api.graphql.QueryAdmission.{nestedConnectionComplexity, nestedFieldComplexity}
 import com.example.graphQL.cats.domain.workflow.{InterviewInterval, InterviewRescheduleProposal}
+import com.example.graphQL.cats.service.read.JobApplicationCounts
 import com.example.graphQL.cats.service.search.*
 import scala.reflect.ClassTag
 import sangria.schema.*
@@ -316,6 +317,25 @@ private[graphql] object HiringGraphQLTypes {
         simple("jobTitle", OptionType(StringType))(_.jobTitle)
       )
     )
+  lazy val applicationStatusCountType: ObjectType[RequestContext, (ApplicationStatus, Int)] = ObjectType(
+    "ApplicationStatusCount",
+    "How many applications of one job are in one status.",
+    fields[RequestContext, (ApplicationStatus, Int)](
+      simple("status", applicationStatus)(_._1),
+      simple("count", IntType)(_._2)
+    )
+  )
+  lazy val jobApplicationCountsType: ObjectType[RequestContext, JobApplicationCounts] =
+    ObjectType(
+      "JobApplicationCounts",
+      "The applications to a job counted by status, for dashboards that must not load every application.",
+      fields[RequestContext, JobApplicationCounts](
+        simple("total", IntType)(_.total),
+        simple("byStatus", ListType(applicationStatusCountType))(counts =>
+          ApplicationStatus.values.toList.map(status => status -> counts.byStatus(status))
+        )
+      )
+    )
   lazy val jobType: ObjectType[RequestContext, Job] = ObjectType(
     "Job",
     // Deferred: User, Job and Application reach each other through their connection fields.
@@ -340,6 +360,16 @@ private[graphql] object HiringGraphQLTypes {
                   .JobRecruiter(context.value.id, context.value.recruiterId)
               )
               .map(_.map(_.value))(using context.ctx.effectAdapter.deferredExecutionContext)
+        ),
+        Field(
+          "applicationCounts",
+          OptionType(jobApplicationCountsType),
+          description = Some(
+            "The applications to this job counted by status, loaded in one read for a whole page of jobs. Only the " +
+              "owning recruiter and Admin see them; for anyone else this is null."
+          ),
+          complexity = Some(nestedFieldComplexity),
+          resolve = context => jobApplicationCountsFetcher.deferOpt(context.value.id)
         ),
         resultField(
           "applications",

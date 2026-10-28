@@ -17,7 +17,7 @@ import mongo4cats.client.{ClientSession, MongoClient}
 import mongo4cats.database.MongoDatabase
 
 import org.bson.Document
-import com.example.graphQL.cats.service.read.HiringReadScope
+import com.example.graphQL.cats.service.read.{HiringReadScope, JobApplicationCounts}
 
 final class MongoApplicationRepository private (
     database: MongoDatabase[IO],
@@ -79,6 +79,56 @@ final class MongoApplicationRepository private (
       )
     documents(database, MongoCollections.Jobs, pipeline, page.pageSize.value, diagnostics)
       .subflatMap(values => MongoStoredDocumentDecoding.values(values.map(MongoHiringCodecs.readApplication)))
+  }
+
+  override def applicationCounts(
+      scope: HiringReadScope,
+      jobIds: List[JobId]
+  ): RepositoryF[IO, List[JobApplicationCounts]] = {
+    import MongoAuthorizedReadQueries.*
+    import scala.jdk.CollectionConverters.*
+    val requested = jobIds.distinct
+    if (requested.isEmpty) MongoF.pure(Nil)
+    else {
+      // Authorization and the count are one selection: only managed jobs reach the lookup, which groups each job's
+      // applications by status on the (jobId, status, ...) index without fetching the application documents.
+      val perStatus = List(
+        new Document("$project", new Document(MongoFields.Status, 1).append(MongoFields.Id, 0)),
+        new Document(
+          "$group",
+          new Document(MongoFields.Id, s"$$${MongoFields.Status}").append("n", new Document("$sum", 1))
+        )
+      )
+      val pipeline = List(
+        matching(
+          Filters.and(Filters.in(MongoFields.Id, requested.map(_.value.toString).asJava), managedJob(scope))
+        )
+      ) ++ actor(scope) ++ List(
+        lookup(MongoCollections.Applications, MongoFields.Id, MongoFields.JobId, "counts", perStatus),
+        new Document("$project", new Document("counts", 1))
+      )
+      documents(database, MongoCollections.Jobs, pipeline, requested.size, diagnostics).subflatMap(values =>
+        values.traverse(document => readCounts(document))
+      )
+    }
+  }
+
+  private def readCounts(document: Document): Either[RepositoryError, JobApplicationCounts] = {
+    import MongoDocumentFields.Repository
+    import scala.jdk.CollectionConverters.*
+    for {
+      jobId <- Repository.uuid(document, MongoFields.Id).map(JobId.apply)
+      reported <- document
+        .getList("counts", classOf[Document])
+        .asScala
+        .toList
+        .traverse { row =>
+          for {
+            status <- Repository.string(row, MongoFields.Id).flatMap(Repository.named(ApplicationStatus.values))
+            n <- Repository.int32(row, "n")
+          } yield status -> n
+        }
+    } yield JobApplicationCounts.of(jobId, reported.toMap)
   }
 
   override def history(

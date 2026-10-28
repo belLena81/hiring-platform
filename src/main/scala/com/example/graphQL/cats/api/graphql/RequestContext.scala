@@ -19,7 +19,7 @@ import com.example.graphQL.cats.service.{AnalyticsReportingUseCases, EmbeddingCo
 import com.example.graphQL.cats.service.Diagnostics.*
 import com.example.graphQL.cats.service.LogField
 import com.example.graphQL.cats.domain.model.CandidateProfile
-import com.example.graphQL.cats.domain.model.Identifiers.UserId
+import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.service.protocol.{
   AccountUseCases,
   ApplicationUseCases,
@@ -193,6 +193,11 @@ final class RequestContext private (
   def relatedJobs(keys: List[JobRelationKey]): HiringGraphQLResult[List[RelatedJob]] =
     authenticatedActor.flatMap(actor =>
       raiseOnUseCaseError(parameters.hiring.readModel.relatedJobs(actor, keys.distinct))
+    )
+
+  def jobApplicationCounts(ids: List[JobId]): HiringGraphQLResult[List[JobApplicationCounts]] =
+    authenticatedActor.flatMap(actor =>
+      raiseOnUseCaseError(parameters.hiring.readModel.jobApplicationCounts(actor, ids.distinct))
     )
 
   /** Owner-only profile attributes are masked by the service rule for the authenticated viewer. */

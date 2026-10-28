@@ -161,6 +161,12 @@ enum ApplicationStatus {
   REJECTED
 }
 
+"How many applications of one job are in one status."
+type ApplicationStatusCount {
+  status: ApplicationStatus!
+  count: Int!
+}
+
 type AuthSuccess {
   user: User!
   accessToken: String!
@@ -736,6 +742,9 @@ type Job {
   updatedAt: Instant!
   recruiter: User
 
+  "The applications to this job counted by status, loaded in one read for a whole page of jobs. Only the owning recruiter and Admin see them; for anyone else this is null."
+  applicationCounts: JobApplicationCounts
+
   "A page of the applications to this job, newest first, optionally of one status. Only the owning recruiter and Admin may read them; anyone else is refused exactly as by jobApplications."
   applications(
     "The page size; between 1 and 100."
@@ -755,6 +764,12 @@ input JobActionInput {
 
   "The job."
   jobId: JobID!
+}
+
+"The applications to a job counted by status, for dashboards that must not load every application."
+type JobApplicationCounts {
+  total: Int!
+  byStatus: [ApplicationStatusCount!]!
 }
 
 type JobConnection {

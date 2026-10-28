@@ -3,7 +3,7 @@ package com.example.graphQL.cats.service
 import cats.data.EitherT
 import cats.Monad
 import cats.syntax.all.*
-import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, UserId}
+import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, UserRole}
 import com.example.graphQL.cats.service.application.AuthorizedApplicationAccess
 import com.example.graphQL.cats.service.port.{ActorRecord, ApplicationRepository, JobRepository, UserRepository}
@@ -30,6 +30,11 @@ final class HiringReadService[F[_]: Monad](
     authorization
       .readScope(actor)
       .flatMap((_, current) => UseCaseF.repository(jobs.relatedJobs(current, keys.distinct)))
+
+  override def jobApplicationCounts(actor: ActorContext, jobIds: List[JobId]): UseCaseF[F, List[JobApplicationCounts]] =
+    authorization
+      .readScope(actor)
+      .flatMap((_, current) => UseCaseF.repository(applications.applicationCounts(current, jobIds.distinct)))
 
   override def viewer(actor: ActorContext): UseCaseF[F, AuthenticatedActor] =
     authorization.resolve(actor).map(AuthenticatedActor(actor, _))

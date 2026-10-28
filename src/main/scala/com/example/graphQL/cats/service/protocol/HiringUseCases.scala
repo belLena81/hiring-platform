@@ -30,6 +30,7 @@ import com.example.graphQL.cats.service.read.*
 trait HiringReadModel[F[_]] {
   def relatedUsers(actor: ActorContext, keys: List[UserRelationKey]): UseCaseF[F, List[RelatedUser]]
   def relatedJobs(actor: ActorContext, keys: List[JobRelationKey]): UseCaseF[F, List[RelatedJob]]
+  def jobApplicationCounts(actor: ActorContext, jobIds: List[JobId]): UseCaseF[F, List[JobApplicationCounts]]
   def viewer(actor: ActorContext): UseCaseF[F, AuthenticatedActor]
   def canViewUserEmails(actor: ActorContext, userIds: List[UserId]): UseCaseF[F, Set[UserId]]
   def application(id: ApplicationId): UseCaseF[F, Option[Application]]

@@ -85,6 +85,11 @@ object TestGraphQLSupport {
     new HiringReadModel[IO] {
       def viewer(actor: ActorContext) = unsupported
       def canViewUserEmails(actor: ActorContext, userIds: List[UserId]) = unsupported
+      def jobApplicationCounts(
+          actor: ActorContext,
+          jobIds: List[com.example.graphQL.cats.domain.model.Identifiers.JobId]
+      ) =
+        unsupported
       def application(id: ApplicationId) = unsupported
       def canViewApplication(actor: ActorContext, applicationId: ApplicationId) = unsupported
       def relatedUsers(actor: ActorContext, keys: List[com.example.graphQL.cats.service.read.UserRelationKey]) =

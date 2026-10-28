@@ -466,6 +466,10 @@ final class HiringGraphQLInterviewActionSpec extends CatsEffectSuite {
             com.example.graphQL.cats.service.UseCaseError.Repository(RepositoryError.Unavailable)
           )
         def canViewUserEmails(actor: ActorContext, userIds: List[UserId]) = delegate.canViewUserEmails(actor, userIds)
+        def jobApplicationCounts(
+            actor: ActorContext,
+            jobIds: List[com.example.graphQL.cats.domain.model.Identifiers.JobId]
+        ) = delegate.jobApplicationCounts(actor, jobIds)
         def application(id: ApplicationId) = delegate.application(id)
         def canViewApplication(actor: ActorContext, applicationId: ApplicationId) =
           delegate.canViewApplication(actor, applicationId)

@@ -63,6 +63,8 @@ final class AuthorizedReadRoundTripsSpec extends CatsEffectSuite {
       record("applications.findByCandidate")(delegate.findByCandidate(scope, page))
     override def findByJob(scope: HiringReadScope, jobId: JobId, page: ApplicationPageRequest) =
       record("applications.findByJob")(delegate.findByJob(scope, jobId, page))
+    override def applicationCounts(scope: HiringReadScope, jobIds: List[JobId]) =
+      record("applications.applicationCounts")(delegate.applicationCounts(scope, jobIds))
     override def history(scope: HiringReadScope, applicationId: ApplicationId, page: ApplicationEventPageRequest) =
       record("applications.history")(delegate.history(scope, applicationId, page))
   }

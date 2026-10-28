@@ -32,7 +32,7 @@ private[graphql] object HiringGraphQLSchemaAssembly {
     )(resolve)
 
   lazy val deferredResolver: DeferredResolver[RequestContext] =
-    DeferredResolver.fetchers(usersFetcher, jobsFetcher, emailVisibilityFetcher)
+    DeferredResolver.fetchers(usersFetcher, jobsFetcher, emailVisibilityFetcher, jobApplicationCountsFetcher)
 
   lazy val queryType: ObjectType[RequestContext, Unit] = ObjectType(
     "Query",
