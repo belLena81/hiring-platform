@@ -31,5 +31,23 @@
     "p95Hours": { "$numberDouble": "96.0" },
     "eligibleCount": { "$numberLong": "2" },
     "excludedCount": { "$numberLong": "1" }
-  }
+  },
+  "stageDurations": [
+    {
+      "metric": "TIME_TO_HIRE",
+      "p50Hours": { "$numberDouble": "24.5" },
+      "p75Hours": { "$numberDouble": "48.0" },
+      "p90Hours": { "$numberDouble": "72.25" },
+      "p95Hours": { "$numberDouble": "96.0" },
+      "eligibleCount": { "$numberLong": "12" }
+    },
+    {
+      "metric": "INTERVIEW_TO_HIRE",
+      "p50Hours": { "$numberDouble": "6.0" },
+      "p75Hours": { "$numberDouble": "12.0" },
+      "p90Hours": { "$numberDouble": "12.0" },
+      "p95Hours": { "$numberDouble": "30.5" },
+      "eligibleCount": { "$numberLong": "10" }
+    }
+  ]
 }

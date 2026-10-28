@@ -25,10 +25,38 @@ type AnalyticsFunnelDay {
   rejected: Long!
 }
 
+type AnalyticsHiringStageDuration {
+  metric: AnalyticsHiringStageMetric!
+  p50Hours: Float!
+  p75Hours: Float!
+  p90Hours: Float!
+  p95Hours: Float!
+  eligibleCount: Long!
+}
+
+"A pair of hiring lifecycle stages whose elapsed time is reported."
+enum AnalyticsHiringStageMetric {
+  "Application created to accepted."
+  TIME_TO_ACCEPT
+
+  "Application created to interview."
+  TIME_TO_INTERVIEW
+
+  "Application created to hired."
+  TIME_TO_HIRE
+
+  "Application accepted to interview."
+  ACCEPTED_TO_INTERVIEW
+
+  "Application interview to hired."
+  INTERVIEW_TO_HIRE
+}
+
 type AnalyticsReport {
   asOf: Instant!
   funnel: [AnalyticsFunnelDay!]!
   timeToHire: AnalyticsTimeToHire
+  stageDurations: [AnalyticsHiringStageDuration!]!
   skillPostingActivity: [AnalyticsSkillPostingDay!]!
 }
 

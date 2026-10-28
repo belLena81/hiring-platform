@@ -53,6 +53,15 @@ Nested connections are charged like root ones, plus a base per parent: a nested 
 
 Every refusal returned as data (`ValidationError`, `DomainError`, `SearchUnavailable`) implements `UserError { code message }`, so a client reads the refusals of any mutation or search with one fragment: `fragment Refusal on UserError { code message }`. Mutation results stay per-operation unions of the success type and the typed errors.
 
+## Analytics report: hiring stage durations
+
+`analyticsReport(from, to)` is Admin-only (the service rechecks the live Admin record; any other actor receives `UNAUTHORIZED`). `AnalyticsReport.stageDurations: [AnalyticsHiringStageDuration!]!` sits next to `timeToHire` and is additive. Each entry has `metric: AnalyticsHiringStageMetric!` (`TIME_TO_ACCEPT`, `TIME_TO_INTERVIEW`, `TIME_TO_HIRE`, `ACCEPTED_TO_INTERVIEW`, `INTERVIEW_TO_HIRE`), the percentiles `p50Hours`, `p75Hours`, `p90Hours`, `p95Hours` (`Float!`, finite, non-negative and non-decreasing) and `eligibleCount: Long!`. A metric whose group was suppressed upstream is absent, so the list may be empty (`[]`). It is not filtered by `from`/`to`, like `timeToHire`: it describes the published snapshot. A stored snapshot without `stageDurations`, with an unknown or repeated metric, or with invalid percentiles is unreadable and the query returns `ANALYTICS_UNAVAILABLE`.
+
+```graphql
+query { analyticsReport(from: "2026-09-16T00:00:00Z", to: "2026-09-17T00:00:00Z") {
+  stageDurations { metric p50Hours p75Hours p90Hours p95Hours eligibleCount } } }
+```
+
 ## Embedding coverage report
 
 `embeddingCoverage(expectedModel: String): EmbeddingCoverageReport!` is an Admin-only, read-only aggregate query. The service rechecks the live Admin record (role Admin, account Active, singleton Admin); any other actor receives `UNAUTHORIZED`. `analyticsReport` and the `repairInterviewWorkflow` mutation apply the same rule (a non-Admin caller of `repairInterviewWorkflow` receives `UNAUTHORIZED`, previously `FORBIDDEN`). When vector search is disabled the query returns the typed `VECTOR_SEARCH_UNAVAILABLE` error rather than zero counts. `expectedModel` is optional, is trimmed, must be non-blank and at most 128 characters (`VALIDATION_FAILED` otherwise), and no model name is built in; without it `MODEL_MISMATCH` is never produced.

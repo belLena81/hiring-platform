@@ -211,6 +211,8 @@ private[mongo] object MongoFields {
   val Funnel = "funnel"
   val SkillPostingActivity = "skillPostingActivity"
   val TimeToHire = "timeToHire"
+  val StageDurations = "stageDurations"
+  val Metric = "metric"
   val Day = "day"
   val Created = "created"
   val Accepted = "accepted"

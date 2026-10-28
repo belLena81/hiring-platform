@@ -12,6 +12,8 @@ import com.example.graphQL.cats.domain.error.DomainValidationError
 import com.example.graphQL.cats.service.{
   ActorContext,
   AnalyticsError,
+  AnalyticsHiringStageDuration,
+  AnalyticsHiringStageMetric,
   AnalyticsReportSnapshot,
   AnalyticsReportingUseCases,
   EmbeddingCoverageService,
@@ -173,7 +175,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
 
   test("HAL-03.5 an active Admin can read a published report with its asOf timestamp") {
     val asOf = Instant.parse("2026-09-17T08:00:00Z")
-    val snapshot = AnalyticsReportSnapshot(asOf, Nil, None, Nil)
+    val snapshot = AnalyticsReportSnapshot(asOf, Nil, None, Vector.empty, Nil)
     val reporting = new AnalyticsReportingUseCases[IO] {
       override def report(
           actor: ActorContext,
@@ -190,6 +192,55 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
           Right(asOf.toString)
         )
       }
+  }
+
+  private def stageDurationsQuery =
+    """query { analyticsReport(from: "2026-09-16T00:00:00Z", to: "2026-09-17T00:00:00Z") {
+      |  stageDurations { metric p50Hours p75Hours p90Hours p95Hours eligibleCount } } }""".stripMargin
+
+  private def reportingWith(durations: Vector[AnalyticsHiringStageDuration]) =
+    new AnalyticsReportingUseCases[IO] {
+      override def report(
+          actor: ActorContext,
+          period: com.example.graphQL.cats.service.AnalyticsPeriod
+      ): UseCaseF[IO, AnalyticsReportSnapshot] =
+        EitherT.rightT(AnalyticsReportSnapshot(Instant.parse("2026-09-17T08:00:00Z"), Nil, None, durations, Nil))
+    }
+
+  test("AC-03 an active Admin reads hiring stage durations with their metric names") {
+    val durations =
+      Vector(AnalyticsHiringStageDuration(AnalyticsHiringStageMetric.AcceptedToInterview, 1.5, 2.0, 3.0, 4.0, 10L))
+
+    executeWithUsers(
+      stageDurationsQuery,
+      Some(ActorContext(adminId, UserRole.Admin)),
+      List(admin),
+      analyticsReporting = reportingWith(durations)
+    ).map { json =>
+      val row = json.hcursor.downField("data").downField("analyticsReport").downField("stageDurations").downArray
+      assertEquals(row.get[String]("metric"), Right("ACCEPTED_TO_INTERVIEW"))
+      assertEquals(row.get[Double]("p50Hours"), Right(1.5))
+      assertEquals(row.get[Double]("p95Hours"), Right(4.0))
+      assertEquals(row.get[Long]("eligibleCount"), Right(10L))
+    }
+  }
+
+  test("AC-03 an empty stageDurations array is returned as an empty list") {
+    executeWithUsers(
+      stageDurationsQuery,
+      Some(ActorContext(adminId, UserRole.Admin)),
+      List(admin),
+      analyticsReporting = reportingWith(Vector.empty)
+    ).map { json =>
+      assertEquals(
+        json.hcursor.downField("data").downField("analyticsReport").downField("stageDurations").as[List[io.circe.Json]],
+        Right(Nil)
+      )
+    }
+  }
+
+  test("AC-03 stageDurations requires authentication") {
+    execute(stageDurationsQuery, None).map(json => assertEquals(errorCode(json), Right("UNAUTHORIZED")))
   }
 
   private val embeddingCoverageQuery =

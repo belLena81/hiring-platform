@@ -73,6 +73,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
       asOf,
       List(AnalyticsFunnelDay(asOf, created, 0L, 0L, 0L, 0L, 0L)),
       None,
+      Vector.empty,
       List(AnalyticsSkillPostingDay(asOf, "scala", created))
     )
 

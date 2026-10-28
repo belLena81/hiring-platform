@@ -9,8 +9,11 @@ import cats.effect.std.UUIDGen
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.AccountDeletionStatus
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
+import com.example.graphQL.cats.repository.mongo.MongoHiringCodecs.StoredDocumentError
 import com.example.graphQL.cats.service.{
   AnalyticsFunnelDay,
+  AnalyticsHiringStageDuration,
+  AnalyticsHiringStageMetric,
   AnalyticsReportSnapshot,
   AnalyticsSkillPostingDay,
   AnalyticsTimeToHire
@@ -377,6 +380,7 @@ private[mongo] object AnalyticsReportSnapshotDocument {
       .append(MongoFields.ExpiresAt, expiresAt.toDate)
       .append(MongoFields.Funnel, snapshot.funnel.map(writeFunnel).asJava)
       .append(MongoFields.SkillPostingActivity, snapshot.skillPostingActivity.map(writeSkill).asJava)
+      .append(MongoFields.StageDurations, snapshot.stageDurations.map(writeStageDuration).asJava)
     snapshot.timeToHire.fold(document)(value => document.append(MongoFields.TimeToHire, writeTimeToHire(value)))
   }
 
@@ -386,7 +390,10 @@ private[mongo] object AnalyticsReportSnapshotDocument {
       funnel <- requiredDocumentVector(document, MongoFields.Funnel).flatMap(_.toList.traverse(readFunnel))
       skills <- requiredDocumentVector(document, MongoFields.SkillPostingActivity).flatMap(_.toList.traverse(readSkill))
       timeToHire <- optionalDocument(document, MongoFields.TimeToHire).flatMap(_.traverse(readTimeToHire))
-    } yield AnalyticsReportSnapshot(asOf, funnel, timeToHire, skills)
+      stageDurations <- requiredDocumentVector(document, MongoFields.StageDurations)
+        .flatMap(_.toList.traverse(readStageDuration))
+        .flatMap(requireDistinctMetrics)
+    } yield AnalyticsReportSnapshot(asOf, funnel, timeToHire, stageDurations.toVector, skills)
 
   private def writeFunnel(value: AnalyticsFunnelDay): Document =
     new Document(MongoFields.Day, value.day.toDate)
@@ -404,6 +411,14 @@ private[mongo] object AnalyticsReportSnapshotDocument {
       .append(MongoFields.P95Hours, value.p95Hours)
       .append(MongoFields.EligibleCount, value.eligibleCount)
       .append(MongoFields.ExcludedCount, value.excludedCount)
+
+  private def writeStageDuration(value: AnalyticsHiringStageDuration): Document =
+    new Document(MongoFields.Metric, value.metric.code)
+      .append(MongoFields.P50Hours, value.p50Hours)
+      .append(MongoFields.P75Hours, value.p75Hours)
+      .append(MongoFields.P90Hours, value.p90Hours)
+      .append(MongoFields.P95Hours, value.p95Hours)
+      .append(MongoFields.EligibleCount, value.eligibleCount)
 
   private def writeSkill(value: AnalyticsSkillPostingDay): Document =
     new Document(MongoFields.Day, value.day.toDate)
@@ -430,6 +445,37 @@ private[mongo] object AnalyticsReportSnapshotDocument {
       count(document, MongoFields.EligibleCount),
       count(document, MongoFields.ExcludedCount)
     ).mapN(AnalyticsTimeToHire.apply)
+
+  /** Percentiles must be finite, non-negative and non-decreasing; the publisher suppresses small groups upstream. */
+  private def readStageDuration(document: Document): Read[AnalyticsHiringStageDuration] =
+    for {
+      metric <- requiredEnum(document, MongoFields.Metric)(AnalyticsHiringStageMetric.fromCode)
+      p50 <- percentile(document, MongoFields.P50Hours)
+      p75 <- percentile(document, MongoFields.P75Hours)
+      p90 <- percentile(document, MongoFields.P90Hours)
+      p95 <- percentile(document, MongoFields.P95Hours)
+      _ <- Either.cond(
+        p50 <= p75 && p75 <= p90 && p90 <= p95,
+        (),
+        StoredDocumentError.InvalidField(MongoFields.StageDurations)
+      )
+      eligible <- requiredNumberAsLong(document, MongoFields.EligibleCount, min = 0L)
+    } yield AnalyticsHiringStageDuration(metric, p50, p75, p90, p95, eligible)
+
+  private def percentile(document: Document, field: String): Read[Double] =
+    requiredDouble(document, field).filterOrElse(
+      value => java.lang.Double.isFinite(value) && value >= 0.0,
+      StoredDocumentError.InvalidField(field)
+    )
+
+  private def requireDistinctMetrics(
+      durations: List[AnalyticsHiringStageDuration]
+  ): Read[List[AnalyticsHiringStageDuration]] =
+    Either.cond(
+      durations.map(_.metric).distinct.size == durations.size,
+      durations,
+      StoredDocumentError.InvalidField(MongoFields.StageDurations)
+    )
 
   private def readSkill(document: Document): Read[AnalyticsSkillPostingDay] =
     (

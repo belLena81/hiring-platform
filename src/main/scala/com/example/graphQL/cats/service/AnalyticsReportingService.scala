@@ -15,6 +15,7 @@ final case class AnalyticsReportSnapshot(
     asOf: Instant,
     funnel: List[AnalyticsFunnelDay],
     timeToHire: Option[AnalyticsTimeToHire],
+    stageDurations: Vector[AnalyticsHiringStageDuration],
     skillPostingActivity: List[AnalyticsSkillPostingDay]
 )
 
@@ -34,6 +35,29 @@ final case class AnalyticsTimeToHire(
     p95Hours: Double,
     eligibleCount: Long,
     excludedCount: Long
+)
+
+/** A pair of hiring lifecycle stages whose elapsed time is reported; `code` is the stored and wire name. */
+enum AnalyticsHiringStageMetric(val code: String) {
+  case TimeToAccept extends AnalyticsHiringStageMetric("TIME_TO_ACCEPT")
+  case TimeToInterview extends AnalyticsHiringStageMetric("TIME_TO_INTERVIEW")
+  case TimeToHire extends AnalyticsHiringStageMetric("TIME_TO_HIRE")
+  case AcceptedToInterview extends AnalyticsHiringStageMetric("ACCEPTED_TO_INTERVIEW")
+  case InterviewToHire extends AnalyticsHiringStageMetric("INTERVIEW_TO_HIRE")
+}
+
+object AnalyticsHiringStageMetric {
+  def fromCode(code: String): Option[AnalyticsHiringStageMetric] = values.find(_.code == code)
+}
+
+/** A suppressed percentile distribution of the hours between two lifecycle stages. */
+final case class AnalyticsHiringStageDuration(
+    metric: AnalyticsHiringStageMetric,
+    p50Hours: Double,
+    p75Hours: Double,
+    p90Hours: Double,
+    p95Hours: Double,
+    eligibleCount: Long
 )
 final case class AnalyticsSkillPostingDay(day: Instant, skill: String, postings: Long)
 

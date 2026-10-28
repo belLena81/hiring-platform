@@ -14,7 +14,7 @@ final class AnalyticsReportingServiceSpec extends CatsEffectSuite {
   private val now = Instant.parse("2026-09-22T00:00:00Z")
   private val adminId = UserId(UUID.fromString("30000000-0000-0000-0000-000000000001"))
   private val recruiterId = UserId(UUID.fromString("30000000-0000-0000-0000-000000000002"))
-  private val snapshot = AnalyticsReportSnapshot(now, Nil, None, Nil)
+  private val snapshot = AnalyticsReportSnapshot(now, Nil, None, Vector.empty, Nil)
 
   test("HAL-03.1 published analytics are available only to the stored active Admin") {
     val admin = User(adminId, None, "Admin", UserRole.Admin, None, now)
@@ -52,11 +52,23 @@ final class AnalyticsReportingServiceSpec extends CatsEffectSuite {
     val after = now.plusSeconds(24L * 60L * 60L)
     val rows = List(before, from, now, after).map(day => AnalyticsFunnelDay(day, 1, 0, 0, 0, 0, 0))
     val skills = List(before, from, now, after).map(day => AnalyticsSkillPostingDay(day, "scala", 1))
-    val report = AnalyticsReportSnapshot(now, rows, None, skills)
+    val report = AnalyticsReportSnapshot(now, rows, None, Vector.empty, skills)
     val service = new AnalyticsReportingService(new TestUsers(Map(adminId -> admin)), new TestReports(Some(report)))
 
     service.report(ActorContext(adminId, UserRole.Admin), AnalyticsPeriod(from, now)).value.map { result =>
       assertEquals(result, Right(report.copy(funnel = rows.slice(1, 3), skillPostingActivity = skills.slice(1, 3))))
+    }
+  }
+
+  test("AC-03 stage durations are not period filtered") {
+    val admin = User(adminId, None, "Admin", UserRole.Admin, None, now)
+    val durations = Vector(AnalyticsHiringStageDuration(AnalyticsHiringStageMetric.TimeToHire, 1.0, 2.0, 3.0, 4.0, 10L))
+    val report = AnalyticsReportSnapshot(now, Nil, None, durations, Nil)
+    val service = new AnalyticsReportingService(new TestUsers(Map(adminId -> admin)), new TestReports(Some(report)))
+    val from = now.minusSeconds(24L * 60L * 60L)
+
+    service.report(ActorContext(adminId, UserRole.Admin), AnalyticsPeriod(from, now)).value.map { result =>
+      assertEquals(result.map(_.stageDurations), Right(durations))
     }
   }
 

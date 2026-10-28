@@ -1,9 +1,10 @@
 package com.example.graphQL.cats.api.graphql
 
-import com.example.graphQL.cats.api.graphql.HiringGraphQLDsl.describedEnum
+import com.example.graphQL.cats.api.graphql.HiringGraphQLDsl.{describedEnum, describedNames}
 import com.example.graphQL.cats.api.graphql.HiringGraphQLInputs.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.AnalyticsReportPayload
 import com.example.graphQL.cats.api.graphql.HiringGraphQLTypes.simple
+import com.example.graphQL.cats.service.{AnalyticsHiringStageDuration, AnalyticsHiringStageMetric}
 import com.example.graphQL.cats.service.port.{EmbeddingWorkFailure, EmbeddingWorkKind}
 import com.example.graphQL.cats.service.search.*
 import sangria.schema.*
@@ -35,6 +36,36 @@ private[graphql] object HiringGraphQLReportingTypes {
         simple("excludedCount", longType)(_.excludedCount)
       )
     )
+  lazy val analyticsHiringStageMetricType: EnumType[AnalyticsHiringStageMetric] =
+    describedNames(
+      "AnalyticsHiringStageMetric",
+      "A pair of hiring lifecycle stages whose elapsed time is reported.",
+      AnalyticsHiringStageMetric.values.toList.map { metric =>
+        (
+          metric.code,
+          metric,
+          metric match {
+            case AnalyticsHiringStageMetric.TimeToAccept        => "Application created to accepted."
+            case AnalyticsHiringStageMetric.TimeToInterview     => "Application created to interview."
+            case AnalyticsHiringStageMetric.TimeToHire          => "Application created to hired."
+            case AnalyticsHiringStageMetric.AcceptedToInterview => "Application accepted to interview."
+            case AnalyticsHiringStageMetric.InterviewToHire     => "Application interview to hired."
+          }
+        )
+      }
+    )
+  lazy val analyticsHiringStageDurationType: ObjectType[RequestContext, AnalyticsHiringStageDuration] =
+    ObjectType(
+      "AnalyticsHiringStageDuration",
+      fields[RequestContext, AnalyticsHiringStageDuration](
+        simple("metric", analyticsHiringStageMetricType)(_.metric),
+        simple("p50Hours", FloatType)(_.p50Hours),
+        simple("p75Hours", FloatType)(_.p75Hours),
+        simple("p90Hours", FloatType)(_.p90Hours),
+        simple("p95Hours", FloatType)(_.p95Hours),
+        simple("eligibleCount", longType)(_.eligibleCount)
+      )
+    )
   lazy val analyticsSkillPostingDayType
       : ObjectType[RequestContext, com.example.graphQL.cats.service.AnalyticsSkillPostingDay] =
     ObjectType(
@@ -52,6 +83,7 @@ private[graphql] object HiringGraphQLReportingTypes {
         instantField("asOf", _.snapshot.asOf),
         simple("funnel", ListType(analyticsFunnelDayType))(_.snapshot.funnel),
         simple("timeToHire", OptionType(analyticsTimeToHireType))(_.snapshot.timeToHire),
+        simple("stageDurations", ListType(analyticsHiringStageDurationType))(_.snapshot.stageDurations),
         simple("skillPostingActivity", ListType(analyticsSkillPostingDayType))(_.snapshot.skillPostingActivity)
       )
     )
