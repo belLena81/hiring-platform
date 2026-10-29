@@ -277,6 +277,8 @@ AI Discovery + Search Quality (10)
    ↓
 Kafka Workflow Contracts + Saga + State (11)
    ↓
+Guided Discovery + Follow-up Assistance (11A)
+   ↓
 Operational Observability + Resilience (12)
    ↓
 Analytics Architecture + Reconciliation + Scale Planning (13)
@@ -284,6 +286,8 @@ Analytics Architecture + Reconciliation + Scale Planning (13)
 Production Hardening (14)
    ↓
 Deployed Analytics Optimization (15, final)
+   ↓
+Post-MVP: LLM-assisted drafting and triage (16, optional)
 ```
 
 Status markers: `[x]` complete, `[~]` in progress, `[ ]` planned. Complete means the capability is implemented in the local application; it does not claim production rollout or external-service certification.
@@ -299,10 +303,16 @@ Status markers: `[x]` complete, `[~]` in progress, `[ ]` planned. Complete means
 - `[~] Phase 9 — Search Evaluation and Embedding Architecture:` [specification](docs/specs/hiring-search-enhancements.md#search-evaluation-and-embedding-architecture). Embedding preparation/recovery, typed evaluation, fixture replay, review export, curated capture and paired assessment are implemented locally. Remaining: Atlas Local evidence run (pending, $0): HSE-04.L, HSE-06.L, SEB-02.L and SEB-04.L, plus final HSE QA; Atlas cloud gates (deferred): HSE-04.C, HSE-06.C, SEB-02.C, SEB-04.C, HSE-05.C (native `$rerank`) and HSE-07.C (Automated Embedding comparison); human gate: SEB-02.H (relevance labels, pending by user decision); real providers: genuine semantic embeddings for SEB-08. Ranking adoption stays deferred and unchanged.
 - `[~] Phase 10 — AI Discovery and Search Quality:` [specification](docs/specs/hiring-discovery-search-quality.md). Radius search, input validation, exact structured facets and cursor/geo index cutover are recorded locally with plain-MongoDB evidence (HDQ-01–03, 05, 09–11). Lexical-query facets (HDQ-12) are implemented: `jobDiscoveryFacets` accepts an optional `query`, counts come from the authoritative eligible set, and `coverageLimit` is null when counts cover all matches or 1000 when they cover only the top lexical matches. Security PASS and Code PASS for the code scope are recorded; `HDQ-12.L` is pending. Remaining: Atlas Local evidence run (pending, $0): HDQ-01.L, HDQ-04.L, HDQ-05.L, HDQ-06.L, HDQ-11.L and HDQ-12.L; Atlas cloud gates (deferred): the matching `.C` rows; ranker adoption (HDQ-07) and personalization (HDQ-08) stay deferred, with HDQ-08 also blocked by the Phase 9 human gate SEB-02.H. Independent QA PASS for the HDQ-12 local scope (October 13).
 - `[~] Phase 11 — Kafka Workflow Contracts, Saga and State:` [specification](docs/specs/durable-hiring-workflows.md). The local closure checkpoint (October 13) records DHW-14–34 as Local PASS on the ledger and fake-provider path, except DHW-26, DHW-32 and the SES part of DHW-24 (deferred); Code Reviewer, Security Engineer and QA PASS are recorded. Interview cancellation and rescheduling are verified locally. An unknown calendar reservation on cancel stays fail-closed and ends in Admin repair (user decision). Atlas: none. Real providers and deployed gates: the calendar provider is not selected (DHW-25 provider contract run deferred); SES notifications (DHW-24 provider part, DHW-26, DHW-32) are deferred to the real-provider slice; production redundancy and deployed retention remain open.
+- `[ ] Phase 11A — Guided Discovery and Follow-up Assistance:` [specification](docs/specs/guided-discovery-and-followup.md). Draft; GDF-01–08 Not run. Sequenced after the current analytics refactoring and before Phase 12. Embedding-only or deterministic: recovery from empty searches with the relaxed filter named, matched and missing skills, similar jobs, follow-up message drafts, query suggestions and saved-search alerts. No LLM.
 - `[~] Phase 12 — Operational Observability and Resilience:` [specification](docs/specs/hiring-observability-resilience.md). Only the pre-existing telemetry runtime and structured logging exist; the draft spec's HOR-01–11 are all Not run (thresholds, routing and exporter decisions still unmade).
 - `[ ] Phase 13 — Analytics Architecture, Reconciliation and Scale Planning:` [specification](docs/specs/analytics-reconciliation-recovery.md). Draft; ARR-01–11 Not run. Deliberately sequenced after Mongo/AI/workflow acceptance.
 - `[ ] Phase 14 — Production Hardening:` [specification](docs/specs/production-readiness.md). Draft; PRD-01–12 Not run. Provider, topology, recovery objectives and owners are unresolved. Production streaming additionally needs genuine retention, writer exclusion and guarded key retirement.
 - `[ ] Phase 15 — Deployed Analytics Optimization (final):` [specification](docs/specs/deployed-analytics-performance.md). Draft; DAP-01–11 Not run. Needs an authorized real deployment; also owns the Phase 7 Bronze p95 (40,084 ms FAIL) latency and burst-drain qualification.
+- `[ ] Phase 16 — LLM-assisted drafting and advisory triage (post-MVP, optional):` described at the end of the [guided discovery specification](docs/specs/guided-discovery-and-followup.md#post-mvp--phase-16-llm-assisted-drafting-and-triage). Not authorized: needs full MVP, a provider and monthly budget decision, and data-minimization and legal review.
+
+### MVP definition (decided October 29, 2026)
+
+Full MVP is claimed as **MVP (local)**: a local run that holds all 13 use cases, with the conditions listed in [development milestones](docs/development-milestones.md#current-refactoring-and-path-to-mvp-checked-2026-10-29). It is claimed after the current analytics refactoring closes and before Phase 11A and the rest of Phase 12; a local observability slice of Phase 12 (verified stack, GraphQL outcome metric, Mongo spans, runtime metrics, alert guards, exporter bounds, overhead baseline) is part of the MVP instead of further features; it asserts no production or deployed result. After the claim the pre-MVP contract policy ends. A time-boxed demo deployment on one trial-credit virtual machine follows as a milestone, not a gate; it covers UC01–UC10 only.
 
 ### Status assessment (October 8, 2026)
 

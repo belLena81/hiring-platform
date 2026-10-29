@@ -29,6 +29,17 @@ These use cases and SLOs describe product intent; see [current implementation](.
 
 Current transitions are `Created → Accepted / Declined / Rejected`, `Accepted → Interview`, and `Interview → Hired / Rejected`. `Declined`, `Hired` and `Rejected` are terminal. Action-specific mutations enforce these rules; no generic status-change operation or GraphQL subscription is implemented. The current analytics report is systemwide transition activity, time-to-hire and skill posting activity; recruiter/job/location dimensions described as goals require separate event-time enrichment design.
 
+## Planned Guided Discovery and Follow-up (Phase 11A)
+
+Planned, not implemented. The [guided discovery specification](specs/guided-discovery-and-followup.md) owns behavior and acceptance. It extends UC02, UC06, UC09 and UC10 without a language model and without changing ranking:
+
+- UC02: an empty filtered search returns the nearest result with the relaxed filter named; hits show matched and missing skills; the query yields suggested filters that are not applied automatically; a candidate can save a search and receive alerts through the notification port.
+- UC03: a job page offers similar open jobs from the stored job embedding.
+- UC09: a recruiter or candidate can request a draft message for an existing status action. A draft sends nothing and changes no status; the existing mutation keeps its required feedback or reason.
+- UC10: matches show matched and missing skills of the owned job.
+
+The post-MVP LLM option (Phase 16) is described only in that specification.
+
 ## Planned Discovery Extensions (Phase 10)
 
 The following are later extensions to structured, semantic, and hybrid discovery; they preserve the core hiring invariants described below. They are sequenced in Phase 10 after MongoDB optimization (Phase 8) and Search Evaluation (Phase 9), before further Spark work. This promotes the formerly post-MVP discovery stage without declaring full MVP complete. Establish relevance measures and a bounded, representative baseline before evaluating personalized ranking.

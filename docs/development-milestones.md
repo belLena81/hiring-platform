@@ -56,6 +56,59 @@ Local closure is re-established on HEAD `1834236` (October 13): `scripts/check-l
 
 The rationale follows Martin Kleppmann, *Designing Data-Intensive Applications*, first edition (2017): workload and latency measurement (pp. 11–17), fencing and stale owners (pp. 301–304), event-time/late-window policy (pp. 468–471), and recovery/idempotence across processing boundaries (pp. 476–479). The book informs these refinements; the project specification owns their exact contracts.
 
+## Current refactoring and path to MVP (checked 2026-10-29)
+
+Source and specification state, read at branch `refactor`, HEAD `321c2eb`. The README and this file describe intent; the linked specifications hold the evidence.
+
+**Current refactoring (closes first).** The [analytics data model refactoring](specs/analytics-data-model-refactoring.md) is in progress: S5 (Spark 4.2 / Delta 4.4.1), W (Mongo startup), S1 (table catalog) and S2 (single parse) are committed; S3a (stage times) is committed but its verification found failing unit tests, fixed in the uncommitted working tree; S3b (application read model and GraphQL) is done. Remaining: verify S3a and its follow-up, S4 (privacy-safe file skipping and compaction), S6 (documentation and admission expression), a clean `HiringAnalyticsStreamingRecoveryIntegrationSpec` run, and final independent QA. The [distributed data reliability plan](specs/distributed-data-reliability-improvements.md) is proposed and not started; the owner decides which of its nine items belong before MVP.
+
+**MVP-local (decided 2026-10-29).** The repository had no written definition of full MVP. The user decided that the MVP is claimed on a local run that holds all 13 use cases, and that it is claimed before Phases 11A, 12 and later. The claim is worded "MVP (local)". It asserts no production rollout, external-service certification or deployed result, the same bar the README already uses for `[x]`. It ends the pre-MVP contract policy in [schema evolution](schema-evolution.md): API and analytics schemas gain the normal migration and compatibility rules from that point. So shape-changing work closes first. The user also decided (2026-10-29) that a local observability slice belongs to the MVP instead of further features: condition 7 below. The rest of Phase 12 stays post-MVP.
+
+MVP (local) is claimed when all of these hold:
+
+| # | Condition | Source of the gate |
+|---|---|---|
+| 1 | The current analytics refactoring is closed: S3a verified with its follow-up, S4, S6, a clean `HiringAnalyticsStreamingRecoveryIntegrationSpec` run and final independent QA. Shape-changing items of the reliability plan (for example the allowed-lateness policy) are either done or explicitly deferred as additive. | `analytics-data-model-refactoring.md`, `distributed-data-reliability-improvements.md` |
+| 2 | One scripted acceptance run exercises UC01–UC13 end to end on the local stack, including Kafka, Spark and Delta to the Admin report (UC11–UC13). No single run of this kind is recorded today. | `use-cases.md`; [hiring end-to-end acceptance](specs/hiring-end-to-end-acceptance.md) (HEA-01–16, draft) |
+| 3 | Atlas Local evidence ($0, user-started `compose.atlas-local.yaml`) for the search use cases UC02, UC06 and UC10: the `.L` rows of Phases 8–10 and the final HSE QA. | `mongodb-vector-retrieval-optimization.md`, `hiring-search-enhancements.md`, `hiring-discovery-search-quality.md` |
+| 4 | Independent Code, Security and QA verdicts for the embedding coverage report. | `embedding-coverage-report.md` |
+| 5 | The HCS-08.3 topic-identity gap (C11) is closed or recorded as accepted; the opt-in HAL-05 cases are run or recorded as accepted. | `continuous-hiring-analytics.md`, `hiring-analytics-lakehouse.md` |
+| 6 | Independent final QA on the final state, and `scripts/check-local.sh` passes. | `AGENTS.md` |
+| 7 | The [MVP observability slice](#mvp-observability-slice-decided-2026-10-29) is closed: items 1–7 done with recorded local evidence, and independent Code, Security and QA verdicts. | [hiring observability and resilience](specs/hiring-observability-resilience.md#mvp-observability-slice) |
+
+Outside the MVP claim (post-MVP, each with its own gate): Phase 11A, the rest of Phase 12 beyond condition 7, Phases 13–15, Atlas cloud `.C` rows, human relevance labels (SEB-02.H), real providers (calendar, SES) and Phase 16.
+
+### MVP observability slice (decided 2026-10-29)
+
+MVP condition 7. Recommended from a review of the existing telemetry and moved into MVP scope by the user, ahead of further features (Phase 11A stays post-MVP). These are local, $0 slices of Phase 12 that make the MVP acceptance run and the demo deployment observable. No item changes a GraphQL or analytics schema, so the pre-MVP contract policy is not involved. Each item follows the [observability specification](specs/hiring-observability-resilience.md#mvp-observability-slice) and its cardinality and privacy rules, and each implementation slice needs the usual independent reviews.
+
+1. **Verify the existing stack first.** Run the first-run checklist in [local observability](local-observability.md) and record the observed metric names, the Mongo-stop gap and alert loading in the specification. Until then dashboards and alerts use derived, not observed, names.
+2. **GraphQL outcome counter (HOR-01).** Field errors return HTTP 200, so the 5xx alert and the RED dashboard cannot see resolver failures or denials. Count operations by schema root field (field name, not alias) and bounded outcome. Caller-supplied operation names stay out of labels: the persisted-query allowlist holds hashes only and is `off` by default.
+3. **Mongo operation spans and duration (HOR-02/03 catalog row "Mongo operations").** Traces currently stop at GraphQL field spans. Observe at the repository or driver boundary with a bounded operation class; no filters, queries or document contents.
+4. **JVM and Cats Effect runtime metrics.** Heap, GC, threads and runtime starvation, through the existing OpenTelemetry boundary. Check module compatibility with otel4s 1.1.0 before adding a dependency.
+5. **Alert hygiene.** Add a minimum-traffic guard to the latency and error-ratio rules so sparse local traffic does not fire or hide them. Mark local thresholds provisional; the specification forbids presenting them as SLOs.
+6. **Exporter bounds and sampling written down (HOR-05 local part).** Set the trace sampler, batch and queue sizes through standard `OTEL_*` settings in the overlay and record the overload policy. 100% sampling locally.
+7. **Overhead baseline (HOR-10 local part).** Same seeded traffic with the overlay on and off (the condition 2 acceptance run can supply the traffic); record p50/p95/p99, throughput, errors and CPU/memory. Local evidence only, not a deployed result.
+
+Items 1, 5 and 6 are configuration and documentation; 2–4 are small Scala slices. Item 1 comes first because items 2 and 5 edit the same dashboard and alert files. Items 1–6 can run alongside the analytics refactoring (condition 1) because they touch the application runtime, not the analytics build; item 7 follows the condition 2 acceptance script.
+
+### Demo deployment (time-boxed milestone, not an MVP gate)
+
+After the MVP (local) claim, run the product for a few hours on one virtual machine paid for by free trial credit, to see the API behave outside a developer machine. Decided 2026-10-29:
+
+- One VM runs `compose.yaml` with MongoDB Atlas Local, which has no search-index cap. The Atlas free cluster is not used because it allows at most 3 search and vector indexes and the application defines four.
+- The containerised API keeps `KAFKA_ENABLED=false` (decision D6 of the [container runtime](specs/hiring-container-runtime.md)). Kafka publication over TLS from the container is not scoped. So the demo covers UC01–UC10; UC11–UC13 are shown from the local run. The demo therefore proves nothing about deployed analytics.
+- Databricks Free Edition is excluded: it is serverless-only and does not run Scala.
+- Before starting: check the trial credit and region, publish only the API behind TLS, keep MongoDB and the Atlas Local port unpublished, supply secrets through files as the container spec requires, set a spend alert and a teardown time, and obtain a Security review of the exposed surface. Nothing is provisioned by this document; provisioning needs its own explicit request. Note that `compose.atlas-local.yaml` is a test-support file whose secrets the test wrapper owns, so a demo overlay may be needed instead of reuse.
+- Evidence recorded: what ran, for how long, the cost, and defects found. No latency or capacity figure is a result unless measured and labelled.
+- If the observability overlay runs on the VM, keep Grafana, Prometheus and the collector unpublished (reach them through an SSH tunnel) and replace the default Grafana password; the overlay is designed for a workstation, not an exposed host. The RED dashboard and backlog gauges are then the demo's evidence of how the API behaved.
+
+## Guided Discovery and Follow-up Assistance (Phase 11A)
+
+Placed after the current refactoring and the MVP (local) claim, because it touches the application GraphQL and Mongo layers that the analytics work does not, and before Phase 12, so that observability covers the new paths. It turns the existing embeddings and workflows into visible improvements without any language model: recovery from empty searches with the relaxed filter named, matched and missing skills as the reason for a hit, similar jobs from stored vectors, follow-up message drafts for the existing status actions, deterministic query suggestions and saved-search alerts.
+
+The [specification](specs/guided-discovery-and-followup.md) owns behavior, GDF-01–08 and the slices: slice 0 baseline, slice 1 (GDF-01–03), slice 2 (GDF-04), slice 3 (GDF-05–06). Constraints from earlier phases remain: authorization and eligibility before any vector call, no ranking change without Phase 9/10 evidence, a single active schema before MVP, and new Mongo structures with versioned recovery. Live vector verification waits for Atlas Local. The post-MVP LLM option (Phase 16) is only described there.
+
 ## Remaining delivery order and acceptance
 
 This October 5 roadmap revision changes planned work from Phase 8 onward. Completed work and open Phase 7 functional obligations retain their original evidence and identifiers. Discovery extensions move forward from the former post-MVP Phase 12 into Phase 10; that sequencing decision does not declare full MVP complete or change the pre-MVP contract policy in [schema evolution](schema-evolution.md).
@@ -66,10 +119,12 @@ This October 5 roadmap revision changes planned work from Phase 8 onward. Comple
 | 9 | [Search evaluation and embedding architecture](specs/hiring-search-enhancements.md#search-evaluation-and-embedding-architecture) | Phase 8 baseline; reproducible relevance and embedding recovery evidence |
 | 10 | [AI discovery and search quality](specs/hiring-discovery-search-quality.md) | Phase 9 evaluation; accepted discovery features and justified ranking decisions |
 | 11 | [Kafka workflow contracts, Saga and State](specs/durable-hiring-workflows.md) | Operational Mongo/AI capabilities; durable business workflow and failure/replay evidence |
+| 11A | [Guided discovery and follow-up assistance](specs/guided-discovery-and-followup.md) | Current analytics refactoring closed; Phase 8 eligibility recheck, Phase 10 filters, Phase 11 notification port; deterministic or embedding-only, no LLM |
 | 12 | [Operational observability and resilience](specs/hiring-observability-resilience.md) | Phases 8–11; actionable diagnostics and provider/broker failure drills |
 | 13 | [Analytics architecture, reconciliation and scale planning](specs/analytics-reconciliation-recovery.md) | Mongo/AI/workflow acceptance first; existing Phase 7 functional gates; bounded audit/recovery evidence |
 | 14 | [Production hardening](specs/production-readiness.md) | Applicable functional gates; deployment security and genuine retention/recovery evidence |
 | 15 | [Deployed analytics optimization (final)](specs/deployed-analytics-performance.md) | Authorized real deployment; measured SLO and cost qualification |
+| 16 (post-MVP) | LLM-assisted drafting and advisory triage, described at the end of the [guided discovery specification](specs/guided-discovery-and-followup.md#post-mvp--phase-16-llm-assisted-drafting-and-triage) | Full MVP complete; provider, budget and data-minimization decisions; not authorized |
 
 Architecture refinement is part of each capability's acceptance. Keep domain decisions immutable and deterministic, time/IDs explicit, expected errors typed, application orchestration effectful, and driver/provider details in adapters. Analytics keeps its existing `F[_]` boundaries; the application's ports are now `F[_]` per [effect-polymorphic services](specs/effect-polymorphic-services.md) (user-approved 2026-10-14; done locally), and the Saga engine is in review for interview scheduling only ([hiring saga orchestration](specs/hiring-saga-orchestration.md)). Each slice needs independent code/security review as applicable and final QA, with source-qualified evidence. A roadmap checkbox cannot certify a provider, deployment, benchmark, or full MVP.
 
@@ -157,6 +212,8 @@ Acceptance requires evidence that a failed status change releases its reservatio
 Structured diagnostics and runtime telemetry already exist; this milestone completes operational coverage for Mongo queries, search/index readiness, embedding freshness, provider timeouts, outbox lag and workflow age/retry/repair state. Define measured thresholds, owners and bounded diagnostic output without logging resumes, vectors, private filters or raw event payloads. Exercise provider/broker outages, worker restart and cancellation, dead-letter repair, and deletion-aware replay without blocking hiring transactions on external availability. Process-local circuit breakers around Voyage, Atlas discovery, the Kafka publisher and Mongo writes are implemented locally ([dependency circuit breakers](specs/dependency-circuit-breakers.md)); degraded readiness reporting (HOR-03) and the outage drills remain open here.
 
 Use Decorator only when multiple adapters share instrumentation; retain typed errors/cancellation and one retry owner. Use managed FS2 streams for local Observer notifications and durable outbox/inbox handoffs for recoverable business work. Bridge requires two independently varying integration dimensions. Completion needs actionable alert/runbook drills and independent failure/recovery evidence. Existing correctness/security controls apply in every earlier phase.
+
+The local slice in [MVP condition 7](#mvp-observability-slice-decided-2026-10-29) is part of the MVP. The post-MVP remainder of this phase: trace context carried through the outbox and Kafka headers as span links (an operational Mongo field, so a versioned migration), circuit-breaker state as a metric, SLO recording rules with multi-window burn-rate alerts, and the remaining catalog rows. Postpone until real traffic exists (Phases 14–15): tail-based trace sampling, scaled metric storage and long retention, Kafka/Spark metric exporters, production alert routing and on-call, adaptive concurrency limits and autoscaling on custom metrics.
 
 ## Analytics Architecture, Reconciliation and Scale Planning (Phase 13)
 
