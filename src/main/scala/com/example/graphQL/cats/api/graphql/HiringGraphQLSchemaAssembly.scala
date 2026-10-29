@@ -218,7 +218,7 @@ private[graphql] object HiringGraphQLSchemaAssembly {
       resultField(
         "createJob",
         createJobResultType,
-        "Creates an open job owned by the calling recruiter." + Idempotent,
+        "Creates a draft job owned by the calling recruiter. It is visible to candidates only after publishJob; until then only its owner and the Admin can read it." + Idempotent,
         createJobInputArgument :: Nil
       )(createJob),
       resultField(
@@ -266,7 +266,7 @@ private[graphql] object HiringGraphQLSchemaAssembly {
       resultField(
         "declineApplication",
         declineApplicationResultType,
-        "Declines an application as its candidate; a reason is required." + Idempotent,
+        "Declines an application as its own candidate (or as the recruiter or Admin managing its job); a reason is required. Another candidate's application, or one the caller may not see, answers NOT_FOUND." + Idempotent,
         declineApplicationInputArgument :: Nil
       )(declineApplication),
       resultField(

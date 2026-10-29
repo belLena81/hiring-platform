@@ -22,8 +22,7 @@ final class JobServiceGenericEffectSpec extends munit.FunSuite {
     " Build services ",
     List(" Scala "),
     Set(" Cats Effect "),
-    Location("Cyprus", Some("Nicosia"), remote = true),
-    JobStatus.Open
+    Location("Cyprus", Some("Nicosia"), remote = true)
   )
   private val world = World(
     users = Map(candidateId -> candidate, recruiterId -> recruiter),
@@ -57,7 +56,9 @@ final class JobServiceGenericEffectSpec extends munit.FunSuite {
     assertEquals(created.map(_.recruiterId), Right(recruiterId))
     assertEquals(created.map(_.title), Right("New role"))
     assertEquals(after.jobs.keySet, Set(jobId))
-    assertEquals(after.events.size, 1)
+    assertEquals(created.map(_.status), Right(com.example.graphQL.cats.domain.model.JobStatus.Draft))
+    // A Draft is private to its owner: nothing is announced until it is published.
+    assertEquals(after.events.size, 0)
     assertEquals(after.wakes, 1)
   }
 

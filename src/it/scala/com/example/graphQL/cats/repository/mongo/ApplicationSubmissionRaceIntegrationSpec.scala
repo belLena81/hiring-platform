@@ -233,4 +233,88 @@ final class ApplicationSubmissionRaceIntegrationSpec extends MongoIntegrationSui
       }
     }
   }
+
+  test("AC-F2.1 a sequential second submission by the same candidate is the typed duplicate, not a conflict") {
+    val candidate = user(UserRole.Candidate)
+    scenario(List(candidate)) { s =>
+      for {
+        first <- s.applications.submitApplication(request(UUID.randomUUID(), "first"), actor(candidate), s.job.id).value
+        started <- IO.monotonic
+        second <- s.applications
+          .submitApplication(request(UUID.randomUUID(), "second"), actor(candidate), s.job.id)
+          .value
+        elapsed <- IO.monotonic.map(_ - started)
+        applicationRows <- s.count(MongoCollections.Applications)
+        historyRows <- s.count(MongoCollections.ApplicationEvents)
+        receiptRows <- s.count(MongoCollections.MutationReceipts)
+      } yield {
+        assert(first.isRight, clue(first))
+        assertEquals(second, Left(UseCaseError.Repository(RepositoryError.DuplicateApplication)))
+        // Answered by the first attempt: the refusal is not retried as a transient transaction failure.
+        assert(elapsed < 2.seconds, clue(elapsed))
+        // The refused attempt rolled back with its receipt: one application, one history entry, one receipt.
+        assertEquals((applicationRows, historyRows, receiptRows), (1L, 1L, 1L))
+      }
+    }
+  }
+
+  test("AC-F2.2 sequential first-time submissions and status changes by one recruiter never conflict") {
+    val candidates = List.tabulate(12)(i => user(UserRole.Candidate, s"Sequential candidate $i"))
+    scenario(candidates) { s =>
+      val recruiterActor = ActorContext(s.recruiter.id, s.recruiter.role)
+      for {
+        submitted <- candidates.traverse(c =>
+          s.applications.submitApplication(request(UUID.randomUUID(), s"seq:${c.id.value}"), actor(c), s.job.id).value
+        )
+        accepted <- submitted
+          .collect { case Right(application) => application }
+          .traverse(application =>
+            s.applications
+              .changeStatus(
+                request(UUID.randomUUID(), s"accept:${application.id.value}"),
+                recruiterActor,
+                application.id,
+                ApplicationStatus.Accepted,
+                None,
+                None
+              )
+              .value
+          )
+      } yield {
+        assertEquals(submitted.collect { case Left(error) => error }, Nil)
+        assertEquals(accepted.collect { case Left(error) => error }, Nil)
+      }
+    }
+  }
+
+  test("AC-F4.8 the owning candidate declines through the store; another candidate and a stranger get not found") {
+    val owner = user(UserRole.Candidate, "Declining candidate")
+    val other = user(UserRole.Candidate, "Other candidate")
+    scenario(List(owner, other)) { s =>
+      for {
+        submitted <- s.applications.submitApplication(request(UUID.randomUUID(), "owner"), actor(owner), s.job.id).value
+        application = submitted.fold(error => fail(s"unexpected $error"), identity)
+        decline = (who: User, id: ApplicationId) =>
+          s.applications
+            .changeStatus(
+              request(UUID.randomUUID(), s"decline:${id.value}:${who.id.value}"),
+              actor(who),
+              id,
+              ApplicationStatus.Declined,
+              None,
+              Some("Accepted another offer")
+            )
+            .value
+        byOther <- decline(other, application.id)
+        unknown <- decline(other, ApplicationId(UUID.randomUUID()))
+        byOwner <- decline(owner, application.id)
+        history <- s.count(MongoCollections.ApplicationEvents)
+      } yield {
+        assertEquals(byOther, unknown)
+        assertEquals(byOther, Left(UseCaseError.Domain(DomainError.NotFound("application"))))
+        assertEquals(byOwner.map(_.status), Right(ApplicationStatus.Declined))
+        assertEquals(history, 2L)
+      }
+    }
+  }
 }

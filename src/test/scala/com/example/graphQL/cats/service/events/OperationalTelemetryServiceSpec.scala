@@ -72,7 +72,8 @@ class OperationalTelemetryServiceSpec extends CatsEffectSuite {
           .recordSearchResultClick(request(clickEventId), actor, clickEventId, searchId, "not-a-result")
           .value
       } yield {
-        assertEquals(forgedActor, Left(UseCaseError.Domain(DomainError.Forbidden)))
+        // Another actor's search session answers exactly as an unknown one.
+        assertEquals(forgedActor, Left(UseCaseError.Domain(DomainError.NotFound("search session"))))
         assertEquals(forgedResult, Left(UseCaseError.Domain(DomainError.Forbidden)))
       }
     }

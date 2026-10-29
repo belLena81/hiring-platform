@@ -287,7 +287,7 @@ final class HiringGraphQLGraphAccessSpec extends CatsEffectSuite {
     }
   }
 
-  test("AC-07.3 a recruiter who does not own the job is refused exactly as by jobApplications, with no data") {
+  test("AC-07.3 a recruiter who does not own the job gets not found exactly as by jobApplications, with no data") {
     for {
       e <- env()
       nested <- execute(e, jobGraph, rob, jobVars(10)).map(ok)
@@ -298,7 +298,7 @@ final class HiringGraphQLGraphAccessSpec extends CatsEffectSuite {
       ).map(ok)
     } yield {
       assertEquals(errorCodes(nested), errorCodes(rootJson))
-      assertEquals(errorCodes(nested), List("FORBIDDEN"))
+      assertEquals(errorCodes(nested), List("NOT_FOUND"))
       assert(!nested.noSpaces.contains(idOf(anaApplication)), clue(nested))
       assert(!nested.noSpaces.contains("Carla"), clue(nested))
     }
@@ -354,7 +354,7 @@ final class HiringGraphQLGraphAccessSpec extends CatsEffectSuite {
     }
   }
 
-  test("AC-07.4 the direct-ID history of someone else's application stays forbidden, as does the nested one") {
+  test("AC-07.4 the direct-ID history of someone else's application is not found, as is the nested one") {
     for {
       e <- env()
       direct <- execute(
@@ -364,8 +364,8 @@ final class HiringGraphQLGraphAccessSpec extends CatsEffectSuite {
       ).map(ok)
       nestedAsOtherRecruiter <- execute(e, jobGraph, rob, jobVars(5)).map(ok)
     } yield {
-      assertEquals(errorCodes(direct), List("FORBIDDEN"))
-      assertEquals(errorCodes(nestedAsOtherRecruiter), List("FORBIDDEN"))
+      assertEquals(errorCodes(direct), List("NOT_FOUND"))
+      assertEquals(errorCodes(nestedAsOtherRecruiter), List("NOT_FOUND"))
       assert(!direct.noSpaces.contains("ACCEPTED"), clue(direct))
     }
   }

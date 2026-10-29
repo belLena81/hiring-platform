@@ -49,7 +49,7 @@ final class OperationalTelemetryService[F[_]: Monad](
       for {
         user <- authorization.resolve(actor)
         job <- UseCaseF.found(jobs.findOwner(jobId), "job")
-        _ <- UseCaseF.forbidUnless[F](authorization.canView(user, job))
+        _ <- UseCaseF.ensure[F](authorization.canView(user, job), UseCaseError.Domain(DomainError.NotFound("job")))
         rank <- searchId.fold(EitherT.rightT[F, UseCaseError](Option.empty[Int]))(id =>
           verifiedSearchResult(actor, id, jobId.value.toString).map(value => Some(value._1))
         )
@@ -108,7 +108,7 @@ final class OperationalTelemetryService[F[_]: Monad](
           case _ => Left(UseCaseError.Domain(DomainError.NotFound("search session")))
         }
       case Some(session) if session.actorId != actor.userId =>
-        EitherT.leftT(UseCaseError.Domain(DomainError.Forbidden))
+        EitherT.leftT(UseCaseError.Domain(DomainError.NotFound("search session")))
       case Some(session) =>
         EitherT.fromEither[F](
           session.results

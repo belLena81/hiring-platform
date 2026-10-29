@@ -11,7 +11,7 @@ import com.example.graphQL.cats.service.ServiceFixtures.*
 import com.example.graphQL.cats.service.port.ApplicationWriteActor
 import com.example.graphQL.cats.service.protocol.IdempotencyRequest
 import com.example.graphQL.cats.domain.error.DomainError
-import com.example.graphQL.cats.domain.model.Identifiers.ApplicationEventId
+import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, UserId}
 import com.example.graphQL.cats.domain.model.{ApplicationStatus, UserRole, JobState}
 import com.example.graphQL.cats.service.events.OperationalEventType
 import java.util.UUID
@@ -269,6 +269,191 @@ class ApplicationServiceSpec extends CatsEffectSuite {
     }
   }
 
+  private val otherCandidate = candidate.copy(id = UserId(UUID.fromString("00000000-0000-0000-0000-000000000011")))
+  private val otherRecruiter = recruiter.copy(id = UserId(UUID.fromString("00000000-0000-0000-0000-000000000012")))
+  private val unknownApplicationId = ApplicationId(UUID.fromString("00000000-0000-0000-0000-0000000000ff"))
+
+  private def decline(service: ApplicationService[IO], actor: ActorContext, id: ApplicationId, reason: Option[String]) =
+    service
+      .changeStatus(request("decline"), actor, id, ApplicationStatus.Declined, None, reason)
+      .value
+
+  test("AC-F4.1 the candidate who owns the application declines it with a reason, recorded under their own identity") {
+    withServices(Map(jobId -> openJob), Map(applicationId -> createdApplication), later, List(eventId.value)).flatMap {
+      case (_, applications, service) =>
+        for {
+          result <- decline(
+            service,
+            ActorContext(candidateId, UserRole.Candidate),
+            applicationId,
+            Some("Accepted another offer")
+          )
+          events <- applications.allEvents
+          actors <- applications.allWriteActors
+        } yield {
+          assertEquals(result.map(_.status), Right(ApplicationStatus.Declined))
+          assertEquals(
+            events.map(e => (e.actorId, e.actorRole, e.newStatus)),
+            Vector((candidateId, UserRole.Candidate, ApplicationStatus.Declined))
+          )
+          assertEquals(events.flatMap(_.reason), Vector("Accepted another offer"))
+          assertEquals(actors, Vector(ApplicationWriteActor(candidateId, UserRole.Candidate)))
+        }
+    }
+  }
+
+  test("AC-F4.2 a candidate's decline without a reason is refused and writes nothing") {
+    withServices(Map(jobId -> openJob), Map(applicationId -> createdApplication), later, List(eventId.value)).flatMap {
+      case (_, applications, service) =>
+        for {
+          result <- decline(service, ActorContext(candidateId, UserRole.Candidate), applicationId, Some(" "))
+          events <- applications.allEvents
+        } yield {
+          assertEquals(result, Left(UseCaseError.Domain(DomainError.DeclineReasonRequired)))
+          assertEquals(events, Vector.empty)
+        }
+    }
+  }
+
+  test("AC-F4.3 another candidate declining gets the answer for an unknown application and changes nothing") {
+    withServices(
+      Map(jobId -> openJob),
+      Map(applicationId -> createdApplication),
+      later,
+      List(eventId.value),
+      List(otherCandidate)
+    ).flatMap { case (_, applications, service) =>
+      val other = ActorContext(otherCandidate.id, UserRole.Candidate)
+      for {
+        hidden <- decline(service, other, applicationId, Some("reason"))
+        unknown <- decline(service, other, unknownApplicationId, Some("reason"))
+        actors <- applications.allWriteActors
+        events <- applications.allEvents
+      } yield {
+        assertEquals(hidden.map(_ => ()), Left(UseCaseError.Domain(DomainError.NotFound("application"))))
+        assertEquals(hidden, unknown)
+        assertEquals((actors, events), (Vector.empty, Vector.empty))
+      }
+    }
+  }
+
+  test(
+    "AC-F4.4 a recruiter who does not own the job gets the answer for an unknown application; the owner and Admin still decline"
+  ) {
+    withServices(
+      Map(jobId -> openJob),
+      Map(applicationId -> createdApplication),
+      later,
+      List(eventId.value),
+      List(otherRecruiter)
+    ).flatMap { case (_, applications, service) =>
+      for {
+        hidden <- decline(service, ActorContext(otherRecruiter.id, UserRole.Recruiter), applicationId, Some("reason"))
+        unknown <- decline(
+          service,
+          ActorContext(otherRecruiter.id, UserRole.Recruiter),
+          unknownApplicationId,
+          Some("reason")
+        )
+        unchanged <- applications.allEvents
+        owner <- decline(service, ActorContext(recruiterId, UserRole.Recruiter), applicationId, Some("reason"))
+      } yield {
+        assertEquals(hidden, unknown)
+        assertEquals(hidden.map(_ => ()), Left(UseCaseError.Domain(DomainError.NotFound("application"))))
+        assertEquals(unchanged, Vector.empty)
+        assertEquals(owner.map(_.status), Right(ApplicationStatus.Declined))
+      }
+    }
+  }
+
+  test("AC-F4.5 a candidate can decline only: accepting or rejecting their own application stays forbidden") {
+    withServices(
+      Map(jobId -> openJob),
+      Map(applicationId -> createdApplication),
+      later,
+      List(eventId.value, eventId.value)
+    ).flatMap { case (_, applications, service) =>
+      val own = ActorContext(candidateId, UserRole.Candidate)
+      for {
+        accepted <- service
+          .changeStatus(request("a"), own, applicationId, ApplicationStatus.Accepted, None, None)
+          .value
+        rejected <- service
+          .changeStatus(request("r"), own, applicationId, ApplicationStatus.Rejected, Some("feedback"), None)
+          .value
+        actors <- applications.allWriteActors
+      } yield {
+        assertEquals(accepted, Left(UseCaseError.Domain(DomainError.Forbidden)))
+        assertEquals(rejected, Left(UseCaseError.Domain(DomainError.Forbidden)))
+        assertEquals(actors, Vector.empty)
+      }
+    }
+  }
+
+  test("AC-F3.5 submitting to a Draft answers as for an unknown job and writes nothing") {
+    withServices(
+      Map(jobId -> openJob.copy(state = JobState.Draft)),
+      Map.empty,
+      now,
+      List(applicationId.value, eventId.value)
+    ).flatMap { case (_, applications, service) =>
+      val actor = ActorContext(candidateId, UserRole.Candidate)
+      for {
+        draft <- service.submitApplication(request("submit-draft"), actor, jobId).value
+        unknown <- service
+          .submitApplication(
+            request("submit-unknown"),
+            actor,
+            com.example.graphQL.cats.domain.model.Identifiers
+              .JobId(UUID.fromString("00000000-0000-0000-0000-0000000000fe"))
+          )
+          .value
+        events <- applications.allEvents
+      } yield {
+        assertEquals(draft, Left(UseCaseError.Domain(DomainError.NotFound("job"))))
+        assertEquals(draft, unknown)
+        assertEquals(events, Vector.empty)
+      }
+    }
+  }
+
+  test("AC-F1.4 viewing an application of another candidate answers as for an unknown application") {
+    for {
+      users <- Ref.of[IO, Map[UserId, com.example.graphQL.cats.domain.model.User]](
+        List(candidate, recruiter, otherCandidate, otherRecruiter).map(user => user.id -> user).toMap
+      )
+      jobs <- Ref.of[IO, Map[
+        com.example.graphQL.cats.domain.model.Identifiers.JobId,
+        com.example.graphQL.cats.domain.model.Job
+      ]](
+        Map(jobId -> openJob)
+      )
+      stored <- Ref.of[IO, Map[ApplicationId, com.example.graphQL.cats.domain.model.Application]](
+        Map(applicationId -> createdApplication)
+      )
+      events <- Ref.of[IO, Vector[com.example.graphQL.cats.domain.model.ApplicationEvent]](Vector.empty)
+      nextCreate <- Ref.of[IO, Option[RepositoryError]](None)
+      read = HiringReadService(
+        InMemoryUsers(users),
+        InMemoryJobs(jobs),
+        InMemoryApplications(stored, events, nextCreate)
+      )
+      view = (user: com.example.graphQL.cats.domain.model.User, id: ApplicationId) =>
+        read.canViewApplication(ActorContext(user.id, user.role), id).value.map(_.map(_.id))
+      otherHidden <- view(otherCandidate, applicationId)
+      otherUnknown <- view(otherCandidate, unknownApplicationId)
+      recruiterHidden <- view(otherRecruiter, applicationId)
+      recruiterUnknown <- view(otherRecruiter, unknownApplicationId)
+      owner <- view(candidate, applicationId)
+      managing <- view(recruiter, applicationId)
+    } yield {
+      assertEquals(otherHidden, Left(UseCaseError.Domain(DomainError.NotFound("application"))))
+      assertEquals(otherHidden, otherUnknown)
+      assertEquals(recruiterHidden, recruiterUnknown)
+      assertEquals((owner, managing), (Right(applicationId), Right(applicationId)))
+    }
+  }
+
   private def withServices(
       jobs: Map[com.example.graphQL.cats.domain.model.Identifiers.JobId, com.example.graphQL.cats.domain.model.Job],
       applications: Map[
@@ -276,14 +461,16 @@ class ApplicationServiceSpec extends CatsEffectSuite {
         com.example.graphQL.cats.domain.model.Application
       ],
       currentTime: java.time.Instant,
-      randomIds: List[UUID]
+      randomIds: List[UUID],
+      extraUsers: List[com.example.graphQL.cats.domain.model.User] = Nil
   ): IO[(InMemoryJobs, InMemoryApplications, ApplicationService[IO])] =
     for {
       usersRef <- Ref.of[IO, Map[
         com.example.graphQL.cats.domain.model.Identifiers.UserId,
         com.example.graphQL.cats.domain.model.User
       ]](
-        Map(candidateId -> candidate, recruiterId -> recruiter, adminId -> admin)
+        Map(candidateId -> candidate, recruiterId -> recruiter, adminId -> admin) ++
+          extraUsers.map(user => user.id -> user)
       )
       jobsRef <- Ref.of[IO, Map[
         com.example.graphQL.cats.domain.model.Identifiers.JobId,

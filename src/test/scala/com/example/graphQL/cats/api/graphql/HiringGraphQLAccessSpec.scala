@@ -1198,6 +1198,67 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     }
   }
 
+  private val otherCandidateId = UserId(UUID.fromString("10000000-0000-0000-0000-000000000011"))
+  private val otherCandidate = candidate.copy(id = otherCandidateId, email = Some(email("other@example.com")))
+  private val unknownId = UUID.fromString("10000000-0000-0000-0000-0000000000ff")
+
+  test("AC-F4.6 the candidate who owns the application declines it through declineApplication") {
+    val query =
+      s"""mutation {
+         |  declineApplication(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001", applicationId: "${applicationId.value}", reason: "Accepted another offer" }) {
+         |    __typename
+         |    ... on Application { id status }
+         |  }
+         |}""".stripMargin
+    executeWithUsers(query, Some(ActorContext(candidateId, UserRole.Candidate)), List(candidate, recruiter)).map {
+      json =>
+        val payload = json.hcursor.downField("data").downField("declineApplication")
+        assertEquals(payload.get[String]("status"), Right("DECLINED"))
+        assertEquals(payload.get[String]("id"), Right(applicationId.value.toString))
+    }
+  }
+
+  test("AC-F4.7 another candidate's decline answers exactly as for an unknown application") {
+    def declineAs(id: UUID) =
+      executeWithUsers(
+        s"""mutation {
+           |  declineApplication(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001", applicationId: "$id", reason: "x" }) {
+           |    __typename
+           |    ... on DomainError { code message }
+           |  }
+           |}""".stripMargin,
+        Some(ActorContext(otherCandidateId, UserRole.Candidate)),
+        List(candidate, recruiter, otherCandidate)
+      ).map(_.hcursor.downField("data").downField("declineApplication").focus)
+    (declineAs(applicationId.value), declineAs(unknownId)).mapN { (hidden, unknown) =>
+      assertEquals(hidden, unknown)
+      assertEquals(hidden.flatMap(_.hcursor.get[String]("code").toOption), Some("NOT_FOUND"))
+    }
+  }
+
+  test("AC-F1.5 a closed job and another candidate's application read exactly as unknown ones, with no data") {
+    def read(query: String) =
+      executeWithUsers(
+        query,
+        Some(ActorContext(otherCandidateId, UserRole.Candidate)),
+        List(candidate, recruiter, otherCandidate)
+      )
+    def job(id: UUID) = read(s"""query { job(id: "$id") { id } }""")
+    def history(id: UUID) =
+      read(s"""query { applicationHistory(applicationId: "$id", first: 5) { edges { node { id } } } }""")
+    for {
+      closed <- job(closedJobId.value)
+      missing <- job(unknownId)
+      otherApplication <- history(applicationId.value)
+      missingApplication <- history(unknownId)
+    } yield {
+      assertEquals(closed, missing)
+      assertEquals(errorCode(closed), Right("NOT_FOUND"))
+      assertEquals(otherApplication, missingApplication)
+      assertEquals(errorCode(otherApplication), Right("NOT_FOUND"))
+    }
+  }
+
   test("VHS-AC02 semantic job search returns ranked jobs with observable model metadata") {
     val query =
       """query {

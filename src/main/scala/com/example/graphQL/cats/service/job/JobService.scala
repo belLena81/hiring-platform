@@ -49,8 +49,7 @@ final case class CreateJobInput(
     description: String,
     requirements: List[String],
     skills: Set[String],
-    location: Location,
-    status: JobStatus
+    location: Location
 )
 
 final case class UpdateJobInput(
@@ -91,7 +90,7 @@ final class JobService[F[_]: MonadThrow](
         job <- EitherT.fromEither[F](
           validateNewJob(user.id, input, now, jobId).flatMap(JobLifecycle.create(_).leftMap(UseCaseError.Domain.apply))
         )
-        created <- persist(job, JobKind.Created, job.createdAt, user.id)(
+        created <- persist(job, None, job.createdAt, user.id)(
           jobs.createWithEvents(job, job.createdAt, _, context).as(job)
         )
       } yield created
@@ -111,22 +110,29 @@ final class JobService[F[_]: MonadThrow](
           replacement <- EitherT.fromEither[F](
             JobLifecycle.update(edited).runS(observed.value).leftMap(UseCaseError.Domain.apply)
           )
-          updated <- persistUpdate(observed, replacement, JobKind.Updated, actor.userId, context)
+          updated <- persistUpdate(
+            observed,
+            replacement,
+            visibleEvent(observed.value, JobKind.Updated),
+            actor.userId,
+            context
+          )
         } yield updated
       }
     }
 
   override def publishJob(request: IdempotencyRequest, actor: ActorContext, jobId: JobId): UseCaseF[F, Job] =
-    transition("publishJob", JobKind.Updated, request, actor, jobId)(JobLifecycle.publish)
+    transition("publishJob", _ => Some(JobKind.Created), request, actor, jobId)(JobLifecycle.publish)
 
   override def closeJob(request: IdempotencyRequest, actor: ActorContext, jobId: JobId): UseCaseF[F, Job] =
-    transition("closeJob", JobKind.Closed, request, actor, jobId)(JobLifecycle.close)
+    transition("closeJob", visibleEvent(_, JobKind.Closed), request, actor, jobId)(JobLifecycle.close)
 
   def viewJob(actor: ActorContext, jobId: JobId): UseCaseF[F, Job] =
     for {
       user <- authorization.resolve(actor)
       job <- UseCaseF.found(jobs.find(jobId), "job")
-      _ <- UseCaseF.forbidUnless[F](authorization.canView(user, JobOwner.of(job)))
+      _ <- UseCaseF
+        .ensure[F](authorization.canView(user, JobOwner.of(job)), UseCaseError.Domain(DomainError.NotFound("job")))
     } yield job
 
   // For display only: under `JobProjection.Summary` the jobs carry a blank description and no requirements (the caller
@@ -223,7 +229,7 @@ final class JobService[F[_]: MonadThrow](
 
   private def transition(
       operation: String,
-      kind: JobKind,
+      kind: Job => Option[JobKind],
       request: IdempotencyRequest,
       actor: ActorContext,
       jobId: JobId
@@ -233,7 +239,7 @@ final class JobService[F[_]: MonadThrow](
         for {
           now <- EitherT.liftF(clock.realTimeInstant)
           changed <- EitherT.fromEither[F](program(now).runS(observed.value).leftMap(UseCaseError.Domain.apply))
-          saved <- persistUpdate(observed, changed, kind, actor.userId, context)
+          saved <- persistUpdate(observed, changed, kind(observed.value), actor.userId, context)
         } yield saved
       }
     }
@@ -253,7 +259,7 @@ final class JobService[F[_]: MonadThrow](
         input.requirements,
         input.skills,
         input.location,
-        JobState.requested(input.status, now),
+        JobState.Draft,
         now,
         now
       )
@@ -284,7 +290,7 @@ final class JobService[F[_]: MonadThrow](
   private def persistUpdate(
       expected: Versioned[Job],
       job: Job,
-      kind: JobKind,
+      kind: Option[JobKind],
       actorId: UserId,
       context: MutationWriteContext
   ): UseCaseF[F, Job] =
@@ -292,17 +298,29 @@ final class JobService[F[_]: MonadThrow](
       jobs.updateWithEvents(expected, job, job.updatedAt, _, context).map(_.value)
     )
 
-  /** Builds the job's operational event, then runs `write` with it and wakes the embedding worker after commit. */
-  private def persist(job: Job, kind: JobKind, occurredAt: Instant, actorId: UserId)(
+  // `createJob` always creates a Draft, which is private to its owner, so it publishes no event: `JOB_CREATED` is
+  // emitted once, with the Open snapshot, by `publishJob`.
+
+  /** Updates and closing are announced only for a job that was published; a Draft emits nothing. */
+  private def visibleEvent(before: Job, kind: JobKind): Option[JobKind] =
+    Option.when(before.status != JobStatus.Draft)(kind)
+
+  /** Builds the job's operational event (none for a Draft), then runs `write` with it and wakes the embedding worker
+    * after commit. The embedding work is enqueued by the write for every state, so a published job is already embedded
+    * or queued; the work key is the job, so publishing re-queues the same item and never duplicates it.
+    */
+  private def persist(job: Job, kind: Option[JobKind], occurredAt: Instant, actorId: UserId)(
       write: List[OperationalEventEnvelope] => RepositoryF[F, Job]
   ): UseCaseF[F, Job] =
     EitherT
       .fromEither[F](
-        OperationalEvents
-          .jobEvent(kind, eventId(job, kind, occurredAt), job, actorId, occurredAt)
-          .leftMap(_.asUseCaseError)
+        kind.toList.traverse(k =>
+          OperationalEvents
+            .jobEvent(k, eventId(job, k, occurredAt), job, actorId, occurredAt)
+            .leftMap(_.asUseCaseError)
+        )
       )
-      .flatMap(event => notifyAfterCommit(UseCaseF.repository(write(List(event)))))
+      .flatMap(events => notifyAfterCommit(UseCaseF.repository(write(events))))
 
   private def notifyAfterCommit(result: UseCaseF[F, Job]): UseCaseF[F, Job] =
     result.semiflatTap(_ => embeddingWork.wakeAfterCommit(diagnostics))

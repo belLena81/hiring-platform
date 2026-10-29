@@ -67,9 +67,10 @@ final class MongoMutationReceiptRepository(
             for {
               pending <- RepositoryF.lift(inProgress(key, fingerprint, now, expiresAt))
               _ <- insert(session, pending)
-              outcome <- write(MongoMutationWriteContext(session)).recoverWith { error =>
-                RepositoryF.lift(remove(session, key)).flatMap(_ => MongoF.raise(error))
-              }
+              // A typed failure leaves the transaction uncommitted, so the runner aborts it together with the pending
+              // receipt. Deleting the receipt here would run in a transaction the server already aborted after a
+              // duplicate-key write, fail as a transient error, and turn that outcome into a retried `Conflict`.
+              outcome <- write(MongoMutationWriteContext(session))
               result <- outcome match {
                 case MutationWriteOutcome.Rejected(error) =>
                   RepositoryF.lift(remove(session, key)).as(MutationReceiptExecution.Rejected(error))

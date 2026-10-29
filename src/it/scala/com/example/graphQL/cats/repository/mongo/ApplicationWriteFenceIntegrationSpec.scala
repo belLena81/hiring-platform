@@ -103,21 +103,31 @@ final class ApplicationWriteFenceIntegrationSpec extends MongoIntegrationSuite {
       insertApplication(application).as(application)
     }
 
-    def accept(application: Application, actor: User): IO[Either[RepositoryError, Unit]] = {
+    def accept(application: Application, actor: User): IO[Either[RepositoryError, Unit]] =
+      change(application, actor, ApplicationStatus.Accepted)
+
+    def decline(application: Application, actor: User): IO[Either[RepositoryError, Unit]] =
+      change(application, actor, ApplicationStatus.Declined)
+
+    private def change(
+        application: Application,
+        actor: User,
+        target: ApplicationStatus
+    ): IO[Either[RepositoryError, Unit]] = {
       val event = ApplicationEvent(
         ApplicationEventId(UUID.randomUUID()),
         application.id,
         Some(ApplicationStatus.Created),
-        ApplicationStatus.Accepted,
+        target,
         actor.id,
         at.plusSeconds(60),
         None,
-        None,
+        if (target == ApplicationStatus.Declined) Some("Withdrawn") else None,
         actor.role
       )
       applications
         .updateStatusWithEvents(
-          application.copy(status = ApplicationStatus.Accepted, updatedAt = at.plusSeconds(60)),
+          application.copy(status = target, updatedAt = at.plusSeconds(60)),
           event,
           Nil,
           ApplicationWriteActor(actor.id, actor.role),
@@ -280,7 +290,13 @@ final class ApplicationWriteFenceIntegrationSpec extends MongoIntegrationSuite {
         .fenceAfterConcurrentDeletion(
           recruiter,
           (fence, session) =>
-            fence.forStatusChange(session, ApplicationWriteActor(recruiter.id, recruiter.role), job.id)
+            fence.forStatusChange(
+              session,
+              ApplicationWriteActor(recruiter.id, recruiter.role),
+              job.id,
+              UserId(UUID.randomUUID()),
+              ApplicationStatus.Accepted
+            )
         )
         .map(outcome => assert(isWriteConflict(outcome), clue(outcome)))
     }
@@ -319,6 +335,30 @@ final class ApplicationWriteFenceIntegrationSpec extends MongoIntegrationSuite {
         assertEquals(owned, Right(()))
         assertEquals(afterOwner, Some("Accepted"))
         assertEquals((byAdmin, adminStatus), (Right(()), Some("Accepted")))
+      }
+    }
+  }
+
+  test("AC-F4.1 the store lets only the application's own candidate decline, and nothing else a candidate asks for") {
+    harness { h =>
+      val owner = user(UserRole.Candidate, "Declining candidate")
+      val other = user(UserRole.Candidate, "Other candidate")
+      val recruiter = user(UserRole.Recruiter, "Fence job owner")
+      val job = openJob(recruiter)
+      for {
+        _ <- List(owner, other, recruiter).traverse_(h.insertUser) *> h.insertJob(job)
+        application <- h.created(owner, job)
+        byOther <- h.decline(application, other)
+        acceptByOwner <- h.accept(application, owner)
+        untouched <- h.status(application)
+        byOwner <- h.decline(application, owner)
+        declined <- h.status(application)
+        history <- h.count(MongoCollections.ApplicationEvents)
+      } yield {
+        assertEquals(byOther, Left(RepositoryError.AuthorityRevoked))
+        assertEquals(acceptByOwner, Left(RepositoryError.AuthorityRevoked))
+        assertEquals(untouched, Some("Created"))
+        assertEquals((byOwner, declined, history), (Right(()), Some("Declined"), 1L))
       }
     }
   }

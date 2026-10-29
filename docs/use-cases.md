@@ -322,6 +322,8 @@ Quality has no arbitrary initial threshold. Establish a baseline dataset first a
 
 **Goal:** View complete information for a selected job.
 
+A job the caller may not see (a Draft or Closed job that is not theirs to manage) is answered exactly as a job that does not exist: `job` is `null` with `NOT_FOUND`, the same code and message, so the answer does not reveal whether the job exists.
+
 ### GraphQL
 
 ```graphql
@@ -631,6 +633,8 @@ Candidate location/status are structured retrieval filters and are excluded from
 
 **Goal:** Create, modify, publish, or close a job.
 
+`createJob` creates a **Draft** owned by the calling Recruiter. A Draft is visible and editable only to its owner and the Admin (`myJobs`, `job`, `updateJob`, `closeJob`); it does not appear in `jobs`, `nearbyJobs`, `jobDiscoveryFacets`, `semanticJobSearch` or `recommendedJobs` and accepts no applications. `publishJob` moves a Draft to Open, which is the moment the job becomes visible and the first `JOB_CREATED` event is published. Closing a Draft is allowed and leaves a Closed job. A Draft is private, so creating, editing or closing one publishes no operational event; the embedding work item is queued from creation (keyed by the job, so publishing re-queues the same item) and a Draft is never eligible for search until it is Open.
+
 ### GraphQL
 
 ```graphql
@@ -648,6 +652,7 @@ Additional operations:
 
 ```text
 updateJob
+publishJob
 closeJob
 ```
 
@@ -657,6 +662,7 @@ closeJob
 - Recruiter owns created jobs.
 - Recruiter may modify only owned jobs.
 - Closing a job prevents new applications.
+- A job the caller does not manage is answered as a missing one (`NOT_FOUND`); a Candidate calling these Recruiter-only operations is `FORBIDDEN`.
 
 ### Events
 
@@ -780,9 +786,11 @@ no N+1 behavior
 
 # UC09 — Change Application Status
 
-**Actor:** Recruiter
+**Actor:** Recruiter (owning the application's job) or Admin for every action; the application's own **Candidate** for `declineApplication` only.
 
 **Goal:** Move an application through its hiring lifecycle.
+
+`declineApplication` is also the Candidate's withdrawal: the candidate who owns the application can decline it, with a required reason, under the same permitted-transition matrix (only `CREATED` can be declined). The history entry records the candidate as the actor. A candidate has no other status power; `acceptApplication`, `moveApplicationToInterview`, `rejectApplication` and `hireApplication` answer a Candidate `FORBIDDEN`. Another candidate, and a recruiter who does not own the job, get `NOT_FOUND`, exactly the answer for an unknown application, and nothing is changed.
 
 ### GraphQL
 

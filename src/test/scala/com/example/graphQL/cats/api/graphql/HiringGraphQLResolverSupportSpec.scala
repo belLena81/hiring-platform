@@ -241,7 +241,7 @@ final class HiringGraphQLResolverSupportSpec extends CatsEffectSuite {
       Scenario(
         "initial job status",
         UseCaseError.Domain(DomainFailure.InvalidInitialJobStatus(JobStatus.Draft)),
-        GraphQLFailure("INVALID_INITIAL_JOB_STATUS", "New jobs must be open", exceptional = false)
+        GraphQLFailure("INVALID_INITIAL_JOB_STATUS", "New jobs cannot start closed", exceptional = false)
       ),
       Scenario(
         "application transition",

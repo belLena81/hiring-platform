@@ -5,7 +5,7 @@ import cats.effect.IO
 import com.example.graphQL.cats.api.graphql.HiringGraphQLInputs.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLResolverSupport.*
-import com.example.graphQL.cats.domain.model.{Job, JobStatus, Location}
+import com.example.graphQL.cats.domain.model.{Job, Location}
 import com.example.graphQL.cats.domain.model.Identifiers.JobId
 import com.example.graphQL.cats.service.job.{CreateJobInput, UpdateJobInput}
 import com.example.graphQL.cats.service.protocol.{IdempotencyRequest, JobUseCases, UseCaseF}
@@ -64,7 +64,7 @@ private[graphql] object HiringGraphQLJobResolvers {
         hiring.jobService.createJob(
           idempotencyRequest(graphQLInput.idempotencyKey, graphQLInput.idempotencyPayload),
           actor,
-          createJobInput(graphQLInput, JobStatus.Open)
+          createJobInput(graphQLInput)
         ),
         InputFieldPaths.createJob
       )
@@ -104,7 +104,7 @@ private[graphql] object HiringGraphQLJobResolvers {
       )
     }
 
-  private def createJobInput(input: CreateJobGraphQLInput, status: JobStatus): CreateJobInput =
+  private def createJobInput(input: CreateJobGraphQLInput): CreateJobInput =
     CreateJobInput(
       input.title,
       input.description,
@@ -115,8 +115,7 @@ private[graphql] object HiringGraphQLJobResolvers {
         input.city,
         input.remote,
         input.coordinates.map(point => com.example.graphQL.cats.domain.model.GeoPoint(point.latitude, point.longitude))
-      ),
-      status
+      )
     )
 
   private def updateInput(input: JobGraphQLInput): UpdateJobInput =

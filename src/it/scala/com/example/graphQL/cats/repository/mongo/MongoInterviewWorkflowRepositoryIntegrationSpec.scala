@@ -596,7 +596,8 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         _ <- success(repository.quarantine("invalid-record-two", now))
       } yield {
         assertEquals(candidateForbidden, Left(UseCaseError.Domain(DomainError.Forbidden)))
-        assertEquals(recruiterForbidden, Left(UseCaseError.Domain(DomainError.Forbidden)))
+        // A job the recruiter does not own is a missing application to them.
+        assertEquals(recruiterForbidden, Left(UseCaseError.Domain(DomainError.NotFound("application"))))
         assertEquals(scheduled.candidateId, own.candidateId)
         assertEquals(scheduled.recruiterId, own.recruiterId)
         assertEquals(scheduled.initiatedBy, own.recruiterId)

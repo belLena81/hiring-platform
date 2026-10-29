@@ -184,7 +184,10 @@ final class MongoApplicationRepository private (
       MongoRepositorySupport
         .repositoryGuard(diagnostics, "applications.updateStatusWithContext") {
           MongoMutationWriteContext.run(context, transactionRunner, transactionRequired = true)(session =>
-            fenced("applications.statusFence", writeFence.forStatusChange(session, actor, application.jobId)) *>
+            fenced(
+              "applications.statusFence",
+              writeFence.forStatusChange(session, actor, application.jobId, application.candidateId, application.status)
+            ) *>
               updateStatusWithSession(application, event, operationalEvents, session)
           )
         }(MongoErrors.duplicateAs(RepositoryError.DuplicateApplication))

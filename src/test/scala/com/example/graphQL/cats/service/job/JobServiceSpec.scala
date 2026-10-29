@@ -43,8 +43,7 @@ class JobServiceSpec extends CatsEffectSuite {
         " Build services ",
         List(" Scala "),
         Set(" Cats Effect "),
-        Location("Cyprus", Some("Nicosia"), remote = true),
-        JobStatus.Draft
+        Location("Cyprus", Some("Nicosia"), remote = true)
       )
       created <- service
         .createJob(request("create-recruiter"), ActorContext(recruiterId, UserRole.Recruiter), input)
@@ -56,32 +55,6 @@ class JobServiceSpec extends CatsEffectSuite {
       assertEquals(created.map(_.recruiterId), Right(recruiterId))
       assertEquals(created.map(_.title), Right("New role"))
       assertEquals(rejected, Left(UseCaseError.Domain(DomainError.Forbidden)))
-    }
-  }
-
-  test("createJob rejects a Closed initial status through JobLifecycle") {
-    for {
-      users <- Ref.of[IO, Map[UserId, User]](Map(recruiterId -> recruiter))
-      jobs <- Ref.of[IO, Map[JobId, Job]](Map.empty)
-      service <- deterministicService(InMemoryUsers(users), InMemoryJobs(jobs), List(now), List(jobId.value))
-      result <- service
-        .createJob(
-          request("create-closed"),
-          ActorContext(recruiterId, UserRole.Recruiter),
-          CreateJobInput(
-            "New role",
-            "Build services",
-            List("Scala"),
-            Set("Scala"),
-            Location("Cyprus", Some("Nicosia"), remote = true),
-            JobStatus.Closed
-          )
-        )
-        .value
-      stored <- jobs.get
-    } yield {
-      assertEquals(result, Left(UseCaseError.Domain(DomainError.InvalidInitialJobStatus(JobStatus.Closed))))
-      assertEquals(stored, Map.empty)
     }
   }
 
@@ -102,8 +75,7 @@ class JobServiceSpec extends CatsEffectSuite {
         "Build services",
         List("Scala"),
         Set("Cats Effect"),
-        Location("Cyprus", Some("Nicosia"), remote = true),
-        JobStatus.Open
+        Location("Cyprus", Some("Nicosia"), remote = true)
       )
       created <- service.createJob(request("create"), ActorContext(recruiterId, UserRole.Recruiter), input).value
       rejected <- service
@@ -127,8 +99,7 @@ class JobServiceSpec extends CatsEffectSuite {
       "Build services",
       List("Scala"),
       Set("Cats Effect"),
-      Location("Cyprus", Some("Nicosia"), remote = false, Some(initialPoint)),
-      JobStatus.Open
+      Location("Cyprus", Some("Nicosia"), remote = false, Some(initialPoint))
     )
     for {
       users <- Ref.of[IO, Map[UserId, User]](Map(recruiterId -> recruiter))
@@ -185,8 +156,7 @@ class JobServiceSpec extends CatsEffectSuite {
             existing.description,
             existing.requirements,
             existing.skills,
-            invalidLocation,
-            JobStatus.Open
+            invalidLocation
           )
         )
         .value
@@ -226,8 +196,7 @@ class JobServiceSpec extends CatsEffectSuite {
             "Build services",
             List("Scala"),
             Set("Scala"),
-            Location("Cyprus", Some("Nicosia"), remote = true),
-            JobStatus.Open
+            Location("Cyprus", Some("Nicosia"), remote = true)
           )
         )
         .value
@@ -270,8 +239,7 @@ class JobServiceSpec extends CatsEffectSuite {
             "Build services",
             List("Scala"),
             Set("Scala"),
-            Location("Cyprus", Some("Nicosia"), true),
-            JobStatus.Draft
+            Location("Cyprus", Some("Nicosia"), true)
           )
         )
         .value
@@ -286,33 +254,108 @@ class JobServiceSpec extends CatsEffectSuite {
     }
   }
 
-  test("createJob hands a JOB_CREATED fact to the durable repository boundary") {
+  private val newRole = CreateJobInput(
+    "New role",
+    "Build services",
+    List("Scala"),
+    Set("Scala"),
+    Location("Cyprus", Some("Nicosia"), remote = true)
+  )
+
+  private val recruiterActor = ActorContext(recruiterId, UserRole.Recruiter)
+
+  test("AC-F3.1 createJob creates a Draft owned by the recruiter and announces nothing yet") {
     for {
       users <- Ref.of[IO, Map[UserId, User]](Map(recruiterId -> recruiter))
       jobs <- Ref.of[IO, Map[JobId, Job]](Map.empty)
       outbox <- Ref.of[IO, Vector[com.example.graphQL.cats.service.events.OperationalEventEnvelope]](Vector.empty)
       jobRepository = InMemoryJobs(jobs, Some(outbox))
       service <- deterministicService(InMemoryUsers(users), jobRepository, List(now), List(jobId.value))
-      result <- service
-        .createJob(
-          request("create-with-event"),
-          ActorContext(recruiterId, UserRole.Recruiter),
-          CreateJobInput(
-            "New role",
-            "Build services",
-            List("Scala"),
-            Set("Scala"),
-            Location("Cyprus", Some("Nicosia"), remote = true),
-            JobStatus.Open
-          )
-        )
-        .value
+      result <- service.createJob(request("create-draft"), recruiterActor, newRole).value
       events <- jobRepository.allOperationalEvents
     } yield {
-      assertEquals(result.map(_.id), Right(jobId))
+      assertEquals(result.map(_.status), Right(JobStatus.Draft))
+      assertEquals(result.map(_.recruiterId), Right(recruiterId))
+      assertEquals(events, Vector.empty)
+    }
+  }
+
+  test("AC-F3.2 publishing a Draft is the first JOB_CREATED fact, with the Open snapshot, and happens once") {
+    for {
+      users <- Ref.of[IO, Map[UserId, User]](Map(recruiterId -> recruiter))
+      jobs <- Ref.of[IO, Map[JobId, Job]](Map.empty)
+      outbox <- Ref.of[IO, Vector[com.example.graphQL.cats.service.events.OperationalEventEnvelope]](Vector.empty)
+      jobRepository = InMemoryJobs(jobs, Some(outbox))
+      service <- deterministicService(InMemoryUsers(users), jobRepository, List(now, later, later), List(jobId.value))
+      _ <- service.createJob(request("create-draft"), recruiterActor, newRole).value
+      published <- service.publishJob(request("publish"), recruiterActor, jobId).value
+      again <- service.publishJob(request("publish-again"), recruiterActor, jobId).value
+      events <- jobRepository.allOperationalEvents
+    } yield {
+      assertEquals(published.map(_.status), Right(JobStatus.Open))
+      assertEquals(
+        again,
+        Left(UseCaseError.Domain(DomainError.InvalidJobTransition(JobStatus.Open, JobStatus.Open)))
+      )
       assertEquals(events.map(_.eventType), Vector(OperationalEventType.JOB_CREATED))
       assertEquals(events.map(_.aggregateId), Vector(jobId.value.toString))
       assert(!events.head.payload.toString.contains("recruiter@example.com"))
+    }
+  }
+
+  test("AC-F3.3 editing or closing a Draft announces nothing and closing leaves a Closed job") {
+    for {
+      users <- Ref.of[IO, Map[UserId, User]](Map(recruiterId -> recruiter))
+      jobs <- Ref.of[IO, Map[JobId, Job]](Map.empty)
+      outbox <- Ref.of[IO, Vector[com.example.graphQL.cats.service.events.OperationalEventEnvelope]](Vector.empty)
+      jobRepository = InMemoryJobs(jobs, Some(outbox))
+      service <- deterministicService(InMemoryUsers(users), jobRepository, List(now, later, later), List(jobId.value))
+      _ <- service.createJob(request("create-draft"), recruiterActor, newRole).value
+      edited <- service
+        .updateJob(
+          request("edit"),
+          recruiterActor,
+          jobId,
+          UpdateJobInput("Edited", "Build services", List("Scala"), Set("Scala"), newRole.location)
+        )
+        .value
+      closed <- service.closeJob(request("close"), recruiterActor, jobId).value
+      events <- jobRepository.allOperationalEvents
+    } yield {
+      assertEquals(edited.map(_.status), Right(JobStatus.Draft))
+      assertEquals(closed.map(_.status), Right(JobStatus.Closed))
+      assertEquals(events, Vector.empty)
+    }
+  }
+
+  test("AC-F3.4 a Draft is visible to its owner and the Admin only, and is not found for others") {
+    val otherRecruiterId = UserId(UUID.randomUUID())
+    val otherRecruiter = recruiter.copy(id = otherRecruiterId)
+    for {
+      users <- Ref.of[IO, Map[UserId, User]](
+        Map(recruiterId -> recruiter, candidateId -> candidate, otherRecruiterId -> otherRecruiter)
+      )
+      jobs <- Ref.of[IO, Map[JobId, Job]](Map.empty)
+      service <- deterministicService(InMemoryUsers(users), InMemoryJobs(jobs), List(now), List(jobId.value))
+      _ <- service.createJob(request("create-draft"), recruiterActor, newRole).value
+      owner <- service.viewJob(recruiterActor, jobId).value
+      byCandidate <- service.viewJob(ActorContext(candidateId, UserRole.Candidate), jobId).value
+      unknown <- service.viewJob(ActorContext(candidateId, UserRole.Candidate), JobId(UUID.randomUUID())).value
+      byOtherRecruiter <- service.viewJob(ActorContext(otherRecruiterId, UserRole.Recruiter), jobId).value
+      updateByOther <- service
+        .updateJob(
+          request("edit-other"),
+          ActorContext(otherRecruiterId, UserRole.Recruiter),
+          jobId,
+          UpdateJobInput("Edited", "Build services", List("Scala"), Set("Scala"), newRole.location)
+        )
+        .value
+    } yield {
+      assertEquals(owner.map(_.id), Right(jobId))
+      assertEquals(byCandidate, unknown)
+      assertEquals(byCandidate, Left(UseCaseError.Domain(DomainError.NotFound("job"))))
+      assertEquals(byOtherRecruiter, Left(UseCaseError.Domain(DomainError.NotFound("job"))))
+      assertEquals(updateByOther.map(_.id), Left(UseCaseError.Domain(DomainError.NotFound("job"))))
     }
   }
 
@@ -392,7 +435,7 @@ class JobServiceSpec extends CatsEffectSuite {
     }
   }
 
-  test("publishJob opens a draft and records a job update event") {
+  test("publishJob opens a draft and records the job creation event") {
     for {
       users <- Ref.of[IO, Map[UserId, User]](Map(recruiterId -> recruiter))
       jobs <- Ref.of[IO, Map[JobId, Job]](Map(jobId -> openJob.copy(state = JobState.Draft)))
@@ -406,11 +449,11 @@ class JobServiceSpec extends CatsEffectSuite {
       assertEquals(result.map(_.status), Right(JobStatus.Open))
       assertEquals(result.map(_.updatedAt), Right(later))
       assertEquals(stored.map(_.status), Some(JobStatus.Open))
-      assertEquals(events.map(_.eventType), Vector(OperationalEventType.JOB_UPDATED))
+      assertEquals(events.map(_.eventType), Vector(OperationalEventType.JOB_CREATED))
     }
   }
 
-  test("candidate can view only open jobs") {
+  test("candidate can view only open jobs: a closed job is not found, as an unknown one is") {
     for {
       users <- Ref.of[IO, Map[com.example.graphQL.cats.domain.model.Identifiers.UserId, User]](
         Map(candidateId -> candidate)
@@ -420,7 +463,11 @@ class JobServiceSpec extends CatsEffectSuite {
       )
       service = TestHiringServices.job(InMemoryUsers(users), InMemoryJobs(jobs))
       result <- service.viewJob(ActorContext(candidateId, UserRole.Candidate), jobId).value
-    } yield assertEquals(result, Left(UseCaseError.Domain(DomainError.Forbidden)))
+      unknown <- service.viewJob(ActorContext(candidateId, UserRole.Candidate), JobId(UUID.randomUUID())).value
+    } yield {
+      assertEquals(result, Left(UseCaseError.Domain(DomainError.NotFound("job"))))
+      assertEquals(result, unknown)
+    }
   }
 
   private def deterministicService(

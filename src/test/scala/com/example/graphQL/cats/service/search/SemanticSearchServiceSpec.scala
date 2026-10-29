@@ -317,7 +317,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
         .value
     } yield {
       assertEquals(accepted.map(_.hits.map(_.candidate.id)), Right(List(candidateId)))
-      assertEquals(rejected.left.toOption, Some(UseCaseError.Domain(DomainError.Forbidden)))
+      assertEquals(rejected.left.toOption, Some(UseCaseError.Domain(DomainError.NotFound("job"))))
     }
   }
 
@@ -326,7 +326,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
     val unowned = owned.copy(recruiterId = candidateId)
     val scenarios: List[(ActorContext, Job, DomainError)] = List(
       (ActorContext(candidateId, UserRole.Candidate), owned, DomainError.RecruiterRequired),
-      (ActorContext(recruiterId, UserRole.Recruiter), unowned, DomainError.Forbidden),
+      (ActorContext(recruiterId, UserRole.Recruiter), unowned, DomainError.NotFound("job")),
       (
         ActorContext(recruiterId, UserRole.Recruiter),
         owned.copy(state = JobState.Closed(java.time.Instant.EPOCH)),
@@ -1002,7 +1002,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
       _ <- jobsRef.update(_.updated(jobId, owned.copy(recruiterId = Identifiers.UserId(UUID.randomUUID()))))
       _ <- release.complete(())
       result <- fiber.joinWithNever
-    } yield assertEquals(result, Left(UseCaseError.Domain(DomainError.Forbidden)))
+    } yield assertEquals(result, Left(UseCaseError.Domain(DomainError.NotFound("job"))))
   }
 
   test("MVR-05 MVR-10 authoritative eligibility failures are sanitized and canceled reads release their resources") {

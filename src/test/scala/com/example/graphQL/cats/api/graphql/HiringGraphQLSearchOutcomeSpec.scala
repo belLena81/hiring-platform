@@ -221,16 +221,23 @@ final class HiringGraphQLSearchOutcomeSpec extends CatsEffectSuite {
     }
   }
 
-  test("AIR-01.4 a recruiter on another recruiter's job gets a top-level FORBIDDEN, a null field and intact siblings") {
+  test(
+    "AIR-01.4 a recruiter on another recruiter's job gets the same answer as for an unknown job, and siblings stay intact"
+  ) {
     val embeddings = new CountingEmbeddings(Right(vector))
-    run(
-      s"""query { sibling: accountDeletionStatus(receiptId: "00000000-0000-0000-0000-000000000001") candidateMatches(jobId: "${freshJob.id.value}", first: 5) { $outcome } }""",
-      candidateActor(otherRecruiter),
-      embeddings
-    ).map { json =>
-      assertEquals(topLevelCode(json), Right("FORBIDDEN"))
-      assertEquals(field(json, "candidateMatches").focus, Some(Json.Null))
-      assertEquals(field(json, "sibling").focus.flatMap(_.asString), Some("NOT_FOUND"))
+    def candidateMatches(jobId: JobId) =
+      run(
+        s"""query { sibling: accountDeletionStatus(receiptId: "00000000-0000-0000-0000-000000000001") candidateMatches(jobId: "${jobId.value}", first: 5) { $outcome } }""",
+        candidateActor(otherRecruiter),
+        embeddings
+      )
+    for {
+      hidden <- candidateMatches(freshJob.id)
+      unknown <- candidateMatches(JobId(java.util.UUID.randomUUID()))
+    } yield {
+      assertEquals(field(hidden, "candidateMatches").focus, field(unknown, "candidateMatches").focus)
+      assertEquals(topLevelCode(hidden), topLevelCode(unknown))
+      assertEquals(field(hidden, "sibling").focus.flatMap(_.asString), Some("NOT_FOUND"))
       assertEquals(embeddings.calls.get, 0)
     }
   }

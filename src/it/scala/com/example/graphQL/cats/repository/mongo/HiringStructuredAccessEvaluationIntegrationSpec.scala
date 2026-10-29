@@ -85,6 +85,7 @@ final class HiringStructuredAccessEvaluationIntegrationSpec extends MongoIntegra
       field: String,
       expectedCount: Int,
       forbidden: Boolean = false,
+      refusal: String = "FORBIDDEN",
       targetP95Millis: Option[Int] = None,
       targetP99Millis: Option[Int] = None
   )
@@ -130,7 +131,9 @@ final class HiringStructuredAccessEvaluationIntegrationSpec extends MongoIntegra
       s"{ jobApplications(jobId: \"${jobs.head.id.value}\", first: $pageSize) { edges { node { id candidate { id } } } } }",
       "jobApplications",
       0,
-      forbidden = true
+      forbidden = true,
+      // A job the recruiter does not own is a missing job to them.
+      refusal = "NOT_FOUND"
     ),
     Operation(
       "candidateRecruiterApplicationsForbidden",
@@ -219,7 +222,7 @@ final class HiringStructuredAccessEvaluationIntegrationSpec extends MongoIntegra
           if (operation.forbidden) {
             assertEquals(
               body.hcursor.downField("errors").downArray.downField("extensions").get[String]("code"),
-              Right("FORBIDDEN")
+              Right(operation.refusal)
             )
             assert(cursor.focus.forall(_.isNull), "forbidden result must not contain private data")
             0

@@ -249,7 +249,7 @@ type CandidateResidence {
 "The outcome of the mutation: Job on success, or a typed ValidationError or DomainError."
 union CloseJobResult = Job | ValidationError | DomainError
 
-"Creates an open job owned by the calling recruiter."
+"Creates a draft job owned by the calling recruiter."
 input CreateJobInput {
   "Client-generated key; repeating it with the same input replays the result."
   idempotencyKey: UUID!
@@ -285,7 +285,7 @@ union CreateJobResult = Job | ValidationError | DomainError
 "An opaque, signed position in a list. Pass the `endCursor` of a page as `after` to get the next page; do not parse, build or store it long term (it stops working after a limited time)."
 scalar Cursor
 
-"Declines an application as its candidate; a reason is required."
+"Declines an application as its own candidate, or as the recruiter or Admin managing its job; a reason is required."
 input DeclineApplicationInput {
   "Client-generated key; repeating it with the same input replays the result."
   idempotencyKey: UUID!
@@ -521,7 +521,7 @@ enum ErrorCode {
   "The job cannot move to the requested status."
   INVALID_JOB_TRANSITION
 
-  "New jobs must start open."
+  "New jobs cannot start closed."
   INVALID_INITIAL_JOB_STATUS
 
   "The application or interview cannot move to the requested state from its current state."
@@ -941,7 +941,7 @@ type Mutation {
     "The application to submit."
     input: SubmitApplicationInput!): SubmitApplicationResult!
 
-  "Creates an open job owned by the calling recruiter. Repeating the same idempotencyKey with the same input replays the original result."
+  "Creates a draft job owned by the calling recruiter. It is visible to candidates only after publishJob; until then only its owner and the Admin can read it. Repeating the same idempotencyKey with the same input replays the original result."
   createJob(
     "The job to create."
     input: CreateJobInput!): CreateJobResult!
@@ -981,7 +981,7 @@ type Mutation {
     "The rejection."
     input: RejectApplicationInput!): RejectApplicationResult!
 
-  "Declines an application as its candidate; a reason is required. Repeating the same idempotencyKey with the same input replays the original result."
+  "Declines an application as its own candidate (or as the recruiter or Admin managing its job); a reason is required. Another candidate's application, or one the caller may not see, answers NOT_FOUND. Repeating the same idempotencyKey with the same input replays the original result."
   declineApplication(
     "The decline."
     input: DeclineApplicationInput!): DeclineApplicationResult!

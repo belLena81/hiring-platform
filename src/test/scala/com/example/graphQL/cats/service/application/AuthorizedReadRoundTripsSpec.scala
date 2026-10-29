@@ -171,7 +171,7 @@ final class AuthorizedReadRoundTripsSpec extends CatsEffectSuite {
     }
   }
 
-  test("AC-02.3 jobApplications refuses a recruiter who does not own the job before any aggregation") {
+  test("AC-02.3 jobApplications answers not found to a recruiter who does not own the job before any aggregation") {
     for {
       r <- rig(extraUsers = List(otherRecruiter))
       result <- r.applications
@@ -179,7 +179,7 @@ final class AuthorizedReadRoundTripsSpec extends CatsEffectSuite {
         .value
       calls <- r.calls.get
     } yield {
-      assertEquals(result.map(_.size), Left(UseCaseError.Domain(DomainError.Forbidden)))
+      assertEquals(result.map(_.size), Left(UseCaseError.Domain(DomainError.NotFound("job"))))
       assert(!calls.contains("applications.findByJob"), calls.toString)
     }
   }
@@ -217,14 +217,14 @@ final class AuthorizedReadRoundTripsSpec extends CatsEffectSuite {
     }
   }
 
-  test("AC-02.4 an admin manages any application and another recruiter is refused") {
+  test("AC-02.4 an admin manages any application and another recruiter gets not found") {
     for {
       r <- rig(extraUsers = List(otherRecruiter))
       admin <- r.access.manage(ActorContext(adminId, UserRole.Admin), applicationId).value
       other <- r.access.manage(ActorContext(otherRecruiterId, UserRole.Recruiter), applicationId).value
     } yield {
       assert(admin.isRight, admin.toString)
-      assertEquals(other.map(_ => ()), Left(UseCaseError.Domain(DomainError.Forbidden)))
+      assertEquals(other.map(_ => ()), Left(UseCaseError.Domain(DomainError.NotFound("application"))))
     }
   }
 

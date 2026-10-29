@@ -248,7 +248,9 @@ final class InterviewCancellationServiceSpec extends CatsEffectSuite {
     }
   }
 
-  test("DHW-16 the candidate gains no generic status power: every status mutation stays recruiter and Admin only") {
+  test(
+    "DHW-16 the candidate gains no generic status power: apart from declining, every status mutation stays recruiter and Admin only"
+  ) {
     for {
       users <- Ref.of[IO, Map[UserId, User]](Map(candidateId -> candidate, recruiterId -> recruiter, adminId -> admin))
       jobs <- Ref.of[IO, Map[JobId, Job]](Map(jobId -> openJob))
@@ -284,9 +286,17 @@ final class InterviewCancellationServiceSpec extends CatsEffectSuite {
       stored <- applications.get
       written <- events.get
     } yield {
+      // The candidate may decline only, and the permitted-transition matrix still refuses Interview -> Declined.
       assertEquals(
         results.distinct,
-        List[Either[UseCaseError, Application]](Left(UseCaseError.Domain(DomainError.Forbidden)))
+        List[Either[UseCaseError, Application]](
+          Left(UseCaseError.Domain(DomainError.Forbidden)),
+          Left(
+            UseCaseError.Domain(
+              DomainError.InvalidStatusTransition(ApplicationStatus.Interview, ApplicationStatus.Declined)
+            )
+          )
+        )
       )
       assertEquals(stored(applicationId).status, ApplicationStatus.Interview)
       assertEquals(written, Vector.empty)

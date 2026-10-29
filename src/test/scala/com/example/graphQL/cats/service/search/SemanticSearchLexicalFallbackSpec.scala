@@ -377,7 +377,7 @@ final class SemanticSearchLexicalFallbackSpec extends CatsEffectSuite {
       calls <- h.embedCalls.get
       queries <- h.lexicalQueries.get
     } yield {
-      assertEquals(notOwner.left.toOption, Some(UseCaseError.Domain(DomainError.Forbidden)))
+      assertEquals(notOwner.left.toOption, Some(UseCaseError.Domain(DomainError.NotFound("job"))))
       assertEquals(onClosed.left.toOption, Some(UseCaseError.Domain(DomainError.JobMustBeOpen)))
       assertEquals(calls, 0)
       assertEquals(queries, Vector.empty)

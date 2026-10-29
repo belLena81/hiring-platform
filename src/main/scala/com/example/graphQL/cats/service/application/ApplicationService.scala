@@ -15,7 +15,7 @@ import com.example.graphQL.cats.service.port.{
 }
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId}
-import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, ApplicationStatus, UserRole}
+import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, ApplicationStatus, JobStatus, UserRole}
 import com.example.graphQL.cats.service.events.OperationalEventEnvelope
 import com.example.graphQL.cats.service.events.OperationalEvents
 import com.example.graphQL.cats.domain.policy.{ApplicationLifecycle, ApplicationSubmission, StatusChange}
@@ -51,6 +51,8 @@ final class ApplicationService[F[_]: Monad](
           candidate <- authorization.resolve(actor)
           _ <- UseCaseF.forbidUnless[F](candidate.role == UserRole.Candidate)
           job <- UseCaseF.found(jobs.findSubmissionSnapshot(jobId), "job")
+          // A Draft is private to its owner: to a candidate it is the same as a job that does not exist.
+          _ <- UseCaseF.ensure[F](job.status != JobStatus.Draft, UseCaseError.Domain(DomainError.NotFound("job")))
           now <- EitherT.liftF(clock.realTimeInstant)
           applicationId <- EitherT.liftF(uuidGen.randomUUID.map(uuid => ApplicationId(uuid)))
           eventId <- EitherT.liftF(uuidGen.randomUUID.map(uuid => ApplicationEventId(uuid)))
@@ -116,8 +118,11 @@ final class ApplicationService[F[_]: Monad](
     idempotent.executeFor(actor, statusOperation(target), request, applicationReference, replayApplication(actor)) {
       context =>
         for {
-          managed <- authorizedApplications.manage(actor, applicationId)
+          managed <- authorizedApplications.statusChangeAccess(actor, applicationId)
           ManagedApplication(actorUser, application, _) = managed
+          // The API gives a Candidate one status action on their own application: declining it. (An interview
+          // cancellation by the candidate is a different use case with its own policy and does not pass here.)
+          _ <- UseCaseF.forbidUnless[F](actorUser.role != UserRole.Candidate || target == ApplicationStatus.Declined)
           now <- EitherT.liftF(clock.realTimeInstant)
           eventId <- EitherT.liftF(uuidGen.randomUUID.map(uuid => ApplicationEventId(uuid)))
           (persistedApplication, change) <- EitherT.fromEither[F](

@@ -2,8 +2,8 @@ package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.IO
 import cats.syntax.all.*
-import com.example.graphQL.cats.domain.model.Identifiers.JobId
-import com.example.graphQL.cats.domain.model.UserRole
+import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
+import com.example.graphQL.cats.domain.model.{ApplicationStatus, UserRole}
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.port.*
 import com.mongodb.client.model.Projections
@@ -68,13 +68,21 @@ private[mongo] final class MongoApplicationWriteFence(database: MongoDatabase[IO
           }
       }
 
-  /** Status change: an active Recruiter owning `jobId`, or the active singleton Admin (ownership bypass). */
+  /** Status change: an active Recruiter owning `jobId`, the active singleton Admin (ownership bypass), or the active
+    * Candidate who owns the application (`candidateId`, as stored on the application being changed) and only to decline
+    * it. The write itself is guarded by the stored `candidateId`, so a forged owner matches nothing.
+    */
   def forStatusChange(
       session: Option[ClientSession[IO]],
       actor: ApplicationWriteActor,
-      jobId: JobId
+      jobId: JobId,
+      candidateId: UserId,
+      newStatus: ApplicationStatus
   ): RepositoryF[IO, Unit] = actor.role match {
-    case UserRole.Candidate => MongoF.raise(RepositoryError.AuthorityRevoked)
+    case UserRole.Candidate =>
+      if (candidateId != actor.id || newStatus != ApplicationStatus.Declined)
+        MongoF.raise(RepositoryError.AuthorityRevoked)
+      else requireActive(session, actor) *> bumpFence(session, actor)
     case UserRole.Admin     => requireActive(session, actor) *> bumpFence(session, actor)
     case UserRole.Recruiter =>
       requireActive(session, actor) *> bumpFence(session, actor) *> requireOwnership(session, actor, jobId)

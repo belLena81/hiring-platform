@@ -332,7 +332,10 @@ final class SemanticSearchService[F[_]: Monad](
     for {
       _ <- UseCaseF.ensure[F](user.role != UserRole.Candidate, UseCaseError.Domain(DomainError.RecruiterRequired))
       found <- job
-      _ <- UseCaseF.forbidUnless[F](user.role != UserRole.Recruiter || found.recruiterId == user.id)
+      _ <- UseCaseF.ensure[F](
+        user.role != UserRole.Recruiter || found.recruiterId == user.id,
+        UseCaseError.Domain(DomainError.NotFound("job"))
+      )
       _ <- UseCaseF.ensure[F](found.status == JobStatus.Open, UseCaseError.Domain(DomainError.JobMustBeOpen))
     } yield found
 

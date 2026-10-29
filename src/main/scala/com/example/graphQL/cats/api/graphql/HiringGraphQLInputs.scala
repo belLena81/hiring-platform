@@ -386,7 +386,7 @@ private[graphql] object HiringGraphQLInputs {
   lazy val createJobInputType: InputObjectType[CreateJobGraphQLInput] =
     deriveInputObjectType[CreateJobGraphQLInput](
       InputObjectTypeName("CreateJobInput"),
-      InputObjectTypeDescription("Creates an open job owned by the calling recruiter."),
+      InputObjectTypeDescription("Creates a draft job owned by the calling recruiter."),
       DocumentInputField("idempotencyKey", IdempotencyKeyDoc),
       DocumentInputField("title", "The job title."),
       DocumentInputField("description", "The job description."),
@@ -444,7 +444,9 @@ private[graphql] object HiringGraphQLInputs {
   lazy val declineApplicationInputType: InputObjectType[DeclineApplicationGraphQLInput] =
     deriveInputObjectType[DeclineApplicationGraphQLInput](
       InputObjectTypeName("DeclineApplicationInput"),
-      InputObjectTypeDescription("Declines an application as its candidate; a reason is required."),
+      InputObjectTypeDescription(
+        "Declines an application as its own candidate, or as the recruiter or Admin managing its job; a reason is required."
+      ),
       DocumentInputField("idempotencyKey", IdempotencyKeyDoc),
       DocumentInputField("applicationId", "The application."),
       DocumentInputField("reason", "Why the candidate declines; required by the rule, checked on submit.")

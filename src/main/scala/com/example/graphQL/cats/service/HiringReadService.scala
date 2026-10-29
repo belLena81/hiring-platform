@@ -4,6 +4,7 @@ import cats.data.EitherT
 import cats.Monad
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
+import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, UserRole}
 import com.example.graphQL.cats.service.application.AuthorizedApplicationAccess
 import com.example.graphQL.cats.service.port.{ActorRecord, ApplicationRepository, JobRepository, UserRepository}
@@ -57,7 +58,7 @@ final class HiringReadService[F[_]: Monad](
       if (application.candidateId == record.id && record.role == UserRole.Candidate || authorization.isAdmin(record))
         EitherT.rightT[F, UseCaseError](application)
       else if (record.role == UserRole.Recruiter) accessible.manageLoaded(record, application).as(application)
-      else UseCaseF.forbidUnless[F](false).as(application)
+      else EitherT.leftT[F, Application](UseCaseError.Domain(DomainError.NotFound("application")))
     }
 
   override def applicationHistory(
