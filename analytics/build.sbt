@@ -22,6 +22,21 @@ lazy val munitScalaCheckVersion = "1.3.1"
 lazy val archUnitVersion = "1.5.1"
 lazy val IntegrationTest = config("it") extend Test
 
+// Unit suites run concurrently in at most this many forked JVMs.
+lazy val unitTestConcurrency = 4
+
+// Measured wall time in seconds of the slow unit suites, used only to start the longest first (unlisted suites weigh 10).
+lazy val unitTestWeights = Map(
+  "AnalyticsTransformsSpec" -> 870,
+  "StreamingOpenSilverSelectionSpec" -> 300,
+  "AnalyticsDeltaCatalogSpec" -> 300,
+  "DeltaStreamingBatchJournalSpec" -> 250,
+  "ApplicationStageTimesSpec" -> 150,
+  "HiringAnalyticsLateFactReplayStagesSpec" -> 120,
+  "DeltaVacuumEligibilitySpec" -> 60,
+  "HiringAnalyticsLateFactsSpec" -> 50
+)
+
 lazy val stageContainerRuntime =
   taskKey[File]("Stages the application jar, its runtime dependency jars and a Java classpath argfile for the image.")
 
@@ -63,7 +78,23 @@ lazy val analytics = (project in file("."))
       .withThresholds(JacocoThresholds(line = 85))
       .withFormats(JacocoReportFormats.ScalaHTML, JacocoReportFormats.XML),
     Test / unmanagedSourceDirectories += baseDirectory.value.getParentFile / "test-support" / "src" / "main" / "scala",
-    Test / parallelExecution := false,
+    Global / concurrentRestrictions := Seq(
+      Tags.limitAll(java.lang.Runtime.getRuntime.availableProcessors),
+      Tags.limit(Tags.ForkedTestGroup, unitTestConcurrency)
+    ),
+    // sbt runs forked test groups concurrently only when parallelExecution is on; testForkedParallel stays off so the
+    // suites of one group still run one after another. Every suite is its own group and JVM: a suite that changes
+    // global Spark or Delta state (SparkConf/SQLConf, shutdown drains, system properties) never shares a JVM, and no
+    // suite sees another's session.
+    Test / parallelExecution := true,
+    Test / testGrouping := {
+      val options = (Test / forkOptions).value
+      val weight =
+        (test: TestDefinition) => unitTestWeights.getOrElse(test.name.substring(test.name.lastIndexOf('.') + 1), 10)
+      (Test / definedTests).value.sortBy(test => (-weight(test), test.name)).map { test =>
+        Tests.Group(test.name, Seq(test), Tests.SubProcess(options))
+      }
+    },
     // Same module opens as spark-jvm.args: Spark materializes DATE cells through sun.util.calendar.
     Test / javaOptions ++= Seq(
       "--add-opens=java.base/sun.security.action=ALL-UNNAMED",

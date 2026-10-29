@@ -1,4 +1,6 @@
 package com.example.hiring.analytics.adapter.spark
+
+import com.example.hiring.analytics.AnalyticsTestSpark
 import com.example.hiring.analytics.adapter.spark.*
 import com.example.hiring.analytics.TestAnalyticsLakehousePaths
 
@@ -20,14 +22,8 @@ class HiringAnalyticsSchemaContractsSpec extends FunSuite {
   override val munitTimeout: FiniteDuration = 5.minutes
   private val sparkExecution = SparkBlockingExecution.forTests[IO](scala.concurrent.ExecutionContext.parasitic)
 
-  private lazy val spark: SparkSession = org.apache.spark.sql.classic.SparkSession
-    .builder()
-    .master("local[2]")
-    .appName("HiringAnalyticsSchemaContractsSpec")
-    .config("spark.ui.enabled", "false")
-    .config("spark.sql.shuffle.partitions", "2")
-    .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-    .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
+  private lazy val spark: SparkSession = AnalyticsTestSpark
+    .builder("HiringAnalyticsSchemaContractsSpec")
     .getOrCreate()
 
   override def afterAll(): Unit =

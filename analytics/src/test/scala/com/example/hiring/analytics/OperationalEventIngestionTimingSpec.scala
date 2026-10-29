@@ -30,14 +30,9 @@ class OperationalEventIngestionTimingSpec extends FunSuite {
 
   private val execution = SparkBlockingExecution.forTests[IO](scala.concurrent.ExecutionContext.parasitic)
   private val keys = AnalyticsTestSubjectPseudonymizer.fromSecret(Array.fill[Byte](32)(5))
-  private lazy val spark: SparkSession = org.apache.spark.sql.classic.SparkSession
-    .builder()
-    .master("local[2]")
-    .appName("OperationalEventIngestionTimingSpec")
-    .config("spark.ui.enabled", "false")
+  private lazy val spark: SparkSession = AnalyticsTestSpark
+    .builder("OperationalEventIngestionTimingSpec")
     .config("spark.sql.shuffle.partitions", "4")
-    .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-    .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
     .getOrCreate()
 
   override def afterAll(): Unit = if (!spark.sparkContext.isStopped) spark.stop()

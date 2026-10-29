@@ -2,6 +2,8 @@ package com.example.hiring.analytics.adapter.spark
 
 import com.example.hiring.analytics.{
   AnalyticsBatchTestSupport,
+  AnalyticsLakehouseTemplate,
+  AnalyticsTestSpark,
   AnalyticsTestOperationalConfig,
   AnalyticsTestSubjectPseudonymizer,
   TestAnalyticsLakehousePaths
@@ -32,16 +34,8 @@ final class ApplicationStageTimesSpec extends FunSuite {
   private val execution = SparkBlockingExecution.forTests[IO](scala.concurrent.ExecutionContext.parasitic)
   private val retention = AnalyticsTestOperationalConfig.operational.retention
 
-  private lazy val spark: SparkSession = org.apache.spark.sql.classic.SparkSession
-    .builder()
-    .master("local[2]")
-    .appName("ApplicationStageTimesSpec")
-    .config("spark.ui.enabled", "false")
-    .config("spark.sql.shuffle.partitions", "2")
-    .config("spark.sql.session.timeZone", "UTC")
-    .config("spark.databricks.delta.vacuum.retentionWindowIgnore.enabled", "false")
-    .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-    .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
+  private lazy val spark: SparkSession = AnalyticsTestSpark
+    .builder("ApplicationStageTimesSpec")
     .getOrCreate()
 
   override def afterAll(): Unit =
@@ -61,6 +55,20 @@ final class ApplicationStageTimesSpec extends FunSuite {
 
   private def freshPaths(name: String): AnalyticsLakehousePaths =
     TestAnalyticsLakehousePaths.unsafe(Files.createTempDirectory(s"stage-times-$name").toUri.toString)
+
+  /** The empty, constrained stage-times table, created once and copied. Tests of creation and backfill use
+    * `freshPaths`.
+    */
+  private lazy val stageTimesTemplate = AnalyticsLakehouseTemplate.build { paths =>
+    AnalyticsTableSchemas.createOrValidate(
+      spark,
+      paths.applicationStageTimes,
+      AnalyticsDeltaCatalog.ApplicationStageTimes
+    )
+  }
+
+  private def tablePaths(name: String): AnalyticsLakehousePaths =
+    TestAnalyticsLakehousePaths.unsafe(stageTimesTemplate.freshDirectory(s"stage-times-$name").toUri.toString)
 
   /** A Silver-shaped lifecycle fact. Every lifecycle event carries the candidate; status changes also an actor. */
   private def event(
@@ -135,7 +143,7 @@ final class ApplicationStageTimesSpec extends FunSuite {
   }
 
   test("AC-03.1 a hire after 45 days counts although Silver keeps only 30 days") {
-    val paths = freshPaths("long-hire")
+    val paths = tablePaths("long-hire")
     merge(paths, cohort(10, "long", Seq(None -> 0, Some(Hired) -> 45))*)
     val report = rebuildAndExtract(paths, day(46))
     assertEquals(report.timeToHire.map(_.p50Hours), Some(1080.0))
@@ -149,7 +157,7 @@ final class ApplicationStageTimesSpec extends FunSuite {
   }
 
   test("AC-03.2 the merge is idempotent, keeps the earliest time and pins the first candidate token") {
-    val paths = freshPaths("idempotent")
+    val paths = tablePaths("idempotent")
     val created = event("app-a", None, day(0))
     val interview = event("app-a", Some(Interview), day(3), actor = Some("token-recruiter-1"))
     merge(paths, created, interview)
@@ -174,8 +182,8 @@ final class ApplicationStageTimesSpec extends FunSuite {
   }
 
   test("AC-03.2 out-of-order delivery gives the same row as in-order delivery") {
-    val ordered = freshPaths("ordered")
-    val shuffled = freshPaths("shuffled")
+    val ordered = tablePaths("ordered")
+    val shuffled = tablePaths("shuffled")
     val rows = Seq(
       event("app-b", None, day(0)),
       event("app-b", Some(Accepted), day(1)),
@@ -201,7 +209,7 @@ final class ApplicationStageTimesSpec extends FunSuite {
     ApplicationStageTimes.StageColumns.map(instant(row, _))
 
   test("AC-03.3 a terminal application expires 30 days after it ended and an open one 180 days after its last event") {
-    val paths = freshPaths("expiry")
+    val paths = tablePaths("expiry")
     merge(
       paths,
       event("rejected", None, day(0)),
@@ -224,7 +232,7 @@ final class ApplicationStageTimesSpec extends FunSuite {
   }
 
   test("AC-03.4 an erasure marker removes the candidate's row and, for a recruiter, every application they acted on") {
-    val paths = freshPaths("erasure")
+    val paths = tablePaths("erasure")
     merge(
       paths,
       event("app-a", None, day(0), candidate = "token-candidate-a"),
@@ -247,7 +255,7 @@ final class ApplicationStageTimesSpec extends FunSuite {
   }
 
   test("AC-03.5 a metric with 9 eligible subjects is absent and with 10 it is present") {
-    val paths = freshPaths("suppression")
+    val paths = tablePaths("suppression")
     val interviewed = Seq(None -> 0, Some(Interview) -> 2, Some(Hired) -> 5)
     merge(paths, cohort(9, "full", interviewed)*)
     merge(paths, cohort(1, "direct", Seq(None -> 0, Some(Hired) -> 4))*)
@@ -311,7 +319,7 @@ final class ApplicationStageTimesSpec extends FunSuite {
   }
 
   test("AC-03.6 a crash after the stage times and before Silver is repaired by the replay without duplicates") {
-    val paths = freshPaths("crash")
+    val paths = tablePaths("crash")
     val rows = Seq(event("app-a", None, day(0)), event("app-a", Some(Accepted), day(1)))
     val startedAt = Instant.parse("2026-01-10T00:00:00Z")
     val failure = intercept[IllegalStateException] {
@@ -330,7 +338,7 @@ final class ApplicationStageTimesSpec extends FunSuite {
   }
 
   test("AC-03.6 the CANDIDATE_HIRED event is not a stage") {
-    val paths = freshPaths("candidate-hired")
+    val paths = tablePaths("candidate-hired")
     val hired = event("app-h", None, day(5)).toSeq.updated(1, AnalyticsEventType.CandidateHired.wire)
     merge(paths, event("app-h", None, day(0)), Row.fromSeq(hired.updated(0, "candidate-hired-event")))
     val row = storedRow(paths, "app-h")
@@ -352,7 +360,7 @@ final class ApplicationStageTimesSpec extends FunSuite {
   }
 
   test("AC-03.5 one candidate with several applications counts once toward eligibleCount") {
-    val paths = freshPaths("one-candidate")
+    val paths = tablePaths("one-candidate")
     // Nine candidates hold one hired application each; the tenth candidate holds three.
     merge(paths, cohort(9, "single", Seq(None -> 0, Some(Hired) -> 3))*)
     (1 to 3).foreach { index =>

@@ -1,5 +1,7 @@
 package com.example.hiring.analytics.adapter.spark
 
+import com.example.hiring.analytics.AnalyticsTestSpark
+
 import cats.effect.{IO, Resource}
 import com.example.hiring.analytics.{AnalyticsTestOperationalConfig, AnalyticsTestSubjectPseudonymizer}
 import com.example.hiring.analytics.errors.AnalyticsError
@@ -29,15 +31,8 @@ final class AnalyticsQuarantineMergeSpec extends CatsEffectSuite {
       Resource
         .make(execution {
           val root = Files.createTempDirectory("analytics-quarantine-merge-")
-          val spark = SparkSession
-            .builder()
-            .master("local[2]")
-            .appName("AnalyticsQuarantineMergeSpec")
-            .config("spark.ui.enabled", "false")
-            .config("spark.sql.shuffle.partitions", "2")
-            .config("spark.databricks.delta.snapshotPartitions", "2")
-            .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-            .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
+          val spark = AnalyticsTestSpark
+            .builder("AnalyticsQuarantineMergeSpec")
             .getOrCreate()
           val paths =
             AnalyticsLakehousePaths.from(root.toUri.toString).toEither.fold(errors => fail(errors.toString), identity)

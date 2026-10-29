@@ -1,5 +1,7 @@
 package com.example.hiring.analytics.adapter.spark
 
+import com.example.hiring.analytics.AnalyticsTestSpark
+
 import com.example.hiring.analytics.{AnalyticsTestOperationalConfig, TestAnalyticsLakehousePaths}
 import com.example.hiring.analytics.domain.{AnalyticsAggregateType, AnalyticsApplicationStatus, AnalyticsEventType}
 import com.example.hiring.analytics.errors.AnalyticsError
@@ -21,16 +23,8 @@ final class AnalyticsDeltaCatalogSpec extends FunSuite {
   override val munitTimeout: FiniteDuration = 20.minutes
   private val execution = SparkBlockingExecution.forTests[IO](scala.concurrent.ExecutionContext.parasitic)
 
-  private lazy val spark: SparkSession = org.apache.spark.sql.classic.SparkSession
-    .builder()
-    .master("local[2]")
-    .appName("AnalyticsDeltaCatalogSpec")
-    .config("spark.ui.enabled", "false")
-    .config("spark.sql.shuffle.partitions", "2")
-    .config("spark.sql.session.timeZone", "UTC")
-    .config("spark.databricks.delta.vacuum.retentionWindowIgnore.enabled", "false")
-    .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-    .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
+  private lazy val spark: SparkSession = AnalyticsTestSpark
+    .builder("AnalyticsDeltaCatalogSpec")
     .getOrCreate()
 
   override def afterAll(): Unit =

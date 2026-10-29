@@ -22,12 +22,8 @@ import scala.jdk.CollectionConverters.*
 
 /** The parse, validate and tokenize work of one batch is computed once and read by every consumer. */
 class OperationalEventParsedFrameSpec extends FunSuite {
-  private lazy val spark = org.apache.spark.sql.classic.SparkSession
-    .builder()
-    .master("local[2]")
-    .appName("OperationalEventParsedFrameSpec")
-    .config("spark.ui.enabled", "false")
-    .config("spark.sql.shuffle.partitions", "2")
+  private lazy val spark = AnalyticsTestSpark
+    .builder("OperationalEventParsedFrameSpec")
     .getOrCreate()
   override def afterAll(): Unit = if (!spark.sparkContext.isStopped) spark.stop()
 

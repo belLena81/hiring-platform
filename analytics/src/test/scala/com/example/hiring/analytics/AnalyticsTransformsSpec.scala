@@ -43,16 +43,10 @@ class AnalyticsTransformsSpec extends FunSuite {
       )
       .toOption
       .get
-  private lazy val spark: SparkSession = org.apache.spark.sql.classic.SparkSession
-    .builder()
-    .master("local[2]")
-    .appName("AnalyticsTransformsSpec")
-    .config("spark.ui.enabled", "false")
-    .config("spark.sql.shuffle.partitions", "2")
-    .config("spark.databricks.delta.vacuum.retentionWindowIgnore.enabled", "false")
-    .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-    .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
-    .getOrCreate()
+  private lazy val spark: SparkSession = AnalyticsTestSpark.session("AnalyticsTransformsSpec")
+
+  private lazy val lakehouseTemplate = AnalyticsLakehouseTemplate.forBatch(spark, pseudonymizer)
+  private def lakehouseDirectory(prefix: String): java.nio.file.Path = lakehouseTemplate.freshDirectory(prefix)
 
   override def afterAll(): Unit =
     if (!spark.sparkContext.isStopped) spark.stop()
@@ -746,7 +740,7 @@ class AnalyticsTransformsSpec extends FunSuite {
   }
 
   test("bounded batch persists replayable layers and quality-blocks Gold on malformed or conflicting records") {
-    val lakehouse = Files.createTempDirectory("hiring-analytics-batch").toUri.toString.stripSuffix("/")
+    val lakehouse = lakehouseDirectory("hiring-analytics-batch").toUri.toString.stripSuffix("/")
     val input = records(
       (1 to 10).map(index =>
         (
@@ -799,7 +793,7 @@ class AnalyticsTransformsSpec extends FunSuite {
   }
 
   test("batch metrics preserve the conflicting event and row counts") {
-    val lakehouse = Files.createTempDirectory("hiring-analytics-conflict-metrics").toUri.toString.stripSuffix("/")
+    val lakehouse = lakehouseDirectory("hiring-analytics-conflict-metrics").toUri.toString.stripSuffix("/")
     val input = records(
       Seq(
         ("hiring.operational-events", 0, 1L, event("f218881d-88d8-3ba4-bb2a-c095006f866f", "APPLICATION_CREATED")),
@@ -830,7 +824,7 @@ class AnalyticsTransformsSpec extends FunSuite {
   }
 
   test("batch metrics count historical event conflicts and their quarantined rows") {
-    val lakehouse = Files.createTempDirectory("hiring-analytics-historical-conflict").toUri.toString.stripSuffix("/")
+    val lakehouse = lakehouseDirectory("hiring-analytics-historical-conflict").toUri.toString.stripSuffix("/")
     val paths = TestAnalyticsLakehousePaths.unsafe(lakehouse)
     val batch = newBatch(
       paths,
@@ -886,7 +880,7 @@ class AnalyticsTransformsSpec extends FunSuite {
   }
 
   test("tombstone quarantine rows deduplicate when a Kafka range is replayed") {
-    val lakehouse = Files.createTempDirectory("hiring-analytics-tombstone-replay").toUri.toString.stripSuffix("/")
+    val lakehouse = lakehouseDirectory("hiring-analytics-tombstone-replay").toUri.toString.stripSuffix("/")
     val paths = TestAnalyticsLakehousePaths.unsafe(lakehouse)
     val input = records(Seq(("hiring.operational-events", 3, 17L, null.asInstanceOf[String])))
     val batch = newBatch(
@@ -940,7 +934,7 @@ class AnalyticsTransformsSpec extends FunSuite {
   }
 
   test("clean bounded batch returns Published and records PUBLISHED in the manifest") {
-    val lakehouse = Files.createTempDirectory("hiring-analytics-published").toUri.toString.stripSuffix("/")
+    val lakehouse = lakehouseDirectory("hiring-analytics-published").toUri.toString.stripSuffix("/")
     val paths = TestAnalyticsLakehousePaths.unsafe(lakehouse)
     val input = records(
       (1 to 10).map(index =>
@@ -979,7 +973,7 @@ class AnalyticsTransformsSpec extends FunSuite {
   }
 
   test("new subject-attributed Delta tables keep tokens and fingerprints out of transaction log statistics") {
-    val lakehouse = Files.createTempDirectory("hiring-analytics-private-delta-stats").toUri.toString.stripSuffix("/")
+    val lakehouse = lakehouseDirectory("hiring-analytics-private-delta-stats").toUri.toString.stripSuffix("/")
     val paths = TestAnalyticsLakehousePaths.unsafe(lakehouse)
     val sensitiveMarker = AnalyticsOperationalEventFixtures.id("raw-log-personal-sentinel-8f17c2")
     val input = records(
@@ -1071,7 +1065,7 @@ class AnalyticsTransformsSpec extends FunSuite {
   }
 
   test("Mongo publication failure never marks the Delta manifest PUBLISHED") {
-    val lakehouse = Files.createTempDirectory("hiring-analytics-publication-failure").toUri.toString.stripSuffix("/")
+    val lakehouse = lakehouseDirectory("hiring-analytics-publication-failure").toUri.toString.stripSuffix("/")
     val paths = TestAnalyticsLakehousePaths.unsafe(lakehouse)
     val input = records(
       (1 to 10).map(index =>
@@ -1145,7 +1139,7 @@ class AnalyticsTransformsSpec extends FunSuite {
   }
 
   test("HAL-10.1 same-range retry completes the manifest after Mongo publication succeeds") {
-    val lakehouse = Files.createTempDirectory("hiring-analytics-manifest-retry").toUri.toString.stripSuffix("/")
+    val lakehouse = lakehouseDirectory("hiring-analytics-manifest-retry").toUri.toString.stripSuffix("/")
     val paths = TestAnalyticsLakehousePaths.unsafe(lakehouse)
     val input = records(
       (1 to 10).map(index =>
@@ -1285,7 +1279,7 @@ class AnalyticsTransformsSpec extends FunSuite {
         IO.unit
     }
     val batch = newBatch(
-      TestAnalyticsLakehousePaths.unsafe(Files.createTempDirectory("analytics-reserve-order").toUri.toString),
+      TestAnalyticsLakehousePaths.unsafe(lakehouseDirectory("analytics-reserve-order").toUri.toString),
       pseudonymizer,
       markers,
       fixedClock(Instant.parse("2026-09-22T12:00:00Z")),
@@ -1304,7 +1298,7 @@ class AnalyticsTransformsSpec extends FunSuite {
   }
 
   test("active deletion markers purge stored Silver and rebuild Gold before a quality-blocked range") {
-    val lakehouse = Files.createTempDirectory("hiring-analytics-silver-erasure").toUri.toString.stripSuffix("/")
+    val lakehouse = lakehouseDirectory("hiring-analytics-silver-erasure").toUri.toString.stripSuffix("/")
     val paths = TestAnalyticsLakehousePaths.unsafe(lakehouse)
     val initialEvents = (1 to 10).map(index =>
       (
@@ -1403,7 +1397,7 @@ class AnalyticsTransformsSpec extends FunSuite {
   }
 
   test("AEC-07.1 a Complete marker drops its subject's replayed rows and the report is still published") {
-    val lakehouse = Files.createTempDirectory("hiring-analytics-completed-marker").toUri.toString.stripSuffix("/")
+    val lakehouse = lakehouseDirectory("hiring-analytics-completed-marker").toUri.toString.stripSuffix("/")
     val paths = TestAnalyticsLakehousePaths.unsafe(lakehouse)
     val erasedCandidate = "19b46da1-bee5-3018-b5f7-abe9a9fdfb29"
     val keptCandidate = "2e6a1d7c-4d0b-3d58-9b7a-0c7a1f2f6a11"
@@ -1457,7 +1451,7 @@ class AnalyticsTransformsSpec extends FunSuite {
   }
 
   test("AEC-07.2 a marker whose request is still in progress hides the batch report") {
-    val lakehouse = Files.createTempDirectory("hiring-analytics-in-progress-marker").toUri.toString.stripSuffix("/")
+    val lakehouse = lakehouseDirectory("hiring-analytics-in-progress-marker").toUri.toString.stripSuffix("/")
     val paths = TestAnalyticsLakehousePaths.unsafe(lakehouse)
     val erasedCandidate = "19b46da1-bee5-3018-b5f7-abe9a9fdfb29"
     val input = records(
@@ -2292,7 +2286,7 @@ class AnalyticsTransformsSpec extends FunSuite {
 
   test("cached deletion markers are released when the source fails") {
     val markers = markerFrame(Seq.empty)
-    val paths = TestAnalyticsLakehousePaths.unsafe(Files.createTempDirectory("analytics-marker-cleanup").toUri.toString)
+    val paths = TestAnalyticsLakehousePaths.unsafe(lakehouseDirectory("analytics-marker-cleanup").toUri.toString)
     val batch = newBatch(paths, pseudonymizer, DataFrameDeletionMarkerSource[IO](markers))
     val source = new BoundedOperationalEventSource[IO] {
       override def read(spark: SparkSession, manifest: AnalyticsRunManifest): IO[org.apache.spark.sql.DataFrame] =

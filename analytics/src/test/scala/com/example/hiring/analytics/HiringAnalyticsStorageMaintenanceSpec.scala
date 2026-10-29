@@ -5,7 +5,7 @@ import cats.syntax.all.*
 import com.example.hiring.analytics.adapter.spark.{AnalyticsDeltaRetention, SparkBlockingExecution}
 import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
 import munit.CatsEffectSuite
-import org.apache.spark.sql.{Row, SparkSession}
+import org.apache.spark.sql.Row
 import org.apache.spark.sql.delta.DeltaLog
 import org.apache.spark.sql.types.{StringType, StructField, StructType}
 import org.typelevel.log4cats.slf4j.Slf4jLogger
@@ -46,15 +46,8 @@ final class HiringAnalyticsStorageMaintenanceSpec extends CatsEffectSuite {
       SparkBlockingExecution.resource[IO].use { execution =>
         Resource
           .make(execution {
-            SparkSession
-              .builder()
-              .master("local[2]")
-              .appName("HiringAnalyticsStorageMaintenanceSpec")
-              .config("spark.ui.enabled", "false")
-              .config("spark.sql.shuffle.partitions", "2")
-              .config("spark.databricks.delta.vacuum.retentionWindowIgnore.enabled", "false")
-              .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-              .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
+            AnalyticsTestSpark
+              .builder("HiringAnalyticsStorageMaintenanceSpec")
               .getOrCreate()
           })(spark => execution.blocking(spark.stop()))
           .use { spark =>

@@ -8,7 +8,6 @@ import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.batch.{AnalyticsLakehousePaths, AnalyticsReportReservation}
 import com.example.hiring.analytics.service.streaming.*
 import munit.CatsEffectSuite
-import org.apache.spark.sql.SparkSession
 
 import java.nio.file.Files
 import java.time.Instant
@@ -20,14 +19,8 @@ import scala.jdk.CollectionConverters.*
 final class DeltaStreamingBatchJournalSpec extends CatsEffectSuite {
   override val munitIOTimeout: FiniteDuration = 5.minutes
 
-  private lazy val spark = SparkSession
-    .builder()
-    .master("local[2]")
-    .appName("DeltaStreamingBatchJournalSpec")
-    .config("spark.ui.enabled", "false")
-    .config("spark.sql.shuffle.partitions", "2")
-    .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-    .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
+  private lazy val spark = AnalyticsTestSpark
+    .builder("DeltaStreamingBatchJournalSpec")
     .config("spark.databricks.delta.constraints.allowUnenforcedNotNull.enabled", "false")
     .getOrCreate()
 

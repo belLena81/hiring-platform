@@ -20,12 +20,17 @@ import scala.jdk.CollectionConverters.*
 import scala.util.Using
 
 /** This is a bounded local reproducibility baseline, not a throughput benchmark or SLO.
+  *
+  * It takes minutes, so it is opt-in: set `HIRING_WORKLOAD_RECORDS=100000` (the fixture size its reconciliation counts
+  * are written for), for example `HIRING_WORKLOAD_RECORDS=100000 sbt "testOnly *HiringAnalyticsWorkloadSpec"` from
+  * `analytics/`. Without it the test is skipped.
   */
 class HiringAnalyticsWorkloadSpec extends FunSuite {
   override val munitTimeout: FiniteDuration = 30.minutes
 
   private val Seed = 424242
   private val TotalRecords = 100000
+  private val WorkloadGate = "HIRING_WORKLOAD_RECORDS"
   private val Topic = "hiring.operational-events"
   private val FixedNow = Instant.parse("2026-09-23T12:00:00Z")
   private val Pseudonymizer =
@@ -214,6 +219,10 @@ class HiringAnalyticsWorkloadSpec extends FunSuite {
   }
 
   test("HAL-07.1 fixed 100000 record hiring analytics workload reports reconciliation and resource use") {
+    assume(
+      sys.env.get(WorkloadGate).contains(TotalRecords.toString),
+      s"set $WorkloadGate=$TotalRecords to run the fixed-size workload"
+    )
     rootResource
       .flatMap(root => sparkResource.map(spark => (root, spark)))
       .use { case (root, spark) =>

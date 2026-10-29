@@ -1,5 +1,7 @@
 package com.example.hiring.analytics.adapter.spark
 
+import com.example.hiring.analytics.AnalyticsTestSpark
+
 import com.example.hiring.analytics.{AnalyticsTestClocks, AnalyticsTestOperationalConfig}
 
 import cats.effect.{Deferred, IO}
@@ -28,16 +30,8 @@ final class HiringAnalyticsLateFactReplayStagesSpec extends FunSuite {
   private val OriginalExpiry = Now.plusSeconds(5L * 86400L)
   private val pseudonymizer = AnalyticsTestSubjectPseudonymizer.fromSecret(Array.fill[Byte](32)(7))
 
-  private lazy val spark: SparkSession = org.apache.spark.sql.classic.SparkSession
-    .builder()
-    .master("local[2]")
-    .appName("HiringAnalyticsLateFactReplayStagesSpec")
-    .config("spark.ui.enabled", "false")
-    .config("spark.sql.shuffle.partitions", "2")
-    .config("spark.sql.session.timeZone", "UTC")
-    .config("spark.databricks.delta.vacuum.retentionWindowIgnore.enabled", "false")
-    .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-    .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
+  private lazy val spark: SparkSession = AnalyticsTestSpark
+    .builder("HiringAnalyticsLateFactReplayStagesSpec")
     .getOrCreate()
 
   override def afterAll(): Unit = if (!spark.sparkContext.isStopped) spark.stop()

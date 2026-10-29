@@ -1,5 +1,7 @@
 package com.example.hiring.analytics.cli
 
+import com.example.hiring.analytics.AnalyticsTestSpark
+
 import com.example.hiring.analytics.adapter.spark.*
 
 import cats.effect.{IO, Resource}
@@ -29,15 +31,8 @@ final class BronzeArrivalSelectionSpec extends CatsEffectSuite {
           }
         )
         spark <- Resource.make(execution {
-          SparkSession
-            .builder()
-            .master("local[2]")
-            .appName("BronzeArrivalSelectionSpec")
-            .config("spark.ui.enabled", "false")
-            .config("spark.sql.shuffle.partitions", "2")
-            .config("spark.databricks.delta.snapshotPartitions", "2")
-            .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-            .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
+          AnalyticsTestSpark
+            .builder("BronzeArrivalSelectionSpec")
             .getOrCreate()
         })(spark => execution.blocking(spark.stop()))
         _ <- Resource.eval(execution.attachSparkContext(spark.sparkContext))

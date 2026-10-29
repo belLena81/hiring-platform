@@ -1,5 +1,7 @@
 package com.example.hiring.analytics.adapter.spark
 
+import com.example.hiring.analytics.AnalyticsTestSpark
+
 import cats.effect.{IO, Resource}
 import com.example.hiring.analytics.{AnalyticsTestSubjectPseudonymizer, TestAnalyticsLakehousePaths}
 import com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock
@@ -17,7 +19,7 @@ import com.example.hiring.analytics.service.batch.AnalyticsManifestStatus
 import com.example.hiring.analytics.service.keyretirement.HmacKeyRetirementAuthorization
 import com.example.hiring.analytics.service.streaming.StreamingInputPreparation
 import munit.CatsEffectSuite
-import org.apache.spark.sql.{Row, SparkSession}
+import org.apache.spark.sql.Row
 import org.apache.spark.sql.types.{StringType, StructField, StructType}
 
 import java.net.URI
@@ -60,14 +62,8 @@ final class HiringAnalyticsStorageLocationsSpec extends CatsEffectSuite {
     )
     driver <- SparkBlockingExecution.resource[IO]
     spark <- Resource.make(driver.blocking {
-      SparkSession
-        .builder()
-        .master("local[2]")
-        .appName("HiringAnalyticsStorageLocationsSpec")
-        .config("spark.ui.enabled", "false")
-        .config("spark.sql.shuffle.partitions", "2")
-        .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-        .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
+      AnalyticsTestSpark
+        .builder("HiringAnalyticsStorageLocationsSpec")
         .getOrCreate()
     })(session => driver.blocking(session.stop()))
     _ <- Resource.eval(driver.attachSparkContext(spark.sparkContext))

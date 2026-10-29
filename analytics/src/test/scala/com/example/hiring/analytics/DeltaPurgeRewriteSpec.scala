@@ -7,7 +7,7 @@ import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{FileStatus, Path, RawLocalFileSystem, RemoteIterator}
-import org.apache.spark.sql.{Row, SparkSession}
+import org.apache.spark.sql.Row
 import org.apache.spark.sql.types.{StringType, StructField, StructType}
 
 import java.nio.file.Files
@@ -21,15 +21,8 @@ class DeltaPurgeRewriteSpec extends munit.FunSuite {
     SparkBlockingExecution.forTests[IO](scala.concurrent.ExecutionContext.parasitic)
   )
   private val configuration = new Configuration()
-  private lazy val spark = SparkSession
-    .builder()
-    .master("local[2]")
-    .appName("DeltaPurgeRewriteSpec")
-    .config("spark.ui.enabled", "false")
-    .config("spark.sql.shuffle.partitions", "2")
-    .config("spark.databricks.delta.vacuum.retentionWindowIgnore.enabled", "false")
-    .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-    .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
+  private lazy val spark = AnalyticsTestSpark
+    .builder("DeltaPurgeRewriteSpec")
     .getOrCreate()
 
   override def afterAll(): Unit = spark.stop()

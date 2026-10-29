@@ -1,5 +1,7 @@
 package com.example.hiring.analytics.adapter.spark
 
+import com.example.hiring.analytics.AnalyticsTestSpark
+
 import cats.effect.{Deferred, IO, Ref, Resource}
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.AnalyticsTestSubjectPseudonymizer
@@ -24,12 +26,8 @@ final class StreamingAdmissionCacheSpec extends CatsEffectSuite {
     SparkBlockingExecution.resource[IO].use { execution =>
       Resource
         .make(execution {
-          SparkSession
-            .builder()
-            .master("local[2]")
-            .appName("StreamingAdmissionCacheSpec")
-            .config("spark.ui.enabled", "false")
-            .config("spark.sql.shuffle.partitions", "2")
+          AnalyticsTestSpark
+            .builder("StreamingAdmissionCacheSpec")
             .getOrCreate()
         })(spark => execution.blocking(spark.stop()))
         .use { spark =>

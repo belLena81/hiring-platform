@@ -10,11 +10,8 @@ import org.apache.spark.sql.types.{IntegerType, LongType, StringType, StructFiel
 import scala.jdk.CollectionConverters.*
 
 class OperationalEventWireContractSpec extends FunSuite {
-  private lazy val spark = org.apache.spark.sql.classic.SparkSession
-    .builder()
-    .master("local[2]")
-    .appName("OperationalEventWireContractSpec")
-    .config("spark.ui.enabled", "false")
+  private lazy val spark = AnalyticsTestSpark
+    .builder("OperationalEventWireContractSpec")
     .getOrCreate()
   override def afterAll(): Unit = if (!spark.sparkContext.isStopped) spark.stop()
 
