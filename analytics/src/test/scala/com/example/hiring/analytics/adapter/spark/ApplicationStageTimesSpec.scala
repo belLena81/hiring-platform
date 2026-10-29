@@ -112,9 +112,6 @@ final class ApplicationStageTimesSpec extends FunSuite {
   private def instant(row: Row, column: String): Option[Instant] =
     Option(row.getAs[Timestamp](column)).map(_.toInstant)
 
-  private def versions(paths: AnalyticsLakehousePaths): Long =
-    DeltaTables.forPath(spark, paths.applicationStageTimes).history().count()
-
   private def lastMergeMetrics(paths: AnalyticsLakehousePaths): Map[String, String] =
     DeltaTables
       .forPath(spark, paths.applicationStageTimes)
@@ -474,9 +471,10 @@ final class ApplicationStageTimesSpec extends FunSuite {
     ApplicationStageTimes.backfillFromSilver(spark, paths, retention, noMarkers)
     assertEquals(stored(paths).size, 10)
     assertEquals(instant(storedRow(paths, "old-1"), Columns.HiredAt), Some(day(3)))
-    val afterBackfill = versions(paths)
     ApplicationStageTimes.backfillFromSilver(spark, paths, retention, noMarkers)
-    assertEquals(versions(paths), afterBackfill, "a populated table is not backfilled again")
+    val metrics = lastMergeMetrics(paths)
+    assertEquals(metrics("numTargetRowsUpdated"), "0", "a repeated backfill rewrites no row")
+    assertEquals(metrics("numTargetRowsInserted"), "0")
     assertEquals(rebuildAndExtract(paths, day(10)).timeToHire.map(_.eligibleCount), Some(10L))
   }
 
@@ -533,6 +531,39 @@ final class ApplicationStageTimesSpec extends FunSuite {
     rejects("metric_valid")(appendGold(paths, goldRow("TIME_TO_EAT", 1.0, 2.0, 3.0, 4.0, 10L)))
     appendGold(paths, goldRow("TIME_TO_HIRE", 1.0, 2.0, 3.0, 4.0, 10L))
     assertEquals(DeltaTables.read(spark, paths.hiringStageDurationsGold).count(), 1L)
+  }
+
+  test("AC-03.5 extraction rejects a stored stage-duration row below K even when the table has no CHECK") {
+    val paths = freshPaths("decode-k")
+    spark
+      .createDataFrame(
+        spark.sparkContext.parallelize(Seq(goldRow("TIME_TO_HIRE", 1.0, 2.0, 3.0, 4.0, 9L))),
+        AnalyticsTableSchemas.struct(AnalyticsDeltaCatalog.HiringStageDurationsGold.shape)
+      )
+      .write
+      .format("delta")
+      .save(SparkPhysicalLocation.resolve(paths.hiringStageDurationsGold))
+    val result = AnalyticsGoldStage.extract[IO](spark, paths, day(10), execution).attempt.unsafeRunSync()
+    assertEquals(result.swap.toOption, Some(AnalyticsError.InvalidGoldSchema))
+  }
+
+  test("AC-03.4 initialization through configureRawTables leaves out the marked subject's applications") {
+    val paths = freshPaths("initialization-marker")
+    val markedToken = s"k1_${"a" * 43}"
+    val rows = Seq(
+      event("app-a", None, day(0), candidate = markedToken),
+      event("app-b", None, day(0), candidate = s"k1_${"b" * 43}")
+    )
+    new DeltaBatchWriter[IO](paths, execution)
+      .merge(facts(rows), paths.silver, "target.eventId = source.eventId")
+      .unsafeRunSync()
+    val keys = AnalyticsTestSubjectPseudonymizer.fromSecret(Array.fill[Byte](32)(7))
+    val maintenance = AnalyticsBatchTestSupport.newMaintenance(spark, paths, keys)
+    val marker = com.example.hiring.analytics.domain.SubjectToken.fromHmac(markedToken).fold(fail(_), identity)
+    maintenance.configureRawTables(Vector(marker)).unsafeRunSync()
+    val tokens = stored(paths).flatMap(_.getAs[Seq[String]](Columns.SubjectTokens))
+    assertEquals(stored(paths).map(_.getAs[String](Columns.ApplicationId)), Vector("app-b"))
+    assert(!tokens.contains(markedToken), tokens.toString)
   }
 
   test("AC-03.3 the stage-times table is subject-attributed, gathers no token statistics and checks its expiry") {

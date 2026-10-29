@@ -7,6 +7,7 @@ import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
 
 import org.apache.spark.sql.{Column, DataFrame, SparkSession}
 import org.apache.spark.sql.functions.{
+  array_compact,
   array_distinct,
   array_except,
   array_union,
@@ -22,8 +23,6 @@ import org.apache.spark.sql.functions.{
   size,
   when
 }
-
-import org.apache.spark.sql.types.{ArrayType, StringType}
 
 import java.time.Duration
 
@@ -73,7 +72,7 @@ private[analytics] object ApplicationStageTimes {
         .agg(
           // Every lifecycle event carries the candidate, so the smallest token is the one candidate token.
           min(col(Columns.SubjectToken)).as(Columns.SubjectToken),
-          array_distinct(flatten(collect_set(col(Columns.SubjectTokens)))).as(Columns.SubjectTokens),
+          array_compact(array_distinct(flatten(collect_set(col(Columns.SubjectTokens))))).as(Columns.SubjectTokens),
           earliest(col(Columns.EventType) === lit(ApplicationCreated)).as(Columns.CreatedAt),
           earliest(enteredStatus(AnalyticsApplicationStatus.Accepted)).as(Columns.AcceptedAt),
           earliest(enteredStatus(AnalyticsApplicationStatus.Declined)).as(Columns.DeclinedAt),
@@ -109,12 +108,10 @@ private[analytics] object ApplicationStageTimes {
       mergedStage(Columns.HiredAt),
       mergedStage(Columns.RejectedAt)
     )
-    // Both sides are cast to one array type: element nullability differs between a stored and a derived column.
-    def tokensOf(side: String => Column, name: String): Column =
-      side(name).cast(ArrayType(StringType, containsNull = true))
-    val storedTokens = tokensOf(target, Columns.SubjectTokens)
-    val incomingTokens = tokensOf(incoming, Columns.SubjectTokens)
-    val tokens = array_union(storedTokens, incomingTokens)
+    val storedTokens = target(Columns.SubjectTokens)
+    val incomingTokens = incoming(Columns.SubjectTokens)
+    // array_compact types the result as non-null elements, which is the declared column type.
+    val tokens = array_compact(array_union(storedTokens, incomingTokens))
     val changed = (stages :+ (Columns.LastEventAt -> lastEvent))
       .map { case (name, merged) => !target(name).eqNullSafe(merged) }
       .reduce(_ || _) ||
@@ -169,7 +166,8 @@ private[analytics] object ApplicationStageTimes {
       )
       .select(Columns.ApplicationId)
       .distinct()
-    facts.join(markedApplications, Seq(Columns.ApplicationId), "left_anti")
+    // A USING join moves the join column first; the Silver shape is positional, so restore the original order.
+    facts.join(markedApplications, Seq(Columns.ApplicationId), "left_anti").select(facts.columns.map(col)*)
   }
 
   /** Builds the first stage times from Silver, with the same merge, leaving out applications that involve an active
