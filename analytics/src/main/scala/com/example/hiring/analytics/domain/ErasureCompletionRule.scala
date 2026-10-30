@@ -26,6 +26,17 @@ object ErasureCompletionRule {
   def deltaDeadline(purgedAt: Instant, horizons: DeltaErasureHorizons): Instant =
     deltaDeadline(purgedAt, horizons.vacuumSafety, horizons.logRetention)
 
+  /** `OPTIMIZE` replaces data files without deleting them, so a file that once held the subject's rows stays
+    * recoverable until VACUUM after the replacement. The horizon therefore runs from the later of the purge and the
+    * last compaction.
+    */
+  def deltaDeadline(purgedAt: Instant, lastCompactionAt: Option[Instant], horizons: DeltaErasureHorizons): Instant =
+    deltaDeadline(
+      lastCompactionAt.filter(_.isAfter(purgedAt)).getOrElse(purgedAt),
+      horizons.vacuumSafety,
+      horizons.logRetention
+    )
+
   /** Upper bound from the purge to verified physical erasure: the slowest of the Kafka expiry, the Delta log rollover
     * plus retention, and the vacuum safety.
     */

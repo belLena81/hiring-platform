@@ -19,7 +19,7 @@ import org.apache.spark.sql.functions.{
   percentile_approx,
   to_date,
   trim,
-  unix_timestamp,
+  unix_micros,
   when
 }
 
@@ -125,14 +125,17 @@ object HiringGoldTransforms {
       )
       .map(_.filter(col(Columns.ExpiresAt) > lit(Timestamp.from(asOf))))
 
+  private val MicrosPerHour = 3600.0 * 1000000.0
+
   /** Applications with both stages present and a non-negative duration, with that duration in hours. The one place the
-    * eligibility rule lives: `time_to_hire` and every stage duration share it.
+    * eligibility rule lives: `time_to_hire` and every stage duration share it. The duration is the exact difference of
+    * the stored microsecond timestamps (`unix_micros`, an integral microsecond count), not of whole-second values.
     */
   private def eligibleDurations(stageTimes: DataFrame, metric: AnalyticsHiringStageMetric): DataFrame = {
     val (from, to) = endpoints(metric)
     stageTimes
       .filter(col(from).isNotNull && col(to).isNotNull)
-      .withColumn(Columns.Hours, (unix_timestamp(col(to)) - unix_timestamp(col(from))) / lit(3600.0))
+      .withColumn(Columns.Hours, (unix_micros(col(to)) - unix_micros(col(from))) / lit(MicrosPerHour))
       .filter(col(Columns.Hours) >= lit(0.0))
   }
 

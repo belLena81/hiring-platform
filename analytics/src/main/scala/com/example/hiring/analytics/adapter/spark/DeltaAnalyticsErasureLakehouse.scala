@@ -17,6 +17,7 @@ import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.typelevel.log4cats.Logger
 
 import java.time.Instant
+import scala.concurrent.duration.FiniteDuration
 
 /** Coordinates Delta-backed erasure maintenance independently of batch publication. */
 private[analytics] final class DeltaAnalyticsErasureLakehouse[F[_]: Async: UUIDGen](
@@ -34,6 +35,7 @@ private[analytics] final class DeltaAnalyticsErasureLakehouse[F[_]: Async: UUIDG
     with AnalyticsBatchMaintenance[F] {
   private val now = clock.realTimeInstant
   private val retention = new AnalyticsDeltaRetention[F](paths, operational, execution, logger)
+  private val compaction = new DeltaTableCompaction[F](paths, execution, logger)
   private val keyContinuity = new AnalyticsKeyContinuityStage(
     paths,
     pseudonymizer,
@@ -69,6 +71,12 @@ private[analytics] final class DeltaAnalyticsErasureLakehouse[F[_]: Async: UUIDG
   def reclaimExpiredFiles: F[Long] =
     retention.configureRawTablePrivacy(spark) *>
       retention.vacuumUnreferencedFiles(spark).flatTap(_ => erasure.checkpointRawTableLogs(spark))
+
+  /** Compacts each due table. Must run under the lakehouse mutex, while no erasure request is pending. */
+  def compactDueTables(at: Instant, interval: FiniteDuration): F[Vector[DeltaCompactionResult]] =
+    compaction.compactDue(spark, at, interval)
+
+  override def lastCompactionAt: F[Option[Instant]] = compaction.lastCompactionAt(spark)
 
   override def verifyMarkedSubjectsAbsent(markerTokens: Vector[SubjectToken]): F[Unit] =
     retention.recoverAbandonedRewrites(spark) *>

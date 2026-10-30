@@ -34,6 +34,24 @@ final class ErasureCompletionRuleSpec extends munit.FunSuite {
     )
   }
 
+  test("AC-04.4 the data horizon runs from an OPTIMIZE that follows the purge, never from an earlier one") {
+    val horizons = DeltaErasureHorizons(vacuumSafety = 30.days, logRetention = 1.day)
+    val purgedAt = Instant.parse("2026-03-02T10:00:00Z")
+    assertEquals(
+      ErasureCompletionRule.deltaDeadline(purgedAt, None, horizons),
+      Instant.parse("2026-04-01T10:00:00Z")
+    )
+    assertEquals(
+      ErasureCompletionRule.deltaDeadline(purgedAt, Some(Instant.parse("2026-03-05T06:00:00Z")), horizons),
+      Instant.parse("2026-04-04T06:00:00Z")
+    )
+    // An OPTIMIZE before the purge cannot shorten the horizon either.
+    assertEquals(
+      ErasureCompletionRule.deltaDeadline(purgedAt, Some(Instant.parse("2026-02-20T00:00:00Z")), horizons),
+      Instant.parse("2026-04-01T10:00:00Z")
+    )
+  }
+
   test("AEC-02.1 the worst case is the slowest of Kafka, rolled log and vacuum horizons") {
     val horizons = DeltaErasureHorizons(vacuumSafety = 7.days, logRetention = 14.days)
     assertEquals(ErasureCompletionRule.worstCaseCompletion(horizons, 14.days), 15.days)

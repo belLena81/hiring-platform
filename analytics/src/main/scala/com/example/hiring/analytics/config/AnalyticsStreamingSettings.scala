@@ -43,8 +43,11 @@ final case class AnalyticsStreamingSettings private (
     maximumReplayRecords: MaximumStreamingReplayRecords,
     initialOffsets: Vector[KafkaStartingOffset],
     maintenanceInterval: FiniteDuration,
-    progressRetention: FiniteDuration
+    progressRetention: FiniteDuration,
+    // Zero disables compaction. An operational tuning knob, so it is not part of the stream identity digest below.
+    optimizeInterval: FiniteDuration
 ) {
+
   def activationIdentity(
       sourceClusterId: String,
       sourceTopicId: String,
@@ -101,7 +104,8 @@ object AnalyticsStreamingSettings {
       maximumReplayRecords: MaximumStreamingReplayRecords,
       initialOffsets: Vector[KafkaStartingOffsetInput],
       maintenanceInterval: AnalyticsPositiveDuration,
-      progressRetention: AnalyticsPositiveDuration
+      progressRetention: AnalyticsPositiveDuration,
+      optimizeInterval: FiniteDuration
   ) derives ConfigReader
 
   /** Check before checkpoint creation that the explicit offsets cover exactly the broker's current partition set. */
@@ -135,10 +139,17 @@ object AnalyticsStreamingSettings {
       (),
       "analytics.streaming.initial-offsets must explicitly name every source partition"
     )
+    // Zero disables compaction; otherwise the interval cannot be shorter than the maintenance tick that runs it.
+    val optimizeInterval = Validated.condNec(
+      raw.optimizeInterval == Duration.Zero || raw.optimizeInterval >= raw.maintenanceInterval,
+      raw.optimizeInterval,
+      "analytics.streaming.optimize-interval must be zero (disabled) or at least maintenance-interval"
+    )
     (
       validateCheckpointLocation(raw.checkpointLocation),
-      (offsets, uniquePartitions, nonEmptyOffsets).mapN((validOffsets, _, _) => validOffsets)
-    ).mapN((checkpointLocation, validOffsets) =>
+      (offsets, uniquePartitions, nonEmptyOffsets).mapN((validOffsets, _, _) => validOffsets),
+      optimizeInterval
+    ).mapN((checkpointLocation, validOffsets, optimizeInterval) =>
       AnalyticsStreamingSettings(
         raw.streamId,
         raw.activationGrantId,
@@ -148,7 +159,8 @@ object AnalyticsStreamingSettings {
         raw.maximumReplayRecords,
         validOffsets,
         raw.maintenanceInterval,
-        raw.progressRetention
+        raw.progressRetention,
+        optimizeInterval
       )
     )
   }

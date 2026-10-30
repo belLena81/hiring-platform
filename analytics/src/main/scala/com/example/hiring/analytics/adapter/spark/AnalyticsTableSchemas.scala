@@ -56,7 +56,8 @@ private[analytics] object AnalyticsTableSchemas {
       shape.map { case (name, dataType) => name -> dataType.simpleString }
 
   /** Creates the declared table when absent, then requires the stored table to equal the declaration exactly: column
-    * names, types (including nested nullability), top-level nullability and the set of CHECK constraints.
+    * names, types (including nested nullability), top-level nullability, the set of CHECK constraints and, for a
+    * subject-attributed table, the exact statistics allow-list with no positional `dataSkippingNumIndexedCols`.
     *
     * Creation and constraint registration are separate Delta commits, so a crash between them leaves an empty table
     * that lacks declared constraints. Only that case is completed here: the columns equal the declaration, the stored
@@ -129,5 +130,6 @@ private[analytics] object AnalyticsTableSchemas {
   }
 
   private def storedMatches(spark: SparkSession, path: String, spec: DeltaTableSpec): Boolean =
-    storedColumnsMatch(spark, path, spec) && storedConstraints(spark, path) == expectedConstraints(spec)
+    storedColumnsMatch(spark, path, spec) && storedConstraints(spark, path) == expectedConstraints(spec) &&
+      DeltaStatsPolicy.permits(spec, DeltaLogFactory.system(spark, path).update().metadata.configuration)
 }

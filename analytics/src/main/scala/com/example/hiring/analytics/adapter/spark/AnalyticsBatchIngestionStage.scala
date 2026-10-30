@@ -109,7 +109,7 @@ private[analytics] final class AnalyticsBatchIngestionStage[F[_]: Async](
       _ <- deltaWriter.merge(
         incoming,
         paths.bronze,
-        "target.topic = source.topic AND target.partition = source.partition AND target.offset = source.offset"
+        MergeKeyBounds.CoordinateCondition
       )
     } yield AnalyticsBronzeInput(analyzed, observedAt, counts._1, counts._2, counts._3)
 

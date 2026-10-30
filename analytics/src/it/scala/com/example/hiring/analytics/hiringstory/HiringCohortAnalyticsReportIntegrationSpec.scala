@@ -46,8 +46,24 @@ final class HiringCohortAnalyticsReportIntegrationSpec
     assertEquals(hours.size, 10, "ten hired applications in the published events")
     val hire = b.timeToHire.getOrElse(fail("timeToHire missing"))
     assertEquals((hire.eligibleCount, hire.excludedCount), (10L, 50L), clues(hire))
-    val tolerance = 1e-3
+    val tolerance = 1e-9
+    println(
+      s"HEA-13.1 cohort report p50..p95 hours=${(hire.p50, hire.p75, hire.p90, hire.p95)} " +
+        s"seconds=${(hire.p50 * 3600, hire.p75 * 3600, hire.p90 * 3600, hire.p95 * 3600)} " +
+        s"events min/max hours=${(hours.min, hours.max)} seconds=${(hours.min * 3600, hours.max * 3600)}"
+    )
+    assert(hire.p50 >= 0.0, clues(hire))
     assert(hire.p50 >= hours.min - tolerance && hire.p95 <= hours.max + tolerance, clues(hire, hours.min, hours.max))
     assert(hire.p50 <= hire.p75 && hire.p75 <= hire.p90 && hire.p90 <= hire.p95, clues(hire))
+  }
+
+  test("HEA-11.2 reading the cohort's Kafka range twice leaves a non-empty report and the stage times unchanged") {
+    val o = observation()
+    assertEquals(o.stagesBefore.size, 60, "one stage-time row per cohort application")
+    assertEquals(o.stagesAfter, o.stagesBefore, "the per-application stage times changed on the second read")
+    assertEquals(o.before.created, 60L, "the report is not empty, so equality below is not trivial")
+    assertEquals(o.after, o.before, "the report changed after reading the same range again")
+    assertEquals(o.bronzeAfterSecond, o.eventCount.toLong, "the second read must not duplicate Bronze")
+    assertEquals(o.silverAfterSecond, o.eventCount.toLong, "Silver holds one row per distinct event")
   }
 }

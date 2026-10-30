@@ -16,6 +16,7 @@ import org.bson.Document
 import org.bson.json.{JsonMode, JsonWriterSettings}
 
 import java.nio.file.{Files, Path}
+import java.nio.file.attribute.PosixFilePermissions
 import java.time.Instant
 import java.util.{Base64, Properties, UUID}
 import java.util.concurrent.TimeUnit
@@ -23,32 +24,56 @@ import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
 /** Shared steps: the published events of one hiring dataset read by the real analytics batch.
+  * (docs/specs/hiring-end-to-end-acceptance.md)
   *
-  * Original description: the hiring story's published events (docs/specs/hiring-end-to-end-acceptance.md) read by the real analytics batch.
+  * The events are the ones the real application published during the story suite
+  * (`HiringStoryAcceptanceIntegrationSpec` HEA-11.3 writes them to
+  * `.local/data/hiring-story-analytics/story-events.jsonl`). They are republished unchanged, one transaction each, to a
+  * fresh isolated topic and consumed by `AppModule.batch`, the production one-shot batch.
   *
-  * The events are the ones the real application published during the story suite (`HiringStoryAcceptanceIntegrationSpec`
-  * HEA-11.3 writes them to `.local/data/hiring-story-analytics/story-events.jsonl`). They are republished unchanged,
-  * one transaction each, to a fresh isolated topic and consumed by `AppModule.batch`, the production one-shot batch.
+  * The suite runs only in a started chain (marker file `chain-started` in the hand-off directory); otherwise its
+  * tests are skipped, which is reported as unverified, never as a pass. In a started chain a missing events file
+  * fails.
   * Expected values below are written from the spec's story table, never from the aggregation code or its output.
   *
   * Evidence is provisional until the analytics refactoring closes.
   */
-abstract class StoryAnalyticsReportSuite(eventsFile: String, reportFile: String, RunId: String) extends CatsEffectSuite {
+abstract class StoryAnalyticsReportSuite(eventsFile: String, reportFile: String, runId: String)
+    extends CatsEffectSuite {
   override val munitIOTimeout: FiniteDuration = 25.minutes
 
   private val HandOff = "hiring-story-analytics"
 
   private def workspaceFile(name: String): Path =
-    Path.of(sys.env.getOrElse("HIRING_TEST_WORKSPACE", System.getProperty("user.dir"))).resolve(".local/data").resolve(HandOff).resolve(name)
+    Path
+      .of(sys.env.getOrElse("HIRING_TEST_WORKSPACE", System.getProperty("user.dir")))
+      .resolve(".local/data")
+      .resolve(HandOff)
+      .resolve(name)
 
-  private def storyEvents: Vector[(String, String)] = {
-    val file = workspaceFile(eventsFile)
-    assume(Files.isRegularFile(file), s"BLOCKED: run the story suite first (it writes $file)")
-    Files.readAllLines(file).asScala.toVector.filter(_.nonEmpty).map { line =>
-      val json = parse(line).fold(e => fail(e.message), identity)
-      val cursor = json.hcursor
-      (cursor.get[String]("key").fold(e => fail(e.message), identity), cursor.get[String]("value").fold(e => fail(e.message), identity))
-    }
+  private def chainStarted: Boolean = Files.isRegularFile(workspaceFile("chain-started"))
+
+  private def eventsPath: Path = workspaceFile(eventsFile)
+
+  private def sha256(bytes: Array[Byte]): String =
+    java.security.MessageDigest.getInstance("SHA-256").digest(bytes).map("%02x".format(_)).mkString
+
+  /** The exported events and the SHA-256 of the exact bytes read now. A missing file FAILS in a started chain. */
+  private def storyEvents: (Vector[(String, String)], String) = {
+    val file = eventsPath
+    if (!Files.isRegularFile(file)) fail(s"hand-off events file missing ($eventsFile): run the story export step first")
+    val bytes = Files.readAllBytes(file)
+    val events = new String(bytes, java.nio.charset.StandardCharsets.UTF_8).linesIterator.toVector
+      .filter(_.nonEmpty)
+      .map { line =>
+        val json = parse(line).fold(e => fail(e.message), identity)
+        val cursor = json.hcursor
+        (
+          cursor.get[String]("key").fold(e => fail(e.message), identity),
+          cursor.get[String]("value").fold(e => fail(e.message), identity)
+        )
+      }
+    (events, sha256(bytes))
   }
 
   /** The events keep their order, key and exact value; each is its own transaction like the real publisher's. */
@@ -63,7 +88,10 @@ abstract class StoryAnalyticsReportSuite(eventsFile: String, reportFile: String,
       properties.put(ProducerConfig.ACKS_CONFIG, "all")
       properties.put("security.protocol", "SASL_PLAINTEXT")
       properties.put("sasl.mechanism", "PLAIN")
-      properties.put("sasl.jaas.config", LocalTestServices.jaasConfig("hiring_publisher_v2", manifest.publisherPassword))
+      properties.put(
+        "sasl.jaas.config",
+        LocalTestServices.jaasConfig("hiring_publisher_v2", manifest.publisherPassword)
+      )
       val producer = new KafkaProducer[String, String](properties)
       try {
         producer.initTransactions()
@@ -146,7 +174,14 @@ abstract class StoryAnalyticsReportSuite(eventsFile: String, reportFile: String,
       snapshot.getList("stageDurations", classOf[Document]).asScala.map(_.getString("metric")).toSet,
       Option(snapshot.get("timeToHire", classOf[Document])).map { d =>
         def n(f: String): Double = d.get(f).asInstanceOf[Number].doubleValue()
-        Hire(n("p50Hours"), n("p75Hours"), n("p90Hours"), n("p95Hours"), n("eligibleCount").toLong, n("excludedCount").toLong)
+        Hire(
+          n("p50Hours"),
+          n("p75Hours"),
+          n("p90Hours"),
+          n("p95Hours"),
+          n("eligibleCount").toLong,
+          n("excludedCount").toLong
+        )
       },
       snapshot
         .getList("stageDurations", classOf[Document])
@@ -156,7 +191,7 @@ abstract class StoryAnalyticsReportSuite(eventsFile: String, reportFile: String,
     )
   }
 
-  private def exportReport(fixture: StreamingIngestionFixtures.Fixture): IO[Unit] = IO.blocking {
+  private def exportReport(fixture: StreamingIngestionFixtures.Fixture, eventsDigest: String): IO[Unit] = IO.blocking {
     val sync = MongoClients.create(fixture.namespace.manifest.mongoUri)
     try {
       val database = sync.getDatabase(fixture.databaseName)
@@ -164,10 +199,12 @@ abstract class StoryAnalyticsReportSuite(eventsFile: String, reportFile: String,
       def one(collection: String, id: String): String =
         database.getCollection(collection).find(new Document("_id", id)).first().toJson(settings)
       val file = workspaceFile(reportFile)
-      Files.createDirectories(file.getParent)
+      Files.deleteIfExists(file)
+      Files.createFile(file, PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")))
       val _ = Files.writeString(
         file,
         Seq(
+          "events-sha256\t" + eventsDigest,
           "analytics_report_control\t" + one("analytics_report_control", "analytics-report"),
           "analytics_report_snapshots\t" + one("analytics_report_snapshots", "current")
         ).mkString("", "\n", "\n")
@@ -224,21 +261,23 @@ abstract class StoryAnalyticsReportSuite(eventsFile: String, reportFile: String,
 
   private val observed = ResourceSuiteLocalFixture(
     "hiring-story-analytics",
-    Resource.eval(IO(storyEvents)).flatMap { events =>
+    if (!chainStarted) Resource.pure[IO, Option[Observed]](None)
+    else Resource.eval(IO { Files.deleteIfExists(workspaceFile(reportFile)); storyEvents }).flatMap {
+      case (events, eventsDigest) =>
         StreamingIngestionFixtures.fixture.evalMap { fixture =>
           val endExclusive = events.size * 2L // one record and one transaction marker per event
           val root = fixture.root.resolve("lakehouse").toUri.toString
           for {
             _ <- republish(fixture, events)
-            first <- batchSettings(fixture, RunId, endExclusive).flatMap(run)
+            first <- batchSettings(fixture, runId, endExclusive).flatMap(run)
             firstSnapshot <- StreamingIngestionFixtures.reportSnapshot(fixture)
             stagesBefore <- stageRows(fixture, root)
-            second <- batchSettings(fixture, RunId, endExclusive).flatMap(run)
+            second <- batchSettings(fixture, runId, endExclusive).flatMap(run)
             secondSnapshot <- StreamingIngestionFixtures.reportSnapshot(fixture)
             stagesAfter <- stageRows(fixture, root)
             streamSettings <- StreamingIngestionFixtures.settings(fixture, 13)
             counts <- StreamingIngestionFixtures.stored(fixture, streamSettings)
-            _ <- exportReport(fixture)
+            _ <- exportReport(fixture, eventsDigest)
           } yield Option(
             Observed(
               events.size,
@@ -259,7 +298,11 @@ abstract class StoryAnalyticsReportSuite(eventsFile: String, reportFile: String,
 
   override def munitFixtures: List[munit.AnyFixture[?]] = List(observed)
 
-  protected def observation(): Observed = observed().getOrElse(fail("BLOCKED: no observation"))
+  /** Skipped (unverified, never a pass) unless the chain was started; in a started chain a missing result fails. */
+  protected def observation(): Observed = {
+    assume(chainStarted, "SKIPPED: analytics chain not started (create the chain-started marker, see the spec, D7)")
+    observed().getOrElse(fail("the analytics chain was started but produced no observation"))
+  }
 
   /** The story's own events give the earliest time each application entered each stage, independent of Spark. */
   protected def stagesFromEvents(events: Vector[(String, String)]): Map[String, Map[String, Instant]] = {

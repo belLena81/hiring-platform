@@ -276,6 +276,36 @@ final class AnalyticsErasureWorkerSpec extends CatsEffectSuite {
     } yield ()
   }
 
+  test("AC-04.4 the worker holds the Delta horizon until the later of the purge and a following OPTIMIZE") {
+    val barrier = KafkaRetentionBarrier.from("hiring.operational-events", Vector(0 -> 12L)).toOption.get
+    val horizons = AnalyticsTestOperationalConfig.operational.retention.copy(
+      deltaVacuumSafety = 2.days,
+      deltaLogRetention = 1.minute
+    )
+    val purgedAt = Instant.EPOCH.plusSeconds(12.hours.toSeconds)
+    val optimizedAt = Instant.EPOCH.plusSeconds(30.hours.toSeconds)
+    def passedAt(at: FiniteDuration, compaction: Option[Instant]): IO[Boolean] =
+      Ref.of[IO, Counters](Counters()).flatMap { state =>
+        TestControl.executeEmbed(
+          IO.sleep(at) *> workerForRetention(horizons, 12L, state, lastCompaction = compaction)
+            .replayHorizonsPassed(barrier, purgedAt, compaction)
+        )
+      }
+    for {
+      // 12h purge + 2d = 60h without an OPTIMIZE; 30h OPTIMIZE + 2d = 78h with one.
+      withoutOptimize <- passedAt(60.hours, None)
+      withOptimize <- passedAt(60.hours + 1.minute, Some(optimizedAt))
+      beforeOptimizeHorizon <- passedAt(78.hours - 1.nano, Some(optimizedAt))
+      atOptimizeHorizon <- passedAt(78.hours, Some(optimizedAt))
+      earlierOptimize <- passedAt(60.hours, Some(Instant.EPOCH.plusSeconds(1.hour.toSeconds)))
+      _ = assertEquals(withoutOptimize, true)
+      _ = assertEquals(withOptimize, false)
+      _ = assertEquals(beforeOptimizeHorizon, false)
+      _ = assertEquals(atOptimizeHorizon, true)
+      _ = assertEquals(earlierOptimize, true)
+    } yield ()
+  }
+
   Vector(
     ("data deadline dominates", 12.hours, 2.days, 1.minute, 60.hours),
     ("log deadline dominates", 12.hours, 1.minute, 2.minutes, 1.day + 2.minutes),
@@ -407,7 +437,8 @@ final class AnalyticsErasureWorkerSpec extends CatsEffectSuite {
       backlog: ErasureBacklog = ErasureBacklog(0L, 0L, None, None),
       logger: Logger[IO] = org.typelevel.log4cats.slf4j.Slf4jLogger.getLogger[IO],
       backlogQuery: Option[IO[ErasureBacklog]] = None,
-      barrierCapture: Option[IO[KafkaRetentionBarrier]] = None
+      barrierCapture: Option[IO[KafkaRetentionBarrier]] = None,
+      lastCompaction: Option[Instant] = None
   ): AnalyticsErasureWorker[IO] = {
     val store = new TestErasureStore(state, renewal, renewalFailure, backlogQuery.getOrElse(IO.pure(backlog)))
     val lock: AnalyticsLakehouseLock[IO] = (_: String) => Resource.pure[IO, Unit](())
@@ -417,6 +448,7 @@ final class AnalyticsErasureWorkerSpec extends CatsEffectSuite {
     val lakehouse = new AnalyticsErasureLakehouse[IO] {
       override def validateHmacConfiguration: IO[Unit] = IO.unit
       override def reclaimRetainedFiles: IO[Long] = IO.pure(0L)
+      override def lastCompactionAt: IO[Option[Instant]] = IO.pure(lastCompaction)
       override def verifyMarkedSubjectsAbsent(markerTokens: Vector[SubjectToken]): IO[Unit] = IO.unit
       override def countMarkedRows(markerTokens: Vector[SubjectToken]): IO[Long] = IO.pure(0L)
       override def captureMarkedFiles(markerTokens: Vector[SubjectToken]): IO[Vector[String]] =

@@ -87,9 +87,7 @@ final class JobService[F[_]: MonadThrow](
         _ <- UseCaseF.forbidUnless[F](authorization.canManageJobs(user))
         now <- EitherT.liftF(clock.realTimeInstant)
         jobId <- EitherT.liftF(uuidGen.randomUUID.map(JobId.apply))
-        job <- EitherT.fromEither[F](
-          validateNewJob(user.id, input, now, jobId).flatMap(JobLifecycle.create(_).leftMap(UseCaseError.Domain.apply))
-        )
+        job <- EitherT.fromEither[F](validateNewJob(user.id, input, now, jobId))
         created <- persist(job, None, job.createdAt, user.id)(
           jobs.createWithEvents(job, job.createdAt, _, context).as(job)
         )

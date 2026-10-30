@@ -41,7 +41,7 @@ private[analytics] final class AnalyticsLateFactStage[F[_]: Async](
       _ <- deltaWriter.merge(
         normalized,
         paths.lateFacts,
-        "target.topic = source.topic AND target.partition = source.partition AND target.offset = source.offset"
+        MergeKeyBounds.CoordinateCondition
       )
     } yield ()
 

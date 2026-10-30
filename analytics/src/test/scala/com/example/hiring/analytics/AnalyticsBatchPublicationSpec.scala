@@ -319,7 +319,11 @@ class AnalyticsBatchPublicationSpec extends AnalyticsBatchSpecFixtures {
       .select("properties")
       .head()
       .getAs[scala.collection.Map[String, String]]("properties")
-    assertEquals(properties.get("delta.dataSkippingNumIndexedCols"), Some("0"))
+    assertEquals(
+      properties.get(DeltaStatsPolicy.StatsColumnsProperty),
+      Some(DeltaStatsPolicy.render(AnalyticsDeltaCatalog.Bronze.statsColumns))
+    )
+    assertEquals(properties.get(DeltaStatsPolicy.NumIndexedColumnsProperty), None)
 
     val controlPath = Files.createTempDirectory("hiring-analytics-stats-control").resolve("delta").toString
     spark.read

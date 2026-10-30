@@ -152,8 +152,8 @@ final class AnalyticsTableInitializationSpec extends CatsEffectSuite {
             assertEquals(newSnapshot.metadata.configuration, oldSnapshot.metadata.configuration)
             assertEquals(newSnapshot.metadata.schema, oldSnapshot.metadata.schema)
             assertEquals(
-              newSnapshot.metadata.configuration.get("delta.dataSkippingNumIndexedCols"),
-              Option.when(table.subjectAttributed)("0")
+              newSnapshot.metadata.configuration.get(DeltaStatsPolicy.StatsColumnsProperty),
+              Option.when(table.subjectAttributed)(DeltaStatsPolicy.render(table.statsColumns))
             )
           }
           val mismatch = root.resolve("mismatch").toString
@@ -186,8 +186,13 @@ final class AnalyticsTableInitializationSpec extends CatsEffectSuite {
           AnalyticsTableSchemas.createOrValidate(spark, path, spec)
           assert(AnalyticsTableSchemas.matches(spark.read.format("delta").load(path).schema, spec.shape))
           assertEquals(
-            DeltaLogFactory.system(spark, path).update().metadata.configuration.get("delta.dataSkippingNumIndexedCols"),
-            Some("0")
+            DeltaLogFactory
+              .system(spark, path)
+              .update()
+              .metadata
+              .configuration
+              .get(DeltaStatsPolicy.StatsColumnsProperty),
+            Some(DeltaStatsPolicy.render(spec.statsColumns))
           )
           assertEquals(DeltaLogFactory.system(spark, path).update().version, spec.checks.size.toLong)
         }

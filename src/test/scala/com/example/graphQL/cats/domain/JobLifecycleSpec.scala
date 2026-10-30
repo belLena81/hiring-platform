@@ -33,13 +33,6 @@ class JobLifecycleSpec extends FunSuite {
     assertEquals(result.map(_._1.updatedAt), Right(updatedAt))
   }
 
-  test("create rejects Closed as an initial status") {
-    val closed = draftJob.copy(state = JobState.Closed(java.time.Instant.EPOCH))
-    val result = JobLifecycle.create(closed)
-
-    assertEquals(result, Left(DomainError.InvalidInitialJobStatus(JobStatus.Closed)))
-  }
-
   test("rejected publish retains the original aggregate value") {
     val closed = draftJob.copy(state = JobState.Closed(java.time.Instant.EPOCH))
     val result = JobLifecycle.publish(updatedAt).run(closed)

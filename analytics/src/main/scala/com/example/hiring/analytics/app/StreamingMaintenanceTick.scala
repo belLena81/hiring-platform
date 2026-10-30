@@ -14,7 +14,7 @@ import cats.syntax.all.*
 import io.github.iltotore.iron.*
 
 import java.time.Instant
-import scala.concurrent.duration.FiniteDuration
+import scala.concurrent.duration.{Duration, FiniteDuration}
 
 /** One idle-time maintenance tick, run under the lakehouse mutex: erasure upkeep, report refresh, retention. */
 private[app] final class StreamingMaintenanceTick[F[_]: Async: UUIDGen](
@@ -24,7 +24,8 @@ private[app] final class StreamingMaintenanceTick[F[_]: Async: UUIDGen](
     journal: DeltaStreamingBatchJournal[F],
     replayJournal: MongoAnalyticsLateFactReplayJournal[F],
     retention: AnalyticsRetentionSettings,
-    progressRetention: FiniteDuration
+    progressRetention: FiniteDuration,
+    optimizeInterval: FiniteDuration
 ) {
   def run(
       identity: StreamingActivationIdentity,
@@ -59,9 +60,21 @@ private[app] final class StreamingMaintenanceTick[F[_]: Async: UUIDGen](
         ids => (journal.referencedPublicationRunIds(ids), replayJournal.referencedPublicationRunIds(ids)).mapN(_ ++ _),
         at
       )
+      _ <- compactDueTables(at)
       _ <- maintenance.reclaimExpiredFiles
       _ <- authorize
     } yield ()
+
+  /** Compaction replaces files that still hold subject tokens, so it runs only while no erasure request is pending or
+    * processing, which is read again here because a request may have arrived since the tick started. It precedes the
+    * vacuum eligibility check, so the files it replaces are judged in the same tick.
+    */
+  private def compactDueTables(at: Instant): F[Unit] =
+    Async[F].whenA(optimizeInterval > Duration.Zero)(
+      markers.activeDeletionMarkers.flatMap(view =>
+        Async[F].unlessA(view.erasureInProgress)(maintenance.compactDueTables(at, optimizeInterval).void)
+      )
+    )
 
   private def publishRefreshedReport(
       reservation: AnalyticsReportReservation,

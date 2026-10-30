@@ -845,6 +845,7 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
         |    maximum-replay-records = 1000
         |    maintenance-interval = 60 seconds
         |    progress-retention = 7 days
+        |    optimize-interval = 6 hours
         |    initial-offsets = [{ partition = 0, offset = 0 }]
         |  }
         |  batch {""".stripMargin

@@ -145,11 +145,6 @@ final class StreamingQuarantinePreparationSpec extends CatsEffectSuite {
             paths.silver,
             "target.eventId = source.eventId"
           )
-          _ <- execution(
-            spark
-              .sql(s"ALTER TABLE delta.`${paths.silver}` SET TBLPROPERTIES ('delta.dataSkippingNumIndexedCols' = '0')")
-              .collect()
-          )
           late <- execution(
             AnalyticsSubjectPrivacy
               .withSubjectToken(OperationalEventTransforms.validEvents(seed), keys)

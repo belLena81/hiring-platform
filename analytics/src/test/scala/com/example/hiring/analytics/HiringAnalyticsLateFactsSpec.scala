@@ -109,8 +109,8 @@ final class HiringAnalyticsLateFactsSpec extends FunSuite {
         .select("properties")
         .head()
         .getAs[scala.collection.Map[String, String]]("properties")
-        .get("delta.dataSkippingNumIndexedCols"),
-      Some("0")
+        .get(DeltaStatsPolicy.StatsColumnsProperty),
+      Some(DeltaStatsPolicy.render(AnalyticsDeltaCatalog.LateFacts.statsColumns))
     )
 
     val marker = token("e02a9d4d-852b-3dda-8055-c4b825532c8a")

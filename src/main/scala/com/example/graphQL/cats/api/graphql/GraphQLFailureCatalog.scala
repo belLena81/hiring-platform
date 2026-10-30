@@ -144,8 +144,6 @@ private[graphql] object GraphQLFailureCatalog {
           exceptional = false,
           "The job cannot move to the requested status."
         )
-    case InvalidInitialJobStatus
-        extends FailureMetadata("INVALID_INITIAL_JOB_STATUS", exceptional = false, "New jobs cannot start closed.")
     case InvalidStatusTransition
         extends FailureMetadata(
           "INVALID_STATUS_TRANSITION",
@@ -469,8 +467,6 @@ private[graphql] object GraphQLFailureCatalog {
       case DomainError.RecruiterRequired => failure(FailureMetadata.RecruiterRequired, "Recruiter role required")
       case DomainError.InvalidJobTransition(_, _) =>
         failure(FailureMetadata.InvalidJobTransition, "Invalid job transition")
-      case DomainError.InvalidInitialJobStatus(_) =>
-        failure(FailureMetadata.InvalidInitialJobStatus, "New jobs cannot start closed")
       case DomainError.InvalidStatusTransition(_, _) =>
         failure(FailureMetadata.InvalidStatusTransition, "Invalid application status transition")
       case DomainError.RejectionFeedbackRequired =>

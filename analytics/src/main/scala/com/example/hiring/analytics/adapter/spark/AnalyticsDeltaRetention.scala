@@ -69,13 +69,22 @@ private[analytics] final class AnalyticsDeltaRetention[F[_]: Async: UUIDGen](
       if (DeltaTables.exists(spark, path)) {
         // DESCRIBE DETAIL computes file counts and sizes even when only properties are selected.
         // Read the same fresh snapshot's metadata without reconstructing those unused statistics.
-        val properties = DeltaLogFactory.system(spark, path).update().metadata.configuration
+        val metadata = DeltaLogFactory.system(spark, path).update().metadata
+        val properties = metadata.configuration
         // Deletion vectors would keep purged rows in files that only REORG ... APPLY (PURGE) rewrites.
         // An enabled table is never silently flipped: fail closed so an operator decides how to rewrite it.
         if (properties.get(AnalyticsDeltaCatalog.DeletionVectorsProperty).contains("true"))
           throw AnalyticsError.DeltaSchemaMismatch(path)
         // Static properties come from the table's catalog declaration; retention windows come from configuration.
-        val declared = AnalyticsDeltaCatalog.specAt(paths, path).fold(Map.empty[String, String])(_.properties)
+        val spec = AnalyticsDeltaCatalog.specAt(paths, path)
+        // A table of an earlier shape may lack allow-listed columns, which Delta rejects in the property. It gets the
+        // allow-list's existing columns, or no statistics at all when none exist, so it is never left less safe.
+        val allowed = spec.filter(_.subjectAttributed).map(_.statsColumns.filter(metadata.schema.fieldNames.contains))
+        val statistics = allowed.fold(Map.empty[String, String]) { columns =>
+          if (columns.nonEmpty) Map(DeltaStatsPolicy.StatsColumnsProperty -> DeltaStatsPolicy.render(columns))
+          else Map(DeltaStatsPolicy.NumIndexedColumnsProperty -> "0")
+        }
+        val declared = spec.fold(Map.empty[String, String])(_.properties - DeltaStatsPolicy.StatsColumnsProperty) ++ statistics
         val desired = Map(
           "delta.deletedFileRetentionDuration" -> desiredVacuumRetention,
           "delta.logRetentionDuration" -> desiredLogRetention
@@ -84,6 +93,15 @@ private[analytics] final class AnalyticsDeltaRetention[F[_]: Async: UUIDGen](
         if (changes.nonEmpty) {
           val rendered = changes.map { case (key, value) => s"'$key' = '$value'" }.mkString(", ")
           val _ = spark.sql(s"ALTER TABLE ${DeltaTables.sqlIdentifier(path)} SET TBLPROPERTIES ($rendered)")
+        }
+        // A positional index would still cover the leading columns beside the allow-list. Erasure must be able to
+        // clean a table that drifted, so the property is repaired here; ingestion's strict create-or-validate still
+        // refuses such a table. Statistics already written stay in the log until the erasure log checkpoint.
+        if (allowed.exists(_.nonEmpty) && properties.contains(DeltaStatsPolicy.NumIndexedColumnsProperty)) {
+          val _ = spark.sql(
+            s"ALTER TABLE ${DeltaTables.sqlIdentifier(path)} UNSET TBLPROPERTIES IF EXISTS " +
+              s"('${DeltaStatsPolicy.NumIndexedColumnsProperty}')"
+          )
         }
       }
     }
@@ -113,6 +131,8 @@ private[analytics] final class AnalyticsDeltaRetention[F[_]: Async: UUIDGen](
                     .write
                     .format("delta")
                     .mode("overwrite")
+                    // The scratch copy holds subject tokens and is not a catalog table, so it gathers no statistics.
+                    .option(DeltaStatsPolicy.NumIndexedColumnsProperty, "0")
                     .save(SparkPhysicalLocation.resolve(temporaryPath))
                   DeltaTables
                     .read(spark, temporaryPath)

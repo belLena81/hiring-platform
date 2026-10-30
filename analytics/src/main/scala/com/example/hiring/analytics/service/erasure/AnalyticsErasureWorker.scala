@@ -294,7 +294,8 @@ final class AnalyticsErasureWorker[F[_]: Async](
       purgedAt <- lift(
         progress.readDeltaPurgedAt(claim.requestId).flatMap(Async[F].fromOption(_, AnalyticsError.MalformedMarker))
       )
-      ready <- lift(replayHorizonsPassed(barrier, purgedAt))
+      compactedAt <- lift(lakehouse.lastCompactionAt)
+      ready <- lift(replayHorizonsPassed(barrier, purgedAt, compactedAt))
       _ <- if (ready) EitherT.rightT(()) else defer(claim, policy.timings.reclamationRecheckInterval)
       markerTokens <- lift(markers.activeDeletionMarkers.map(_.exclusionTokens))
       _ <- lift(lakehouseLock.resource(paths.root).use { _ =>
@@ -309,11 +310,15 @@ final class AnalyticsErasureWorker[F[_]: Async](
       _ <- lift(lakehouse.verifyFilesAbsent(affectedFiles))
     } yield ()
 
-  private[analytics] def replayHorizonsPassed(barrier: KafkaRetentionBarrier, deltaPurgedAt: Instant): F[Boolean] =
+  private[analytics] def replayHorizonsPassed(
+      barrier: KafkaRetentionBarrier,
+      deltaPurgedAt: Instant,
+      lastCompactionAt: Option[Instant] = None
+  ): F[Boolean] =
     for {
       current <- now
       kafkaExpired <- kafka.retention.retentionPassed(barrier)
-      deltaDeadline = ErasureCompletionRule.deltaDeadline(deltaPurgedAt, retention.deltaHorizons)
+      deltaDeadline = ErasureCompletionRule.deltaDeadline(deltaPurgedAt, lastCompactionAt, retention.deltaHorizons)
       deltaExpired = !current.isBefore(deltaDeadline)
     } yield kafkaExpired && deltaExpired
 

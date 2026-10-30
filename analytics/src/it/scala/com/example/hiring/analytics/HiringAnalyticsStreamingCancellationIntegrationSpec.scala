@@ -126,6 +126,7 @@ final class HiringAnalyticsStreamingCancellationIntegrationSpec extends Analytic
       maximum-replay-records = 1
       maintenance-interval = 60 seconds
       progress-retention = 7 days
+      optimize-interval = 6 hours
       initial-offsets = [{ partition = 0, offset = 0 }]
     }""")
   )

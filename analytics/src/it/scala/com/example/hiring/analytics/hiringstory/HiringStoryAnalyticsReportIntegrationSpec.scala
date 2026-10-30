@@ -22,7 +22,10 @@ final class HiringStoryAnalyticsReportIntegrationSpec
 
   test("HEA-11.2 reading the same Kafka range twice leaves the report, Bronze, Silver and stage times unchanged") {
     val o = observation()
-    println(s"HEA-11.2 events=${o.eventCount} range=[0,${o.eventCount * 2}) bronze=${o.bronzeAfterSecond} silver=${o.silverAfterSecond}")
+    println(
+      s"HEA-11.2 events=${o.eventCount} range=[0,${o.eventCount * 2}) " +
+        s"bronze=${o.bronzeAfterSecond} silver=${o.silverAfterSecond}"
+    )
     assertEquals(o.first.outcome, AnalyticsRunOutcome.Published)
     assertEquals(o.second.outcome, AnalyticsRunOutcome.Published)
     assertEquals(o.first.bronzeRecords, o.eventCount.toLong)
@@ -34,8 +37,7 @@ final class HiringStoryAnalyticsReportIntegrationSpec
     assertEquals(o.after, o.before, "the report changed after reading the same range again")
   }
 
-
-  test("HEA-12.3 the stored stage facts equal the story: stages reached per application (Silver, before any suppression)") {
+  test("HEA-12.3 the stored stage facts equal the story: stages reached per application (before suppression)") {
     val o = observation()
     val reached = StageColumns.map(name => name -> o.stagesAfter.count(_.stages.contains(name)).toLong).toMap
     println(s"HEA-12.3 applications with each stage reached: $reached of ${o.stagesAfter.size} applications")
@@ -48,19 +50,18 @@ final class HiringStoryAnalyticsReportIntegrationSpec
     assertEquals(reached("declinedAt"), Oracle.declined)
   }
 
-
   test("HEA-13.3 stage times equal the earliest event time per stage taken from the published events") {
     val o = observation()
     val expected = stagesFromEvents(o.events)
     assertEquals(o.stagesAfter.map(row => row.applicationId -> row.stages).toMap, expected)
   }
 
-
   test("HEA-13.2 a distribution built from fewer than ten distinct candidates is withheld") {
     val o = observation()
-    // Candidates that reached each stage, from the oracle: every pair of stages involves fewer than ten candidates.
-    val candidatesReaching = Vector(Oracle.accepted, Oracle.interview, Oracle.hired)
-    assert(candidatesReaching.forall(_ < Oracle.minimumDistinctCandidates))
+    // Read from the stored stage facts, not from the oracle: every stage after Created was reached by fewer than ten
+    // applications (and by at least one, so the withholding is the K rule, not an absence of data).
+    val reached = StageColumns.tail.map(name => o.stagesAfter.count(_.stages.contains(name)))
+    assert(reached.forall(count => count >= 1 && count < Oracle.minimumDistinctCandidates), clues(reached))
     assert(!o.before.timeToHirePresent, "time to hire built from one hired candidate must be withheld")
     assertEquals(o.before.stageMetrics, Set.empty[String])
   }

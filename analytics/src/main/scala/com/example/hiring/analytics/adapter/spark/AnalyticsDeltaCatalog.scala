@@ -22,7 +22,8 @@ private[analytics] final case class DeltaCheck(name: String, expression: String)
 
 /** The single declaration of a Delta table: ordered columns, constraints, properties and privacy classification.
   *
-  * `statsColumns` is reserved for data-skipping statistics columns and is not applied yet.
+  * `statsColumns` is the explicit data-skipping allow-list of a subject-attributed table. It is never empty, names
+  * declared columns and holds no token or raw identifier column; the other tables leave it empty.
   */
 private[analytics] final case class DeltaTableSpec(
     name: String,
@@ -32,6 +33,15 @@ private[analytics] final case class DeltaTableSpec(
     statsColumns: Vector[String],
     subjectAttributed: Boolean
 ) {
+  require(
+    !subjectAttributed || statsColumns.nonEmpty,
+    s"subject-attributed table $name must declare its statistics columns"
+  )
+  require(
+    statsColumns.forall(stat => columns.exists(_.name == stat) && !DeltaStatsPolicy.isForbidden(stat)),
+    s"table $name declares a statistics column that is unknown or holds a subject token or raw identifier"
+  )
+
   def shape: Vector[(String, DataType)] = columns.map(column => column.name -> column.dataType)
 
   /** Schema with the declared nullability, used to create the table. */
@@ -44,7 +54,6 @@ private[analytics] final case class DeltaTableSpec(
   */
 private[analytics] object AnalyticsDeltaCatalog {
   val DeletionVectorsProperty = "delta.enableDeletionVectors"
-  val SkippingNumIndexedColumnsProperty = "delta.dataSkippingNumIndexedCols"
   val ConstraintPropertyPrefix = "delta.constraints."
 
   private def required(name: String, dataType: DataType) = DeltaColumn(name, dataType, nullable = false)
@@ -75,17 +84,20 @@ private[analytics] object AnalyticsDeltaCatalog {
       name: String,
       columns: Vector[DeltaColumn],
       checks: Vector[DeltaCheck] = Vector.empty,
-      subjectAttributed: Boolean = false
+      subjectAttributed: Boolean = false,
+      statsColumns: Vector[String] = Vector.empty
   ): DeltaTableSpec =
     DeltaTableSpec(
       name,
       columns,
       checks,
-      // Deletion vectors would keep purged rows in files that only a rewrite removes. Subject-attributed tables also
-      // gather no data-skipping statistics, because token values would otherwise be copied into the Delta log.
+      // Deletion vectors would keep purged rows in files that only a rewrite removes. Subject-attributed tables gather
+      // data-skipping statistics only on their explicit allow-list, because token values would otherwise be copied
+      // into the Delta log.
       Map(DeletionVectorsProperty -> "false") ++
-        (if (subjectAttributed) Map(SkippingNumIndexedColumnsProperty -> "0") else Map.empty),
-      Vector.empty,
+        (if (subjectAttributed) Map(DeltaStatsPolicy.StatsColumnsProperty -> DeltaStatsPolicy.render(statsColumns))
+         else Map.empty),
+      statsColumns,
       subjectAttributed
     )
 
@@ -115,7 +127,9 @@ private[analytics] object AnalyticsDeltaCatalog {
     "silver_operational_events",
     SilverEventColumns ++ ExpiryColumns,
     eventChecks :+ expiresAfterIngestion,
-    subjectAttributed = true
+    subjectAttributed = true,
+    // MERGE key, plus the time columns read by retention expiry and the event-time windows.
+    statsColumns = Vector(Columns.EventId, Columns.OccurredAt, Columns.IngestedAt, Columns.ExpiresAt)
   )
 
   /** One row per application: the earliest time it entered each status, pseudonymized. `subjectToken` is the candidate
@@ -144,7 +158,9 @@ private[analytics] object AnalyticsDeltaCatalog {
         s"${quoted(Columns.TerminalAt)} IS NULL OR ${quoted(Columns.ExpiresAt)} > ${quoted(Columns.TerminalAt)}"
       )
     ),
-    subjectAttributed = true
+    subjectAttributed = true,
+    // MERGE key (a random application UUID, not a subject) and the time columns read by retention expiry.
+    statsColumns = Vector(Columns.ApplicationId, Columns.LastEventAt, Columns.TerminalAt, Columns.ExpiresAt)
   )
 
   /** Persisted Bronze: Kafka coordinates, envelope fingerprint, normalized fields and tokens; no raw identifiers. */
@@ -169,7 +185,16 @@ private[analytics] object AnalyticsDeltaCatalog {
       required(Columns.SubjectTokens, tokenArray)
     ) ++ ExpiryColumns,
     eventChecks ++ Vector(partitionNonNegative, offsetNonNegative, expiresAfterIngestion),
-    subjectAttributed = true
+    subjectAttributed = true,
+    // MERGE key (Kafka coordinates) and the time columns read by retention expiry and event-time windows.
+    statsColumns = Vector(
+      Columns.Topic,
+      Columns.Partition,
+      Columns.Offset,
+      Columns.OccurredAt,
+      Columns.IngestedAt,
+      Columns.ExpiresAt
+    )
   )
 
   /** Closed-day facts retain only normalized, pseudonymized fields needed for bounded replay. */
@@ -196,7 +221,17 @@ private[analytics] object AnalyticsDeltaCatalog {
       required(Columns.ExpiresAt, TimestampType)
     ),
     eventChecks ++ Vector(partitionNonNegative, offsetNonNegative, expiresAfterIngestion),
-    subjectAttributed = true
+    subjectAttributed = true,
+    // MERGE key (Kafka coordinates), the event-ID lookup of replay and the time columns read by retention expiry.
+    statsColumns = Vector(
+      Columns.Topic,
+      Columns.Partition,
+      Columns.Offset,
+      Columns.EventId,
+      Columns.OccurredAt,
+      Columns.IngestedAt,
+      Columns.ExpiresAt
+    )
   )
 
   /** Rejected records keep only coordinates, a payload hash and tokens. A tombstone has no payload to hash. */
@@ -213,7 +248,10 @@ private[analytics] object AnalyticsDeltaCatalog {
       required(Columns.ExpiresAt, TimestampType)
     ),
     Vector(partitionNonNegative, offsetNonNegative),
-    subjectAttributed = true
+    subjectAttributed = true,
+    // Kafka coordinates (offset-range lookups) and expiry. `quarantineId` is a SHA-256 of the raw record and spreads
+    // uniformly, so min/max skipping on it would not prune; it is not indexed.
+    statsColumns = Vector(Columns.Topic, Columns.Partition, Columns.Offset, Columns.ExpiresAt)
   )
 
   private def nonNegativeCount(column: String) =

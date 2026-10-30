@@ -17,6 +17,7 @@ class AnalyticsStreamingSettingsSpec extends FunSuite {
     |  max-offsets-per-trigger = 1000
     |  maintenance-interval = 60 seconds
     |  progress-retention = 7 days
+    |  optimize-interval = 6 hours
     |  maximum-replay-records = 1000
     |  initial-offsets = [{ partition = 0, offset = 12 }, { partition = 1, offset = 0 }]
     |}
@@ -140,6 +141,47 @@ class AnalyticsStreamingSettingsSpec extends FunSuite {
     assertNotEquals(
       settings.activationIdentity("cluster", "topic", "hiring.events", "file:///tmp/lakehouse"),
       changed.activationIdentity("cluster", "topic", "hiring.events", "file:///tmp/lakehouse")
+    )
+  }
+
+  test("AC-04.3 optimize-interval defaults to six hours, zero disables compaction and the tick bounds it") {
+    val settings = AnalyticsConfigFixtures.streaming(valid).toOption.get
+    assertEquals(settings.optimizeInterval, 6.hours)
+    val disabled =
+      AnalyticsConfigFixtures.streaming(valid.replace("optimize-interval = 6 hours", "optimize-interval = 0 seconds"))
+    assertEquals(disabled.map(_.optimizeInterval), Right(Duration.Zero))
+    List("optimize-interval = -1 hours", "optimize-interval = 30 seconds", "optimize-interval = soon").foreach { bad =>
+      assert(
+        AnalyticsConfigFixtures.streaming(valid.replace("optimize-interval = 6 hours", bad)).isLeft,
+        bad
+      )
+    }
+    // Compaction is an operational knob, so changing it keeps the stream identity.
+    val changed = AnalyticsConfigFixtures
+      .streaming(valid.replace("optimize-interval = 6 hours", "optimize-interval = 2 hours"))
+      .toOption
+      .get
+    assertEquals(
+      settings.activationIdentity("cluster", "topic", "hiring.events", "file:///tmp/lakehouse"),
+      changed.activationIdentity("cluster", "topic", "hiring.events", "file:///tmp/lakehouse")
+    )
+  }
+
+  test("AC-04.3 the shipped application settings carry the interval and an environment override") {
+    val shipped = scala.util.Using.resource(scala.io.Source.fromResource("application.conf"))(_.mkString) +
+      "\nanalytics.streaming.initial-offsets = [{ partition = 0, offset = 0 }]\n"
+    val base = Map("ANALYTICS_STREAMING_GRANT_ID" -> "grant-2026-10")
+    assertEquals(AnalyticsConfigFixtures.streaming(shipped, base).map(_.optimizeInterval), Right(6.hours))
+    assertEquals(
+      AnalyticsConfigFixtures
+        .streaming(shipped, base + ("ANALYTICS_STREAMING_OPTIMIZE_INTERVAL" -> "2 hours"))
+        .map(_.optimizeInterval),
+      Right(2.hours)
+    )
+    assert(
+      AnalyticsConfigFixtures
+        .streaming(shipped, base + ("ANALYTICS_STREAMING_OPTIMIZE_INTERVAL" -> "10 seconds"))
+        .isLeft
     )
   }
 

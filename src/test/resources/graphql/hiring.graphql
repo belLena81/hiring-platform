@@ -521,9 +521,6 @@ enum ErrorCode {
   "The job cannot move to the requested status."
   INVALID_JOB_TRANSITION
 
-  "New jobs cannot start closed."
-  INVALID_INITIAL_JOB_STATUS
-
   "The application or interview cannot move to the requested state from its current state."
   INVALID_STATUS_TRANSITION
 

@@ -56,13 +56,21 @@ class HiringCohortStoryIntegrationSpec extends HiringStoryStackSuite {
   private val conflicts = new java.util.concurrent.atomic.AtomicInteger(0)
 
   /** A lost concurrent write answers CONFLICT, which `docs/api.md` says to retry with the same idempotency key. */
-  private def withRetry(name: String, actor: StoryActor, application: String, extra: Json): IO[StoryOutcome] = {
+  private def withRetry(
+      name: String,
+      actor: StoryActor,
+      application: String,
+      extra: Json,
+      candidate: Int
+  ): IO[StoryOutcome] = {
     val key = operations.key
     val input = Json.obj("applicationId" -> application.asJson).deepMerge(extra)
     def attempt(remaining: Int): IO[StoryOutcome] =
       operations.sendWithKey(name, input, Some(actor), key).map(StoryOutcome.of(_, name)).flatMap {
         case StoryOutcome.Refused("CONFLICT", _, _) if remaining > 0 =>
-          IO(conflicts.incrementAndGet()) *> IO.sleep(200.millis) *> attempt(remaining - 1)
+          IO(println(s"HEA-12.0 CONFLICT retry: $name candidate $candidate attempt ${6 - remaining} of 5")) *> IO(
+            conflicts.incrementAndGet()
+          ) *> IO.sleep(200.millis) *> attempt(remaining - 1)
         case other => IO.pure(other)
       }
     attempt(5)
@@ -89,7 +97,7 @@ class HiringCohortStoryIntegrationSpec extends HiringStoryStackSuite {
         path.steps.traverse_ { case (name, extra) =>
           // The declining path acts as the candidate who owns the application; all other steps as the recruiter.
           val by = if (name == "declineApplication") actor else recruiter
-          withRetry(name, by, application, extra).map(unwrap(_, s"$name for candidate $i"))
+          withRetry(name, by, application, extra, i).map(unwrap(_, s"$name for candidate $i"))
         }
       }
       counts <- operations.read(StoryDocuments.job, "job", Json.obj("id" -> job.asJson), recruiter)
@@ -128,9 +136,14 @@ class HiringCohortStoryIntegrationSpec extends HiringStoryStackSuite {
     }
 
   test("HEA-11.3 the cohort's published events are exported for the analytics step") {
+    AnalyticsChain.require()
     for {
       _ <- untilPublished.timeout(120.seconds)
-      exported <- HiringStoryEventExport.write(stack.running.namespace, "cohort-events.jsonl")
+      exported <- HiringStoryEventExport.write(
+        stack.running.namespace,
+        "cohort-events.jsonl",
+        "cohort-report-documents.jsonl"
+      )
     } yield {
       // 61 jobs-and-applications creations (1 job, 60 applications), 90 status changes, 10 CANDIDATE_HIRED.
       println(s"HEA-11.3 exported ${exported._2} cohort events")

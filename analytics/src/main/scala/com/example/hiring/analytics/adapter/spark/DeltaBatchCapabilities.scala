@@ -34,7 +34,7 @@ private[analytics] final class DeltaBatchWriter[F[_]](
     val mutation = DeltaTables
       .forPath(source.sparkSession, path)
       .as("target")
-      .merge(source.as("source"), condition)
+      .merge(source.as("source"), MergeKeyBounds.bounded(source, condition))
       .whenNotMatched()
       .insertAll()
     freshnessVerdict(source, freshness).map(_ => mutation.execute()).map(_ => ())

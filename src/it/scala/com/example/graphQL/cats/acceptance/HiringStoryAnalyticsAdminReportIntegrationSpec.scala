@@ -3,8 +3,10 @@ package com.example.graphQL.cats.acceptance
 /** The 12-candidate story's report read through the real Admin `analyticsReport` (access control; the report itself is
   * empty at this scale by the K=10 rule and is checked on the hired cohort).
   */
-class HiringStoryAnalyticsAdminReportIntegrationSpec extends StoryAdminReportSuite("report-documents.jsonl") {
+class HiringStoryAnalyticsAdminReportIntegrationSpec
+    extends StoryAdminReportSuite("story-events.jsonl", "report-documents.jsonl") {
   test("HEA-12.2 a candidate and a recruiter are forbidden to read the report; the Admin is not") {
+    requireChain()
     for {
       admin <- adminActor
       recruiter <- operations.signUpRecruiter("Rhea Analytics", "Fabrikam Hiring")

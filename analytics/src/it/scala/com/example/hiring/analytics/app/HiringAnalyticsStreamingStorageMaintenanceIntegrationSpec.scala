@@ -8,6 +8,7 @@ import com.example.hiring.analytics.SharedRecoveryRuntimeSuite
 import com.example.hiring.analytics.StreamingCalendarFixtures.*
 import com.example.hiring.analytics.ShortRetentionFixtures.*
 import com.example.hiring.analytics.app.StreamingMaintenanceFixtures.*
+import com.example.hiring.analytics.adapter.spark.DeltaLogFactory
 import com.example.hiring.analytics.domain.StreamingBatchId
 import com.example.hiring.analytics.service.streaming.StreamingCheckpointBatch
 import org.apache.spark.sql.functions.{array_contains, col}
@@ -49,6 +50,85 @@ final class HiringAnalyticsStreamingStorageMaintenanceIntegrationSpec extends Sh
       else if (attempts == 0) IO.raiseError(new AssertionError("physical reclamation did not complete in time"))
       else maintenance.reclaim *> IO.sleep(1.second) *> reclaimUntil(maintenance, done, attempts - 1)
     }
+
+  private def optimizeCommits(harness: Harness, path: String): IO[Long] =
+    harness.execution {
+      io.delta.tables.DeltaTable
+        .forPath(harness.spark, path)
+        .history()
+        .filter(col("operation") === "OPTIMIZE")
+        .count()
+    }
+
+  private def fileCount(harness: Harness, path: String): IO[Long] =
+    harness.execution(DeltaLogFactory.system(harness.spark, path).update().numOfFiles)
+
+  test("AC-04.3 the maintenance tick compacts each subject table once its interval has elapsed") {
+    resource.use { runtime =>
+      for {
+        harness <- runtime.harness("maintenance-compaction")
+        observed = harness.at.truncatedTo(ChronoUnit.MICROS)
+        lineage = harness.preparation().identity.lineage
+        arrival = (index: Long) => observed.plusSeconds(index * 60L)
+        _ <- (0L until 4L).toVector.traverse_ { index =>
+          timedFrame(harness, index, arrival(index)).flatMap(processAt(harness, _, index, arrival(index)))
+        }
+        tables = Vector(harness.paths.bronze, harness.paths.silver)
+        before <- tables.traverse(fileCount(harness, _))
+        _ = assert(before.forall(_ > 1L), s"micro-batches left several files per table: $before")
+        rows <- tables.traverse(harness.count)
+        at = observed.plusSeconds(600L)
+        disabled = StreamingMaintenanceFixtures.maintenance(harness, harness.operational, 7.days)
+        _ <- disabled.run(lineage, at)
+        untouched <- tables.traverse(fileCount(harness, _))
+        _ = assertEquals(untouched, before, "a zero interval disables compaction")
+        maintenance = StreamingMaintenanceFixtures.maintenance(
+          harness,
+          harness.operational,
+          7.days,
+          optimizeInterval = 1.hour
+        )
+        _ <- maintenance.run(lineage, at)
+        after <- tables.traverse(fileCount(harness, _))
+        _ = assertEquals(after, Vector(1L, 1L), s"compacted from $before")
+        commits <- tables.traverse(optimizeCommits(harness, _))
+        _ = assertEquals(commits, Vector(1L, 1L))
+        _ <- maintenance.run(lineage, at.plusSeconds(60L))
+        again <- tables.traverse(optimizeCommits(harness, _))
+        _ = assertEquals(again, Vector(1L, 1L), "the interval has not elapsed, so nothing is compacted again")
+        _ <- tables.traverse(harness.count).map(counts => assertEquals(counts, rows, "contents are unchanged"))
+      } yield ()
+    }
+  }
+
+  test("AC-04.3 the maintenance tick does not compact while an erasure request is pending") {
+    resource.use { runtime =>
+      for {
+        harness <- runtime.harness("maintenance-compaction-erasure")
+        observed = harness.at.truncatedTo(ChronoUnit.MICROS)
+        lineage = harness.preparation().identity.lineage
+        arrival = (index: Long) => observed.plusSeconds(index * 60L)
+        _ <- (0L until 4L).toVector.traverse_ { index =>
+          timedFrame(harness, index, arrival(index)).flatMap(processAt(harness, _, index, arrival(index)))
+        }
+        _ <- harness.sync(
+          _.getCollection("analytics_erasure_requests").insertOne(
+            new Document("_id", harness.subjects(2)).append("state", "Pending")
+          )
+        )
+        maintenance = StreamingMaintenanceFixtures.maintenance(
+          harness,
+          harness.operational,
+          7.days,
+          optimizeInterval = 1.hour
+        )
+        _ <- maintenance.run(lineage, observed.plusSeconds(600L))
+        tables = Vector(harness.paths.bronze, harness.paths.silver, harness.paths.quarantine, harness.paths.lateFacts)
+        commits <- tables.traverse(optimizeCommits(harness, _))
+        _ = assertEquals(commits, Vector.fill(tables.size)(0L), "no table is compacted during an erasure request")
+      } yield ()
+    }
+  }
 
   test("HCS-11.1 maintenance thirty-one days later expires Bronze, Silver and late facts and reclaims their files") {
     resource.use { runtime =>

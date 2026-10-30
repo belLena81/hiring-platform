@@ -646,10 +646,15 @@ class HiringStoryAcceptanceIntegrationSpec extends HiringStoryStackSuite {
   }
 
   test("HEA-11.3 the story's published events are exported for the analytics step") {
-    HiringStoryEventExport.write(stack.running.namespace).map { case (file, count) =>
-      assert(count > 0, "the topic holds the story's events")
-      println(s"HEA-11.3 exported $count events to the analytics hand-off file")
-      assert(java.nio.file.Files.isRegularFile(file))
+    AnalyticsChain.require()
+    for {
+      _ <- untilPublished.timeout(90.seconds)
+      exported <- HiringStoryEventExport.write(stack.running.namespace)
+    } yield {
+      println(s"HEA-11.3 exported ${exported._2} events to the analytics hand-off file")
+      // 14 + 9 + 1 + 1 + 1 + 4 + 1 + 1 published action events plus 12 SEARCH_PERFORMED (see HEA-11.1).
+      assertEquals(exported._2, 44)
+      assert(java.nio.file.Files.isRegularFile(exported._1))
     }
   }
 }

@@ -6,11 +6,6 @@ import com.example.graphQL.cats.domain.model.{Job, JobState, JobStatus}
 import java.time.Instant
 
 object JobLifecycle {
-  def create(job: Job): Either[DomainError, Job] =
-    job.state match {
-      case JobState.Closed(_)             => Left(DomainError.InvalidInitialJobStatus(JobStatus.Closed))
-      case JobState.Draft | JobState.Open => Right(job)
-    }
 
   /** Applies the editable content of an already validated job; owner, status and embedding stay as they are. */
   def update(input: Job): LifecycleProgram[Job, Unit] =

@@ -49,7 +49,8 @@ private[app] object StreamingMaintenanceFixtures {
       harness: Harness,
       operational: AnalyticsOperationalSettings,
       progressRetention: FiniteDuration,
-      logs: DeltaLogFactory = DeltaLogFactory.system
+      logs: DeltaLogFactory = DeltaLogFactory.system,
+      optimizeInterval: FiniteDuration = Duration.Zero
   ): Maintenance =
     maintenance(
       harness.spark,
@@ -60,7 +61,8 @@ private[app] object StreamingMaintenanceFixtures {
       harness.keys,
       operational,
       progressRetention,
-      logs
+      logs,
+      optimizeInterval
     )
 
   def maintenance(
@@ -72,7 +74,8 @@ private[app] object StreamingMaintenanceFixtures {
       keys: SubjectPseudonymizer,
       operational: AnalyticsOperationalSettings,
       progressRetention: FiniteDuration,
-      logs: DeltaLogFactory
+      logs: DeltaLogFactory,
+      optimizeInterval: FiniteDuration
   ): Maintenance = {
     val streams = new MongoPublisherStream(operational)
     val lock = new MongoAnalyticsLakehouseLock[IO](database, streams, Clock[IO])
@@ -97,7 +100,8 @@ private[app] object StreamingMaintenanceFixtures {
         new DeltaStreamingBatchJournal[IO](spark, paths, execution),
         new MongoAnalyticsLateFactReplayJournal[IO](database, streams, paths.root),
         operational.retention,
-        progressRetention
+        progressRetention,
+        optimizeInterval
       ),
       lock,
       paths.root

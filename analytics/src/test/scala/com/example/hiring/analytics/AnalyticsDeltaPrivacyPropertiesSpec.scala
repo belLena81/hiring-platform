@@ -3,7 +3,9 @@ package com.example.hiring.analytics
 import cats.effect.{IO, Resource}
 import cats.syntax.all.*
 import com.example.hiring.analytics.adapter.spark.{
+  AnalyticsDeltaCatalog,
   AnalyticsDeltaRetention,
+  DeltaStatsPolicy,
   SparkBlockingExecution,
   SparkExecution,
   SparkPhysicalLocation
@@ -75,9 +77,15 @@ final class AnalyticsDeltaPrivacyPropertiesSpec extends CatsEffectSuite {
         _ <- execution {
           val shape = StructType(Vector(StructField("controlValue", StringType, nullable = false)))
           tables.foreach { path =>
-            spark
-              .createDataFrame(Vector(Row("synthetic retained control")).asJava, shape)
-              .write
+            // The statistics allow-list names real columns, so subject tables keep their declared (empty) shape.
+            val frame =
+              if (subjectTables(path))
+                spark.createDataFrame(
+                  Vector.empty[Row].asJava,
+                  AnalyticsDeltaCatalog.specAt(paths, path).getOrElse(fail(s"no catalog table at $path")).schema
+                )
+              else spark.createDataFrame(Vector(Row("synthetic retained control")).asJava, shape)
+            frame.write
               .format("delta")
               .option("delta.dataSkippingNumIndexedCols", "7")
               .option("delta.checkpointInterval", "100")
@@ -92,7 +100,14 @@ final class AnalyticsDeltaPrivacyPropertiesSpec extends CatsEffectSuite {
             assertEquals(properties("delta.deletedFileRetentionDuration"), "interval 7 days")
             assertEquals(properties("delta.logRetentionDuration"), "interval 14 days")
             assertEquals(properties("delta.enableDeletionVectors"), "false")
-            assertEquals(properties("delta.dataSkippingNumIndexedCols"), if (subjectTables(path)) "0" else "7")
+            if (subjectTables(path)) {
+              val declared = AnalyticsDeltaCatalog.specAt(paths, path).getOrElse(fail(s"no catalog table at $path"))
+              assertEquals(
+                properties(DeltaStatsPolicy.StatsColumnsProperty),
+                DeltaStatsPolicy.render(declared.statsColumns)
+              )
+              assertEquals(properties.get(DeltaStatsPolicy.NumIndexedColumnsProperty), None)
+            } else assertEquals(properties("delta.dataSkippingNumIndexedCols"), "7")
             assertEquals(properties("delta.checkpointInterval"), "100")
             path -> snapshot.version
           }.toMap
@@ -112,9 +127,14 @@ final class AnalyticsDeltaPrivacyPropertiesSpec extends CatsEffectSuite {
         _ <- execution {
           val repaired = DeltaLog.forTable(spark, SparkPhysicalLocation.resolve(paths.bronze)).update()
           assertEquals(repaired.metadata.configuration("delta.deletedFileRetentionDuration"), "interval 7 days")
-          assertEquals(repaired.metadata.configuration("delta.dataSkippingNumIndexedCols"), "0")
+          assertEquals(
+            repaired.metadata.configuration(DeltaStatsPolicy.StatsColumnsProperty),
+            DeltaStatsPolicy.render(AnalyticsDeltaCatalog.Bronze.statsColumns)
+          )
+          assertEquals(repaired.metadata.configuration.get(DeltaStatsPolicy.NumIndexedColumnsProperty), None)
           assertEquals(repaired.metadata.configuration("delta.checkpointInterval"), "100")
-          assertEquals(repaired.version, versions(paths.bronze) + 2L)
+          // The test's own drift, then the repair: one SET for the retention window and one UNSET of the positional index.
+          assertEquals(repaired.version, versions(paths.bronze) + 3L)
           tables.filterNot(_ == paths.bronze).foreach { path =>
             assertEquals(
               DeltaLog.forTable(spark, SparkPhysicalLocation.resolve(path)).update().version,
@@ -130,9 +150,8 @@ final class AnalyticsDeltaPrivacyPropertiesSpec extends CatsEffectSuite {
     withLakehouse { (spark, execution, paths, retention) =>
       for {
         _ <- execution {
-          val shape = StructType(Vector(StructField("controlValue", StringType, nullable = false)))
           spark
-            .createDataFrame(Vector(Row("synthetic retained control")).asJava, shape)
+            .createDataFrame(Vector.empty[Row].asJava, AnalyticsDeltaCatalog.Bronze.schema)
             .write
             .format("delta")
             .option("delta.logRetentionDuration", "interval 30 days")
@@ -153,9 +172,8 @@ final class AnalyticsDeltaPrivacyPropertiesSpec extends CatsEffectSuite {
     withLakehouse { (spark, execution, paths, retention) =>
       for {
         _ <- execution {
-          val shape = StructType(Vector(StructField("controlValue", StringType, nullable = false)))
           spark
-            .createDataFrame(Vector(Row("synthetic retained control")).asJava, shape)
+            .createDataFrame(Vector.empty[Row].asJava, AnalyticsDeltaCatalog.Bronze.schema)
             .write
             .format("delta")
             .save(SparkPhysicalLocation.resolve(paths.bronze))

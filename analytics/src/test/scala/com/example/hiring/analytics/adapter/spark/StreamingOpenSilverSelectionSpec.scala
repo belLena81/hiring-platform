@@ -193,13 +193,6 @@ final class StreamingOpenSilverSelectionSpec extends CatsEffectSuite {
             OperationalEventTransforms.silver(OperationalEventTransforms.validEvents(seed), keys, markers)
           )
           _ <- writer.merge(writer.withExpiry(existing, at, 30), seedPaths.silver, "target.eventId = source.eventId")
-          _ <- execution(
-            spark
-              .sql(
-                s"ALTER TABLE delta.`${seedPaths.silver}` SET TBLPROPERTIES ('delta.dataSkippingNumIndexedCols' = '0')"
-              )
-              .collect()
-          )
         } yield AnalyticsLakehouseTemplate.fromPrepared(seededRoot)
       }
       def run(

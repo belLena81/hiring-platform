@@ -577,7 +577,11 @@ final class ApplicationStageTimesSpec extends FunSuite {
   test("AC-03.3 the stage-times table is subject-attributed, gathers no token statistics and checks its expiry") {
     val spec = AnalyticsDeltaCatalog.ApplicationStageTimes
     assert(spec.subjectAttributed)
-    assertEquals(spec.properties.get(AnalyticsDeltaCatalog.SkippingNumIndexedColumnsProperty), Some("0"))
+    assertEquals(
+      spec.properties.get(DeltaStatsPolicy.StatsColumnsProperty),
+      Some("applicationId,lastEventAt,terminalAt,expiresAt")
+    )
+    assertEquals(spec.properties.get(DeltaStatsPolicy.NumIndexedColumnsProperty), None)
     val paths = freshPaths("inventory")
     assert(paths.inventory.subjectDelta.exists(_.location == paths.applicationStageTimes))
     assert(paths.inventory.delta.exists(_.location == paths.hiringStageDurationsGold))

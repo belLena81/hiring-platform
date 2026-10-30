@@ -153,7 +153,11 @@ final class AnalyticsQuarantineMergeSpec extends CatsEffectSuite {
           .detail()
           .head()
           .getAs[scala.collection.Map[String, String]]("properties")
-        assertEquals(properties.get("delta.dataSkippingNumIndexedCols"), Some("0"))
+        assertEquals(
+          properties.get(DeltaStatsPolicy.StatsColumnsProperty),
+          Some(DeltaStatsPolicy.render(AnalyticsDeltaCatalog.Quarantine.statsColumns))
+        )
+        assertEquals(properties.get(DeltaStatsPolicy.NumIndexedColumnsProperty), None)
         assert(!table.columns.exists(Set("rawValue", "actorId", "payload", "subjectToken")))
       }
     }

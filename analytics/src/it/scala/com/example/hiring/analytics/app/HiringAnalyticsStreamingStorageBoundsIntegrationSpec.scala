@@ -175,7 +175,8 @@ final class HiringAnalyticsStreamingStorageBoundsIntegrationSpec extends CatsEff
                 settings.common.pseudonymizer,
                 shortRetention(settings.common.operational),
                 7.days,
-                shiftedLogs(32L)
+                shiftedLogs(32L),
+                Duration.Zero
               )
               _ <- maintenance.run(lineage, Instant.now())
               _ <- dataFilesAfterReclaim(root, maintenance, measured._1)

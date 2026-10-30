@@ -25,6 +25,7 @@ final class HiringAnalyticsStreamingActivationSpec extends CatsEffectSuite {
     |  trigger-interval = 10 seconds
     |  maintenance-interval = 60 seconds
     |  progress-retention = 7 days
+    |  optimize-interval = 6 hours
     |  max-offsets-per-trigger = 1000
     |  maximum-replay-records = 1000
     |  initial-offsets = [{ partition = 0, offset = 0 }]
