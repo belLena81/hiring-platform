@@ -7,7 +7,7 @@
 - Coordinator: Product Manager. Owners: Software Architect (design below), Scala Developer (S1, S2, S4, service part of S3), Data Engineer (repository part of S3). Reviewers: Code Reviewer and Security Engineer per slice; QA on the final state.
 - User outcome: a screen that mixes ordinary data with AI search still renders when the embedding provider or vector search is down; candidates and recruiters get keyword results instead of an error; partner developers can see their remaining query budget.
 - Non-goals: token-bucket budget (deferred, see D4); `RateLimit` HTTP headers (draft syntax unverified); plan tiers; `@cost` directives; structured fallback for `recommendedJobs`; operational event contract change (no `mode` field); pagination of ranked results (D2 of the contract-consistency spec stands); LLM features and streaming.
-- Dependencies: [contract consistency](hiring-graphql-contract-consistency.md) (ErrorCode enum, `UserError`, D2), [architecture review remediation](architecture-review-remediation.md) (ARR-14 limiter properties), [dependency circuit breakers](dependency-circuit-breakers.md).
+- Dependencies: contract consistency (ErrorCode enum, `UserError`, D2) and architecture review remediation (ARR-14 limiter properties), both complete and recorded in [hiring platform refinements](hiring-platform-refinements.md#completed-work-recorded-from-removed-specifications), [dependency circuit breakers](dependency-circuit-breakers.md).
 
 ## Source facts (Software Architect, read 2026-10-15)
 

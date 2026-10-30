@@ -2,7 +2,7 @@
 
 ## Current decisions and implementation
 
-[README](../README.md) describes the Scala 3, Cats Effect, FS2, Sangria, http4s, and MongoDB platform. [Architecture](../ARCHITECTURE.md), [use cases](use-cases.md), and the [current reset specification](specs/pre-mvp-contract-reset.md) describe the active system and its evidence.
+[README](../README.md) describes the Scala 3, Cats Effect, FS2, Sangria, http4s, and MongoDB platform. [Architecture](../ARCHITECTURE.md), [use cases](use-cases.md), and the [API reference](api.md) describe the active system; [schema evolution](schema-evolution.md) and the specifications under `specs/` hold its evidence.
 
 The current build uses Scala 3.9 LTS, Java 17+, Cats Effect, Sangria/http4s, and MUnit. Unit tests are Docker-independent; the explicit `IntegrationTest` configuration contains live HTTP and disposable MongoDB checks. Inspect the live build before each task.
 

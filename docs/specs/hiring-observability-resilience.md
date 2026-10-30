@@ -6,7 +6,7 @@
 - Status: **draft**. Signal boundaries and local failure scenarios are defined; production alert thresholds, operator routing, exporter deployment and resource budgets require measured decisions.
 - Coordinator: Product Manager. Scala Developer owns instrumentation/runtime changes; Data Engineer owns Mongo query measurements; Big Data Engineer owns broker/workflow measurements. Independent Security Engineer, Code Reviewer and QA review final implementation.
 - Outcome: operators can identify whether a hiring request failed, durable background work is delayed, or evidence is missing, and can recover safely with an actionable runbook.
-- Authorized current work: specification. Non-goals: production monitoring procurement, frontend dashboards, Node tooling, general-purpose event bus, logging hiring content, new automatic replay authority, or claiming resilience from a dashboard alone.
+- Authorized current work: specification, plus the [MVP observability slice](#mvp-observability-slice) as MVP scope (implementation still needs its own task request). Non-goals: production monitoring procurement, frontend dashboards, Node tooling, general-purpose event bus, logging hiring content, new automatic replay authority, or claiming resilience from a dashboard alone.
 - Dependencies: accepted operational behavior from [Mongo/vector access](mongodb-vector-retrieval-optimization.md), [search/embedding](hiring-search-enhancements.md), [discovery](hiring-discovery-search-quality.md), and [durable workflows](durable-hiring-workflows.md).
 - Existing security, telemetry and failure controls remain mandatory before this phase. Existing analytics maintenance/activation gates cannot be postponed into observability work.
 
@@ -21,7 +21,7 @@
 | [OperationalEventKafkaRuntime.scala](../../src/main/scala/com/example/graphQL/cats/infrastructure/kafka/OperationalEventKafkaRuntime.scala) | Resource-owned publisher/consumer and durable receipt/quarantine operations; broader lag/repair observability is a target. |
 | [EmbeddingCapability.scala](../../src/main/scala/com/example/graphQL/cats/runtime/EmbeddingCapability.scala), [EmbeddingPipeline.scala](../../src/main/scala/com/example/graphQL/cats/service/search/EmbeddingPipeline.scala) | Optional embedding capability, existing client/worker lifecycle and durable processing. Instrument this ownership rather than starting another worker. |
 
-[Runtime safety](hiring-runtime-safety.md), [mutation reliability](mutation-reliability.md), [logging](../logging.md), and [engineering quality](../engineering-quality.md) remain baseline references. Historical acceptance there is not evidence that the requirements below pass.
+The earlier runtime safety and mutation reliability tasks (recorded in [hiring platform refinements](hiring-platform-refinements.md#completed-work-recorded-from-removed-specifications)), [logging](../logging.md), and [engineering quality](../engineering-quality.md) remain baseline references. Historical acceptance there is not evidence that the requirements below pass.
 
 ## Desired behavior and operator contract
 
@@ -172,5 +172,17 @@ Compare existing diagnostics plus local capture with a collector and backend. In
 4. QA runs deterministic provider/broker/worker/quarantine/deletion drills against final code and repeats affected checks after fixes (HOR-06–08).
 5. Once workload and deployment decisions are resolved, measure overhead and configure production alert routing/retention with independently reviewed safe examples (HOR-09–10). This is a distinct deployed gate.
 6. Run root `sbt test`, configured format checks, and relevant `IntegrationTest / test`; obtain independent Code Reviewer/Security verdicts and final QA. Preserve explicit blocked/unverified status for missing infrastructure.
+
+### MVP observability slice
+
+Recommended 2026-10-29 from a source review of the existing telemetry and placed in MVP scope by the user the same day: it is MVP (local) condition 7 in [development milestones](../development-milestones.md#mvp-observability-slice-decided-2026-10-29). The rest of this phase stays post-MVP. Source facts behind it:
+
+- [GraphQLHttpRoutes.scala](../../src/main/scala/com/example/graphQL/cats/api/http/GraphQLHttpRoutes.scala) returns HTTP 200 for a result with `errors` and records `FIELD_ERROR` only in the `GRAPHQL_COMPLETED` log event. The local 5xx alert and RED dashboard therefore cannot see field-level failures (HOR-01 gap).
+- The persisted-query allowlist ([PersistedQueryAllowlist.scala](../../src/main/scala/com/example/graphQL/cats/api/admission/PersistedQueryAllowlist.scala)) holds document hashes only and defaults to `off`, so operation names stay caller-supplied and remain excluded from labels. The bounded label for a GraphQL outcome metric is the schema root field name (not the alias) plus the outcome class.
+- Spans exist for the HTTP server, GraphQL fields (`graphql.field.<name>`) and the Voyage client (with header propagation). There are no Mongo spans, no runtime (JVM/Cats Effect) metrics, and no trace context on outbox entries or Kafka records.
+- The local alert rules have no minimum-sample guard; `histogram_quantile` and the error ratio are unstable at sparse local traffic.
+- Container logging uses an `AsyncAppender` with `neverBlock=false` and a 256-entry queue: no log loss, but a slow stdout delays request handling. Record this as the current overload policy under "Sampling/bounds" rather than change it silently.
+
+Slice order: (1) run the [local observability](../local-observability.md) first-run checklist and record observed names; (2) GraphQL root-field outcome counter (HOR-01, HOR-02); (3) Mongo operation spans and duration at the repository or driver boundary (HOR-02, HOR-03); (4) runtime metrics through the existing OpenTelemetry boundary; (5) minimum-traffic guards on local alerts, thresholds marked provisional; (6) documented `OTEL_*` sampler and exporter batch/queue bounds (HOR-05, local part); (7) overlay on/off overhead baseline (HOR-10, local part). Outbox/Kafka trace links, circuit-breaker state metrics and burn-rate SLO rules follow inside the phase. Tail sampling, metric-storage scaling, production routing and adaptive concurrency wait for deployed traffic (Phases 14–15).
 
 Checkpoint: specification drafted; no implementation acceptance completed. Future tests/drills listed here have not run. No exporter backend/provider was provisioned. Next action: independent specification review, then finalize the instrument catalog for the first slice. Future Code Reviewer: pending. Future Security Engineer: pending. Future QA: pending. Documentation-delivery evidence and verdicts are tracked separately in the [roadmap readiness index](../development-milestones.md#specification-ownership-and-readiness).

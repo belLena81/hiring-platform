@@ -27,8 +27,11 @@ lazy val unitTestConcurrency = 4
 
 // Measured wall time in seconds of the slow unit suites, used only to start the longest first (unlisted suites weigh 10).
 lazy val unitTestWeights = Map(
-  "AnalyticsTransformsSpec" -> 870,
-  "StreamingOpenSilverSelectionSpec" -> 300,
+  "StreamingOpenSilverSelectionSpec" -> 350,
+  "AnalyticsSubjectErasureSpec" -> 300,
+  "AnalyticsBatchPublicationSpec" -> 300,
+  "AnalyticsEventTransformsSpec" -> 250,
+  "AnalyticsHmacKeyContinuityTransformsSpec" -> 250,
   "AnalyticsDeltaCatalogSpec" -> 300,
   "DeltaStreamingBatchJournalSpec" -> 250,
   "ApplicationStageTimesSpec" -> 150,

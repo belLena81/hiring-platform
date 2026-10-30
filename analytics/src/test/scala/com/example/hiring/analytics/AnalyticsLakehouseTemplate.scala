@@ -24,9 +24,12 @@ private[analytics] final class AnalyticsLakehouseTemplate private (template: Pat
   /** A new temporary lakehouse directory that starts as a copy of the template. */
   def freshDirectory(prefix: String): Path = {
     val target = Files.createTempDirectory(prefix)
-    copyTree(template, target)
+    copyInto(target)
     target
   }
+
+  /** Copies the template into `target`, which may be absent or an empty directory. */
+  def copyInto(target: Path): Unit = copyTree(template, target)
 
   private def copyTree(from: Path, to: Path): Unit = {
     val entries = Files.walk(from)
@@ -50,6 +53,9 @@ private[analytics] object AnalyticsLakehouseTemplate {
     initialize(TestAnalyticsLakehousePaths.unsafe(directory.toUri.toString.stripSuffix("/")))
     new AnalyticsLakehouseTemplate(directory)
   }
+
+  /** A template over a lakehouse directory that the caller has already prepared and will not change again. */
+  def fromPrepared(directory: Path): AnalyticsLakehouseTemplate = new AnalyticsLakehouseTemplate(directory)
 
   /** The state every batch reaches before it reads any data. */
   def forBatch(spark: SparkSession, pseudonymizer: SubjectPseudonymizer): AnalyticsLakehouseTemplate =

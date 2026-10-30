@@ -1046,27 +1046,25 @@ availability in Bronze < 30 sec
 ### Input
 
 ```text
-date range
-
-optional dimensions:
-job
-recruiter
-location
-skill
+date range (at most 30 days)
 ```
 
 ### Output
 
+Daily, system-wide counts of the stages applications reached (UTC day of the event):
+
 ```text
-applications
+created
 accepted
-interviews
+declined
+interview
 hired
 rejected
-
-application → interview conversion
-interview → hire conversion
 ```
+
+A count is the number of distinct applications that entered that status on that day, so an application rejected after an interview counts in both `interview` and `rejected`. A day is published only when every non-zero count comes from at least 10 distinct candidates; otherwise the whole day is withheld.
+
+Post-MVP (not built): dimensions (job, recruiter, location, skill) and the conversion rates (application → interview, interview → hire, hire rate, rejection rate).
 
 ### Pipeline
 
@@ -1100,14 +1098,6 @@ output rows
 shuffle size
 execution duration
 records rejected
-```
-
-Business:
-
-```text
-stage conversion rates
-hire rate
-rejection rate
 ```
 
 ### Initial SLO

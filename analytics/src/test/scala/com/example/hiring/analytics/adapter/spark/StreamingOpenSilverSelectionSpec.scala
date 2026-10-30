@@ -1,6 +1,6 @@
 package com.example.hiring.analytics.adapter.spark
 
-import com.example.hiring.analytics.AnalyticsTestSpark
+import com.example.hiring.analytics.{AnalyticsLakehouseTemplate, AnalyticsTestSpark}
 
 import cats.effect.{IO, Resource}
 import cats.syntax.all.*
@@ -181,12 +181,35 @@ final class StreamingOpenSilverSelectionSpec extends CatsEffectSuite {
 
   test("direct OPEN projection preserves normalized native Silver and quarantine outcomes") {
     withSpark { (spark, execution, root) =>
+      // Every run starts from the same 7,500-row Silver table with data skipping statistics disabled; build it once.
+      val seededRoot = root.resolve("seeded-silver")
+      val seedPaths = TestAnalyticsLakehousePaths.unsafe(seededRoot.toUri.toString.stripSuffix("/"))
+      val buildSeeded: IO[AnalyticsLakehouseTemplate] = {
+        val writer = new DeltaBatchWriter[IO](seedPaths, execution)
+        for {
+          seed <- execution(parsed(spark, (0 until 7500).toVector, false))
+          markers <- execution(AnalyticsSubjectPrivacy.emptyMarkers(seed))
+          existing <- execution.either(
+            OperationalEventTransforms.silver(OperationalEventTransforms.validEvents(seed), keys, markers)
+          )
+          _ <- writer.merge(writer.withExpiry(existing, at, 30), seedPaths.silver, "target.eventId = source.eventId")
+          _ <- execution(
+            spark
+              .sql(
+                s"ALTER TABLE delta.`${seedPaths.silver}` SET TBLPROPERTIES ('delta.dataSkippingNumIndexedCols' = '0')"
+              )
+              .collect()
+          )
+        } yield AnalyticsLakehouseTemplate.fromPrepared(seededRoot)
+      }
       def run(
+          seeded: AnalyticsLakehouseTemplate,
           mixed: Boolean,
           direct: Boolean,
           trial: Int
       ): IO[(Vector[Long], Long, (StructType, Vector[String], Long), (StructType, Vector[String], Long))] = {
-        val paths = TestAnalyticsLakehousePaths.unsafe(root.resolve(s"$mixed-$direct-$trial").toUri.toString)
+        val runRoot = root.resolve(s"$mixed-$direct-$trial")
+        val paths = TestAnalyticsLakehousePaths.unsafe(runRoot.toUri.toString.stripSuffix("/"))
         val writer = new DeltaBatchWriter[IO](paths, execution)
         val stage = new AnalyticsBatchSilverStage[IO](
           paths,
@@ -198,17 +221,10 @@ final class StreamingOpenSilverSelectionSpec extends CatsEffectSuite {
           AnalyticsTestOperationalConfig.operational.retention
         )
         for {
+          // Untimed setup: a copy of the seeded Silver table (the same seed in every run).
+          _ <- IO.blocking(seeded.copyInto(runRoot))
           seed <- execution(parsed(spark, (0 until 7500).toVector, false))
           markers <- execution(AnalyticsSubjectPrivacy.emptyMarkers(seed))
-          existing <- execution.either(
-            OperationalEventTransforms.silver(OperationalEventTransforms.validEvents(seed), keys, markers)
-          )
-          _ <- writer.merge(writer.withExpiry(existing, at, 30), paths.silver, "target.eventId = source.eventId")
-          _ <- execution(
-            spark
-              .sql(s"ALTER TABLE delta.`${paths.silver}` SET TBLPROPERTIES ('delta.dataSkippingNumIndexedCols' = '0')")
-              .collect()
-          )
           input <- execution(
             if (mixed) parsed(spark, ((0 until 500) ++ (10000 until 10500)).toVector, true)
             else parsed(spark, (10000 until 11000).toVector, false)
@@ -251,10 +267,10 @@ final class StreamingOpenSilverSelectionSpec extends CatsEffectSuite {
             }
         } yield result
       }
-      Vector(false, true).traverse_ { mixed =>
+      def trials(seeded: AnalyticsLakehouseTemplate): IO[Unit] = Vector(false, true).traverse_ { mixed =>
         (0 until 3).toVector.traverse_ { trial =>
           val order = if (trial % 2 == 0) Vector(false, true) else Vector(true, false)
-          order.traverse(direct => run(mixed, direct, trial).map(direct -> _)).flatMap { values =>
+          order.traverse(direct => run(seeded, mixed, direct, trial).map(direct -> _)).flatMap { values =>
             IO {
               val original = values.find(entry => !entry._1).get._2
               val direct = values.find(_._1).get._2
@@ -267,6 +283,7 @@ final class StreamingOpenSilverSelectionSpec extends CatsEffectSuite {
           }
         }
       }
+      buildSeeded.flatMap(trials)
     }
   }
   test("normalized OPEN selection preserves duplicates privacy malformed future closed and prepared supersets") {
@@ -306,11 +323,13 @@ final class StreamingOpenSilverSelectionSpec extends CatsEffectSuite {
               .withColumn("eventId", lit(null).cast(StringType))
               .withColumn("rawValue", lit("invalid-envelope"))
               .withColumn("offset", lit(9L))
-            valid
+            val combined = valid
               .unionByName(parsed(spark, Vector(100), false).withColumn("offset", lit(6L)))
               .unionByName(parsed(spark, Vector(102), false).withColumn("offset", lit(7L)))
               .unionByName(parsed(spark, Vector(102), true).withColumn("offset", lit(8L)))
               .unionByName(malformed)
+            // Same rows as a flat local relation: the fixture is the parsed content, not its parsing lineage.
+            spark.createDataFrame(combined.collectAsList(), combined.schema)
           }
           markers <- execution(
             AnalyticsSubjectPrivacy

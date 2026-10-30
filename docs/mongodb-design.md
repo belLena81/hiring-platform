@@ -245,7 +245,7 @@ Cleanup selection sweeps ascending raw `_id` values in pages of at most 32 throu
 
 ## Status write, work rows and the batch claim
 
-Consolidation S3 (MR-04 to MR-08, MR-12, FD-03, FD-05; [spec](specs/hiring-model-and-retrieval-consolidation.md)). Stored-shape retirement uses ledger steps 029 to 034 (033 and 034 are consolidation S5, below); steps 026 to 028 belong to the schema consolidation (outbox envelope, canonical job filters, binary embedding vectors).
+Consolidation S3 (MR-04 to MR-08, MR-12, FD-03, FD-05; [record](specs/hiring-platform-refinements.md#completed-work-recorded-from-removed-specifications)). Stored-shape retirement uses ledger steps 029 to 034 (033 and 034 are consolidation S5, below); steps 026 to 028 belong to the schema consolidation (outbox envelope, canonical job filters, binary embedding vectors).
 
 **Status write (`ApplicationStatusWrite`).** The API status change, the interview hiring commit and the interview cancellation all call one session-scoped write: `$set status, updatedAt` on the application, guarded by `_id`, `jobId`, `candidateId` and the previous status (a stale or forged write matches nothing and is a `Conflict`); then the append-only `application_events` insert; then the outbox inserts. The document is never replaced, so the other fields cannot be overwritten by a caller's copy. Invariant, asserted by `ApplicationStatusInvariant` at the end of every status-changing integration test: `applications.status` equals the `newStatus` of the latest history row, and the history is a chain. Access pattern: write by `_id` (primary key); no new index.
 
@@ -274,7 +274,7 @@ Migration 025 installs and audits its own generation of the validators (`MongoOp
 
 ## Domain states, field ownership and list projection
 
-Consolidation S5 (MR-09, MR-10, GQ-02, FD-07; [spec](specs/hiring-model-and-retrieval-consolidation.md)).
+Consolidation S5 (MR-09, MR-10, GQ-02, FD-07; [record](specs/hiring-platform-refinements.md#completed-work-recorded-from-removed-specifications)).
 
 **Two facts, one state.** The domain `Job` carries `state: JobState` (`Draft`, `Open`, `Closed(at)`) and `User` carries `state: AccountState` (`Active`, `Deleted(at)`), so a closed job without `closedAt` or a deleted account without `deletedAt` cannot be built. `JobStatus` and `AccountStatus` remain the closed label enums that the GraphQL enums, filters, event payloads and stored strings use (`state.status`). The stored shape is unchanged and stays flat: `status` with `closedAt`, `accountStatus` with `deletedAt`, because the indexes, filters, GraphQL arguments and the analytics build read the status string. The codec decodes the pair as one state and fails closed on a disagreement (`InconsistentDocument`: Closed without `closedAt`, Open or Draft with it, Deleted without `deletedAt`, Active with it). No validator or ledger step is added for these two pairs: the users and jobs validators are pinned by the completed proofs of 016 and 021 and nothing changes in what is stored.
 

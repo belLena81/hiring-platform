@@ -644,4 +644,12 @@ class HiringStoryAcceptanceIntegrationSpec extends HiringStoryStackSuite {
       println(s"HEA-11.1 types outside the committed-action list: $unexpected")
     }
   }
+
+  test("HEA-11.3 the story's published events are exported for the analytics step") {
+    HiringStoryEventExport.write(stack.running.namespace).map { case (file, count) =>
+      assert(count > 0, "the topic holds the story's events")
+      println(s"HEA-11.3 exported $count events to the analytics hand-off file")
+      assert(java.nio.file.Files.isRegularFile(file))
+    }
+  }
 }

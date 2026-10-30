@@ -24,7 +24,7 @@ The October 6 functional refactoring is tracked in [Hiring Workflow Recovery and
 | [LifecycleProgram.scala](../../src/main/scala/com/example/graphQL/cats/domain/policy/LifecycleProgram.scala) | Pure local aggregate transition program. `StateT` over domain `Either` does not persist workflow progress. |
 | [ApplicationService.scala](../../src/main/scala/com/example/graphQL/cats/service/application/ApplicationService.scala) | Application status use cases retain service authorization and local transactional status/history behavior. Calendar scheduling is a future separate capability. |
 
-[Lifecycle state programs](hiring-lifecycle-state-programs.md), [mutation reliability](mutation-reliability.md), and [runtime safety](hiring-runtime-safety.md) provide prior requirements/evidence. Their results do not establish any acceptance criterion introduced here.
+The earlier lifecycle state programs, mutation reliability and runtime safety tasks (recorded in [hiring platform refinements](hiring-platform-refinements.md#completed-work-recorded-from-removed-specifications)) provide prior requirements/evidence. Their results do not establish any acceptance criterion introduced here.
 
 ## Stream and ownership contract
 
