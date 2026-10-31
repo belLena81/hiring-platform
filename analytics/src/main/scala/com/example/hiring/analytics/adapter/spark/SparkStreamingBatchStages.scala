@@ -13,9 +13,8 @@ import com.example.hiring.analytics.service.batch.{
   AnalyticsReportReservation
 }
 import com.example.hiring.analytics.service.streaming.*
-import org.apache.spark.sql.{DataFrame, Row, SparkSession}
+import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.functions.*
-import org.apache.spark.sql.types.*
 import org.apache.spark.storage.StorageLevel
 
 import java.sql.Timestamp
@@ -612,29 +611,12 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
   }
 
   private def withEventTimeAdmission(frame: DataFrame, preparation: StreamingInputPreparation): DataFrame = {
-    val schema = StructType(
-      Vector(
-        StructField(AdmissionStatusField, StringType, nullable = false),
-        StructField(EffectiveTimeField, TimestampType, nullable = true)
-      )
-    )
-    val observedAt = preparation.observedAt
-    val previousWatermark = preparation.priorWatermark
-    val classify = udf(
-      (timestamp: Timestamp) => {
-        if (timestamp == null) Row(EventTimeAdmission.FutureStatus, null)
-        else {
-          val admission = AnalyticsEventTimePolicy.admit(timestamp.toInstant, observedAt, previousWatermark)
-          admission match {
-            case EventTimeAdmission.Admitted(effective) => Row(admission.wireStatus, Timestamp.from(effective))
-            case _                                      => Row(admission.wireStatus, null)
-          }
-        }
-      },
-      schema
-    )
     frame
-      .withColumn(AdmissionColumn, classify(col(Columns.OccurredAt)))
+      .withColumn(
+        AdmissionColumn,
+        EventTimeAdmissionExpression
+          .classify(col(Columns.OccurredAt), preparation.observedAt, preparation.priorWatermark)
+      )
       .withColumn(EffectiveTimeColumn, col(s"$AdmissionColumn.$EffectiveTimeField"))
   }
 
