@@ -1,6 +1,6 @@
 package com.example.hiring.analytics
 
-import cats.effect.{IO, Resource}
+import cats.effect.{IO, Ref, Resource}
 import cats.syntax.all.*
 import com.example.hiring.analytics.adapter.spark.{
   AnalyticsDeltaCatalog,
@@ -16,6 +16,7 @@ import munit.CatsEffectSuite
 import org.apache.spark.sql.{Row, SparkSession}
 import org.apache.spark.sql.delta.DeltaLog
 import org.apache.spark.sql.types.{StringType, StructField, StructType}
+import org.typelevel.log4cats.Logger
 import org.typelevel.log4cats.slf4j.Slf4jLogger
 
 import java.nio.file.Files
@@ -27,7 +28,8 @@ final class AnalyticsDeltaPrivacyPropertiesSpec extends CatsEffectSuite {
   override val munitIOTimeout: FiniteDuration = 10.minutes
 
   private def withLakehouse(
-      body: (SparkSession, SparkExecution[IO], AnalyticsLakehousePaths, AnalyticsDeltaRetention[IO]) => IO[Unit]
+      body: (SparkSession, SparkExecution[IO], AnalyticsLakehousePaths, AnalyticsDeltaRetention[IO]) => IO[Unit],
+      logger: Logger[IO] = Slf4jLogger.getLogger[IO]
   ): IO[Unit] = {
     val temporary = Resource.make(IO.blocking(Files.createTempDirectory("hiring-delta-privacy-properties-")))(root =>
       IO.blocking {
@@ -60,7 +62,7 @@ final class AnalyticsDeltaPrivacyPropertiesSpec extends CatsEffectSuite {
                 paths,
                 AnalyticsTestOperationalConfig.operational,
                 execution,
-                Slf4jLogger.getLogger[IO]
+                logger
               )
               _ <- body(spark, execution, paths, retention)
             } yield ()
@@ -188,6 +190,60 @@ final class AnalyticsDeltaPrivacyPropertiesSpec extends CatsEffectSuite {
         failure <- retention.configureRawTablePrivacy(spark).attempt
         _ = assertEquals(failure, Left(AnalyticsError.DeltaSchemaMismatch(paths.bronze)))
       } yield ()
+    }
+  }
+
+  private def capturingWarnings(lines: Ref[IO, Vector[String]]): Logger[IO] = new Logger[IO] {
+    private def warning(message: => String): IO[Unit] = lines.update(_ :+ message)
+    private val ignored: IO[Unit] = IO.unit
+    override def error(t: Throwable)(message: => String): IO[Unit] = ignored
+    override def warn(t: Throwable)(message: => String): IO[Unit] = warning(message)
+    override def info(t: Throwable)(message: => String): IO[Unit] = ignored
+    override def debug(t: Throwable)(message: => String): IO[Unit] = ignored
+    override def trace(t: Throwable)(message: => String): IO[Unit] = ignored
+    override def error(message: => String): IO[Unit] = ignored
+    override def warn(message: => String): IO[Unit] = warning(message)
+    override def info(message: => String): IO[Unit] = ignored
+    override def debug(message: => String): IO[Unit] = ignored
+    override def trace(message: => String): IO[Unit] = ignored
+  }
+
+  test("AC-04.1 repairing a drifted positional statistics property logs one WARN with the table name only") {
+    Ref.of[IO, Vector[String]](Vector.empty).flatMap { lines =>
+      withLakehouse(
+        { (spark, execution, paths, retention) =>
+          for {
+            _ <- retention.configureRawTables(spark, Vector.empty)
+            quiet <- lines.get
+            _ <- execution {
+              val escaped = SparkPhysicalLocation.resolve(paths.bronze).replace("`", "``")
+              spark.sql(s"ALTER TABLE delta.`$escaped` SET TBLPROPERTIES ('delta.dataSkippingNumIndexedCols' = '4242')")
+            }
+            _ <- retention.configureRawTablePrivacy(spark)
+            logged <- lines.get
+            _ <- retention.configureRawTablePrivacy(spark)
+            again <- lines.get
+            stored <- execution(
+              DeltaLog
+                .forTable(spark, SparkPhysicalLocation.resolve(paths.bronze))
+                .update()
+                .metadata
+                .configuration
+                .get(DeltaStatsPolicy.NumIndexedColumnsProperty)
+            )
+            _ = assertEquals(quiet, Vector.empty[String], "no repair, no warning")
+            _ = assertEquals(logged.size, 1)
+            _ = assert(
+              logged.head.startsWith("DELTA_STATS_PROPERTY_REPAIRED table=bronze_operational_events"),
+              logged.head
+            )
+            _ = assert(!logged.head.contains("4242"), "the line carries no property value")
+            _ = assertEquals(again, logged, "a repaired table is not warned about again")
+            _ = assertEquals(stored, None)
+          } yield ()
+        },
+        capturingWarnings(lines)
+      )
     }
   }
 }

@@ -22,8 +22,8 @@ private[analytics] final case class DeltaCompactionResult(table: String, filesBe
   * storage, and keep their subject tokens, until VACUUM, which is why the erasure horizon also looks at the last
   * compaction (see `lastCompactionAt`).
   *
-  * The time of the last run is a table property, so it is durable with the table, needs no second store, and is lost
-  * together with the table on a lakehouse reset.
+  * The time of the last run (for scheduling) and its completion time (for the horizon) are table properties, so it is
+  * durable with the table, needs no second store, and is lost together with the table on a lakehouse reset.
   */
 private[analytics] final class DeltaTableCompaction[F[_]: Async](
     paths: AnalyticsLakehousePaths,
@@ -43,23 +43,42 @@ private[analytics] final class DeltaTableCompaction[F[_]: Async](
         }
       }
 
-  /** The latest `OPTIMIZE` commit across the subject-attributed tables, if any is still in a retained log. */
+  /** An upper bound of the latest `OPTIMIZE` commit across the subject-attributed tables, if there is one.
+    *
+    * Each scheduled run records its completion time and the table version its `OPTIMIZE` produced. The history is then
+    * read only for the versions after that one, so any later `OPTIMIZE`, scheduled or run by hand, is seen, and the
+    * read is bounded by the commits since the last scheduled run, not by the retained log. With no recorded version, an
+    * unparsable one, or a run marked pending (crash between the `OPTIMIZE` commit and its record, or a run in progress)
+    * the full history is read, which is exact. The completion time is taken after the commit, so the result is never
+    * earlier than the real one.
+    */
   def lastCompactionAt(spark: SparkSession): F[Option[Instant]] =
     execution {
       paths.inventory.subjectDelta
         .map(_.location)
         .flatMap { path =>
           if (!DeltaTables.exists(spark, path)) None
-          else
-            Option(
-              DeltaTables
-                .forPath(spark, path)
-                .history()
-                .filter(col("operation") === "OPTIMIZE")
-                .agg(max(col("timestamp")))
-                .head()
-                .getTimestamp(0)
-            ).map(_.toInstant)
+          else {
+            val snapshot = DeltaLogFactory.system(spark, path).update()
+            val configuration = snapshot.metadata.configuration
+            val recorded = configuration.get(CompletedProperty).flatMap(value => Try(Instant.parse(value)).toOption)
+            val recordedVersion = configuration.get(CompletedVersionProperty).flatMap(_.toLongOption)
+            val history = DeltaTables.forPath(spark, path)
+            def newest(rows: org.apache.spark.sql.DataFrame): Option[Instant] =
+              Option(
+                rows.filter(col("operation") === "OPTIMIZE").agg(max(col("timestamp"))).head().getTimestamp(0)
+              ).map(_.toInstant)
+            val inspected =
+              if (configuration.contains(PendingProperty)) newest(history.history())
+              else
+                recordedVersion.filter(_ <= snapshot.version) match {
+                  case Some(version) if recorded.isDefined =>
+                    val newer = snapshot.version - version
+                    if (newer <= 0L) None else newest(history.history(Math.toIntExact(newer)))
+                  case _ => newest(history.history())
+                }
+            Vector(recorded, inspected).flatten.maxOption
+          }
         }
         .maxOption
     }
@@ -82,16 +101,37 @@ private[analytics] final class DeltaTableCompaction[F[_]: Async](
     AnalyticsDeltaCatalog.specAt(paths, path).fold("unknown")(_.name)
 
   private def compact(spark: SparkSession, path: String, table: String, at: Instant): F[DeltaCompactionResult] =
-    execution {
-      val before = DeltaLogFactory.system(spark, path).update().numOfFiles
-      val _ = DeltaTables.forPath(spark, path).optimize().executeCompaction()
-      val after = DeltaLogFactory.system(spark, path).update().numOfFiles
-      // Recorded after the run, also when there was nothing to compact, so a table is not retried on every tick.
-      val _ = spark.sql(
-        s"ALTER TABLE ${DeltaTables.sqlIdentifier(path)} SET TBLPROPERTIES ('$LastOptimizedProperty' = '$at')"
-      )
-      DeltaCompactionResult(table, before, after)
-    }
+    for {
+      startedAt <- Async[F].realTimeInstant
+      // Marked before the run so a crash after the OPTIMIZE commit still leaves a trace that lastCompactionAt reads.
+      _ <- execution(setProperties(spark, path, Map(PendingProperty -> startedAt.toString)))
+      before <- execution(DeltaLogFactory.system(spark, path).update().numOfFiles)
+      _ <- execution(DeltaTables.forPath(spark, path).optimize().executeCompaction())
+      after <- execution(DeltaLogFactory.system(spark, path).update().numOfFiles)
+      // Taken after the commit, so it is never earlier than it. Recorded also when there was nothing to compact, so a
+      // table is not retried on every tick.
+      finishedAt <- Async[F].realTimeInstant
+      producedVersion <- execution(DeltaLogFactory.system(spark, path).update().version)
+      _ <- execution {
+        setProperties(
+          spark,
+          path,
+          Map(
+            LastOptimizedProperty -> at.toString,
+            CompletedProperty -> finishedAt.toString,
+            CompletedVersionProperty -> producedVersion.toString
+          )
+        )
+        val _ = spark.sql(
+          s"ALTER TABLE ${DeltaTables.sqlIdentifier(path)} UNSET TBLPROPERTIES IF EXISTS ('$PendingProperty')"
+        )
+      }
+    } yield DeltaCompactionResult(table, before, after)
+
+  private def setProperties(spark: SparkSession, path: String, properties: Map[String, String]): Unit = {
+    val rendered = properties.map { case (key, value) => s"'$key' = '$value'" }.mkString(", ")
+    val _ = spark.sql(s"ALTER TABLE ${DeltaTables.sqlIdentifier(path)} SET TBLPROPERTIES ($rendered)")
+  }
 
   private def report(result: DeltaCompactionResult): F[Unit] =
     logger.info(
@@ -103,4 +143,16 @@ private[analytics] object DeltaTableCompaction {
 
   /** Table property holding the UTC time of the last compaction run. */
   val LastOptimizedProperty = "analytics.lastOptimizedAt"
+
+  /** Table property holding the wall-clock time at which the last run finished, after its commit. It, not the
+    * scheduling time above, bounds the erasure horizon.
+    */
+  val CompletedProperty = "analytics.lastOptimizeCompletedAt"
+
+  /** Table version at which the last scheduled run finished its `OPTIMIZE`; later history is searched for others. */
+  val CompletedVersionProperty = "analytics.lastOptimizeCompletedVersion"
+
+  /** Table property set while a compaction run is in progress and removed when it has been recorded. */
+  val PendingProperty = "analytics.optimizePendingAt"
+
 }

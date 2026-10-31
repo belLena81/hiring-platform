@@ -12,6 +12,7 @@ import cats.effect.Async
 import cats.effect.std.UUIDGen
 import cats.syntax.all.*
 import io.github.iltotore.iron.*
+import org.typelevel.log4cats.Logger
 
 import java.time.Instant
 import scala.concurrent.duration.{Duration, FiniteDuration}
@@ -25,7 +26,8 @@ private[app] final class StreamingMaintenanceTick[F[_]: Async: UUIDGen](
     replayJournal: MongoAnalyticsLateFactReplayJournal[F],
     retention: AnalyticsRetentionSettings,
     progressRetention: FiniteDuration,
-    optimizeInterval: FiniteDuration
+    optimizeInterval: FiniteDuration,
+    logger: Logger[F]
 ) {
   def run(
       identity: StreamingActivationIdentity,
@@ -71,9 +73,14 @@ private[app] final class StreamingMaintenanceTick[F[_]: Async: UUIDGen](
     */
   private def compactDueTables(at: Instant): F[Unit] =
     Async[F].whenA(optimizeInterval > Duration.Zero)(
-      markers.activeDeletionMarkers.flatMap(view =>
-        Async[F].unlessA(view.erasureInProgress)(maintenance.compactDueTables(at, optimizeInterval).void)
-      )
+      markers.activeDeletionMarkers
+        .flatMap(view =>
+          Async[F].unlessA(view.erasureInProgress)(maintenance.compactDueTables(at, optimizeInterval).void)
+        )
+        // Compaction is an optimization: its failure must not keep idle vacuum and authorization from running.
+        .handleErrorWith(failure =>
+          logger.warn(s"DELTA_COMPACTION_FAILED errorClass=${failure.getClass.getSimpleName}; the tick continues")
+        )
     )
 
   private def publishRefreshedReport(

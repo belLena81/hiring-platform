@@ -7,7 +7,7 @@ import com.example.hiring.analytics.domain.{DeltaErasureHorizons, ErasureComplet
 import cats.effect.{IO, Ref, Resource}
 import munit.CatsEffectSuite
 import org.apache.spark.sql.SparkSession
-import org.apache.spark.sql.functions.col
+import org.apache.spark.sql.functions.{col, max}
 import org.typelevel.log4cats.Logger
 
 import java.nio.file.{Files, Path}
@@ -192,6 +192,72 @@ final class DeltaTableCompactionSpec extends CatsEffectSuite {
             .isAfter(ErasureCompletionRule.deltaDeadline(purgedAt, horizons)),
           "the OPTIMIZE lengthens the horizon"
         )
+      } yield ()
+    }
+  }
+
+  test("AC-04.4 an OPTIMIZE that committed before its completion was recorded still counts toward the horizon") {
+    withLakehouse { (spark, execution, paths) =>
+      val spec = AnalyticsDeltaCatalog.Bronze
+      val compaction = new DeltaTableCompaction[IO](paths, execution, org.typelevel.log4cats.noop.NoOpLogger[IO])
+      for {
+        _ <- execution {
+          AnalyticsTableSchemas.createOrValidate(spark, paths.bronze, spec)
+          (0 until 3).foreach(batch => append(spark, paths.bronze, spec, batch * 10L, 10))
+        }
+        _ <- compaction.compactDue(spark, start, 1.hour)
+        recorded <- compaction.lastCompactionAt(spark)
+        // A crash: the OPTIMIZE below commits, the process dies before it records anything. Many commits follow.
+        _ <- IO.sleep(1.second)
+        _ <- execution {
+          val _ = spark.sql(
+            s"ALTER TABLE ${DeltaTables.sqlIdentifier(paths.bronze)} SET TBLPROPERTIES " +
+              s"('${DeltaTableCompaction.PendingProperty}' = '$start')"
+          )
+          (3 until 18).foreach(batch => append(spark, paths.bronze, spec, batch * 10L, 2))
+          val _ = DeltaTables.forPath(spark, paths.bronze).optimize().executeCompaction()
+          (18 until 40).foreach(batch => append(spark, paths.bronze, spec, batch * 10L, 2))
+        }
+        afterCrash <- compaction.lastCompactionAt(spark)
+        _ = assert(recorded.isDefined, "the completed run is recorded")
+        _ = assert(
+          afterCrash.exists(at => recorded.exists(at.isAfter)),
+          s"crashed OPTIMIZE seen: $recorded $afterCrash"
+        )
+      } yield ()
+    }
+  }
+
+  test("AC-04.4 a manual OPTIMIZE long after the scheduled one is still the latest compaction") {
+    withLakehouse { (spark, execution, paths) =>
+      val spec = AnalyticsDeltaCatalog.Bronze
+      val compaction = new DeltaTableCompaction[IO](paths, execution, org.typelevel.log4cats.noop.NoOpLogger[IO])
+      for {
+        _ <- execution {
+          AnalyticsTableSchemas.createOrValidate(spark, paths.bronze, spec)
+          (0 until 3).foreach(batch => append(spark, paths.bronze, spec, batch * 10L, 2))
+        }
+        _ <- compaction.compactDue(spark, start, 1.hour)
+        scheduled <- compaction.lastCompactionAt(spark)
+        _ <- IO.sleep(1.second)
+        _ <- execution((100 until 115).foreach(batch => append(spark, paths.bronze, spec, batch * 10L, 2)))
+        _ <- IO.sleep(1.second)
+        manual <- execution {
+          val _ = DeltaTables.forPath(spark, paths.bronze).optimize().executeCompaction()
+          DeltaTables
+            .forPath(spark, paths.bronze)
+            .history()
+            .filter(col("operation") === "OPTIMIZE")
+            .agg(max(col("timestamp")))
+            .head()
+            .getTimestamp(0)
+            .toInstant
+        }
+        _ <- execution((200 until 215).foreach(batch => append(spark, paths.bronze, spec, batch * 10L, 2)))
+        found <- compaction.lastCompactionAt(spark)
+        _ = assert(scheduled.isDefined)
+        _ = assert(manual.isAfter(scheduled.get), s"$manual follows $scheduled")
+        _ = assertEquals(found, Some(manual), "a bare OPTIMIZE beyond the newest ten commits is seen")
       } yield ()
     }
   }

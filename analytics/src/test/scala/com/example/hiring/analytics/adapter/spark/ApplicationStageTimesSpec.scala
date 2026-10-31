@@ -579,7 +579,7 @@ final class ApplicationStageTimesSpec extends FunSuite {
     assert(spec.subjectAttributed)
     assertEquals(
       spec.properties.get(DeltaStatsPolicy.StatsColumnsProperty),
-      Some("applicationId,lastEventAt,terminalAt,expiresAt")
+      Some("lastEventAt,terminalAt,expiresAt")
     )
     assertEquals(spec.properties.get(DeltaStatsPolicy.NumIndexedColumnsProperty), None)
     val paths = freshPaths("inventory")

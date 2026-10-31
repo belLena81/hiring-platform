@@ -31,9 +31,8 @@ import scala.jdk.CollectionConverters.*
   * `.local/data/hiring-story-analytics/story-events.jsonl`). They are republished unchanged, one transaction each, to a
   * fresh isolated topic and consumed by `AppModule.batch`, the production one-shot batch.
   *
-  * The suite runs only in a started chain (marker file `chain-started` in the hand-off directory); otherwise its
-  * tests are skipped, which is reported as unverified, never as a pass. In a started chain a missing events file
-  * fails.
+  * The suite runs only in a started chain (marker file `chain-started` in the hand-off directory); otherwise its tests
+  * are skipped, which is reported as unverified, never as a pass. In a started chain a missing events file fails.
   * Expected values below are written from the spec's story table, never from the aggregation code or its output.
   *
   * Evidence is provisional until the analytics refactoring closes.
@@ -262,38 +261,39 @@ abstract class StoryAnalyticsReportSuite(eventsFile: String, reportFile: String,
   private val observed = ResourceSuiteLocalFixture(
     "hiring-story-analytics",
     if (!chainStarted) Resource.pure[IO, Option[Observed]](None)
-    else Resource.eval(IO { Files.deleteIfExists(workspaceFile(reportFile)); storyEvents }).flatMap {
-      case (events, eventsDigest) =>
-        StreamingIngestionFixtures.fixture.evalMap { fixture =>
-          val endExclusive = events.size * 2L // one record and one transaction marker per event
-          val root = fixture.root.resolve("lakehouse").toUri.toString
-          for {
-            _ <- republish(fixture, events)
-            first <- batchSettings(fixture, runId, endExclusive).flatMap(run)
-            firstSnapshot <- StreamingIngestionFixtures.reportSnapshot(fixture)
-            stagesBefore <- stageRows(fixture, root)
-            second <- batchSettings(fixture, runId, endExclusive).flatMap(run)
-            secondSnapshot <- StreamingIngestionFixtures.reportSnapshot(fixture)
-            stagesAfter <- stageRows(fixture, root)
-            streamSettings <- StreamingIngestionFixtures.settings(fixture, 13)
-            counts <- StreamingIngestionFixtures.stored(fixture, streamSettings)
-            _ <- exportReport(fixture, eventsDigest)
-          } yield Option(
-            Observed(
-              events.size,
-              first,
-              second,
-              view(firstSnapshot.getOrElse(sys.error("no report snapshot was published"))),
-              view(secondSnapshot.getOrElse(sys.error("no report snapshot after the second read"))),
-              counts.bronze,
-              counts.silver,
-              stagesBefore,
-              stagesAfter,
-              events
+    else
+      Resource.eval(IO { Files.deleteIfExists(workspaceFile(reportFile)); storyEvents }).flatMap {
+        case (events, eventsDigest) =>
+          StreamingIngestionFixtures.fixture.evalMap { fixture =>
+            val endExclusive = events.size * 2L // one record and one transaction marker per event
+            val root = fixture.root.resolve("lakehouse").toUri.toString
+            for {
+              _ <- republish(fixture, events)
+              first <- batchSettings(fixture, runId, endExclusive).flatMap(run)
+              firstSnapshot <- StreamingIngestionFixtures.reportSnapshot(fixture)
+              stagesBefore <- stageRows(fixture, root)
+              second <- batchSettings(fixture, runId, endExclusive).flatMap(run)
+              secondSnapshot <- StreamingIngestionFixtures.reportSnapshot(fixture)
+              stagesAfter <- stageRows(fixture, root)
+              streamSettings <- StreamingIngestionFixtures.settings(fixture, 13)
+              counts <- StreamingIngestionFixtures.stored(fixture, streamSettings)
+              _ <- exportReport(fixture, eventsDigest)
+            } yield Option(
+              Observed(
+                events.size,
+                first,
+                second,
+                view(firstSnapshot.getOrElse(sys.error("no report snapshot was published"))),
+                view(secondSnapshot.getOrElse(sys.error("no report snapshot after the second read"))),
+                counts.bronze,
+                counts.silver,
+                stagesBefore,
+                stagesAfter,
+                events
+              )
             )
-          )
-        }
-    }
+          }
+      }
   )
 
   override def munitFixtures: List[munit.AnyFixture[?]] = List(observed)

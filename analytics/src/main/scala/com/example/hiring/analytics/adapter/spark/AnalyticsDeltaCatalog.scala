@@ -159,8 +159,9 @@ private[analytics] object AnalyticsDeltaCatalog {
       )
     ),
     subjectAttributed = true,
-    // MERGE key (a random application UUID, not a subject) and the time columns read by retention expiry.
-    statsColumns = Vector(Columns.ApplicationId, Columns.LastEventAt, Columns.TerminalAt, Columns.ExpiresAt)
+    // Only the time columns read by retention expiry. The application UUID is the raw aggregate identifier and is
+    // forbidden in statistics; random UUID keys would not prune a MERGE anyway.
+    statsColumns = Vector(Columns.LastEventAt, Columns.TerminalAt, Columns.ExpiresAt)
   )
 
   /** Persisted Bronze: Kafka coordinates, envelope fingerprint, normalized fields and tokens; no raw identifiers. */

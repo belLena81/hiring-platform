@@ -194,7 +194,8 @@ object AppModule {
             replayJournal,
             common.operational.retention,
             settings.streaming.progressRetention,
-            settings.streaming.optimizeInterval
+            settings.streaming.optimizeInterval,
+            Slf4jLogger.getLogger[F]
           )
           val stream = new SparkHiringAnalyticsStream[F](
             shared.spark,

@@ -130,6 +130,41 @@ final class HiringAnalyticsStreamingStorageMaintenanceIntegrationSpec extends Sh
     }
   }
 
+  test("AC-04.3 a failing compaction does not stop the rest of the maintenance tick") {
+    resource.use { runtime =>
+      for {
+        harness <- runtime.harness("maintenance-compaction-failure")
+        observed = harness.at.truncatedTo(ChronoUnit.MICROS)
+        lineage = harness.preparation().identity.lineage
+        arrival = (index: Long) => observed.plusSeconds(index * 60L)
+        _ <- (0L until 3L).toVector.traverse_ { index =>
+          timedFrame(harness, index, arrival(index)).flatMap(processAt(harness, _, index, arrival(index)))
+        }
+        // A read-only table directory lets every read and log commit work, but OPTIMIZE cannot write its rewritten file.
+        log = java.nio.file.Path.of(java.net.URI.create(harness.paths.bronze))
+        lock = IO.blocking(
+          java.nio.file.Files
+            .setPosixFilePermissions(log, java.nio.file.attribute.PosixFilePermissions.fromString("r-xr-xr-x"))
+        )
+        unlock = IO.blocking(
+          java.nio.file.Files
+            .setPosixFilePermissions(log, java.nio.file.attribute.PosixFilePermissions.fromString("rwxr-xr-x"))
+        )
+        maintenance = StreamingMaintenanceFixtures.maintenance(
+          harness,
+          harness.operational,
+          7.days,
+          optimizeInterval = 1.hour
+        )
+        _ <- (lock *> maintenance.run(lineage, observed.plusSeconds(600L))).guarantee(unlock.void)
+        commits <- optimizeCommits(harness, harness.paths.bronze)
+        silverCommits <- optimizeCommits(harness, harness.paths.silver)
+        _ = assertEquals(commits, 0L, "the failed compaction committed nothing, and the tick still completed")
+        _ = assert(silverCommits <= 1L)
+      } yield ()
+    }
+  }
+
   test("HCS-11.1 maintenance thirty-one days later expires Bronze, Silver and late facts and reclaims their files") {
     resource.use { runtime =>
       for {

@@ -101,7 +101,8 @@ private[app] object StreamingMaintenanceFixtures {
         new MongoAnalyticsLateFactReplayJournal[IO](database, streams, paths.root),
         operational.retention,
         progressRetention,
-        optimizeInterval
+        optimizeInterval,
+        Slf4jLogger.getLogger[IO]
       ),
       lock,
       paths.root

@@ -57,13 +57,17 @@ class HiringStageDurationPrecisionSpec extends AnalyticsBatchSpecFixtures {
   test("a boundary just across a whole second is 1 ms, not 1 s, and just below a whole second is not 0") {
     // Created at .900 and hired 101 ms later (1.001): whole-second values 0 and 1 gave 1 s, about 10 times too large.
     // Created at .000 and hired 999 ms later: whole-second values gave 0 s.
-    val across = (0 until 10).map(index => applicationAt(index, Some(Created), Some(Created.plusMillis(101)))) // .900 -> 1.001
+    val across =
+      (0 until 10).map(index => applicationAt(index, Some(Created), Some(Created.plusMillis(101)))) // .900 -> 1.001
     val rowAcross = timeToHireRow(across)
     assertEqualsDouble(rowAcross.getAs[Double]("p50Hours") * Hour, 0.101, 1e-6)
     // The replaced whole-second calculation, evaluated on the same rows, gives 1 s.
-    val oldSeconds = stageTimes(across).select(
-      (unix_timestamp(col("hiredAt")) - unix_timestamp(col("createdAt"))).as("seconds")
-    ).head().getLong(0)
+    val oldSeconds = stageTimes(across)
+      .select(
+        (unix_timestamp(col("hiredAt")) - unix_timestamp(col("createdAt"))).as("seconds")
+      )
+      .head()
+      .getLong(0)
     assertEquals(oldSeconds, 1L)
     val whole = Instant.parse("2026-10-30T10:00:00Z")
     val below = (0 until 10).map(index => applicationAt(index, Some(whole), Some(whole.plusMillis(999))))

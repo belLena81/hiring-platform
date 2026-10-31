@@ -1,7 +1,7 @@
 package com.example.hiring.analytics.adapter.spark
 
-import org.apache.spark.sql.DataFrame
-import org.apache.spark.sql.functions.{col, max, min}
+import org.apache.spark.sql.{Column, DataFrame}
+import org.apache.spark.sql.functions.{col, expr, lit, max, min}
 
 /** Lets a MERGE keyed on Kafka coordinates use the table's data-skipping statistics.
   *
@@ -22,11 +22,13 @@ private[analytics] object MergeKeyBounds {
     */
   val MaximumRanges = 256
 
-  private def literal(value: String): String = s"'${value.replace("'", "''")}'"
-
-  /** `condition` plus per topic-partition offset bounds from `source`; unchanged for any other condition. */
-  def bounded(source: DataFrame, condition: String): String =
-    if (condition != CoordinateCondition) condition
+  /** `condition` plus per topic-partition offset bounds from `source`; unchanged for any other condition.
+    *
+    * The bounds are built with the Column API, so a topic name is a literal value and never SQL text: quotes and
+    * backslashes in it cannot change which topic is targeted.
+    */
+  def bounded(source: DataFrame, condition: String): Column =
+    if (condition != CoordinateCondition) expr(condition)
     else {
       val ranges = source
         .groupBy(col(Columns.Topic), col(Columns.Partition))
@@ -36,13 +38,19 @@ private[analytics] object MergeKeyBounds {
         .toVector
         .map(row => (row.getString(0), row.getInt(1), row.getLong(2), row.getLong(3)))
         .sorted
-      if (ranges.isEmpty || ranges.size > MaximumRanges) condition
-      else {
-        val alternatives = ranges.map { case (topic, partition, first, last) =>
-          s"(target.topic = ${literal(topic)} AND target.partition = $partition AND " +
-            s"target.offset >= $first AND target.offset <= $last)"
-        }
-        s"$condition AND (${alternatives.mkString(" OR ")})"
+      boundedBy(condition, ranges)
+    }
+
+  /** The condition for already collected `(topic, partition, first offset, last offset)` ranges. */
+  def boundedBy(condition: String, ranges: Vector[(String, Int, Long, Long)]): Column =
+    if (ranges.isEmpty || ranges.size > MaximumRanges) expr(condition)
+    else {
+      val alternatives = ranges.map { case (topic, partition, first, last) =>
+        col(s"target.${Columns.Topic}") === lit(topic) &&
+        col(s"target.${Columns.Partition}") === lit(partition) &&
+        col(s"target.${Columns.Offset}") >= lit(first) &&
+        col(s"target.${Columns.Offset}") <= lit(last)
       }
+      expr(condition) && alternatives.reduce(_ || _)
     }
 }

@@ -6,6 +6,7 @@ import io.circe.Json
 import io.circe.parser.parse
 import munit.CatsEffectSuite
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.functions.{expr, lit}
 
 import java.nio.file.{Files, Path}
 import scala.concurrent.duration.*
@@ -145,7 +146,7 @@ final class DeltaFileSkippingSpec extends CatsEffectSuite {
     val source = DeltaSubjectTableFixtures.frame(spark, AnalyticsDeltaCatalog.Bronze, first, 5)
     val condition =
       if (bounded) MergeKeyBounds.bounded(source, MergeKeyBounds.CoordinateCondition)
-      else MergeKeyBounds.CoordinateCondition
+      else org.apache.spark.sql.functions.expr(MergeKeyBounds.CoordinateCondition)
     val _ = DeltaTables
       .forPath(spark, path)
       .as("target")
@@ -207,38 +208,103 @@ final class DeltaFileSkippingSpec extends CatsEffectSuite {
     }
   }
 
-  test("AC-04.2 coordinate bounds are literal per topic and partition, quote topics and leave other keys alone") {
+  /** Rows for every topic and partition, each holding offsets `first` until `first + count`. */
+  private def coordinateFrame(
+      spark: SparkSession,
+      topics: Vector[String],
+      partitions: Vector[Int],
+      first: Long,
+      count: Int
+  ) =
+    (for { topic <- topics; partition <- partitions } yield DeltaSubjectTableFixtures
+      .frame(spark, AnalyticsDeltaCatalog.Bronze, first, count)
+      .withColumn(Columns.Topic, lit(topic))
+      .withColumn(Columns.Partition, lit(partition))).reduce(_.unionByName(_))
+
+  test("AC-04.2 the production writer merges several topics and partitions, quotes and backslashes included, once") {
+    withSpark { (spark, execution, root) =>
+      val paths = com.example.hiring.analytics.TestAnalyticsLakehousePaths.unsafe(root.toUri.toString.stripSuffix("/"))
+      val writer = new DeltaBatchWriter[IO](paths, execution)
+      // "its" differs from "it's" only by the quote that adjacent SQL string literals would silently drop.
+      val topics = Vector("it's", "its", "back\\slash", "it\\'s", "plain")
+      val partitions = Vector(0, 1)
+      def count = DeltaTables.read(spark, paths.bronze).count()
+      for {
+        _ <- execution {
+          AnalyticsTableSchemas.createOrValidate(spark, paths.bronze, AnalyticsDeltaCatalog.Bronze)
+          coordinateFrame(spark, topics, partitions, 0L, 5)
+            .coalesce(1)
+            .write
+            .format("delta")
+            .mode("append")
+            .save(SparkPhysicalLocation.resolve(paths.bronze))
+        }
+        seeded <- execution(count)
+        duplicates <- execution(coordinateFrame(spark, topics, partitions, 0L, 5))
+        _ <- writer.merge(duplicates, paths.bronze, MergeKeyBounds.CoordinateCondition)
+        afterDuplicates <- execution(count)
+        fresh <- execution(
+          coordinateFrame(spark, Vector("it's", "back\\slash", "it\\'s"), Vector(1), 5L, 2)
+            .unionByName(coordinateFrame(spark, Vector("plain"), Vector(0), 3L, 4))
+        )
+        _ <- writer.merge(fresh, paths.bronze, MergeKeyBounds.CoordinateCondition)
+        _ <- writer.merge(fresh, paths.bronze, MergeKeyBounds.CoordinateCondition)
+        perTopic <- execution(
+          DeltaTables
+            .read(spark, paths.bronze)
+            .groupBy(Columns.Topic, Columns.Partition)
+            .count()
+            .collect()
+            .toVector
+            .map(row => (row.getString(0), row.getInt(1)) -> row.getLong(2))
+            .toMap
+        )
+        _ = assertEquals(seeded, 50L)
+        _ = assertEquals(afterDuplicates, 50L, "existing coordinates of every topic are matched, not re-inserted")
+        _ = assertEquals(perTopic(("it's", 1)), 7L)
+        _ = assertEquals(perTopic(("its", 1)), 5L, "the bound of it's did not reach its")
+        _ = assertEquals(perTopic(("back\\slash", 1)), 7L)
+        _ = assertEquals(perTopic(("it\\'s", 1)), 7L)
+        _ = assertEquals(perTopic(("plain", 0)), 7L, "offsets 5 and 6 are new, 3 and 4 already existed")
+        _ = assertEquals(perTopic(("plain", 1)), 5L)
+        _ = assertEquals(perTopic.values.sum, 50L + 3L * 2L + 2L, "each new coordinate is inserted exactly once")
+      } yield ()
+    }
+  }
+
+  test("AC-04.2 coordinate bounds are Column literals per topic and partition and leave other conditions alone") {
     withSpark { (spark, execution, _) =>
       execution {
-        val schema = AnalyticsTableSchemas.struct(
-          Vector(
-            Columns.Topic -> org.apache.spark.sql.types.StringType,
-            Columns.Partition -> org.apache.spark.sql.types.IntegerType,
-            Columns.Offset -> org.apache.spark.sql.types.LongType
-          )
-        )
-        val rows = Vector(
-          org.apache.spark.sql.Row("it's", 1, 5L),
-          org.apache.spark.sql.Row("it's", 1, 9L),
-          org.apache.spark.sql.Row("plain", 0, 100L)
-        )
-        val source = spark.createDataFrame(rows.asJava, schema)
+        val source = coordinateFrame(spark, Vector("it's"), Vector(1), 5L, 5)
+          .unionByName(coordinateFrame(spark, Vector("plain"), Vector(0), 100L, 1))
+        val bounded = MergeKeyBounds.bounded(source, MergeKeyBounds.CoordinateCondition).toString
+        assert(bounded.contains("'it\\'s'") && bounded.contains("'plain'"), bounded)
+        assert(!bounded.contains("''"), "no SQL-escaped literal")
         assertEquals(
-          MergeKeyBounds.bounded(source, MergeKeyBounds.CoordinateCondition),
-          MergeKeyBounds.CoordinateCondition +
-            " AND ((target.topic = 'it''s' AND target.partition = 1 AND target.offset >= 5 AND target.offset <= 9) OR " +
-            "(target.topic = 'plain' AND target.partition = 0 AND target.offset >= 100 AND target.offset <= 100))"
+          MergeKeyBounds.bounded(source, "target.eventId = source.eventId").toString,
+          expr("target.eventId = source.eventId").toString
         )
         assertEquals(
-          MergeKeyBounds.bounded(source, "target.eventId = source.eventId"),
-          "target.eventId = source.eventId"
-        )
-        assertEquals(
-          MergeKeyBounds.bounded(source.limit(0), MergeKeyBounds.CoordinateCondition),
-          MergeKeyBounds.CoordinateCondition
+          MergeKeyBounds.bounded(source.limit(0), MergeKeyBounds.CoordinateCondition).toString,
+          expr(MergeKeyBounds.CoordinateCondition).toString
         )
       }
     }
+  }
+
+  test("AC-04.2 more than the maximum number of ranges keeps the plain coordinate condition") {
+    val plain = expr(MergeKeyBounds.CoordinateCondition).toString
+    def ranges(size: Int) = (0 until size).toVector.map(index => ("topic", index, 0L, 9L))
+    assertEquals(
+      MergeKeyBounds
+        .boundedBy(MergeKeyBounds.CoordinateCondition, ranges(MergeKeyBounds.MaximumRanges + 1))
+        .toString,
+      plain
+    )
+    assertNotEquals(
+      MergeKeyBounds.boundedBy(MergeKeyBounds.CoordinateCondition, ranges(MergeKeyBounds.MaximumRanges)).toString,
+      plain
+    )
   }
 
   private def rawTable(
@@ -317,7 +383,14 @@ final class DeltaFileSkippingSpec extends CatsEffectSuite {
       .filterNot(_.subjectAttributed)
       .foreach(spec => assert(spec.statsColumns.isEmpty, spec.name))
     val silver = AnalyticsDeltaCatalog.Silver
-    Vector(Columns.SubjectToken, Columns.SubjectTokens, Columns.AggregateId, Columns.JobId, "missing").foreach { bad =>
+    Vector(
+      Columns.SubjectToken,
+      Columns.SubjectTokens,
+      Columns.AggregateId,
+      Columns.JobId,
+      Columns.ApplicationId,
+      "missing"
+    ).foreach { bad =>
       intercept[IllegalArgumentException](silver.copy(statsColumns = silver.statsColumns :+ bad))
     }
     intercept[IllegalArgumentException](silver.copy(statsColumns = Vector.empty))

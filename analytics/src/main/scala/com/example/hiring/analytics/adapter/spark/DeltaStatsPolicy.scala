@@ -13,7 +13,9 @@ private[analytics] object DeltaStatsPolicy {
 
   /** Subject pseudonyms and the raw identifiers of the people and jobs an event is about. */
   val ForbiddenColumns: Set[String] =
-    Set(Columns.SubjectToken, Columns.SubjectTokens, Columns.AggregateId, Columns.JobId).map(_.toLowerCase(Locale.ROOT))
+    Set(Columns.SubjectToken, Columns.SubjectTokens, Columns.AggregateId, Columns.JobId, Columns.ApplicationId).map(
+      _.toLowerCase(Locale.ROOT)
+    )
 
   private def topLevel(column: String): String = column.takeWhile(_ != '.').toLowerCase(Locale.ROOT)
 
