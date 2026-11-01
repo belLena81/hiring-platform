@@ -3,7 +3,7 @@
 ## Identity and scope
 
 - Roadmap: Phase 10 in [development milestones](../development-milestones.md).
-- Status: the approved local radius, validation, and exact structured-facet slice is complete. Phase 10 remains partial: Atlas lexical/vector execution and ranking adoption are open evaluation/deployment gates, and lexical-query facets are not part of the completed structured-facet slice. The 2026-10-13 closure split (`.L`/`.C` rows) and lexical-query facets HDQ-12 (Data Engineer PASS; implemented with local Code, Security and QA PASS; `HDQ-12.L` pending Atlas Local) are at the end of this document.
+- Status: the approved local radius, validation, and exact structured-facet slice is complete. Phase 10 remains partial: the Atlas Local `.L` rows for HDQ-01, 04, 05, 06 and 11 are observed on 2026-11-01 (`local-container`, not Atlas acceptance); `HDQ-12.L` is observed (5 of 5 on Atlas Local, 2026-11-01, HEAD c5af728); `.C` cloud rows and ranking adoption remain open gates; and lexical-query facets are not part of the completed structured-facet slice. The 2026-10-13 closure split (`.L`/`.C` rows) and lexical-query facets HDQ-12 (Data Engineer PASS; implemented with local Code, Security and QA PASS; `HDQ-12.L` pending Atlas Local) are at the end of this document.
 - Outcome: candidates find relevant eligible jobs through structured geographic discovery and richer lexical/hybrid search; recruiters improve matching within their existing authorization and privacy boundaries.
 - Coordinator: Product Manager. Architect owns contracts, Data Engineer owns Mongo/Atlas access and schema, Scala Developer owns services and API. Independent Code Reviewer, Security Engineer and QA own final verdicts.
 - Dependencies: measured Phase 8 access baseline and Phase 9 held-out evaluation in [MongoDB optimization](mongodb-vector-retrieval-optimization.md) and [Hiring Search Enhancements](hiring-search-enhancements.md#search-evaluation-and-embedding-architecture).
@@ -181,7 +181,7 @@ Historical sections above are unchanged. Where they say Atlas parts are "pending
 
 ### Criteria
 
-Evidence for every `.L` row is **Pending evidence run on current HEAD**; no `.L` row is claimed as passed. `.C` rows are DEFERRED to the Atlas integration slice.
+Evidence for every `.L` row in this table is recorded as **OBSERVED** on Atlas Local 8.3.11 (`local-container`) on 2026-11-01. `HDQ-12.L` is not in this table; it is recorded in its own section (observed 5 of 5 at HEAD c5af728). `.C` rows are DEFERRED to the Atlas integration slice.
 
 | ID | Given / When / Then | Method and expected test tag | Evidence |
 |---|---|---|---|
