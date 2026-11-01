@@ -122,9 +122,8 @@ final class AtlasHiringSearchIntegrationSpec extends CatsEffectSuite {
             val _ = document.get("profile", classOf[org.bson.Document]).remove("recruiterSearchOptIn")
           }
           if (user.name == "inactive") {
-            val _ = document.put("accountStatus", "Deleted")
-            val _ = document.remove("profile")
-            val _ = document.put("deletedAt", java.util.Date.from(now))
+            // A Deleted account exactly as account deletion leaves it; the strict users validator rejects any other shape.
+            val _ = AtlasLocalSupport.tombstoned(document, now)
           }
           MongoRepositoryTestSupport.insertOne(db, MongoCollections.Users, document)
         }
@@ -429,7 +428,7 @@ final class AtlasHiringSearchIntegrationSpec extends CatsEffectSuite {
         users <- Mongo4catsCollections.documents(db, MongoCollections.Users)
         _ <- users.updateOne(
           com.mongodb.client.model.Filters.eq(MongoFields.Id, stale.value.toString),
-          com.mongodb.client.model.Updates.set(MongoFields.AccountStatus, AccountStatus.Deleted.toString)
+          AtlasLocalSupport.tombstoneUpdate(now)
         )
         remaining <- await(120)(hits => !hits.contains(stale))
       } yield {

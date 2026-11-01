@@ -89,4 +89,30 @@ private[mongo] object AtlasLocalSupport {
           .sortBy(_._1)
       )
   }
+
+  /** The fields account deletion removes (`MongoUserRepository` tombstone), so a fixture is exactly what production
+    * leaves behind and the strict users validator accepts it.
+    */
+  private val erasedOnDeletion =
+    List("passwordHash", "profile", "embedding", "embeddingMeta", "recruiterProfile", "email", "emailCanonical")
+
+  /** A stored candidate or recruiter document rewritten as the Deleted tombstone production writes. */
+  def tombstoned(document: Document, at: java.time.Instant): Document = {
+    erasedOnDeletion.foreach(field => document.remove(field))
+    document.put("accountStatus", "Deleted")
+    document.put("deletedAt", java.util.Date.from(at))
+    document
+  }
+
+  /** The same tombstone as an update of a live document, with the revision advance production applies. */
+  def tombstoneUpdate(at: java.time.Instant): org.bson.conversions.Bson = {
+    import com.mongodb.client.model.Updates
+    Updates.combine(
+      (List(
+        Updates.set("accountStatus", "Deleted"),
+        Updates.set("deletedAt", java.util.Date.from(at)),
+        Updates.inc("version", 1L)
+      ) ++ erasedOnDeletion.map(Updates.unset))*
+    )
+  }
 }
