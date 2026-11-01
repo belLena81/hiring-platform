@@ -797,4 +797,15 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
       _ <- fiber.cancel
     } yield assert(true)
   }
+
+  test("DDR-06.3 the producer record key is the envelope aggregateId") {
+    val aggregate = UUID.randomUUID().toString
+    val value = event(OperationalEventType.JOB_UPDATED, aggregateId = aggregate)
+    val claimed =
+      ClaimedOperationalEvent(value, OperationalEventWireCodec.bytes(value), value.partitionKey, "lease", 1)
+    val record = OperationalEventKafkaRuntime.producerRecord("hiring.operational-events", claimed)
+    assertEquals(value.partitionKey, aggregate)
+    assertEquals(record.key, aggregate)
+    assertEquals(record.topic, "hiring.operational-events")
+  }
 }

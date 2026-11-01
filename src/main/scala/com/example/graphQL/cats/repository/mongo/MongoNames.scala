@@ -59,6 +59,7 @@ private[mongo] object MongoIndexNames {
   val JobsEmbeddingMeta = "jobs_embedding_meta_canonical_filters"
   val UsersEmbeddingMeta = "users_embedding_meta_filters"
   val EventOutboxClaim = "event_outbox_claim"
+  val EventOutboxAggregateOrder = "event_outbox_aggregate_order"
   val EventOutboxPublishedRetention = "event_outbox_published_retention"
   val EventOutboxSubjectIds = "event_outbox_subject_ids"
   val OutboxSubjectFenceLease = "outbox_subject_fences_lease_until"

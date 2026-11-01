@@ -95,7 +95,8 @@ final class MongoMigrationLedgerSpec extends FunSuite {
       "031_search_session_work_single_copy",
       "032_embedding_work_key_from_identity",
       "033_application_event_actor_role",
-      "034_interview_workflow_initiator_role"
+      "034_interview_workflow_initiator_role",
+      "035_event_outbox_aggregate_order"
     )
     val actual = List(
       MigrationIds.UserJobRevisions,
@@ -131,7 +132,8 @@ final class MongoMigrationLedgerSpec extends FunSuite {
       MigrationIds.SearchSessionWorkSingleCopy,
       MigrationIds.EmbeddingWorkKeyFromIdentity,
       MigrationIds.ApplicationEventActorRole,
-      MigrationIds.InterviewWorkflowInitiatorRole
+      MigrationIds.InterviewWorkflowInitiatorRole,
+      MigrationIds.EventOutboxAggregateOrder
     ).map(_.value)
     assertEquals(actual, expected)
     assertEquals(MongoDeletedAccountEmbeddingMigrations.MigrationId, MigrationIds.DeletedAccountEmbeddings.value)

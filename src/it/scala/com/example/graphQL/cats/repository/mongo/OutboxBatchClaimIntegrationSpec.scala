@@ -18,6 +18,7 @@ import org.bson.Document
 import java.time.Instant
 import java.util.UUID
 import scala.concurrent.duration.*
+import scala.jdk.CollectionConverters.*
 
 /** MR-06 (AC-08.4): the outbox claim leases a bounded batch with one claim token. Per event the cost falls with the
   * batch size, a subject has one in-flight event, and a stale holder is fenced by its generation of the lease.
@@ -408,6 +409,362 @@ final class OutboxBatchClaimIntegrationSpec extends MongoIntegrationSuite {
       } yield println(
         s"AC-08.4 claim racing deletion over 15 rounds: claimedFirst=${results.count(_._1)} suppressed=${results.count(_._2)}"
       )
+    }
+  }
+
+  /** A job event of an existing aggregate; distinct actors keep the per-user subject leases out of the picture. */
+  private def eventOn(job: UUID, actor: UserId, at: Instant): OperationalEventEnvelope =
+    OperationalEventEnvelope(
+      UUID.randomUUID(),
+      OperationalEventType.JOB_UPDATED,
+      at,
+      OperationalAggregateType.Job,
+      job.toString,
+      actor,
+      OperationalEventPayload.JobFact(
+        OperationalEventPayload.JobKind.Updated,
+        OperationalEventPayload.JobSnapshot(job, List("Scala"), JobStatus.Open)
+      )
+    )
+
+  private def aggregateEvents(job: UUID, count: Int, from: Int = 0): List[OperationalEventEnvelope] =
+    (from until from + count).toList.map(index => eventOn(job, UserId(UUID.randomUUID()), now.plusMillis(index.toLong)))
+
+  private def succeeded(result: cats.data.EitherT[IO, RepositoryError, Unit]): IO[Unit] =
+    result.value.flatMap(_.fold(error => IO.raiseError(new AssertionError(s"repository failed: $error")), IO.pure))
+
+  test("DDR-06.1 a later event of an aggregate is not claimed while an earlier one waits for retry") {
+    mongoResource.use { fixture =>
+      val job = UUID.randomUUID()
+      val List(a, b) = aggregateEvents(job, 2)
+      val repository = outbox(fixture)
+      for {
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
+        _ <- seed(fixture, List(a, b))
+        first <- claim(repository, "w", now.plusSeconds(1), limit = 10)
+        // The send of A failed transiently: it is released for retry in the future and its subject lease is gone.
+        _ <- succeeded(
+          repository.releaseForRetry(a.eventId, first.head.leaseToken, now.plusSeconds(2), now.plusSeconds(60))
+        )
+        whileRetrying <- claim(repository, "w", now.plusSeconds(3), limit = 10)
+        retried <- claim(repository, "w", now.plusSeconds(61), limit = 10)
+        _ <- succeeded(
+          repository.markPublished(a.eventId, retried.head.leaseToken, now.plusSeconds(62), now.plusSeconds(3600))
+        )
+        afterPublish <- claim(repository, "w", now.plusSeconds(63), limit = 10)
+      } yield {
+        assertEquals(ids(first), List(a.eventId), "B is not claimed in the same batch as the earlier A")
+        assertEquals(whileRetrying, Nil)
+        assertEquals(ids(retried), List(a.eventId))
+        assertEquals(ids(afterPublish), List(b.eventId))
+      }
+    }
+  }
+
+  test("DDR-06.1 a later event is not claimed while the lease of an earlier in-flight event is still running") {
+    mongoResource.use { fixture =>
+      val job = UUID.randomUUID()
+      val List(a, b) = aggregateEvents(job, 2)
+      val repository = outbox(fixture)
+      for {
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
+        _ <- seed(fixture, List(a, b))
+        first <- claim(repository, "slow", now.plusSeconds(1), limit = 1)
+        // A's lease is held (its subject lease protects only the actor); B must still wait.
+        held <- claim(repository, "other", now.plusSeconds(5), limit = 10)
+        // The holder died: the expired lease makes A claimable again, and A, not B, is the event returned.
+        expired <- claim(repository, "other", now.plusSeconds(1 + lease.toSeconds), limit = 10)
+      } yield {
+        assertEquals(ids(first), List(a.eventId))
+        assertEquals(held, Nil)
+        assertEquals(ids(expired), List(a.eventId))
+      }
+    }
+  }
+
+  test("DDR-06.1 a failed event does not block its aggregate and stays visible as Failed") {
+    mongoResource.use { fixture =>
+      val job = UUID.randomUUID()
+      val List(a, b) = aggregateEvents(job, 2)
+      val repository = outbox(fixture)
+      for {
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
+        _ <- seed(fixture, List(a, b))
+        first <- claim(repository, "w", now.plusSeconds(1), limit = 10)
+        _ <- succeeded(repository.markFailed(a.eventId, first.head.leaseToken, now.plusSeconds(2), "RetriesExhausted"))
+        next <- claim(repository, "w", now.plusSeconds(3), limit = 10)
+        failed <- row(fixture, a.eventId).map(_.getString(MongoFields.State))
+      } yield {
+        assertEquals(ids(next), List(b.eventId))
+        assertEquals(failed, "Failed")
+      }
+    }
+  }
+
+  test("DDR-06.2 other aggregates are claimed while one aggregate is blocked") {
+    mongoResource.use { fixture =>
+      val blockedJob = UUID.randomUUID()
+      val List(a, b) = aggregateEvents(blockedJob, 2)
+      val c = eventOn(UUID.randomUUID(), UserId(UUID.randomUUID()), now.plusMillis(5))
+      val repository = outbox(fixture)
+      for {
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
+        _ <- seed(fixture, List(a, b))
+        first <- claim(repository, "w", now.plusSeconds(1), limit = 1)
+        _ <- succeeded(
+          repository.releaseForRetry(a.eventId, first.head.leaseToken, now.plusSeconds(2), now.plusSeconds(600))
+        )
+        _ <- seed(fixture, List(c))
+        next <- claim(repository, "w", now.plusSeconds(3), limit = 10)
+      } yield assertEquals(ids(next), List(c.eventId))
+    }
+  }
+
+  test("DDR-06.2 a full page of blocked rows does not hide an event of another aggregate behind it") {
+    mongoResource.use { fixture =>
+      val blockedJob = UUID.randomUUID()
+      val a = eventOn(blockedJob, UserId(UUID.randomUUID()), now)
+      val waiting = aggregateEvents(blockedJob, MongoProducerRegistrations.BatchSize + 6, from = 1)
+      val free = eventOn(UUID.randomUUID(), UserId(UUID.randomUUID()), now.plusSeconds(10))
+      val repository = outbox(fixture)
+      for {
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
+        _ <- seed(fixture, List(a))
+        first <- claim(repository, "w", now.plusSeconds(1), limit = 1)
+        _ <- succeeded(
+          repository.releaseForRetry(a.eventId, first.head.leaseToken, now.plusSeconds(2), now.plusSeconds(600))
+        )
+        _ <- seed(fixture, waiting :+ free)
+        next <- claim(repository, "w", now.plusSeconds(20), limit = 1)
+      } yield {
+        assert(waiting.size > MongoProducerRegistrations.BatchSize)
+        assertEquals(ids(next), List(free.eventId))
+      }
+    }
+  }
+
+  test("DDR-06.3 the Kafka record key of an event is its aggregate id") {
+    val job = UUID.randomUUID()
+    val value = eventOn(job, UserId(UUID.randomUUID()), now)
+    assertEquals(value.partitionKey, job.toString)
+    assertEquals(stored(value).getString(MongoFields.PartitionKey), job.toString)
+  }
+
+  private def setState(
+      fixture: MongoAccessEvaluationSupport.Fixture,
+      eventIds: List[UUID],
+      state: String
+  ): IO[Unit] =
+    MongoAccessEvaluationSupport
+      .command(
+        fixture.database,
+        new Document("update", MongoCollections.EventOutbox).append(
+          "updates",
+          java.util.List.of(
+            new Document("q", new Document(MongoFields.Id, new Document("$in", eventIds.map(_.toString).asJava)))
+              .append("u", new Document("$set", new Document(MongoFields.State, state)))
+              .append("multi", true)
+          )
+        )
+      )
+      .void
+
+  test("DDR-06.1 the earliest-pending read is an index-only DISTINCT_SCAN with no SORT stage") {
+    mongoResource.use { fixture =>
+      val jobs = List.fill(20)(UUID.randomUUID())
+      val perJob = jobs.zipWithIndex.map { case (job, jobIndex) => aggregateEvents(job, 10, from = jobIndex * 10) }
+      val values = perJob.flatten
+      // Three events per aggregate stay pending; the other seven are terminal and not in the partial index.
+      val terminal = perJob.flatMap(_.drop(3)).map(_.eventId)
+      val repository = outbox(fixture)
+      for {
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
+        _ <- seed(fixture, values)
+        _ <- setState(fixture, terminal, "Published")
+        _ <- fixture.commands.clear
+        // The production claim issues the read; its recorded pipeline is the one explained, so the two cannot drift.
+        _ <- claim(repository, "w", now.plusSeconds(1), limit = 20)
+        issuedCommands <- fixture.commands.snapshot
+        pipeline = issuedCommands
+          .find(command => command.getFirstKey == "aggregate" && command.containsKey("pipeline"))
+          .map(_.getArray("pipeline"))
+          .getOrElse(fail("the claim issued no aggregate command"))
+        explained <- MongoAccessEvaluationSupport.command(
+          fixture.database,
+          new Document(
+            "explain",
+            new Document("aggregate", MongoCollections.EventOutbox)
+              .append("pipeline", pipeline)
+              .append("cursor", new Document())
+          ).append("verbosity", "executionStats")
+        )
+      } yield {
+        val plan = explained.toJson
+        def stat(name: String): Long =
+          s""""$name": (\\d+)""".r.findFirstMatchIn(plan).map(_.group(1).toLong).getOrElse(-1L)
+        println(
+          s"DDR-06.1 explain earliest-pending rows=${values.size} keys=${jobs.size} " +
+            s"keysExamined=${stat("totalKeysExamined")} docsExamined=${stat("totalDocsExamined")} " +
+            s"returned=${stat("nReturned")}"
+        )
+        assert(plan.contains("DISTINCT_SCAN"), clue(plan))
+        assert(plan.contains(MongoIndexNames.EventOutboxAggregateOrder), clue(plan))
+        assert(!plan.contains("COLLSCAN"), clue(plan))
+        assert(!plan.contains("\"SORT\""), clue(plan))
+        assertEquals(stat("totalDocsExamined"), 0L)
+        assert(stat("totalKeysExamined") <= jobs.size.toLong * 3, clue(plan))
+      }
+    }
+  }
+
+  test("DDR-06.1 a blocked event is reached again after its predecessor completes while new events keep arriving") {
+    mongoResource.use { fixture =>
+      val job = UUID.randomUUID()
+      val List(a, b) = aggregateEvents(job, 2)
+      // Arrivals sit between B and A's retry time; `late` sits after it, beyond anything a cursor that passed B would
+      // have to revisit: only a cursor that never passed B returns B before `late`.
+      val arrivals = (1 to 3).toList.map(i =>
+        eventOn(UUID.randomUUID(), UserId(UUID.randomUUID()), now.plusSeconds(2).plusMillis(i.toLong))
+      )
+      val late = eventOn(UUID.randomUUID(), UserId(UUID.randomUUID()), now.plusSeconds(5).plusMillis(500))
+      val repository = outbox(fixture)
+      for {
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
+        _ <- seed(fixture, List(a, b))
+        first <- claim(repository, "w", now.plusSeconds(1), limit = 1)
+        _ <- succeeded(
+          repository.releaseForRetry(a.eventId, first.head.leaseToken, now.plusSeconds(1), now.plusSeconds(5))
+        )
+        // New events keep arriving and are claimed one by one; the worker passes the blocked B every time.
+        passed <- arrivals.traverse { arrival =>
+          for {
+            _ <- seed(fixture, List(arrival))
+            claimed <- claim(repository, "w", now.plusSeconds(4), limit = 1)
+            _ <- succeeded(
+              repository.markPublished(
+                arrival.eventId,
+                claimed.head.leaseToken,
+                now.plusSeconds(4),
+                now.plusSeconds(3600)
+              )
+            )
+          } yield claimed
+        }
+        retried <- claim(repository, "w", now.plusSeconds(6), limit = 1)
+        _ <- succeeded(
+          repository.markPublished(a.eventId, retried.head.leaseToken, now.plusSeconds(6), now.plusSeconds(3600))
+        )
+        _ <- seed(fixture, List(late))
+        // The next claim returns B, ahead of the newer arrival.
+        next <- claim(repository, "w", now.plusSeconds(7), limit = 1)
+      } yield {
+        assertEquals(passed.map(ids), arrivals.map(value => List(value.eventId)))
+        assertEquals(ids(retried), List(a.eventId))
+        assertEquals(ids(next), List(b.eventId))
+      }
+    }
+  }
+
+  test("DDR-06.1 the in-transaction check alone refuses a later event of a pending aggregate") {
+    mongoResource.use { fixture =>
+      val job = UUID.randomUUID()
+      val List(a, b) = aggregateEvents(job, 2)
+      val repository = outbox(fixture)
+      def candidate(value: OperationalEventEnvelope) =
+        MongoOutboxClaimBatch.Candidate(value.eventId.toString, List(value.actorId.value.toString), Some(job.toString))
+      for {
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
+        _ <- seed(fixture, List(a, b))
+        first <- claim(repository, "w", now.plusSeconds(1), limit = 1)
+        _ <- succeeded(
+          repository.releaseForRetry(a.eventId, first.head.leaseToken, now.plusSeconds(2), now.plusSeconds(600))
+        )
+        // A stale page read could still offer B; the claim transaction refuses it without the page filter.
+        stale <- repository
+          .claimCandidates("w", "hiring-publisher-w", now.plusSeconds(3), now.plusSeconds(33), List(candidate(b)))
+          .value
+        state <- row(fixture, b.eventId).map(_.getString(MongoFields.State))
+        // Both offered together: only the earlier one is leased.
+        both <- repository
+          .claimCandidates(
+            "w",
+            "hiring-publisher-w",
+            now.plusSeconds(601),
+            now.plusSeconds(631),
+            List(candidate(a), candidate(b))
+          )
+          .value
+      } yield {
+        assertEquals(stale.map(ids), Right(Nil))
+        assertEquals(state, "Retryable")
+        assertEquals(both.map(ids), Right(List(a.eventId)))
+      }
+    }
+  }
+
+  test("DDR-06.1 events with an equal occurredAt are ordered by event id") {
+    mongoResource.use { fixture =>
+      val job = UUID.randomUUID()
+      def at(n: Long) =
+        eventOn(job, UserId(UUID.randomUUID()), now).copy(eventId = new UUID(0L, n))
+      val (small, large) = (at(1L), at(2L))
+      val repository = outbox(fixture)
+      for {
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
+        // Inserted in the opposite order: the claim order is the key, not the insertion.
+        _ <- seed(fixture, List(large, small))
+        first <- claim(repository, "w", now.plusSeconds(1), limit = 10)
+        _ <- succeeded(
+          repository.markPublished(small.eventId, first.head.leaseToken, now.plusSeconds(2), now.plusSeconds(3600))
+        )
+        second <- claim(repository, "w", now.plusSeconds(3), limit = 10)
+      } yield {
+        assertEquals(ids(first), List(small.eventId))
+        assertEquals(ids(second), List(large.eventId))
+      }
+    }
+  }
+
+  test("DDR-06.1 two workers claiming at once never release a later event of an aggregate before its predecessor") {
+    mongoResource.use { fixture =>
+      val repository = outbox(fixture)
+      def round(n: Int): IO[Unit] = {
+        val pairs = List.fill(10)(UUID.randomUUID()).map(job => aggregateEvents(job, 2, from = n * 100))
+        val firsts = pairs.map(_.head.eventId).toSet
+        val seconds = pairs.map(_(1).eventId).toSet
+        for {
+          _ <- seed(fixture, pairs.flatten)
+          claimed <- IO.both(
+            claim(repository, "left", now.plusSeconds(1), limit = 20),
+            claim(repository, "right", now.plusSeconds(1), limit = 20)
+          )
+          all = ids(claimed._1) ++ ids(claimed._2)
+        } yield {
+          assert(all.forall(firsts), clue(all.filter(seconds)))
+          assertEquals(all.distinct.size, all.size, "no event is claimed by both workers")
+          assert(all.nonEmpty)
+        }
+      }
+      MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO]) *> (0 until 3).toList.traverse_(round)
+    }
+  }
+
+  test("DDR-06.3 a claim read back from Mongo carries the aggregate id into the producer record key") {
+    mongoResource.use { fixture =>
+      val job = UUID.randomUUID()
+      val value = eventOn(job, UserId(UUID.randomUUID()), now)
+      val repository = outbox(fixture)
+      for {
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
+        _ <- seed(fixture, List(value))
+        claimed <- claim(repository, "w", now.plusSeconds(1), limit = 1)
+      } yield {
+        val record = com.example.graphQL.cats.infrastructure.kafka.OperationalEventKafkaRuntime
+          .producerRecord(OperationalEventEnvelope.Topic, claimed.head)
+        assertEquals(claimed.head.partitionKey, value.aggregateId)
+        assertEquals(record.key, job.toString)
+        assertEquals(record.topic, OperationalEventEnvelope.Topic)
+      }
     }
   }
 }

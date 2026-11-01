@@ -154,7 +154,56 @@ final class MongoProducerRegistrationsIntegrationSpec extends MongoIntegrationSu
     }
   }
 
-  test("fair claim scan checkpoints past more than one page of busy subjects") {
+  test("fair claim scan checkpoints past more than one page of busy subjects across claims") {
+    mongoResource.use { fixture =>
+      val hot = UserId(UUID.randomUUID())
+      val independent = UserId(UUID.randomUUID())
+      val outbox =
+        MongoOperationalEventOutboxRepository.transactional(
+          fixture.database,
+          fixture.client,
+          Diagnostics.noop[IO],
+          maxScanPages = 0
+        )
+      def event(n: Long, actor: UserId): OperationalEventEnvelope = OperationalEventEnvelope(
+        new UUID(0L, n),
+        OperationalEventType.JOB_CREATED,
+        now,
+        OperationalAggregateType.Job,
+        new UUID(1L, n).toString,
+        actor,
+        OperationalEventPayload.JobFact(
+          OperationalEventPayload.JobKind.Created,
+          OperationalEventPayload.JobSnapshot(new UUID(1L, n), List("Scala"), JobStatus.Open)
+        )
+      )
+      val desired = event(200L, independent)
+      for {
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
+        _ <- MongoRepositoryTestSupport.insertOne(
+          fixture.database,
+          MongoCollections.OutboxSubjectFences,
+          new Document("_id", hot.value.toString)
+            .append("deleted", false)
+            .append("leaseUntil", Date.from(now.plusSeconds(60)))
+        )
+        _ <- ((1L to 128L).map(n => event(n, hot)).toList :+ desired).traverse_(value =>
+          IO.fromEither(MongoHiringCodecs.outboxRecord(value, now).leftMap(new AssertionError(_)))
+            .flatMap(row => MongoRepositoryTestSupport.insertOne(fixture.database, MongoCollections.EventOutbox, row))
+        )
+        first <- success(outbox.claim("fair-worker", "hiring-publisher-test", now, now.plusSeconds(60), 1))
+        second <- success(outbox.claim("fair-worker", "hiring-publisher-test", now, now.plusSeconds(60), 1))
+        third <- success(outbox.claim("fair-worker", "hiring-publisher-test", now, now.plusSeconds(60), 1))
+      } yield {
+        // With no extra pages per claim, each claim checkpoints one page of busy subjects and the next resumes there.
+        assertEquals(first, Nil)
+        assertEquals(second, Nil)
+        assertEquals(third.map(_.event.eventId), List(desired.eventId))
+      }
+    }
+  }
+
+  test("fair claim scan continues past more than one page of busy subjects within one claim") {
     mongoResource.use { fixture =>
       val hot = UserId(UUID.randomUUID())
       val independent = UserId(UUID.randomUUID())
@@ -190,9 +239,11 @@ final class MongoProducerRegistrationsIntegrationSpec extends MongoIntegrationSu
         second <- success(outbox.claim("fair-worker", "hiring-publisher-test", now, now.plusSeconds(60), 1))
         third <- success(outbox.claim("fair-worker", "hiring-publisher-test", now, now.plusSeconds(60), 1))
       } yield {
-        assertEquals(first, Nil)
+        // The scan used to checkpoint page by page over three claims; it now continues over the next pages (bounded by
+        // MaxScanPages) so the independent event is claimed at once, and the later claims find nothing free.
+        assertEquals(first.map(_.event.eventId), List(desired.eventId))
         assertEquals(second, Nil)
-        assertEquals(third.map(_.event.eventId), List(desired.eventId))
+        assertEquals(third, Nil)
       }
     }
   }

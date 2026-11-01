@@ -8,6 +8,7 @@ import cats.effect.std.UUIDGen
 import cats.syntax.all.*
 import mongo4cats.client.{ClientSession, MongoClient}
 import mongo4cats.database.MongoDatabase
+import mongo4cats.operations.{Accumulator, Aggregate, Sort}
 import com.example.graphQL.cats.service.events.{OperationalEventEnvelope, SearchSession}
 import com.example.graphQL.cats.service.port.{
   ClaimedOperationalEvent,
@@ -25,6 +26,7 @@ import com.example.graphQL.cats.service.Diagnostics
 import com.mongodb.MongoCommandException
 import com.mongodb.client.model.{Sorts, UpdateOptions, Projections}
 import org.bson.Document
+import org.bson.conversions.Bson
 import org.bson.types.Binary
 import java.time.Instant
 import com.example.graphQL.cats.repository.mongo.MongoDocumentFields.Repository.{instant, string}
@@ -103,7 +105,8 @@ final class MongoOperationalEventOutboxRepository(
     database: MongoDatabase[IO],
     transactionRunner: MongoTransactionRunner,
     diagnostics: Diagnostics[IO],
-    uuidGen: UUIDGen[IO] = UUIDGen[IO]
+    uuidGen: UUIDGen[IO] = UUIDGen[IO],
+    maxScanPages: Int = MongoOutboxClaimBatch.MaxScanPages
 ) extends OperationalEventOutboxRepository[IO] {
   import MongoOperationalEventOutboxRepository.OutboxState
   private val outbox = Mongo4catsCollections.documents(database, MongoCollections.EventOutbox)
@@ -149,10 +152,10 @@ final class MongoOperationalEventOutboxRepository(
       limit: Int
   ): RepositoryF[IO, List[ClaimedOperationalEvent]] = {
     val cursors = Mongo4catsCollections.documents(database, MongoProducerRegistrations.ClaimCursorsCollection)
-    def cursorFilter(row: Document): Either[RepositoryError, MongoFilter] = for {
+    def cursorFilter(row: Document, idField: String): Either[RepositoryError, MongoFilter] = for {
       at <- instant(row, "availableAt").map(_.toDate)
       occurred <- instant(row, "occurredAt").map(_.toDate)
-      id <- string(row, "eventId")
+      id <- string(row, idField)
     } yield MongoFilter.or(
       MongoFilter.gt(MongoFields.AvailableAt, at),
       MongoFilter.and(MongoFilter.eq(MongoFields.AvailableAt, at), MongoFilter.gt(MongoFields.OccurredAt, occurred)),
@@ -169,7 +172,13 @@ final class MongoOperationalEventOutboxRepository(
             .sort(Sorts.ascending(MongoFields.AvailableAt, MongoFields.OccurredAt, MongoFields.Id))
             .projection(
               Projections
-                .include(MongoFields.Id, MongoFields.AvailableAt, MongoFields.OccurredAt, MongoFields.SubjectIds)
+                .include(
+                  MongoFields.Id,
+                  MongoFields.AvailableAt,
+                  MongoFields.OccurredAt,
+                  MongoFields.SubjectIds,
+                  MongoFields.PartitionKey
+                )
             )
             .limit(MongoProducerRegistrations.BatchSize)
             .all
@@ -194,26 +203,95 @@ final class MongoOperationalEventOutboxRepository(
         )
       )
       .void
+    // A page can hold only rows that must wait (held subjects, or an earlier event of the same aggregate still
+    // retrying). When it is full and the batch is still short, the scan continues with the next page, up to a bound,
+    // so other aggregates are not stalled behind it for a poll interval. `position` is the last row scanned and pages
+    // the scan; `cursor` is what the worker persists. A row that waits for an earlier event of its aggregate pins the
+    // cursor before it (`pinned`): the cursor never passes a blocked row, so it is reached again as soon as the
+    // earlier event completes, however much new work keeps arriving behind it.
     def scan(
         rows: List[Document],
+        blocked: Set[String],
         values: List[ClaimedOperationalEvent],
-        last: Option[Document]
+        position: Option[Document],
+        cursor: Option[Document],
+        pinned: Boolean,
+        pagesLeft: Int,
+        pageFull: Boolean
     ): RepositoryF[IO, List[ClaimedOperationalEvent]] = {
       val need = limit - values.size
-      if (rows.isEmpty || need <= 0) last.traverse_(checkpoint).as(values)
-      else {
-        val batch = MongoOutboxClaimBatch.select(rows.map(candidate), need)
+      if (need <= 0) cursor.traverse_(checkpoint).as(values)
+      else if (rows.isEmpty) {
+        val next = if (pageFull && pagesLeft > 0) position.map(row => cursorFilter(row, MongoFields.Id)) else None
+        next match {
+          case Some(filter) =>
+            MongoF
+              .fromEither(filter)
+              .flatMap(after => page(Some(after)))
+              .flatMap(more =>
+                pendingBehind(more).flatMap(behind =>
+                  scan(
+                    more,
+                    behind,
+                    values,
+                    position,
+                    cursor,
+                    pinned,
+                    pagesLeft - 1,
+                    more.size >= MongoProducerRegistrations.BatchSize
+                  )
+                )
+              )
+          case None => cursor.traverse_(checkpoint).as(values)
+        }
+      } else {
+        val batch = MongoOutboxClaimBatch.select(rows.map(candidate), need, blocked)
         val (examined, rest) = rows.splitAt(batch.examined)
+        val (beforeBlocked, _) = examined.span(row => !blocked(row.getString(MongoFields.Id)))
+        val nowPinned = pinned || beforeBlocked.size < examined.size
+        val nextCursor = if (pinned) cursor else beforeBlocked.lastOption.orElse(cursor)
         claimBatch(workerId, transactionalId, now, leaseUntil, batch.claimable, MongoOutboxClaimBatch.Attempts)
-          .flatMap(claimed => scan(rest, values ++ claimed, examined.lastOption.orElse(last)))
+          .flatMap(claimed =>
+            scan(
+              rest,
+              blocked,
+              values ++ claimed,
+              examined.lastOption.orElse(position),
+              nextCursor,
+              nowPinned,
+              pagesLeft,
+              pageFull
+            )
+          )
       }
     }
+    /* Rows of the page that wait for an earlier pending event of their aggregate. This read is only a filter that
+     * keeps blocked rows from using the batch budget; the claim transaction re-checks it. */
+    def pendingBehind(rows: List[Document]): RepositoryF[IO, Set[String]] =
+      earliestPending(None, rows.flatMap(row => Option(row.getString(MongoFields.PartitionKey))).distinct).map(
+        earliest =>
+          rows.flatMap { row =>
+            (Option(row.getString(MongoFields.Id)), Option(row.getString(MongoFields.PartitionKey))).tupled.collect {
+              case (id, key) if earliest.get(key).exists(_ != id) => id
+            }
+          }.toSet
+      )
     for {
       current <- RepositoryF.lift(MongoSessionOperations.findOne(cursors, None, MongoFilter.eq("_id", workerId)))
-      after <- MongoF.fromEither(current.traverse(cursorFilter))
+      after <- MongoF.fromEither(current.traverse(cursorFilter(_, "eventId")))
       found <- page(after)
       rows <- if (found.isEmpty && after.nonEmpty) page(None) else MongoF.pure(found)
-      result <- scan(rows, Nil, None)
+      behind <- pendingBehind(rows)
+      result <- scan(
+        rows,
+        behind,
+        Nil,
+        None,
+        None,
+        false,
+        maxScanPages,
+        rows.size >= MongoProducerRegistrations.BatchSize
+      )
     } yield result
   }
 
@@ -223,7 +301,8 @@ final class MongoOperationalEventOutboxRepository(
       // An unreadable subject list is not a reason to skip the row: the claim fails it as an invalid event.
       Option(row.get(MongoFields.SubjectIds))
         .collect { case values: java.util.List[?] => values.asScala.toList.collect { case id: String => id } }
-        .getOrElse(Nil)
+        .getOrElse(Nil),
+      Option(row.getString(MongoFields.PartitionKey))
     )
 
   private def due(now: Instant): MongoFilter = MongoOperationalEventOutboxRepository.Claimable.filter(now)
@@ -347,6 +426,18 @@ final class MongoOperationalEventOutboxRepository(
           }
       }
 
+  /** Claims exactly these candidates in one transaction, without the page scan or its blocked-row filter, so the
+    * in-transaction aggregate-order check can be exercised on its own.
+    */
+  private[mongo] def claimCandidates(
+      workerId: String,
+      transactionalId: String,
+      now: Instant,
+      leaseUntil: Instant,
+      candidates: List[MongoOutboxClaimBatch.Candidate]
+  ): RepositoryF[IO, List[ClaimedOperationalEvent]] =
+    claimBatch(workerId, transactionalId, now, leaseUntil, candidates, MongoOutboxClaimBatch.Attempts)
+
   private def claimInSession(
       session: Option[ClientSession[IO]],
       workerId: String,
@@ -358,7 +449,11 @@ final class MongoOperationalEventOutboxRepository(
   ): RepositoryF[IO, List[ClaimedOperationalEvent]] =
     for {
       held <- heldSubjects(session, now, candidates.flatMap(_.subjects).distinct)
-      free = candidates.filterNot(_.subjects.exists(held))
+      earliest <- earliestPending(session, candidates.flatMap(_.partitionKey).distinct)
+      // Per-aggregate order: an event waits while an earlier non-terminal event of its aggregate exists.
+      free = candidates.filterNot(c =>
+        c.subjects.exists(held) || c.partitionKey.exists(key => earliest.get(key).exists(_ != c.id))
+      )
       documents <- leaseEvents(session, workerId, token, now, leaseUntil, free)
       // A row without readable attribution, attempt counter or subject list, or with an event that cannot be
       // interpreted, is ended as Failed (its stored evidence is kept) and never blocks the rest of the batch.
@@ -371,6 +466,31 @@ final class MongoOperationalEventOutboxRepository(
       _ <- failClaimed(session, token, suppressed.map(_.event.eventId.toString), "SUBJECT_DELETED", now)
       _ <- leaseSubjects(session, live, transactionalId, token, now, leaseUntil)
     } yield live
+
+  /** Per partition key, the id of the earliest `Retryable` or `InFlight` event by `(occurredAt, _id)`. `Published` and
+    * `Failed` events never block; one `$group` row per key bounds the result by the candidate count.
+    */
+  private def earliestPending(
+      session: Option[ClientSession[IO]],
+      keys: List[String]
+  ): RepositoryF[IO, Map[String, String]] =
+    if (keys.isEmpty) MongoF.pure(Map.empty)
+    else {
+      val pipeline = MongoOutboxClaimBatch.earliestPendingAggregate(keys)
+      MongoRepositorySupport.transactionGuard(diagnostics, "outbox.earliestPending", session)(
+        RepositoryF.lift(
+          outbox
+            .flatMap(c =>
+              session
+                .fold(c.aggregate[Document](pipeline))(active => c.aggregate[Document](active, pipeline))
+                .boundedStream(keys.size + 1)
+                .compile
+                .toList
+            )
+            .map(_.flatMap(row => (Option(row.getString(MongoFields.Id)), Option(row.getString("first"))).tupled).toMap)
+        )
+      )
+    }
 
   /** The subjects whose lease is still held by another claim: their events wait for it to be released or to expire. */
   private def heldSubjects(
@@ -684,13 +804,15 @@ object MongoOperationalEventOutboxRepository {
       client: MongoClient[IO],
       diagnostics: Diagnostics[IO],
       uuidGen: UUIDGen[IO] = UUIDGen[IO],
-      breaker: CircuitBreaker[IO] = CircuitBreaker.disabled[IO]
+      breaker: CircuitBreaker[IO] = CircuitBreaker.disabled[IO],
+      maxScanPages: Int = MongoOutboxClaimBatch.MaxScanPages
   ): MongoOperationalEventOutboxRepository =
     new MongoOperationalEventOutboxRepository(
       database,
       MongoTransactionRunner.sessions(client, RepositoryError.Conflict, diagnostics = diagnostics, breaker = breaker),
       diagnostics,
-      uuidGen
+      uuidGen,
+      maxScanPages
     )
 }
 
@@ -781,7 +903,27 @@ object MongoSearchSessionRepository {
 private[mongo] object MongoOutboxClaimBatch {
 
   /** A due event as the page scan saw it: its identity and the subjects whose lease its publication needs. */
-  final case class Candidate(id: String, subjects: List[String])
+  final case class Candidate(id: String, subjects: List[String], partitionKey: Option[String] = None)
+
+  /** The earliest pending event per partition key: one `$group` row per key, read through the partial index
+    * `event_outbox_aggregate_order` as a `DISTINCT_SCAN` (the sort is the index order, so no `SORT` stage runs).
+    */
+  def earliestPendingAggregate(keys: List[String]): Aggregate = {
+    val pending = MongoFilter.and(
+      MongoFilter.in(MongoFields.PartitionKey, keys),
+      MongoFilter.in(MongoFields.State, PendingStates)
+    )
+    Aggregate
+      .matchBy(pending.sessionFilter)
+      .sort(Sort.asc(MongoFields.PartitionKey).asc(MongoFields.OccurredAt).asc(MongoFields.Id))
+      .group("$" + MongoFields.PartitionKey, Accumulator.first("first", "$" + MongoFields.Id))
+  }
+
+  /** The non-terminal outbox states: `Retryable` and `InFlight`. */
+  val PendingStates: List[String] = List("Retryable", "InFlight")
+
+  /** Pages a single claim may scan when every row of a full page has to wait. */
+  val MaxScanPages = 8
 
   /** Attempts of one page when another claim wins a subject lease between the read and the write. */
   val Attempts = 3
@@ -789,19 +931,20 @@ private[mongo] object MongoOutboxClaimBatch {
   /** The events of one batch and how many scanned rows it consumed. */
   final case class Selection(claimable: List[Candidate], examined: Int)
 
-  /** Takes at most `need` events in scan order such that no two share a subject: a subject lease belongs to one event
-    * at a time, so a later event of the same subject waits for the next claim. Events without subjects are taken as
-    * they are (the claim fails them as invalid). Every row up to the last one taken, or all of them, counts as
-    * examined; rows skipped on the way stay `Retryable`.
+  /** Rows in `blocked` (an earlier pending event of their aggregate exists) are examined but never taken. Takes at most
+    * `need` events in scan order such that no two share a subject: a subject lease belongs to one event at a time, so a
+    * later event of the same subject waits for the next claim. Events without subjects are taken as they are (the claim
+    * fails them as invalid). Every row up to the last one taken, or all of them, counts as examined; rows skipped on
+    * the way stay `Retryable`.
     */
-  def select(rows: List[Candidate], need: Int): Selection = {
+  def select(rows: List[Candidate], need: Int, blocked: Set[String] = Set.empty): Selection = {
     @annotation.tailrec
     def loop(rest: List[Candidate], taken: List[Candidate], used: Set[String], examined: Int): Selection =
       rest match {
         case _ if taken.size >= need => Selection(taken.reverse, examined)
         case Nil                     => Selection(taken.reverse, examined)
         case row :: tail             =>
-          if (row.subjects.exists(used)) loop(tail, taken, used, examined + 1)
+          if (blocked(row.id) || row.subjects.exists(used)) loop(tail, taken, used, examined + 1)
           else loop(tail, row :: taken, used ++ row.subjects, examined + 1)
       }
     loop(rows, Nil, Set.empty, 0)

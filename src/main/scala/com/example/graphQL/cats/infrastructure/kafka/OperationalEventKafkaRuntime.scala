@@ -146,11 +146,18 @@ object OperationalEventKafkaRuntime {
         }
       }
     } { claim =>
-      val record = ProducerRecord(config.topic, claim.partitionKey, claim.envelopeBytes)
+      val record = producerRecord(config.topic, claim)
       publishClaim(config, outbox, diagnostics, claim, clock)(
         guardedSend(breaker, producer.produceWithoutOffsets(ProducerRecords.one(record)).void)
       )
     }
+
+  /** The Kafka key is the aggregate id (job, application or search id), so one aggregate stays in one partition. */
+  private[cats] def producerRecord(
+      topic: String,
+      claim: ClaimedOperationalEvent
+  ): ProducerRecord[String, Array[Byte]] =
+    ProducerRecord(topic, claim.partitionKey, claim.envelopeBytes)
 
   /** While the breaker is open nothing is claimed, so outbox rows stay untouched until a probe is allowed; probing
     * claims a single event.

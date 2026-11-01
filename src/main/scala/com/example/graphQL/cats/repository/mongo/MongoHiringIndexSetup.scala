@@ -74,6 +74,18 @@ private[mongo] object MongoHiringIndexSetup {
     new IndexOptions().name(JobsEmbeddingMeta)
   )
 
+  /** Earliest pending event of an aggregate for the outbox claim's per-aggregate order check; introduced by
+    * `035_event_outbox_aggregate_order`. Partial on the two non-terminal states, so `Published` and `Failed` rows are
+    * not indexed, and ordered `(partitionKey, occurredAt, _id)`, so the earliest event per key is a `DISTINCT_SCAN`.
+    */
+  val eventOutboxAggregateOrderIndex: IndexSpec = IndexSpec(
+    MongoCollections.EventOutbox,
+    Indexes.ascending(MongoFields.PartitionKey, MongoFields.OccurredAt, MongoFields.Id),
+    new IndexOptions()
+      .name(EventOutboxAggregateOrder)
+      .partialFilterExpression(Filters.in(MongoFields.State, MongoOutboxClaimBatch.PendingStates.asJava))
+  )
+
   val jobCanonicalFilterIndexes: List[IndexSpec] = List(jobOpenCityIndex, jobEmbeddingMetaIndex)
   private val indexSpecs: List[IndexSpec] = List(
     IndexSpec(
@@ -237,6 +249,7 @@ private[mongo] object MongoHiringIndexSetup {
       ),
       new IndexOptions().name(EventOutboxClaim)
     ),
+    eventOutboxAggregateOrderIndex,
     IndexSpec(
       MongoCollections.EventOutbox,
       Indexes.ascending(MongoFields.RetentionExpiresAt),
