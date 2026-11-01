@@ -101,8 +101,12 @@ lazy val analytics = (project in file("."))
     // Same module opens as spark-jvm.args: Spark materializes DATE cells through sun.util.calendar.
     Test / javaOptions ++= Seq(
       "--add-opens=java.base/sun.security.action=ALL-UNNAMED",
-      "--add-opens=java.base/sun.util.calendar=ALL-UNNAMED"
+      "--add-opens=java.base/sun.util.calendar=ALL-UNNAMED",
+      // Loopback driver address: a changed host network address must not break executor-to-driver class loading.
+      "-Dspark.driver.host=127.0.0.1",
+      "-Dspark.driver.bindAddress=127.0.0.1"
     ),
+    Test / envVars += "SPARK_LOCAL_IP" -> "127.0.0.1",
     IntegrationTest / scalaSource := baseDirectory.value / "src" / "it" / "scala",
     IntegrationTest / parallelExecution := false,
     // sbt-jacoco hands the exec-file location to the JVM through javaOptions, so only a forked JVM records data.
@@ -118,8 +122,12 @@ lazy val analytics = (project in file("."))
     },
     IntegrationTest / javaOptions ++= Seq(
       "--add-opens=java.base/sun.security.action=ALL-UNNAMED",
-      "--add-opens=java.base/sun.util.calendar=ALL-UNNAMED"
+      "--add-opens=java.base/sun.util.calendar=ALL-UNNAMED",
+      // Loopback driver address: a changed host network address must not break executor-to-driver class loading.
+      "-Dspark.driver.host=127.0.0.1",
+      "-Dspark.driver.bindAddress=127.0.0.1"
     ),
+    IntegrationTest / envVars += "SPARK_LOCAL_IP" -> "127.0.0.1",
     scalacOptions ++= Seq(
       "-encoding",
       "utf-8",

@@ -85,6 +85,8 @@ private[analytics] object HiringAnalyticsRecoveryTestSupport {
     databaseReleases <- Resource.make(Ref.of[IO, List[IO[Unit]]](Nil))(_.get.flatMap(_.sequence_))
     _ <- Resource.eval(blocking {
       spark.conf.set("spark.sql.shuffle.partitions", "2")
+      // Tiny tables: the default 50 snapshot partitions make every Delta snapshot reconstruction a 50-task stage.
+      spark.conf.set("spark.databricks.delta.snapshotPartitions", "2")
       spark.conf.set("spark.sql.session.timeZone", "UTC")
     })
   } yield Runtime(root, uri, spark, client, new LakehouseOperation[IO](blocking), blocking, databaseReleases)

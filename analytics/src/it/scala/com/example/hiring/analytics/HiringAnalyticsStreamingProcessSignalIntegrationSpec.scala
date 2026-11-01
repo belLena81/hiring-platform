@@ -18,6 +18,17 @@ final class HiringAnalyticsStreamingProcessSignalIntegrationSpec extends CatsEff
 
   private val eventCount = 12
 
+  /** The module opens and reflection flags of the packaged runtime (`spark-jvm.args`), so the child JVM runs as it does
+    * deployed; the deployment-only warehouse directory is excluded.
+    */
+  private lazy val childJvmOptions: Vector[String] =
+    Files
+      .readAllLines(Path.of("spark-jvm.args"))
+      .toArray
+      .toVector
+      .map(_.toString.trim)
+      .filter(line => line.startsWith("--add-opens=") || line.startsWith("-Djdk.") || line.startsWith("-Dio.netty."))
+
   /** A child JVM on this test's classpath; its output goes to a file so it can never block on a full pipe. */
   private def spawn(
       fixture: StreamingIngestionFixtures.Fixture,
@@ -30,13 +41,18 @@ final class HiringAnalyticsStreamingProcessSignalIntegrationSpec extends CatsEff
       Files.writeString(config, configurationText(fixture, 13))
       val command = Vector(
         Path.of(System.getProperty("java.home"), "bin", "java").toString,
-        "--add-opens=java.base/sun.security.action=ALL-UNNAMED",
         "-cp",
-        System.getProperty("java.class.path"),
+        System.getProperty("java.class.path")
+      ) ++ childJvmOptions ++ Vector(
+        // Loopback driver address: a changed host network address must not break executor-to-driver class loading.
+        "-Dspark.driver.host=127.0.0.1",
+        "-Dspark.driver.bindAddress=127.0.0.1",
         s"-Dconfig.file=$config",
         s"-Djacoco-agent.destfile=${fixture.root.resolve(name + ".exec")}"
       ) ++ properties.map { case (key, value) => s"-D$key=$value" } :+ mainClass
-      new ProcessBuilder(command*)
+      val builder = new ProcessBuilder(command*)
+      val _ = builder.environment().put("SPARK_LOCAL_IP", "127.0.0.1")
+      builder
         .redirectErrorStream(true)
         .redirectOutput(fixture.root.resolve(name + ".log").toFile)
         .start()
@@ -52,6 +68,14 @@ final class HiringAnalyticsStreamingProcessSignalIntegrationSpec extends CatsEff
       case false => IO.raiseError(new AssertionError(s"the process did not exit within $within"))
     }
 
+  /** The first error lines (a stack-trace tail alone hides the root cause) followed by the last output lines. */
+  private def failureDiagnostics(log: Path): String = {
+    val lines = Files.readAllLines(log).toArray.map(_.toString).toVector
+    val errors =
+      lines.filter(line => line.contains("ERROR") || line.contains("Exception") || line.contains("Caused by"))
+    s"first error lines:\n${errors.take(30).mkString("\n")}\nlast output lines:\n${lines.takeRight(40).mkString("\n")}"
+  }
+
   /** Bounded polling that fails at once if the child has died, with the tail of its output. */
   private def eventually(
       fixture: StreamingIngestionFixtures.Fixture,
@@ -65,8 +89,8 @@ final class HiringAnalyticsStreamingProcessSignalIntegrationSpec extends CatsEff
     check.flatMap { done =>
       if (done) IO.unit
       else if (!process.isAlive)
-        IO.blocking(Files.readAllLines(fixture.root.resolve(name + ".log")).toArray.takeRight(40).mkString("\n"))
-          .flatMap(tail => IO.raiseError(new AssertionError(s"the process ended before $description:\n$tail")))
+        IO.blocking(failureDiagnostics(fixture.root.resolve(name + ".log")))
+          .flatMap(report => IO.raiseError(new AssertionError(s"the process ended before $description:\n$report")))
       else if (attempts == 0) IO.raiseError(new AssertionError(s"timed out waiting for $description"))
       else IO.sleep(500.millis) *> eventually(fixture, process, name, description, attempts - 1)(check)
     }
