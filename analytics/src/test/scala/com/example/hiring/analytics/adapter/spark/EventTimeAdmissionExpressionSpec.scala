@@ -127,6 +127,43 @@ class EventTimeAdmissionExpressionSpec extends FunSuite {
     assert(compared > 5000, s"only $compared inputs compared")
   }
 
+  test("DDR-04.2 the expression classifies facts inside, at and past a configured allowed-lateness bound") {
+    val lateness = scala.concurrent.duration.DurationInt(48).hours
+    val newest = Instant.parse("2026-10-02T00:00:00Z")
+    val observedAt = newest
+    val watermark = AnalyticsEventTimePolicy.candidateWatermark(None, List(newest), observedAt, lateness)
+    assertEquals(watermark, Some(Instant.parse("2026-09-30T00:00:00Z")))
+    val bound = watermark.get
+    val facts = Vector(
+      "inside: first instant of the open day" -> (bound, EventTimeAdmission.OpenStatus),
+      "inside: last microsecond of the open day" -> (
+        bound.plusSeconds(86399L).plusNanos(999000L),
+        EventTimeAdmission.OpenStatus
+      ),
+      "at: last microsecond of the day ending exactly at the bound" -> (
+        bound.minusNanos(1000L),
+        EventTimeAdmission.ClosedStatus
+      ),
+      "past: five days before the bound" -> (bound.minusSeconds(5L * 86400L), EventTimeAdmission.ClosedStatus)
+    )
+    val frame = spark
+      .createDataFrame(
+        facts.map { case (name, (time, _)) => Row(name, Timestamp.from(time)) }.asJava,
+        StructType(
+          Vector(StructField("name", StringType, nullable = false), StructField("t", TimestampType, nullable = false))
+        )
+      )
+      .select(col("name"), EventTimeAdmissionExpression.classify(col("t"), observedAt, watermark).as("a"))
+      .select(col("name"), col("a.status"), col("a.effectiveTime"))
+    val rows = frame.collect().map(row => row.getString(0) -> (row.getString(1), Option(row.get(2)))).toMap
+    facts.foreach { case (name, (_, status)) =>
+      assertEquals(rows(name)._1, status, name)
+      assertEquals(rows(name)._2.isDefined, status == EventTimeAdmission.OpenStatus, name)
+      val policy = AnalyticsEventTimePolicy.admit(facts.find(_._1 == name).get._2._1, observedAt, watermark)
+      assertEquals(policy.wireStatus, status, name)
+    }
+  }
+
   test("AC-06.1 a null event time is rejected as FUTURE with no effective time, as before") {
     val frame = spark.createDataFrame(
       List(Row(null)).asJava,

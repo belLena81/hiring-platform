@@ -192,7 +192,14 @@ object EventTimeAdmission {
 
 object AnalyticsEventTimePolicy {
   val AllowedFutureSkew: FiniteDuration = 5.minutes
-  val WatermarkLag: FiniteDuration = 24.hours
+
+  /** The watermark trails the greatest admitted event time by the allowed lateness (`analytics.streaming.allowed-
+    * lateness`). A UTC day closes once its end is at or before the watermark, so a fact is tolerated for between one
+    * and two allowed-lateness periods after its event time, depending on its position within the UTC day.
+    */
+  val DefaultAllowedLateness: FiniteDuration = 24.hours
+  val MinimumAllowedLateness: FiniteDuration = 1.hour
+  val MaximumAllowedLateness: FiniteDuration = 7.days
   val LateFactRetentionDays: Int = 30
 
   def admit(
@@ -213,11 +220,12 @@ object AnalyticsEventTimePolicy {
   def candidateWatermark(
       previousWatermark: Option[Instant],
       admittedUnambiguousEventTimes: Iterable[Instant],
-      observedAt: Instant
+      observedAt: Instant,
+      allowedLateness: FiniteDuration
   ): Option[Instant] =
     admittedUnambiguousEventTimes.iterator
       .map(time => if (time.isAfter(observedAt)) observedAt else time)
       .maxOption
-      .map(_.minusNanos(WatermarkLag.toNanos))
+      .map(_.minusNanos(allowedLateness.toNanos))
       .map(candidate => previousWatermark.fold(candidate)(Ordering[Instant].max(candidate, _)))
 }

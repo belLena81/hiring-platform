@@ -564,6 +564,13 @@ final class StreamingBatchCoordinatorSpec extends CatsEffectSuite {
       ): IO[Unit] = IO.unit
     }
 
-    val coordinator = new StreamingBatchCoordinator[IO](journal, markers, stages, checkpoint, authorize)
+    val coordinator = new StreamingBatchCoordinator[IO](
+      journal,
+      markers,
+      stages,
+      checkpoint,
+      authorize,
+      AnalyticsEventTimePolicy.DefaultAllowedLateness
+    )
   }
 }

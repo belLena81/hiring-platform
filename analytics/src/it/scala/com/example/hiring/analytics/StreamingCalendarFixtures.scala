@@ -59,7 +59,14 @@ private[analytics] object StreamingCalendarFixtures {
           .streamingStages(frame, sink)
           .map(stages => observer.fold(stages)(StreamingDurableBoundaryObserver.stages(stages, _)))
           .use(stages =>
-            new StreamingBatchCoordinator[IO](store, harness.markers, stages, harness.checkpoint(store), IO.unit)
+            new StreamingBatchCoordinator[IO](
+              store,
+              harness.markers,
+              stages,
+              harness.checkpoint(store),
+              IO.unit,
+              AnalyticsEventTimePolicy.DefaultAllowedLateness
+            )
               .process(preparation)
           )
       } yield result

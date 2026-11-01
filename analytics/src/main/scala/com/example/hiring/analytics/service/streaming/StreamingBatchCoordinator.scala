@@ -17,6 +17,7 @@ import com.example.hiring.analytics.service.batch.{ActiveDeletionMarkerSource, A
 import com.example.hiring.analytics.service.batch.{AnalyticsReportPublicationReceipt, AnalyticsReportReservation}
 
 import java.time.Instant
+import scala.concurrent.duration.FiniteDuration
 
 /** Immutable evidence captured once for a Spark batch, before any sink is changed. */
 final case class StreamingInputPreparation(
@@ -177,7 +178,8 @@ final class StreamingBatchCoordinator[F[_]: Async](
     deletionMarkers: ActiveDeletionMarkerSource[F],
     stages: StreamingBatchStages[F],
     checkpoint: StreamingCheckpointAcknowledgement[F],
-    authorize: F[Unit]
+    authorize: F[Unit],
+    allowedLateness: FiniteDuration
 ) {
   private val MaximumDecisionAttempts = 3
 
@@ -255,7 +257,7 @@ final class StreamingBatchCoordinator[F[_]: Async](
       candidate = assessment match {
         case StreamingIngestionResult.Ready(_) if !markers.erasureInProgress =>
           recoveredCandidate.orElse(
-            AnalyticsEventTimePolicy.candidateWatermark(prior, eventTimes, preparation.observedAt)
+            AnalyticsEventTimePolicy.candidateWatermark(prior, eventTimes, preparation.observedAt, allowedLateness)
           )
         case _ => None
       }

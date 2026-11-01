@@ -9,6 +9,8 @@ import cats.effect.Async
 import cats.syntax.all.*
 import org.apache.spark.sql.DataFrame
 
+import scala.concurrent.duration.FiniteDuration
+
 /** The per-micro-batch streaming callback: builds the batch stages and stacks the cost and durable-boundary decorators
   * around the journal, writer and stages. Every dependency is explicit; composition only constructs it.
   */
@@ -18,7 +20,8 @@ private[app] final class StreamingBatchCallback[F[_]: Async](
     journal: StreamingBatchJournal[F],
     checkpoint: StreamingCheckpointAcknowledgement[F],
     cost: Option[StreamingBatchCost[F]],
-    observer: Option[StreamingDurableBoundaryObserver[F]]
+    observer: Option[StreamingDurableBoundaryObserver[F]],
+    allowedLateness: FiniteDuration
 ) {
   import StreamingBatchCallback.timed
 
@@ -69,7 +72,8 @@ private[app] final class StreamingBatchCallback[F[_]: Async](
           common.operational.retention,
           shared.maintenance.configureRawTables,
           shared.maintenance.purgeMarkedSubjects,
-          authorize
+          authorize,
+          allowedLateness
         )
         .use { stages =>
           val costed = cost.fold(stages)(_.wrap(stages))
@@ -78,7 +82,8 @@ private[app] final class StreamingBatchCallback[F[_]: Async](
             shared.markers,
             observer.fold(costed)(StreamingDurableBoundaryObserver.stages(costed, _)),
             checkpoint,
-            authorize
+            authorize,
+            allowedLateness
           ).process(preparation).void
         }
     } yield ()

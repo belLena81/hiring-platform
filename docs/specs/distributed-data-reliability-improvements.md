@@ -1,6 +1,6 @@
 # Distributed Data Reliability Improvements
 
-Status: **proposed plan, not started**. Nothing here is implemented or reviewed. Created from a read-through of the
+Status: **scoped, in progress (2026-11-01)**. Owner decision (2026-11-01, MVP condition 1): items 5, 6, 1, 3 and DDR-04.1 to DDR-04.3 land before the MVP (local) claim; items 2, 7, 8 and 9 and DDR-04.4's re-measurement are explicitly deferred as additive post-MVP work (no API or analytics shape change). Nothing here is implemented or reviewed yet. Created from a read-through of the
 codebase against *Designing Data-Intensive Applications* (Kleppmann, 1st ed., 2017). Chapter references are to that book.
 
 Pre-MVP contract policy applies (`AGENTS.md`): API and analytics schemas have one active shape, so no migration,
@@ -210,6 +210,14 @@ deferred to Phase 15 until a real deployment exists.
 | DDR-04.3 | A late fact after publication triggers the documented correction or replay, with the report generation recorded. |
 | DDR-04.4 | The Bronze latency result remains recorded as FAIL until a new measured run replaces it. |
 
+### Decisions (2026-11-01)
+
+Gap analysis on HEAD `c43ac94`: the bound is the fixed 24 h `WatermarkLag` (effective tolerance 24 to 48 h depending on the clock position within the UTC day); CLOSED facts go only to `lateFacts`, FUTURE facts only to quarantine (blocking that batch's publication); the per-batch counts are measured but never emitted; replay is explicit and records `generation`, `revision` and `runId`. Owner decisions:
+
+- DDR-04.1: `analytics.streaming.allowed-lateness` (default 24 hours, `ANALYTICS_STREAMING_ALLOWED_LATENESS`), validated and part of the streaming activation identity (local grants and checkpoints are re-created; pre-MVP). Future skew and the 30-day late-fact retention stay fixed policy values.
+- DDR-04.2: counts are emitted as one sanitized structured log line per ingest, `STREAMING_EVENT_TIME_ADMISSION closedDay=N future=N allowedLatenessMillis=M batch=<id> generation=<g> revision=<r>` (revision added 2026-11-01: replay publishes a newer revision of the pinned generation, so generation alone cannot identify the report a late fact missed); no journal columns, no metrics dependency, no analytics table or Mongo snapshot shape change.
+- DDR-04.3: the policy is explicit operator replay by Kafka coordinate into a new generation; the log line records which published generation a late fact missed. Automatic replay is a post-MVP option.
+
 ### Owners and gates
 
 Big Data Engineer. Independent Code Reviewer and QA. Large benchmarks need explicit scope and budget.
@@ -251,6 +259,10 @@ outbox row the rest of the system already trusts.
 | DDR-05.2 | Transactions and outbox or status writes use majority write concern, enforced by configuration validation. |
 | DDR-05.3 | A URI with a weaker write concern is rejected at startup with a sanitized error. |
 
+### Decisions (2026-11-01)
+
+Verification on HEAD `c43ac94`: **Confirmed, not enforced.** The application sets no write concern, read concern or read preference (only the Admin embedding-coverage read pins primary/snapshot); `MongoDatabaseProbe` applies the URI and nothing else, `MongoTransactionRunner` starts transactions without `TransactionOptions`, and `HttpMongoConfigReader` rejects only `w=0`. Analytics validates only that the URI parses; its lock, streaming registry/gate, HMAC authorization and late-fact journal pin majority with journal, while the erasure queue, barrier and progress, deletion markers, report publisher and key-retirement scan inherit the URI default. The effective value is the server default (majority on the shipped single-member replica set, unasserted). Owner decision: reject weak URIs **and** override. Startup rejects `w` below majority, `journal=false`, a non-primary read preference and an unsupported read-concern level with the existing redacted error, in both the application and analytics; the client builders (`MongoDatabaseProbe.effectiveSettings`, analytics `SparkRuntime.mongoClient`) and transactions set majority write concern with journal, majority read concern and primary read preference explicitly. `docs/mongodb-design.md` gains the effective-concern table (DDR-05.1).
+
 ### Owners and gates
 
 Data Engineer. Security Engineer (configuration, secrets in URIs). Code Reviewer and QA.
@@ -283,6 +295,14 @@ completion frontier. `MongoOperationalEventRepositories.scala` claims batches wi
 | DDR-06.1 | Under a transient failure of an earlier event, a later event of the same aggregate is not published first. |
 | DDR-06.2 | Events of different aggregates continue to publish while one aggregate is blocked. |
 | DDR-06.3 | The Kafka key for operational events is documented and tested as the aggregate partition key. |
+
+### Decisions (2026-11-01)
+
+Verification on HEAD `c43ac94`: **Confirmed failing; severity raised to Medium.** The Kafka key is the aggregate ID, and the producer is idempotent and transactional, so the producer cannot reorder a partition. The relay can: publication is serialized only by per-user subject leases, `releaseForRetry` releases the leases of a transiently failed event, and the claim has no "earlier unpublished event of the same aggregate" predicate, so a later event of one aggregate can be published before an earlier one that is retrying or whose lease expired (DDR-06.1 fails). Today's consumers are order-independent (analytics earliest-wins and deduplication; the application consumer records receipts), so the practical impact is low, but `ARCHITECTURE.md` promises aggregate order. Owner decisions:
+
+- The claim does not return an event while an earlier non-terminal (`Retryable` or `InFlight`) event with the same partition key exists, ordered by `(occurredAt, _id)`; other aggregates keep publishing (DDR-06.2).
+- A `Failed` event (retries exhausted) does not block its aggregate: later events continue, the gap is documented, and the failed event stays visible and logged for operator repair.
+- Events written in one transaction (for example `APPLICATION_STATUS_CHANGED` and `CANDIDATE_HIRED`) have no defined relative order; this is documented, and no sequence field is added.
 
 ### Owners and gates
 
@@ -420,3 +440,4 @@ Software Architect, Data Engineer. No implementation gate.
 |---|---|---|
 | 2026-10-27 | 1 | Confirmed by reading `MongoRepositorySupport.scala` and its callers; no database-clock use found. |
 | 2026-10-27 | 2 to 9 | Not yet verified beyond the facts quoted above. |
+| 2026-11-01 | 4 (DDR-04.1 to DDR-04.3) | Implemented; Code Reviewer PASS and Security Engineer PASS (2026-11-01); final QA pending. Final state: analytics `sbt test` 608 total, 606 passed, 2 skipped, 0 failed; formatting checks pass; integration `HiringAnalyticsStreamingAllowedLatenessIntegrationSpec` 3 of 3 (inside/at/past, future-only, replay after publication), `HiringAnalyticsLateFactReplayRecoveryIntegrationSpec` 7 of 7, `HiringAnalyticsStreamingIngestionIntegrationSpec` 4 of 4 on a lightly loaded rerun (two earlier runs at load average 5 to 8 each had one test exceed its fixed 5-minute bound; the 4 of 4 passes before and after those runs show load sensitivity, not a regression). `analytics.streaming.allowed-lateness` (default 24 hours, 1 hour to 7 days, in the activation identity) replaces the fixed `WatermarkLag`; `StreamingEventTimeAdmissionLog` emits `STREAMING_EVENT_TIME_ADMISSION` (with `generation` and `revision` from the batch's publication reservation) per ingest, with a unit test that captures the emitted log event; explicit replay is the documented correction policy. Tests: `AnalyticsStreamingSettingsSpec` and `AnalyticsEventTimeSpec` (DDR-04.1 and bound cases), `StreamingEventTimeAdmissionLogSpec`, `EventTimeAdmissionExpressionSpec` (inside, at, past), `HiringAnalyticsStreamingAllowedLatenessIntegrationSpec` (DDR-04.2 path exclusivity, DDR-04.3 replay into a newer revision of the pinned generation; the generation number changes only through erasure fencing, so the corrected report is identified by `revision` and `runId`). DDR-04.4 unchanged: Bronze p95 40,084 ms stays FAIL. |

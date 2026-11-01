@@ -19,6 +19,7 @@ import org.apache.spark.storage.StorageLevel
 
 import java.sql.Timestamp
 import java.time.Instant
+import scala.concurrent.duration.FiniteDuration
 
 /** Adapter for one callback's parsed Kafka frame. The Resource owns its Spark cache through ingestion and publication.
   */
@@ -120,7 +121,8 @@ private[analytics] object SparkStreamingBatchStages {
       retention: AnalyticsRetentionSettings,
       configureTables: Vector[SubjectToken] => F[Unit],
       applyActiveDeletions: Vector[SubjectToken] => F[Unit],
-      authorizePublication: F[Unit]
+      authorizePublication: F[Unit],
+      allowedLateness: FiniteDuration
   ): Resource[F, StreamingBatchStages[F]] =
     Resource
       .make(
@@ -144,7 +146,8 @@ private[analytics] object SparkStreamingBatchStages {
           retention,
           configureTables,
           applyActiveDeletions,
-          authorizePublication
+          authorizePublication,
+          allowedLateness
         )
       )
 }
@@ -164,7 +167,8 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
     retention: AnalyticsRetentionSettings,
     configureTables: Vector[SubjectToken] => F[Unit],
     applyActiveDeletions: Vector[SubjectToken] => F[Unit],
-    authorizePublication: F[Unit]
+    authorizePublication: F[Unit],
+    allowedLateness: FiniteDuration
 ) extends StreamingBatchStages[F] {
   private val F = Async[F]
   private val AdmissionColumn = "_hiringEventTimeAdmission"
@@ -246,6 +250,16 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
       _ <- silverStage.quarantinePreparation(spark, bronze, markerFrame, activeTokens.nonEmpty).use { prepared =>
         classifyForWriting(preparation, markerFrame, activeTokens.nonEmpty, prepared, attempt).use { admission =>
           for {
+            _ <- StreamingEventTimeAdmissionLog.emit[F](
+              StreamingEventTimeAdmissionLog(
+                admission.closedCount,
+                admission.futureCount,
+                allowedLateness,
+                preparation.identity.batchId,
+                decision.publicationReservation.generation,
+                decision.publicationReservation.revision
+              )
+            )
             _ <- persistFutureQuarantine(admission, preparation.observedAt)
             lateEvents <- lateFactsNotAlreadyAdmitted(admission)
             _ <- lateFactStage.persistClosedDayFacts(lateEvents, markerFrame, preparation.observedAt)

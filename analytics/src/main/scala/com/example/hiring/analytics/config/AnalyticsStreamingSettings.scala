@@ -2,6 +2,7 @@ package com.example.hiring.analytics.config
 
 import com.example.hiring.analytics.domain.{
   AnalyticsDigest,
+  AnalyticsEventTimePolicy,
   AnalyticsLakehouseIdentity,
   AnalyticsOffset,
   AnalyticsPartition,
@@ -44,6 +45,8 @@ final case class AnalyticsStreamingSettings private (
     initialOffsets: Vector[KafkaStartingOffset],
     maintenanceInterval: FiniteDuration,
     progressRetention: FiniteDuration,
+    // How far the durable watermark trails the greatest admitted event time; part of the stream identity digest.
+    allowedLateness: FiniteDuration,
     // Zero disables compaction. An operational tuning knob, so it is not part of the stream identity digest below.
     optimizeInterval: FiniteDuration
 ) {
@@ -67,7 +70,8 @@ final case class AnalyticsStreamingSettings private (
       AnalyticsStreamingSettings.ConsumerGroupId,
       offsets,
       maintenanceInterval.toString,
-      progressRetention.toString
+      progressRetention.toString,
+      allowedLateness.toString
     ).mkString("\n")
     for {
       _ <- Either.cond(
@@ -105,7 +109,8 @@ object AnalyticsStreamingSettings {
       initialOffsets: Vector[KafkaStartingOffsetInput],
       maintenanceInterval: AnalyticsPositiveDuration,
       progressRetention: AnalyticsPositiveDuration,
-      optimizeInterval: FiniteDuration
+      optimizeInterval: FiniteDuration,
+      allowedLateness: Option[FiniteDuration]
   ) derives ConfigReader
 
   /** Check before checkpoint creation that the explicit offsets cover exactly the broker's current partition set. */
@@ -145,11 +150,20 @@ object AnalyticsStreamingSettings {
       raw.optimizeInterval,
       "analytics.streaming.optimize-interval must be zero (disabled) or at least maintenance-interval"
     )
+    // Absent means the documented default; the shipped application.conf also states it explicitly.
+    val requestedLateness = raw.allowedLateness.getOrElse(AnalyticsEventTimePolicy.DefaultAllowedLateness)
+    val allowedLateness = Validated.condNec(
+      requestedLateness >= AnalyticsEventTimePolicy.MinimumAllowedLateness &&
+        requestedLateness <= AnalyticsEventTimePolicy.MaximumAllowedLateness,
+      requestedLateness,
+      "analytics.streaming.allowed-lateness must be between 1 hour and 7 days"
+    )
     (
       validateCheckpointLocation(raw.checkpointLocation),
       (offsets, uniquePartitions, nonEmptyOffsets).mapN((validOffsets, _, _) => validOffsets),
-      optimizeInterval
-    ).mapN((checkpointLocation, validOffsets, optimizeInterval) =>
+      optimizeInterval,
+      allowedLateness
+    ).mapN((checkpointLocation, validOffsets, optimizeInterval, allowedLateness) =>
       AnalyticsStreamingSettings(
         raw.streamId,
         raw.activationGrantId,
@@ -160,6 +174,7 @@ object AnalyticsStreamingSettings {
         validOffsets,
         raw.maintenanceInterval,
         raw.progressRetention,
+        allowedLateness,
         optimizeInterval
       )
     )

@@ -209,7 +209,15 @@ object AppModule {
             observedLock,
             common.lakehouseRoot,
             checkpoint,
-            new StreamingBatchCallback[F](shared, common, observedJournal, checkpoint, cost, observer).apply,
+            new StreamingBatchCallback[F](
+              shared,
+              common,
+              observedJournal,
+              checkpoint,
+              cost,
+              observer,
+              settings.streaming.allowedLateness
+            ).apply,
             () => KafkaOffsetRangeSource.sourceIdentity(common.kafka, settings.topic, shared.sparkExecution),
             maintenance = Some((identity, lineage, retainedCheckpoint, authorize) =>
               new AnalyticsStreamingMaintenance[F](

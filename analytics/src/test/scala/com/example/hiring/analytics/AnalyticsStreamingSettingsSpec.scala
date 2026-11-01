@@ -185,4 +185,64 @@ class AnalyticsStreamingSettingsSpec extends FunSuite {
     )
   }
 
+  test("DDR-04.1 allowed-lateness defaults to 24 hours when absent") {
+    assertEquals(AnalyticsConfigFixtures.streaming(valid).map(_.allowedLateness), Right(24.hours))
+  }
+
+  test("DDR-04.1 allowed-lateness is read, bounded between 1 hour and 7 days, and rejected outside it") {
+    def withLateness(value: String) =
+      AnalyticsConfigFixtures.streaming(
+        valid.replace("progress-retention = 7 days", s"progress-retention = 7 days\n  allowed-lateness = $value")
+      )
+    assertEquals(withLateness("72 hours").map(_.allowedLateness), Right(72.hours))
+    assertEquals(withLateness("1 hour").map(_.allowedLateness), Right(1.hour))
+    assertEquals(withLateness("7 days").map(_.allowedLateness), Right(7.days))
+    List("59 minutes", "0 seconds", "-1 hours", "8 days", "soon").foreach { bad =>
+      assert(
+        withLateness(bad).left.exists {
+          case error: AnalyticsError.InvalidConfiguration => error.getMessage.contains("allowed-lateness")
+          case _                                          => false
+        },
+        bad
+      )
+    }
+  }
+
+  test("DDR-04.1 allowed-lateness is part of the streaming activation identity") {
+    val original = AnalyticsConfigFixtures.streaming(valid).toOption.get
+    val changed = AnalyticsConfigFixtures
+      .streaming(
+        valid.replace("progress-retention = 7 days", "progress-retention = 7 days\n  allowed-lateness = 48 hours")
+      )
+      .toOption
+      .get
+    val sameAsDefault = AnalyticsConfigFixtures
+      .streaming(
+        valid.replace("progress-retention = 7 days", "progress-retention = 7 days\n  allowed-lateness = 24 hours")
+      )
+      .toOption
+      .get
+    def identity(settings: AnalyticsStreamingSettings) =
+      settings.activationIdentity("cluster", "topic", "hiring.events", "file:///tmp/lakehouse")
+    assertNotEquals(identity(original), identity(changed))
+    assertEquals(identity(original), identity(sameAsDefault))
+  }
+
+  test("DDR-04.1 the shipped application settings document the default and an environment override") {
+    val shipped = scala.util.Using.resource(scala.io.Source.fromResource("application.conf"))(_.mkString) +
+      "\nanalytics.streaming.initial-offsets = [{ partition = 0, offset = 0 }]\n"
+    val base = Map("ANALYTICS_STREAMING_GRANT_ID" -> "grant-2026-10")
+    assertEquals(AnalyticsConfigFixtures.streaming(shipped, base).map(_.allowedLateness), Right(24.hours))
+    assertEquals(
+      AnalyticsConfigFixtures
+        .streaming(shipped, base + ("ANALYTICS_STREAMING_ALLOWED_LATENESS" -> "48 hours"))
+        .map(_.allowedLateness),
+      Right(48.hours)
+    )
+    assert(
+      AnalyticsConfigFixtures
+        .streaming(shipped, base + ("ANALYTICS_STREAMING_ALLOWED_LATENESS" -> "10 minutes"))
+        .isLeft
+    )
+  }
 }

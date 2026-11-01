@@ -211,7 +211,8 @@ private[analytics] object HiringAnalyticsRecoveryTestSupport {
         operational.retention,
         maintenance.configureRawTables,
         maintenance.applyActiveDeletions,
-        IO.unit
+        IO.unit,
+        AnalyticsEventTimePolicy.DefaultAllowedLateness
       )
     }
 
@@ -240,7 +241,14 @@ private[analytics] object HiringAnalyticsRecoveryTestSupport {
         store: StreamingBatchJournal[IO] = journal
     ): IO[StreamingCoordinatorResult] = lock.resource(paths.root).use { _ =>
       maintenance.validateHmacConfigurationLocked *> streamingStages(frame, sink, publication).use { stages =>
-        new StreamingBatchCoordinator[IO](store, markers, stages, checkpoint(store), IO.unit).process(preparation())
+        new StreamingBatchCoordinator[IO](
+          store,
+          markers,
+          stages,
+          checkpoint(store),
+          IO.unit,
+          AnalyticsEventTimePolicy.DefaultAllowedLateness
+        ).process(preparation())
       }
     }
 
