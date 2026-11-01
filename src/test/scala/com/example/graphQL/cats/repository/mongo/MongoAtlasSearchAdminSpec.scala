@@ -23,4 +23,33 @@ final class MongoAtlasSearchAdminSpec extends CatsEffectSuite {
         }
       }
   }
+
+  test("DDR-05.2 the lexical job matcher runs its $search on a local read concern handle") {
+    MongoDatabaseProbe.clientResource("mongodb://127.0.0.1:1").use { client =>
+      for {
+        database <- client.getDatabase("search_admin_spec")
+        policy <- DiscoveryQueryPolicy.create(scala.concurrent.duration.DurationInt(1).second, 1)
+        matcher = new MongoLexicalJobMatcher(
+          database,
+          "jobs_lexical",
+          com.example.graphQL.cats.service.Diagnostics.noop[IO],
+          policy
+        )
+        handle <- matcher.jobsSearchHandle
+      } yield assertEquals(handle.underlying.getReadConcern, ReadConcern.LOCAL)
+    }
+  }
+
+  test("DDR-05.2 the search aggregation handle is local while the same collection elsewhere stays majority") {
+    MongoDatabaseProbe.clientResource("mongodb://127.0.0.1:1").use { client =>
+      for {
+        database <- client.getDatabase("search_admin_spec")
+        search <- MongoAtlasSearchAdmin.searchCollection(database, "jobs")
+        business <- Mongo4catsCollections.documents(database, "jobs")
+      } yield {
+        assertEquals(search.underlying.getReadConcern, ReadConcern.LOCAL)
+        assertEquals(business.underlying.getReadConcern, ReadConcern.MAJORITY)
+      }
+    }
+  }
 }

@@ -240,7 +240,7 @@ final class MongoSemanticSearchRepository(
     searchGuard(operation) {
       RepositoryF
         .lift(
-          Mongo4catsCollections.documents(database, collection).flatMap { source =>
+          MongoAtlasSearchAdmin.searchCollection(database, collection).flatMap { source =>
             collectWithin(aggregate(source, stages), branchLimit)
           }
         )
@@ -279,7 +279,7 @@ final class MongoSemanticSearchRepository(
     searchGuard("semanticSearch.candidateVector") {
       RepositoryF
         .lift(
-          Mongo4catsCollections.documents(database, MongoCollections.Users).flatMap { users =>
+          MongoAtlasSearchAdmin.searchCollection(database, MongoCollections.Users).flatMap { users =>
             collectWithin(aggregate(users, pipeline.asScala.toSeq), limit)
           }
         )
@@ -294,7 +294,7 @@ final class MongoSemanticSearchRepository(
     searchGuard("semanticSearch.candidateLexical") {
       RepositoryF
         .lift(
-          Mongo4catsCollections.documents(database, MongoCollections.Users).flatMap { users =>
+          MongoAtlasSearchAdmin.searchCollection(database, MongoCollections.Users).flatMap { users =>
             collectWithin(aggregate(users, pipeline.asScala.toSeq), branchLimit)
           }
         )
@@ -338,7 +338,7 @@ final class MongoSemanticSearchRepository(
     searchGuard("semanticSearch.nativeJobs") {
       RepositoryF
         .lift(
-          Mongo4catsCollections.documents(database, MongoCollections.Jobs).flatMap { jobs =>
+          MongoAtlasSearchAdmin.searchCollection(database, MongoCollections.Jobs).flatMap { jobs =>
             collectWithin(aggregate(jobs, stages), branchLimit)
           }
         )
@@ -405,7 +405,7 @@ final class MongoSemanticSearchRepository(
     searchGuard("semanticSearch.nativeCandidates") {
       RepositoryF
         .lift(
-          Mongo4catsCollections.documents(database, MongoCollections.Users).flatMap { users =>
+          MongoAtlasSearchAdmin.searchCollection(database, MongoCollections.Users).flatMap { users =>
             collectWithin(
               aggregate(users, pipeline),
               branchLimit
@@ -476,7 +476,7 @@ final class MongoSemanticSearchRepository(
     searchGuard("semanticSearch.vectorJobs") {
       RepositoryF
         .lift(
-          Mongo4catsCollections.documents(database, MongoCollections.Jobs).flatMap { jobs =>
+          MongoAtlasSearchAdmin.searchCollection(database, MongoCollections.Jobs).flatMap { jobs =>
             collectWithin(aggregate(jobs, pipeline.asScala.toSeq), limit)
           }
         )
@@ -511,7 +511,7 @@ final class MongoSemanticSearchRepository(
     searchGuard("semanticSearch.lexicalJobs") {
       RepositoryF
         .lift(
-          Mongo4catsCollections.documents(database, MongoCollections.Jobs).flatMap { jobs =>
+          MongoAtlasSearchAdmin.searchCollection(database, MongoCollections.Jobs).flatMap { jobs =>
             collectWithin(aggregate(jobs, pipeline.asScala.toSeq), branchLimit)
           }
         )

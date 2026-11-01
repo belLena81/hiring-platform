@@ -44,5 +44,61 @@ final class MongoClientConstructionGuardSpec extends FunSuite {
     assertEquals(offenders, Nil)
   }
 
+  private val searchOwners = Set("MongoSemanticSearchRepository.scala", "MongoLexicalJobMatcher.scala")
+  private val adminFile = "MongoAtlasSearchAdmin.scala"
+  // Direct stage literals and every helper that builds a mongot-served stage; a file touching any of them is a search
+  // file, so a stage built through a helper cannot escape the rule.
+  private val searchTokens = List(
+    "\"$search\"",
+    "\"$searchMeta\"",
+    "\"$vectorSearch\"",
+    "\"$rankFusion\"",
+    "\"$scoreFusion\"",
+    "MongoLexicalSearch",
+    "lexicalSearchStage",
+    "lexicalJobStages",
+    "lexicalCandidateStages",
+    "vectorSearchStage"
+  )
+  private val handleAcquisition = """Mongo4catsCollections\.documents\(|getCollection\(|\.getCollection""".r
+  // The one authoritative (majority) handle in a search file: the eligibility `$lookup` read over a variable parent.
+  private val authoritativeEligibilityHandle = "Mongo4catsCollections.documents(database, parentCollection)"
+
+  private def sources: List[(Path, String)] = {
+    val root = Paths.get("src/main/scala")
+    assume(Files.isDirectory(root), "run from the project root")
+    Using.resource(Files.walk(root))(
+      _.iterator().asScala.filter(_.toString.endsWith(".scala")).map(path => path -> Files.readString(path)).toList
+    )
+  }
+
+  test(
+    "DDR-05.2 a search file acquires every collection handle through the pinned helper, except the eligibility read"
+  ) {
+    val searchFiles = sources.filter { case (path, text) =>
+      path.getFileName.toString != adminFile && searchTokens.exists(text.contains)
+    }
+    // The named search owners must be recognised, so a rename cannot make the rule vacuous.
+    assertEquals(searchFiles.map(_._1.getFileName.toString).toSet.intersect(searchOwners), searchOwners)
+    val offenders = searchFiles.flatMap { case (path, text) =>
+      val unpinned = handleAcquisition.findAllIn(text.replace(authoritativeEligibilityHandle, "")).toList
+      val missingPin =
+        if (text.contains("searchCollection(") || text.contains("jobsSearchHandle")) Nil else List("no pin")
+      (unpinned ++ missingPin).map(token => s"${relative(path)}: $token")
+    }
+    assertEquals(offenders, Nil)
+  }
+
+  test("DDR-05.2 the pinned search handles are used only by the search repository, matcher and admin") {
+    val allowed = searchOwners + adminFile
+    val offenders = sources.collect {
+      case (path, text)
+          if !allowed(path.getFileName.toString) &&
+            List("searchCollection(", "searchMetadataCollection(").exists(text.contains) =>
+        relative(path)
+    }
+    assertEquals(offenders, Nil)
+  }
+
   private def relative(path: Path): String = Paths.get("").toAbsolutePath.relativize(path.toAbsolutePath).toString
 }

@@ -25,6 +25,9 @@ final class MongoLexicalJobMatcher(
     policy: DiscoveryQueryPolicy
 ) extends LexicalJobMatcher[IO] {
 
+  /** `$search` only runs under read concern local; the caller revalidates every hit (DDR-05). */
+  private[mongo] def jobsSearchHandle = MongoAtlasSearchAdmin.searchCollection(database, MongoCollections.Jobs)
+
   override def matches(text: String, filter: JobSearchFilter, limit: Int): RepositoryF[IO, LexicalJobMatches] = {
     val window = limit + 1
     val pipeline = MongoLexicalJobMatcher.pipeline(jobLexicalIndex, text, filter, window)
@@ -33,8 +36,7 @@ final class MongoLexicalJobMatcher(
         .fromFEither(
           policy
             .run(
-              Mongo4catsCollections
-                .documents(database, MongoCollections.Jobs)
+              jobsSearchHandle
                 .flatMap(jobs =>
                   MongoBoundedResults.collect(
                     jobs.aggregate[Document](pipeline).maxTime(policy.maxTime).boundedStream(32),
