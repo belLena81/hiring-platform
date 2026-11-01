@@ -311,6 +311,8 @@ object AnalyticsRuntimeConfig {
     Either
       .catchNonFatal(new ConnectionString(uri))
       .leftMap(_ => "analytics.mongo.uri is invalid")
+      // Same message for a weaker concern: the error must never reveal which option, host or credential was present.
+      .filterOrElse(AnalyticsMongoConcernPolicy.accepts, "analytics.mongo.uri is invalid")
       .toValidatedNec
       .as(uri)
 

@@ -1,11 +1,12 @@
 package com.example.hiring.analytics.adapter.spark
 
-import com.example.hiring.analytics.config.AnalyticsRuntimeDirectory
+import com.example.hiring.analytics.config.{AnalyticsMongoConcernPolicy, AnalyticsRuntimeDirectory}
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.errors.AnalyticsErrorTranslation.{translating, translatingWith}
 
 import cats.effect.{Async, Resource}
 import cats.syntax.all.*
+import com.mongodb.{ConnectionString, MongoClientSettings}
 import mongo4cats.client.MongoClient
 import mongo4cats.database.MongoDatabase
 import org.apache.spark.sql.SparkSession
@@ -67,11 +68,24 @@ private[analytics] object SparkRuntime {
     } yield (spark, mongo, sparkExecution)
 
   private[analytics] def mongoClient[F[_]: Async](uri: String): Resource[F, MongoClient[F]] =
-    MongoClient
-      .fromConnectionString[F](uri)
+    Resource
+      .eval(Async[F].fromEither(effectiveSettings(uri)))
+      .flatMap(MongoClient.create[F](_))
       .translatingWith { case _: IllegalArgumentException =>
         AnalyticsError.InvalidConfiguration("MONGODB_URI is invalid")
       }(AnalyticsError.MongoConnectionFailure(_))
+
+  /** The only analytics client construction (DDR-05.2): the policy values are set after the URI so they override it. */
+  private[analytics] def effectiveSettings(uri: String): Either[Throwable, MongoClientSettings] =
+    Either.catchNonFatal(
+      MongoClientSettings
+        .builder()
+        .applyConnectionString(new ConnectionString(uri))
+        .writeConcern(AnalyticsMongoConcernPolicy.writeConcern)
+        .readConcern(AnalyticsMongoConcernPolicy.readConcern)
+        .readPreference(AnalyticsMongoConcernPolicy.readPreference)
+        .build()
+    )
 
   private[analytics] def mongoDatabase[F[_]: Async](client: MongoClient[F], name: String): F[MongoDatabase[F]] =
     client

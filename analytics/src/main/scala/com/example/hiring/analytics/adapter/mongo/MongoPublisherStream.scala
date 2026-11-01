@@ -1,6 +1,6 @@
 package com.example.hiring.analytics.adapter.mongo
 
-import com.example.hiring.analytics.config.AnalyticsOperationalSettings
+import com.example.hiring.analytics.config.{AnalyticsMongoConcernPolicy, AnalyticsOperationalSettings}
 import com.example.hiring.analytics.errors.AnalyticsError
 
 import cats.data.EitherT
@@ -71,10 +71,11 @@ private[analytics] final class MongoPublisherStream(settings: AnalyticsOperation
 
       // Session primitives are built per attempt: a retry must start a fresh transaction, not replay a built effect.
       val runOnce: F[Either[AnalyticsError, A]] = Async[F].defer {
-        val transaction = session.startTransaction *> work.value.flatMap {
-          case success @ Right(_) => commit.as(success)
-          case failure @ Left(_)  => abortIfActive.as(failure)
-        }
+        val transaction =
+          session.startTransaction(AnalyticsMongoConcernPolicy.transactionOptions) *> work.value.flatMap {
+            case success @ Right(_) => commit.as(success)
+            case failure @ Left(_)  => abortIfActive.as(failure)
+          }
         transaction.guaranteeCase {
           case Outcome.Succeeded(_) => Async[F].unit
           case _                    => abortIfActive

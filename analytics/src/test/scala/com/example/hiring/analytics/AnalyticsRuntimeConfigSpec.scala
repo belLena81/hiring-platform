@@ -925,6 +925,68 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
     assert(!message.contains("sk-live"), message)
   }
 
+  private def mongoUriResult(uri: String) =
+    AnalyticsConfigFixtures.batch(hocon, settings + ("MONGODB_URI" -> uri))
+
+  private def assertRedactedMongoUriFailure(uri: String) = {
+    val result = mongoUriResult(uri)
+    assertEquals(failureSet(result), List("analytics.mongo.uri is invalid"), uri)
+    List("synthetic-secret", "synthetic-host", "user:").foreach(part =>
+      assert(!invalidMessage(result).contains(part), s"$uri leaked $part")
+    )
+  }
+
+  test("DDR-05.3 accepts a Mongo URI that states majority or no concern at all") {
+    List(
+      "",
+      "w=majority",
+      "w=majority&journal=true",
+      "journal=true",
+      "readPreference=primary",
+      "readConcernLevel=local",
+      "readConcernLevel=majority",
+      "readConcernLevel=snapshot"
+    ).foreach(options => assert(mongoUriResult(s"mongodb://host/?$options").isRight, options))
+  }
+
+  test("DDR-05.3 rejects a weaker, repeated, mixed-case or tagged Mongo URI with a redacted error") {
+    val credentials = "user:synthetic-secret@synthetic-host.invalid"
+    List(
+      "w=0",
+      "w=1",
+      "w=2",
+      "w=1&journal=true",
+      "w=majority&journal=false",
+      "journal=false",
+      "readPreference=secondary",
+      "readPreference=primaryPreferred",
+      "readPreference=nearest",
+      "readConcernLevel=available",
+      "readConcernLevel=linearizable",
+      "w=majority&w=1",
+      "W=1",
+      "JOURNAL=false",
+      "ReadPreference=Secondary",
+      "w=synthetic-tag",
+      "readPreference=secondary&readPreferenceTags=dc:east"
+    ).foreach(options => assertRedactedMongoUriFailure(s"mongodb://$credentials/?$options"))
+  }
+
+  test("DDR-05.3 rejects weaker SRV and unparseable Mongo URIs with a redacted error") {
+    val credentials = "user:synthetic-secret@synthetic-host.invalid"
+    List(
+      s"mongodb+srv://$credentials/?w=1",
+      s"mongodb+srv://$credentials/?w=majority&journal=false",
+      s"mongodb://user:synthetic-secret@synthetic-host.invalid:badport/?w=majority",
+      s"unknown-scheme://$credentials/"
+    ).foreach(assertRedactedMongoUriFailure)
+  }
+
+  test("DDR-05.3 a repeated option follows the driver: the last value decides") {
+    assert(mongoUriResult("mongodb://host/?w=1&w=majority").isRight)
+    assert(mongoUriResult("mongodb://host/?w=majority&w=1").isLeft)
+  }
+
   private def invalidMessage(result: Either[AnalyticsError, Any]): String =
     result.swap.toOption.getOrElse(fail("expected an invalid configuration")).getMessage
 
