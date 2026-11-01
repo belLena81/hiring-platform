@@ -617,12 +617,87 @@ class AppConfigSpec extends FunSuite {
     }
   }
 
-  test("P1-AC01 accepts acknowledged write concerns in the Mongo URI") {
-    List("w=1", "w=majority", "w=1&journal=true").foreach { options =>
-      assert(
-        AppConfigFixtures.fromConfig(defaultConfig + s"mongo.uri = \"mongodb://host/?$options\"\n", Map.empty).isRight
+  private def mongoUriResult(uri: String) =
+    AppConfigFixtures.fromConfig(defaultConfig + "mongo.uri = \"" + uri + "\"\n", Map.empty)
+
+  test("DDR-05.3 accepts a Mongo URI that states majority or no concern at all") {
+    List(
+      "",
+      "w=majority",
+      "w=majority&journal=true",
+      "journal=true",
+      "readPreference=primary",
+      "readConcernLevel=local",
+      "readConcernLevel=majority",
+      "readConcernLevel=snapshot"
+    ).foreach(options => assert(mongoUriResult(s"mongodb://host/?$options").isRight, options))
+  }
+
+  test("DDR-05.3 rejects a Mongo URI with a weaker write, journal, read preference or read concern, redacted") {
+    List(
+      "w=0",
+      "w=1",
+      "w=2",
+      "w=1&journal=true",
+      "w=majority&journal=false",
+      "journal=false",
+      "readPreference=secondary",
+      "readPreference=primaryPreferred",
+      "readPreference=nearest",
+      "readConcernLevel=available",
+      "readConcernLevel=linearizable"
+    ).foreach { options =>
+      val result = mongoUriResult(s"mongodb://user:synthetic-secret@synthetic-host.invalid/?$options")
+      assertContainsError(result, ConfigError.InvalidMongoUri)
+      List("synthetic-secret", "synthetic-host", "user:").foreach(part =>
+        assert(!result.toString.contains(part), s"$options leaked $part")
       )
     }
+  }
+
+  test("DDR-05.3 rejects srv, repeated, mixed-case, tagged and unparseable Mongo URIs without leaking them") {
+    val credentials = "user:synthetic-secret@synthetic-host.invalid"
+    List(
+      s"mongodb+srv://$credentials/?w=1",
+      s"mongodb+srv://$credentials/?w=majority&journal=false",
+      s"mongodb://$credentials/?w=majority&w=1",
+      s"mongodb://$credentials/?W=1",
+      s"mongodb://$credentials/?JOURNAL=false",
+      s"mongodb://$credentials/?ReadPreference=Secondary",
+      s"mongodb://$credentials/?w=synthetic-tag",
+      s"mongodb://$credentials/?readPreference=secondary&readPreferenceTags=dc:east",
+      s"mongodb://$credentials/?readPreference=primary&readPreferenceTags=dc:east",
+      "mongodb://user:synthetic-secret@synthetic-host.invalid:badport/?w=majority",
+      s"unknown-scheme://$credentials/",
+      "mongodb://user:synthetic-secret@/?w=majority"
+    ).foreach { uri =>
+      val result = mongoUriResult(uri)
+      assertContainsError(result, ConfigError.InvalidMongoUri)
+      List("synthetic-secret", "synthetic-host", "user:").foreach(part =>
+        assert(!result.toString.contains(part), s"$uri leaked $part")
+      )
+    }
+  }
+
+  test("DDR-05.3 a repeated option follows the driver: the last value decides, and client settings override anyway") {
+    assert(mongoUriResult("mongodb://host/?w=1&w=majority").isRight)
+    assert(mongoUriResult("mongodb://host/?w=majority&w=1").isLeft)
+  }
+
+  test("DDR-05.3 the transport settings never render the Mongo URI") {
+    import io.github.iltotore.iron.autoRefine
+    val settings = TransportSettings(
+      com.comcast.ip4s.Host.fromString("127.0.0.1").get,
+      com.comcast.ip4s.Port.fromInt(8080).get,
+      8,
+      scala.concurrent.duration.DurationInt(5).seconds,
+      TrustedProxyConfig(Nil),
+      "mongodb://user:synthetic-secret@synthetic-host.invalid",
+      "db",
+      DiscoveryConfig(),
+      resetOnStart = false
+    )
+    assert(!settings.toString.contains("synthetic"), settings.toString)
   }
 
   test("P1-AC01 accepts boundary ports without application logging levels") {

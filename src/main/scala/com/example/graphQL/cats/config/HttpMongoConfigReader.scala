@@ -19,12 +19,12 @@ private object HttpMongoReaders {
   given ConfigReader[Ip4sPort] =
     ConfigReader[Port].emap(value => Ip4sPort.fromInt(value).toRight(CannotConvert(value.toString, "Port", "invalid")))
   // The URI may embed credentials, so it never appears in the failure. Repository results are trusted only when the
-  // write concern acknowledges them, so an unacknowledged (w=0) concern is rejected at the configuration boundary.
+  // concerns meet MongoConcernPolicy (majority, journalled, primary reads), so a weaker URI is rejected here.
   given ConfigReader[ConnectionString] =
     ConfigReader[String].emap(value =>
       Either
         .catchNonFatal(new ConnectionString(value))
-        .filterOrElse(uri => Option(uri.getWriteConcern).forall(_.isAcknowledged), new IllegalArgumentException)
+        .filterOrElse(MongoConcernPolicy.accepts, new IllegalArgumentException)
         .leftMap(_ => CannotConvert("[redacted]", "MongoUri", "invalid"))
     )
   given ConfigReader[DiscoveryConfig] =

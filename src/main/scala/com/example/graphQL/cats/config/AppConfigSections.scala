@@ -13,7 +13,10 @@ private[config] final case class TransportSettings(
     mongoDatabase: String,
     discovery: DiscoveryConfig,
     resetOnStart: Boolean
-)
+) {
+  // mongoUri may embed credentials.
+  override def toString: String = "TransportSettings([REDACTED])"
+}
 
 private[config] final case class AuthSettings(
     jwt: JwtAuthConfig,

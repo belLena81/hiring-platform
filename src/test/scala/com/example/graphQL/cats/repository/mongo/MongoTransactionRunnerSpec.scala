@@ -292,6 +292,35 @@ final class MongoTransactionRunnerSpec extends CatsEffectSuite {
     }
   }
 
+  test("DDR-05.2 a write concern timeout at commit is commit-retried, ends Unavailable and does not open the breaker") {
+    val concernError =
+      new com.mongodb.bulk.WriteConcernError(
+        64,
+        "WriteConcernFailed",
+        "waiting for replication timed out",
+        new BsonDocument()
+      )
+    def timedOut: MongoException =
+      new com.mongodb.MongoWriteConcernException(
+        concernError,
+        com.mongodb.WriteConcernResult.unacknowledged(),
+        server,
+        java.util.Set.of(MongoErrors.UnknownTransactionCommitResultLabel)
+      )
+    for {
+      breaker <- newBreaker
+      first <- run(List(Some(timedOut)), breaker = breaker)
+      second <- run(List(Some(timedOut)), breaker = breaker)
+      third <- run(List(Some(timedOut)), breaker = breaker)
+      state <- breaker.current
+    } yield {
+      assertEquals(first, (Left(RepositoryError.Unavailable), (1, 1, 3, 1, 1)))
+      assertEquals(second._1, Left(RepositoryError.Unavailable))
+      assertEquals(third._1, Left(RepositoryError.Unavailable))
+      assert(!state.isInstanceOf[State.Open], clue(state))
+    }
+  }
+
   test("a transient label at commit retries the whole transaction") {
     run(List(Some(transient), None)).map { case (result, counts) =>
       assertEquals(result, Right("done"))

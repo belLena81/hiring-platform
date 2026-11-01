@@ -3,6 +3,7 @@ package com.example.graphQL.cats.repository.mongo
 import cats.effect.{IO, Outcome, Ref, Resource}
 import com.example.graphQL.cats.domain.policy.CircuitBreakerPolicy.Completion
 import com.example.graphQL.cats.service.port.{RepositoryF}
+import com.example.graphQL.cats.config.MongoConcernPolicy
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.Diagnostics
 import com.example.graphQL.cats.service.resilience.CircuitBreaker
@@ -60,13 +61,14 @@ private[mongo] object MongoTransactionRunner {
         // Resource release owns the only abort, for typed rejection, failure and cancellation alike.
         val attemptOnce: IO[Either[RepositoryError, A]] =
           client.startSession(ClientSessionOptions()).use { session =>
-            Resource.make(session.startTransaction.as(session))(abort).use { active =>
-              operation(Some(active)).value
-                .onError {
-                  case error if !MongoErrors.isTransient(error) =>
-                    MongoRepositorySupport.reportFailure(diagnostics, "transaction.operation", error)
-                }
-                .flatTap(_.traverse_(_ => commit(active)))
+            Resource.make(session.startTransaction(MongoConcernPolicy.transactionOptions).as(session))(abort).use {
+              active =>
+                operation(Some(active)).value
+                  .onError {
+                    case error if !MongoErrors.isTransient(error) =>
+                      MongoRepositorySupport.reportFailure(diagnostics, "transaction.operation", error)
+                  }
+                  .flatTap(_.traverse_(_ => commit(active)))
             }
           }
 

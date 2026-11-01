@@ -137,6 +137,29 @@ class MongoDatabaseProbeSpec extends CatsEffectSuite {
     }
   }
 
+  test("DDR-05.2 the client settings override a weak URI with journalled majority writes and primary majority reads") {
+    IO {
+      val settings = MongoDatabaseProbe.effectiveSettings(
+        "mongodb://127.0.0.1:27017/?w=1&journal=false&readPreference=secondary&readConcernLevel=local"
+      )
+      assertEquals(settings.getWriteConcern.getWString, "majority")
+      assertEquals(settings.getWriteConcern.getJournal, java.lang.Boolean.TRUE)
+      assertEquals(settings.getWriteConcern.getWTimeout(TimeUnit.MILLISECONDS).longValue, 1500L)
+      assertEquals(settings.getReadConcern, com.mongodb.ReadConcern.MAJORITY)
+      assertEquals(settings.getReadPreference, com.mongodb.ReadPreference.primary())
+    }
+  }
+
+  test("DDR-05.2 a client built from a URI without concerns carries the same explicit concerns") {
+    IO {
+      val settings = MongoDatabaseProbe.effectiveSettings("mongodb://127.0.0.1:27017")
+      assertEquals(settings.getWriteConcern.getWString, "majority")
+      assertEquals(settings.getWriteConcern.getJournal, java.lang.Boolean.TRUE)
+      assertEquals(settings.getReadConcern, com.mongodb.ReadConcern.MAJORITY)
+      assertEquals(settings.getReadPreference, com.mongodb.ReadPreference.primary())
+    }
+  }
+
   test("client acquisition does not ping; unavailable check is bounded") {
     cats.effect.Resource.fromAutoCloseable(IO.blocking(new ServerSocket(0))).use { socket =>
       MongoDatabaseProbe

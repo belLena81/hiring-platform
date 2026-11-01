@@ -1,6 +1,7 @@
 package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.{IO, Resource}
+import com.example.graphQL.cats.config.MongoConcernPolicy
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFields, LogOutcome, ProbeResult}
 import com.example.graphQL.cats.service.port.DatabaseProbe
 import com.example.graphQL.cats.service.Diagnostics.*
@@ -18,6 +19,10 @@ object MongoDatabaseProbe {
     MongoClientSettings
       .builder()
       .applyConnectionString(new com.mongodb.ConnectionString(uri))
+      // Explicit after the URI so the effective concern never depends on the URI or a server default (DDR-05.2).
+      .writeConcern(MongoConcernPolicy.writeConcern)
+      .readConcern(MongoConcernPolicy.readConcern)
+      .readPreference(MongoConcernPolicy.readPreference)
       .applyToConnectionPoolSettings { builder =>
         val _ = builder.minSize(0).maxSize(10).maxWaitTime(2, TimeUnit.SECONDS)
       }

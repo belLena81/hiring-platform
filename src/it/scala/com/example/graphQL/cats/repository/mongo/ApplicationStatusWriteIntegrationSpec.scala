@@ -182,6 +182,28 @@ final class ApplicationStatusWriteIntegrationSpec extends MongoIntegrationSuite 
     }
   }
 
+  test("DDR-05.2 the status change commit and its writes carry a journalled majority write concern") {
+    harness { h =>
+      for {
+        _ <- h.fixture.commands.clear
+        result <- h.change(ApplicationStatus.Created, ApplicationStatus.Accepted, at.plusSeconds(10))
+        commands <- h.fixture.commands.snapshot
+        commits = commands.filter(_.getFirstKey == "commitTransaction")
+      } yield {
+        assertEquals(result, Right(()))
+        assertEquals(commits.size, 1)
+        val concern = commits.head.getDocument("writeConcern")
+        assertEquals(concern.getString("w").getValue, "majority")
+        assertEquals(concern.getBoolean("j").getValue, true)
+        assertEquals(concern.getNumber("wtimeout").intValue(), 1500)
+        // Inside a transaction the concern belongs to the commit; the writes themselves must not state one.
+        commands
+          .filter(command => Set("update", "insert").contains(command.getFirstKey))
+          .foreach(command => assert(!command.containsKey("writeConcern"), command.toJson))
+      }
+    }
+  }
+
   test("AC-04.1 a write from a status the application has left is a Conflict that stores nothing") {
     harness { h =>
       for {
