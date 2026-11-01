@@ -36,6 +36,16 @@ class InterviewWorkflowConfigSpec extends FunSuite {
     }
   }
 
+  test("DDR-03.2 the smallest completed-evidence retention outlives the replay window by at least one day") {
+    val smallest = KafkaConfigValidation
+      .validInterview(RawInterviewRuntimeConfig(completedDedupRetentionSeconds = 691200L))
+      .toOption
+      .map(_.completedDedupRetentionSeconds)
+    val replay = InterviewRuntimeConfig().replayRetentionSeconds
+    assertEquals(smallest, Some(691200L))
+    assert(smallest.exists(_ - replay >= 86400L), clues(smallest, replay))
+  }
+
   test("disabled workflow defaults preserve existing operational Kafka configuration") {
     assertEquals(
       KafkaConfigValidation.validInterview(RawInterviewRuntimeConfig()).toOption,

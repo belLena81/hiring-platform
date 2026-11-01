@@ -2,6 +2,7 @@ package com.example.graphQL.cats.service.application
 
 import cats.effect.{Deferred, IO, Ref}
 import cats.syntax.foldable.*
+import cats.syntax.traverse.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.domain.workflow.*
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField}
@@ -604,6 +605,80 @@ final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
     } yield {
       assert(absentWorkflow.quarantined.exists(_.endsWith(":unknown")))
       assert(absentCommand.quarantined.exists(_.endsWith(":inconsistent")))
+    }
+  }
+
+  private val replayWindow = 7.days.toSeconds
+  private val atWindow = observedAt.minusSeconds(replayWindow)
+  private val beyondWindow = atWindow.minusNanos(1)
+
+  test("DDR-03.1 a duplicate command delivered exactly at the replay window is acknowledged without side effects") {
+    val handled = command.copy(occurredAt = atWindow, result = Some(InterviewResult.Succeeded))
+    observeDelivery(messageFor(handled, workflow, InterviewStep.Reserve, None), stored = Some(handled)).map { result =>
+      assert(result.acknowledged)
+      assertEquals(result.claims, 0)
+      assertEquals(result.advanced, Vector.empty)
+      assertEquals(result.quarantined, Vector.empty)
+    }
+  }
+
+  test("DDR-03.1 a result delivered exactly at the replay window is applied once as timely") {
+    val handled = command.copy(occurredAt = atWindow, result = Some(InterviewResult.Succeeded))
+    observeDelivery(
+      messageFor(handled, workflow, InterviewStep.Reserve, Some(InterviewResult.Succeeded)),
+      true,
+      Some(handled)
+    ).map { result =>
+      assert(result.acknowledged)
+      assertEquals(result.quarantined, Vector.empty)
+      assertEquals(result.advanced.map(_.phase), Vector(InterviewWorkflowPhase.StatusCommitPending))
+    }
+  }
+
+  test("DDR-03.2 a message one nanosecond past the replay window on a completed workflow is quarantined as expired") {
+    val done = workflow.copy(phase = InterviewWorkflowPhase.Completed)
+    val old = command.copy(occurredAt = beyondWindow)
+    observeDelivery(messageFor(old, done, InterviewStep.Reserve, None), stored = Some(old), current = Some(done))
+      .map { result =>
+        assert(result.acknowledged)
+        assertEquals(result.claims, 0)
+        assertEquals(result.advanced, Vector.empty)
+        assert(result.quarantined.exists(_.endsWith(":expired")), clues(result.quarantined))
+      }
+  }
+
+  test("DDR-03.2 an expired message whose workflow and command are gone is quarantined and never executed") {
+    val old = command.copy(occurredAt = beyondWindow)
+    List(false, true).traverse { resultDelivery =>
+      observeDelivery(
+        messageFor(old, workflow, InterviewStep.Reserve, Option.when(resultDelivery)(InterviewResult.Succeeded)),
+        resultDelivery,
+        stored = None,
+        current = None
+      ).map { result =>
+        assert(result.acknowledged)
+        assertEquals(result.claims, 0)
+        assertEquals(result.advanced, Vector.empty)
+        assert(result.quarantined.exists(_.endsWith(":expired")), clues(result.quarantined))
+      }
+    }.void
+  }
+
+  test("DDR-03.3 a command and a result for a purged subject are acknowledged and recreate nothing") {
+    val handled = command.copy(result = Some(InterviewResult.Succeeded))
+    for {
+      replayedCommand <- observeDelivery(message, stored = None, current = None)
+      replayedResult <- observeDelivery(
+        messageFor(handled, workflow, InterviewStep.Reserve, Some(InterviewResult.Succeeded)),
+        true,
+        stored = None,
+        current = None
+      )
+    } yield List(replayedCommand, replayedResult).foreach { result =>
+      assert(result.acknowledged)
+      assertEquals(result.claims, 0)
+      assertEquals(result.advanced, Vector.empty)
+      assert(result.quarantined.exists(_.endsWith(":unknown")), clues(result.quarantined))
     }
   }
 }
