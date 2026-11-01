@@ -50,8 +50,10 @@ private[mongo] final class HiringSearchEvaluationRetrieval(database: MongoDataba
     RepositoryF.fromFEither(
       policy
         .run(
-          Mongo4catsCollections
-            .documents(database, collection)
+          // The lexical strategy runs `$search` here directly; the server rejects it under the client's majority read
+          // concern (code 72), so the pinned search handle is required (DDR-05 exception).
+          MongoAtlasSearchAdmin
+            .searchCollection(database, collection)
             .flatMap { source =>
               MongoRepositoryTestSupport
                 .collectWithin(source.aggregate[Document](pipeline).maxTime(policy.maxTime).stream, 8)

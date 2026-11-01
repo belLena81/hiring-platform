@@ -56,6 +56,11 @@ final class AtlasHiringSearchIntegrationSpec extends CatsEffectSuite {
       discoveryPolicy = Some(policy)
     )
 
+  /** The Active, opted-out candidate whose embedding model differs: ineligible for vectors, eligible for lexical. */
+  private val wrongModelId = UserId(
+    UUID.nameUUIDFromBytes("wrong-model".getBytes(java.nio.charset.StandardCharsets.UTF_8))
+  )
+
   private def fixture(db: MongoDatabase[IO]): IO[(Job, Set[UserId])] = {
     val recruiter = UserId(UUID.nameUUIDFromBytes("recruiter".getBytes(java.nio.charset.StandardCharsets.UTF_8)))
     val job = Job(
@@ -86,7 +91,7 @@ final class AtlasHiringSearchIntegrationSpec extends CatsEffectSuite {
         name.startsWith("true")
       )
       User(
-        UserId(UUID.randomUUID()),
+        (if (name == "wrong-model") wrongModelId else UserId(UUID.randomUUID())),
         None,
         name,
         UserRole.Candidate,
@@ -397,7 +402,10 @@ final class AtlasHiringSearchIntegrationSpec extends CatsEffectSuite {
         assertEquals(rankedJobs.hits.map(_.mode), List(SearchMode.LEXICAL))
         assertEquals(rankedJobs.hits.map(_.model), List(None))
         val rankedCandidates = candidates.fold(error => fail(error.toString), identity)
-        assertEquals(rankedCandidates.hits.map(_.candidate.id).toSet, expected)
+        // Lexical retrieval ignores embedding state (SearchEligibilityCriteria.candidates(filters, None);
+        // SearchEligibility.candidateLexical): the opted-out wrong-model candidate matches the text, skill and consent
+        // rules, so it is eligible here although the vector branches exclude it.
+        assertEquals(rankedCandidates.hits.map(_.candidate.id).toSet, expected + wrongModelId)
         assertEquals(rankedCandidates.hits.map(_.mode).distinct, List(SearchMode.LEXICAL))
       }
     }
@@ -433,7 +441,8 @@ final class AtlasHiringSearchIntegrationSpec extends CatsEffectSuite {
         remaining <- await(120)(hits => !hits.contains(stale))
       } yield {
         assert(!remaining.contains(stale), clue(remaining))
-        assertEquals(remaining.toSet, expected - stale)
+        // The lexical set is the vector-eligible set plus the wrong-model candidate (lexical ignores embedding state).
+        assertEquals(remaining.toSet, expected + wrongModelId - stale)
       }
     }
   }

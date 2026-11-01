@@ -317,6 +317,17 @@ final class AtlasLexicalQueryFacetsIntegrationSpec extends CatsEffectSuite {
       object_("stage").flatMap(_.asString).toList ++ object_.values.toList.flatMap(stagesOf)
     ) ++ json.asArray.toList.flatMap(_.toList.flatMap(stagesOf))
 
+  /** Index names of the winning plan only: `rejectedPlans` lists every index the planner considered and discarded. */
+  private def winningIndexNamesOf(json: Json): List[String] =
+    json.asObject.toList.flatMap(object_ =>
+      object_("winningPlan").toList.flatMap(indexNamesOf) ++ object_.values.toList.flatMap(winningIndexNamesOf)
+    ) ++ json.asArray.toList.flatMap(_.toList.flatMap(winningIndexNamesOf))
+
+  private def rejectedIndexNamesOf(json: Json): List[String] =
+    json.asObject.toList.flatMap(object_ =>
+      object_("rejectedPlans").toList.flatMap(indexNamesOf) ++ object_.values.toList.flatMap(rejectedIndexNamesOf)
+    ) ++ json.asArray.toList.flatMap(_.toList.flatMap(rejectedIndexNamesOf))
+
   private def indexNamesOf(json: Json): List[String] =
     json.asObject.toList.flatMap(object_ =>
       object_("indexName").flatMap(_.asString).toList ++ object_.values.toList.flatMap(indexNamesOf)
@@ -326,7 +337,7 @@ final class AtlasLexicalQueryFacetsIntegrationSpec extends CatsEffectSuite {
     live() { (db, policy) =>
       val jobs = corpus(scalaJobs = 1100, otherJobs = 100)
       val matching = jobs.filter(_.title.startsWith("Scala"))
-      def explain(name: String, query: JobFacetQuery, ids: Set[JobId]): IO[(Int, Option[Long], Boolean)] = {
+      def explain(name: String, query: JobFacetQuery, ids: Set[JobId]): IO[(Int, Option[Long], List[String])] = {
         val inner = MongoJobRepository.facetPipeline(query, Some(ids))
         val command = new org.bson.Document(
           "explain",
@@ -350,13 +361,15 @@ final class AtlasLexicalQueryFacetsIntegrationSpec extends CatsEffectSuite {
               "openJobs" -> Json.fromInt(jobs.count(_.status == JobStatus.Open)),
               "stages" -> Json.fromValues(stagesOf(json).distinct.map(Json.fromString)),
               "indexNames" -> Json.fromValues(indexNamesOf(json).distinct.map(Json.fromString)),
+              "winningIndexNames" -> Json.fromValues(winningIndexNamesOf(json).distinct.map(Json.fromString)),
+              "rejectedIndexNames" -> Json.fromValues(rejectedIndexNamesOf(json).distinct.map(Json.fromString)),
               "totalKeysExamined" -> keys.fold(Json.Null)(Json.fromLong),
               "totalDocsExamined" -> docs.fold(Json.Null)(Json.fromLong),
               "nReturned" -> returned.fold(Json.Null)(Json.fromLong),
               "executionTimeMillis" -> millis.fold(Json.Null)(Json.fromLong),
               "explain" -> json
             )
-          ).as((ids.size, docs, indexNamesOf(json).exists(name => name != "_id_" && name.nonEmpty)))
+          ).as((ids.size, docs, winningIndexNamesOf(json).distinct))
         }
       }
       for {
@@ -390,10 +403,11 @@ final class AtlasLexicalQueryFacetsIntegrationSpec extends CatsEffectSuite {
         assertEquals(capped.map(_.coverage), Right(FacetCoverage.TopMatches(1000)))
         assertEquals(wide.size, 1000)
         assert(combined.isRight)
-        // Acceptance: the non-radius plan examines no more documents than IDs and does not drive from other indexes.
-        List(nonRadiusWide, nonRadiusSmall).foreach { case (ids, docs, usesOtherIndex) =>
+        // Acceptance: the non-radius plan examines no more documents than IDs and its WINNING plan drives from `_id_`.
+        // Rejected plans (other jobs_open_* indexes the planner considered) are recorded, not asserted.
+        List(nonRadiusWide, nonRadiusSmall).foreach { case (ids, docs, winning) =>
           assert(docs.forall(_ <= ids.toLong), s"examined $docs documents for $ids IDs")
-          assert(!usesOtherIndex, "planner chose an index other than _id_ for the ID-restricted match")
+          assertEquals(winning, List("_id_"), clue(s"winning plan indexes for the ID-restricted match, $ids IDs"))
         }
         // Radius examination is recorded in the JSON evidence; it is not asserted against N (D4).
         assert(radiusWide._2.nonEmpty && radiusSmall._2.nonEmpty)

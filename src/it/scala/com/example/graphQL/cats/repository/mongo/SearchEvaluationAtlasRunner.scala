@@ -60,10 +60,21 @@ object SearchEvaluationAtlasRunner extends IOApp {
             case Right(_) =>
               IO.println("Synthetic Atlas search evaluation completed; JSON records were written.").as(ExitCode.Success)
             case Left(error) =>
-              IO.println(s"Atlas search evaluation failed: ${error.getClass.getSimpleName}").as(ExitCode.Error)
+              IO.println(s"Atlas search evaluation failed: ${describeFailure(error)}").as(ExitCode.Error)
           }
         }
     }
+
+  /** Sanitized failure description: the exception class and, for a server command error, its numeric code and code
+    * name. Never the message, URI, host or any document content.
+    */
+  private[mongo] def describeFailure(error: Throwable): String =
+    com.example.graphQL.cats.shared
+      .CauseChain(error)
+      .collectFirst { case command: com.mongodb.MongoCommandException =>
+        s"${command.getClass.getSimpleName} code=${command.getErrorCode} codeName=${command.getErrorCodeName}"
+      }
+      .getOrElse(error.getClass.getSimpleName)
 
   private def parse(args: List[String]): Either[String, Settings] = {
     val values = args.grouped(2).collect { case List(key, value) if key.startsWith("--") => key.drop(2) -> value }.toMap
@@ -165,8 +176,12 @@ object SearchEvaluationAtlasRunner extends IOApp {
         )
         .use { _ =>
           val collectionName = s"search_evaluation_${UUID.randomUUID().toString.replace("-", "")}"
-          database.getCollection[CatsDocument](collectionName, CodecRegistry.Default).map(_.as[Document]).flatMap {
-            collection =>
+          database
+            .getCollection[CatsDocument](collectionName, CodecRegistry.Default)
+            // `$listSearchIndexes` and `$vectorSearch` are rejected under the application client's majority read
+            // concern (code 72); this evaluation reads only its own synthetic collection, so it pins `local`.
+            .map(_.as[Document].withReadConcern(com.mongodb.ReadConcern.LOCAL))
+            .flatMap { collection =>
               val indexName = "synthetic_vector"
               val vectorField = new Document("type", "vector")
                 .append("path", "embedding")
@@ -224,7 +239,7 @@ object SearchEvaluationAtlasRunner extends IOApp {
                     _ <- captureExplain(database, collectionName, settings)
                   } yield ()
                 }
-          }
+            }
         }
     }
 
