@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
-import cats.effect.IO
+import cats.effect.{IO, Ref}
 import com.example.graphQL.cats.service.Diagnostics
 import com.example.hiring.testing.DisposableAtlas
 import mongo4cats.database.MongoDatabase
@@ -88,23 +88,41 @@ final class AtlasSearchIndexSetupIntegrationSpec extends CatsEffectSuite {
       case remaining         => IO.pure(remaining)
     }
 
+  /** The real driver admin, except that provisioning cancels itself right after the first search index was really
+    * created: a deterministic mid-provisioning interruption on the real server, using the existing test seam.
+    */
+  private def cancelAfterFirstCreate(
+      real: MongoAtlasSearchSetup.SearchIndexAdmin,
+      created: Ref[IO, Int]
+  ): MongoAtlasSearchSetup.SearchIndexAdmin = new MongoAtlasSearchSetup.SearchIndexAdmin {
+    def list(collectionName: String): IO[List[org.bson.Document]] = real.list(collectionName)
+    def create(collectionName: String, model: com.mongodb.client.model.SearchIndexModel): IO[Unit] =
+      real.create(collectionName, model) *> created
+        .updateAndGet(_ + 1)
+        .flatMap(count => IO.whenA(count == 1)(IO.canceled))
+  }
+
   test(
-    "MVR-10.L cancelled setup resumes on retry through the restartable provision path, and the dropped nonce database holds no search index"
+    "MVR-10.L setup cancelled after the first search index resumes on retry through the restartable provision path, and the dropped nonce database holds no search index"
   ) {
     authorized.flatMap { uri =>
       val name = AtlasLocalSupport.nonceName("search_evaluation_setup_")
       AtlasLocalSupport.client(uri, None).use { client =>
         for {
-          // The database handle and how far setup got when it was cancelled.
           run <- AtlasLocalSupport.nonceDatabase(client, name).use { db =>
             for {
-              fiber <- MongoHiringSetup.initialize(db, Some(indexes), Diagnostics.noop[IO]).start
-              _ <- IO.sleep(3.seconds)
-              _ <- fiber.cancel
+              // Collections, validators and ordinary indexes first, without Atlas, so provisioning has its targets.
+              _ <- MongoHiringSetup.initialize(db, None, Diagnostics.noop[IO])
+              setup <- MongoHiringSetup.setupDatabase(db)
+              created <- Ref.of[IO, Int](0)
+              fiber <- MongoAtlasSearchSetup
+                .provision(indexes, cancelAfterFirstCreate(MongoAtlasSearchSetup.driverAdmin(setup), created))
+                .start
               outcome <- fiber.join
-              _ = assert(!outcome.isError, clue(outcome))
-              atCancel <- definitionsOrEmpty(db)
-              // Retry the same setup on the same database: it lists, creates only missing indexes, and validates all.
+              _ = assert(outcome.isCanceled, clue(outcome))
+              // Measured, not assumed: how many search indexes exist at cancel time (the listing may trail briefly).
+              atCancel <- untilListed(db, 20)
+              // Retry through the production path: it lists, creates only the missing names, validates all four.
               _ <- MongoHiringSetup.initialize(db, Some(indexes), Diagnostics.noop[IO])
               definitions <- AtlasLocalSupport.searchIndexDefinitions(db)
             } yield {
@@ -117,13 +135,19 @@ final class AtlasSearchIndexSetupIntegrationSpec extends CatsEffectSuite {
           _ = assert(!remaining.exists(_ == name), clue(remaining))
           leftover <- untilEmpty(db, 60)
           _ = assertEquals(leftover, Nil)
-          // Only a cancel that landed between creating none and all four indexes exercises the resume path.
+          // The resume path is only exercised if some but not all indexes existed when setup was cancelled.
           _ = assume(
             createdAtCancel > 0 && createdAtCancel < indexNames.size,
-            s"Inconclusive: setup had $createdAtCancel of ${indexNames.size} indexes at cancel time; resume not exercised"
+            s"Inconclusive: $createdAtCancel of ${indexNames.size} indexes were listed at cancel time; resume not exercised"
           )
         } yield ()
       }
     }
   }
+
+  private def untilListed(db: MongoDatabase[IO], attempts: Int): IO[List[(String, String)]] =
+    definitionsOrEmpty(db).flatMap {
+      case Nil if attempts > 0 => IO.sleep(500.millis) *> untilListed(db, attempts - 1)
+      case found               => IO.pure(found)
+    }
 }
