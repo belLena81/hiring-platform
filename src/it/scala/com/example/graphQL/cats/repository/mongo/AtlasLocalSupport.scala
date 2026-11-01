@@ -49,6 +49,10 @@ private[mongo] object AtlasLocalSupport {
     def findCount(database: String, collection: String): Int =
       finds.asScala.count(value => value.database == database && value.collection == collection)
 
+    /** Every aggregate on a collection since the last `clear`, whatever its first stage. */
+    def aggregates(database: String, collection: String): List[Aggregate] =
+      started.asScala.toList.filter(value => value.database == database && value.collection == collection)
+
     /** Aggregates whose first stage is a retrieval root: the number of search round trips, whatever their branch. */
     def retrievals(database: String, collection: String): List[Aggregate] =
       started.asScala.toList.filter(value =>

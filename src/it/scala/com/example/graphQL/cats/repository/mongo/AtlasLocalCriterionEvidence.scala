@@ -151,6 +151,44 @@ private[mongo] object AtlasLocalCriterionEvidence {
     }
   }
 
+  enum DiscoveryOutcome(val text: String) {
+    case RetainCurrent extends DiscoveryOutcome("retain current")
+    case CandidateForCloudConfirmation extends DiscoveryOutcome("candidate for cloud confirmation")
+  }
+
+  /** What one geographic pipeline did over the fixed workload: result count, examined work and latency. */
+  final case class PlanFigures(
+      returned: Long,
+      docsExamined: Long,
+      keysExamined: Long,
+      p95Millis: Double,
+      errors: Int
+  )
+
+  /** HDQ-11.L: a different pipeline is only a candidate for cloud confirmation when it returns the same job ids for
+    * every query, has no errors, examines no more documents, is no slower at p95, and is better in at least one of
+    * examined documents or p95 (by 10%). Anything else retains the current pipeline. Nothing is adopted here.
+    */
+  def decideDiscovery(
+      current: PlanFigures,
+      candidate: PlanFigures,
+      identicalResults: Boolean
+  ): (DiscoveryOutcome, String) = {
+    val retain = DiscoveryOutcome.RetainCurrent
+    if (!identicalResults) (retain, "result ids differ from the current pipeline")
+    else if (candidate.errors > 0 || current.errors > 0) (retain, "errors observed")
+    else if (candidate.docsExamined > current.docsExamined) (retain, "candidate examines more documents")
+    else if (candidate.p95Millis > current.p95Millis) (retain, "candidate p95 is slower")
+    else if (candidate.docsExamined < current.docsExamined)
+      (DiscoveryOutcome.CandidateForCloudConfirmation, "same results, no regression, and fewer documents examined")
+    else if (candidate.p95Millis <= current.p95Millis * 0.9)
+      (
+        DiscoveryOutcome.CandidateForCloudConfirmation,
+        "latency-only, repeat: same results and no regression, improvement only in p95"
+      )
+    else (retain, "no measured improvement")
+  }
+
   /** The spec requires every bucket and concurrency: one retained run retains the setting. */
   def combine(outcomes: List[SweepOutcome]): SweepOutcome =
     if (outcomes.nonEmpty && outcomes.forall(_ == SweepOutcome.CandidateForCloudConfirmation))

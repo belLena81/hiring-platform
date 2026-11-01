@@ -365,7 +365,7 @@ final class AtlasHiringSearchBoundsIntegrationSpec extends CatsEffectSuite {
     }
   }
 
-  test("HSE-04.L an unsupported native stage gives sanitized unavailability and does not switch strategy") {
+  test("HSE-04.L HDQ-04.L an unsupported native stage gives sanitized unavailability and does not switch strategy") {
     live { (db, policy, commands) =>
       assume(
         sys.env.get("ATLAS_TEST_URI").flatMap(DisposableAtlas.nativeRerankSkipReason).isDefined,

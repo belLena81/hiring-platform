@@ -139,6 +139,43 @@ final class AtlasLocalCriterionEvidenceSpec extends FunSuite {
     )
   }
 
+  test("HDQ-11.L a geographic candidate needs identical results, no regression and a measured improvement") {
+    val current = PlanFigures(10, 100, 100, 10.0, 0)
+    assertEquals(
+      decideDiscovery(current, PlanFigures(10, 50, 50, 10.0, 0), identicalResults = true)._1,
+      DiscoveryOutcome.CandidateForCloudConfirmation
+    )
+    assertEquals(
+      decideDiscovery(current, PlanFigures(10, 100, 100, 8.5, 0), identicalResults = true)._1,
+      DiscoveryOutcome.CandidateForCloudConfirmation
+    )
+    assertEquals(
+      decideDiscovery(current, PlanFigures(10, 100, 100, 9.5, 0), identicalResults = true)._1,
+      DiscoveryOutcome.RetainCurrent
+    )
+    assertEquals(
+      decideDiscovery(current, PlanFigures(10, 50, 50, 8.0, 0), identicalResults = false)._1,
+      DiscoveryOutcome.RetainCurrent
+    )
+    assertEquals(
+      decideDiscovery(current, PlanFigures(10, 50, 50, 8.0, 1), identicalResults = true)._1,
+      DiscoveryOutcome.RetainCurrent
+    )
+    assertEquals(
+      decideDiscovery(current, PlanFigures(10, 120, 50, 8.0, 0), identicalResults = true)._1,
+      DiscoveryOutcome.RetainCurrent
+    )
+    assertEquals(
+      decideDiscovery(current, PlanFigures(10, 50, 50, 12.0, 0), identicalResults = true)._1,
+      DiscoveryOutcome.RetainCurrent
+    )
+    assert(
+      decideDiscovery(current, PlanFigures(10, 100, 100, 8.5, 0), identicalResults = true)._2
+        .startsWith("latency-only, repeat")
+    )
+    assertEquals(DiscoveryOutcome.RetainCurrent.text, "retain current")
+  }
+
   test("MVR-08.L invalid baseline JSON is rejected") {
     assert(parseFigures("not json").isLeft)
     assert(parseFigures("{}").isLeft)

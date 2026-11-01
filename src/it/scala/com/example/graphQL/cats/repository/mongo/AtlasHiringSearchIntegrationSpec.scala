@@ -276,7 +276,7 @@ final class AtlasHiringSearchIntegrationSpec extends CatsEffectSuite {
   }
 
   test(
-    "MSC-08.1 MVR-04.L job vector, hybrid and lexical branches match the canonical city and skills ignoring case"
+    "MSC-08.1 MVR-04.L HDQ-04.L job vector, hybrid and lexical branches match the canonical city and skills ignoring case"
   ) {
     live { (db, policy) =>
       val upper = JobSearchFilter(Some(" TORONTO "), Set("SCALA"), None)
