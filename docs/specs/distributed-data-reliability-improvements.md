@@ -172,8 +172,12 @@ at the boundary, or if it depends on a clock comparison (see item 1).
 | ID | Criterion |
 |---|---|
 | DDR-03.1 | A duplicate delivered within the retention window is acknowledged without side effects. |
-| DDR-03.2 | A message older than the window is refused and recorded, with no state change. |
+| DDR-03.2 | A message older than the window is refused, recorded and never executed: a message that does not match an applicable open command is quarantined (`:expired`) with no state change; an applicable command on an open workflow marks it `RepairRequired` (visible repair). |
 | DDR-03.3 | Deleted-subject replays stay denied (per `AGENTS.md`: no automatic replay of deleted subjects). |
+
+### Findings and decisions (2026-11-01)
+
+Read on HEAD `462aac9`. The horizon is an explicit age check, `InterviewMessagePolicy.replayDisposition` (`service/application/InterviewMessagePolicy.scala:36-44`), applied by `InterviewMessageReceiver.withinReplayWindow` before any deduplication: the replay window is pinned to 7 days (`replayRetentionSeconds`, `StrictEqual[604800L]`), future messages beyond the skew tolerance are refused. TTL deletion of completed evidence (`completedDedupRetentionSeconds`, at least 8 days) is only a backstop and deletes late, never early; if evidence is gone, admission quarantines and never executes. Deleted subjects are purged and fenced; redelivered messages find no workflow and are acknowledged without effect (DHW-30). The check compares the producer's `occurredAt` with the consumer clock, so the item 1 database-clock approach does not apply; skew can only shift the window by the NTP skew, covered by the 1-day retention margin. Decisions: DDR-03.2 is reworded to the existing, deliberate and tested behaviour (an applicable expired command produces a visible `RepairRequired`, not silent refusal); the plan's file pointer for `ReplayExpired` is `domain/workflow/InterviewWorkflowPolicy.scala` and `InterviewRepairReason.scala`. Work left: DDR-03.x tagged receiver-level tests (duplicate at exactly 7 days, one nanosecond past on a completed workflow, missing workflow after TTL, purged subject) and a config test that evidence retention exceeds the replay window by at least one day; written after item 1 lands because they share the `claimExecution` test double.
 
 ### Owners and gates
 
