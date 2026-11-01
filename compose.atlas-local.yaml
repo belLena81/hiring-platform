@@ -16,6 +16,12 @@ services:
       - /data/configdb:mode=1777
       - /data/mongot:mode=1777
     mem_limit: 3g
+    # Each disposable test database adds many collection and index files; the default open-file limit made
+    # WiredTiger panic with "Too many open files" mid-suite (2026-11-01). 64000 is MongoDB's recommended limit.
+    ulimits:
+      nofile:
+        soft: 64000
+        hard: 64000
     healthcheck:
       test: ["CMD", "mongosh", "--quiet", "--eval", "db.hello().isWritablePrimary ? quit(0) : quit(1)"]
       interval: 5s

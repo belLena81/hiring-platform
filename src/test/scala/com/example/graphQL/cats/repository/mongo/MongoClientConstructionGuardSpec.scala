@@ -28,5 +28,21 @@ final class MongoClientConstructionGuardSpec extends FunSuite {
     assertEquals(offenders, Nil)
   }
 
+  test("DDR-05.2 every source that lists search indexes pins local read concern, which that stage requires") {
+    val root = Paths.get("src/main/scala")
+    assume(Files.isDirectory(root), "run from the project root")
+    val offenders = Using.resource(Files.walk(root))(stream =>
+      stream
+        .iterator()
+        .asScala
+        .filter(_.toString.endsWith(".scala"))
+        .map(path => path -> Files.readString(path))
+        .filter { case (_, text) => text.contains("\"$listSearchIndexes\"") && !text.contains("ReadConcern.LOCAL") }
+        .map { case (path, _) => relative(path) }
+        .toList
+    )
+    assertEquals(offenders, Nil)
+  }
+
   private def relative(path: Path): String = Paths.get("").toAbsolutePath.relativize(path.toAbsolutePath).toString
 }

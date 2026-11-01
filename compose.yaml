@@ -97,6 +97,11 @@ services:
       - /data/configdb:mode=1777
       - /data/mongot:mode=1777
     mem_limit: 3g
+    # Same open-file limit as compose.atlas-local.yaml: WiredTiger panicked at the default limit mid-suite.
+    ulimits:
+      nofile:
+        soft: 64000
+        hard: 64000
     logging: *rotated-logs
     healthcheck:
       test: ["CMD", "mongosh", "--quiet", "--eval", "db.hello().isWritablePrimary ? quit(0) : quit(1)"]
