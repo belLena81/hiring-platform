@@ -78,7 +78,36 @@ private[mongo] object MongoAtlasSearchSetup {
     definition.exists(value => includes(value, expected))
   }
 
-  def provision(database: MongoHiringSetup.SetupDatabase, config: AtlasSearchIndexConfig): IO[Unit] = {
+  /** The two Atlas Search administration calls setup needs, as a seam so restart behaviour is testable without Atlas.
+    */
+  private[mongo] trait SearchIndexAdmin {
+    def list(collectionName: String): IO[List[Document]]
+    def create(collectionName: String, model: SearchIndexModel): IO[Unit]
+  }
+
+  private[mongo] def driverAdmin(database: MongoHiringSetup.SetupDatabase): SearchIndexAdmin = new SearchIndexAdmin {
+    def list(collectionName: String): IO[List[Document]] =
+      MongoAtlasSearchAdmin.listIndexes(database.underlying, collectionName, 100)
+    def create(collectionName: String, model: SearchIndexModel): IO[Unit] =
+      MongoAtlasSearchAdmin.createIndex(database.underlying, collectionName, model)
+  }
+
+  /** A concurrent creator won the race: the index exists, so validation decides, not the create error. */
+  private[mongo] def isAlreadyExists(error: Throwable): Boolean =
+    com.example.graphQL.cats.shared.CauseChain(error).exists {
+      case command: com.mongodb.MongoCommandException =>
+        command.getErrorCode == IndexAlreadyExistsCode || command.getErrorMessage.toLowerCase.contains("already exists")
+      case _ => false
+    }
+  private val IndexAlreadyExistsCode = 68
+
+  def provision(database: MongoHiringSetup.SetupDatabase, config: AtlasSearchIndexConfig): IO[Unit] =
+    provision(config, driverAdmin(database))
+
+  /** Restartable: lists the existing search indexes, creates only the missing names, then validates every definition.
+    * Existing indexes are never dropped or altered; a mismatch is a `MongoSetupError`.
+    */
+  private[mongo] def provision(config: AtlasSearchIndexConfig, admin: SearchIndexAdmin): IO[Unit] = {
 
     def vectorDefinition(filters: List[String]): Document = new Document(
       "fields",
@@ -89,7 +118,10 @@ private[mongo] object MongoAtlasSearchSetup {
         filters.map(path => new Document("type", MongoFields.Filter).append("path", path))).asJava
     )
     def create(collectionName: String, model: SearchIndexModel): IO[Unit] =
-      MongoAtlasSearchAdmin.createIndex(database.underlying, collectionName, model)
+      admin.list(collectionName).flatMap { existing =>
+        if (existing.exists(_.getString("name") == model.getName)) IO.unit
+        else admin.create(collectionName, model).recover { case error if isAlreadyExists(error) => () }
+      }
     List(
       create(
         MongoCollections.Jobs,
@@ -130,11 +162,11 @@ private[mongo] object MongoAtlasSearchSetup {
         MongoCollections.Jobs,
         new SearchIndexModel(config.jobLexicalIndex, jobLexicalDefinition, SearchIndexType.search())
       )
-    ).sequence_.void *> awaitSearchIndexes(database, config)
+    ).sequence_.void *> awaitSearchIndexes(admin, config)
   }
 
   private def awaitSearchIndexes(
-      database: MongoHiringSetup.SetupDatabase,
+      admin: SearchIndexAdmin,
       config: AtlasSearchIndexConfig
   ): IO[Unit] = {
     val candidateVectorFilters = Set(
@@ -148,8 +180,7 @@ private[mongo] object MongoAtlasSearchSetup {
       MongoFields.ProfileAvailabilityStatus
     )
     val deadline = IO.monotonic.map(_ + config.readyTimeoutMillis.millis)
-    def indexDocuments(collectionName: String): IO[List[Document]] =
-      MongoAtlasSearchAdmin.listIndexes(database.underlying, collectionName, 100)
+    def indexDocuments(collectionName: String): IO[List[Document]] = admin.list(collectionName)
     def validVector(index: Document, requiredFilters: Set[String]): Boolean = {
       val definition = Option(index.get("latestDefinition", classOf[Document]))
         .orElse(Option(index.get("definition", classOf[Document])))

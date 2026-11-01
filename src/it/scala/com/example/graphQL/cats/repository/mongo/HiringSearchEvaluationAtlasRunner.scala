@@ -198,5 +198,37 @@ object HiringSearchEvaluationAtlasRunner extends IOApp {
         }
       } yield ()
     }
+    _ <- IO.blocking {
+      val jobs = SearchEvaluationFixtures.jobs
+      val candidates = SearchEvaluationFixtures.candidates
+      val tags = Map(
+        "closedJob" -> jobs.count(value => !value.active && !value.deleted),
+        "deletedJob" -> jobs.count(_.deleted),
+        "staleSourceJob" -> jobs.count(_.stale),
+        "inactiveCandidate" -> candidates.count(value => !value.active && !value.deleted),
+        "deletedCandidate" -> candidates.count(_.deleted),
+        "staleSourceCandidate" -> candidates.count(_.stale),
+        "consentOptedIn" -> candidates.count(_.optIn.contains(true)),
+        "consentOptedOut" -> candidates.count(_.optIn.contains(false)),
+        "consentAbsent" -> candidates.count(_.optIn.isEmpty)
+      )
+      val record = AtlasLocalCriterionEvidence.curatedRecord(
+        deployment,
+        version,
+        settings.revision,
+        settings.concurrency,
+        reports.map(report =>
+          s"curated-${report.run.strategy.toString}-${settings.concurrency}-${timestamp.toEpochMilli}.json"
+        ),
+        tags
+      )
+      Files.createDirectories(settings.output)
+      Files.writeString(
+        settings.output.resolve(s"criterion-evidence-curated-${settings.concurrency}-${timestamp.toEpochMilli}.json"),
+        record.spaces2,
+        StandardCharsets.UTF_8
+      )
+      ()
+    }
   } yield ()
 }

@@ -81,6 +81,18 @@ The application continues to write Voyage embeddings through its durable work qu
 
 Recorded run (October 8, 2026, Atlas Local reporting MongoDB 8.3.11): a direct `$search`, `$vectorSearch` (ANN with filter and exact), `$rankFusion` and `$scoreFusion` probe executed against READY indexes. `AtlasHiringSearchIntegrationSpec` passed 3/4 (consent truth table, `MongoRankFusion` and `MongoScoreFusion` capability gates); the native `$rerank` gate failed with its explicit BLOCKED assertion because the local image does not provide it. Both Atlas runners initially terminated with a `StackOverflowError` because they passed `mongo4cats.bson.Document.fromJava(...)` to `runCommand`; they now use `MongoAccessEvaluationSupport.command` and complete locally. `HiringSearchEvaluationAtlasRunner` wrote its three curated capture files (semantic quality and privacy acceptance remain unobserved), and `SearchEvaluationAtlasRunner` completed a 500-document, 20-query synthetic ANN/ENN run (20/20 successful, no errors; the recorded latency and recall figures are local-container values, not Atlas results).
 
+### Criterion evidence on Atlas Local
+
+With the same three environment variables, the `.L` gates are:
+
+```bash
+sbt 'IntegrationTest/testOnly *AtlasHiringSearchIntegrationSpec *AtlasHiringSearchBoundsIntegrationSpec *AtlasSearchIndexSetupIntegrationSpec *AtlasLexicalQueryFacetsIntegrationSpec'
+sbt 'IntegrationTest/runMain com.example.graphQL.cats.repository.mongo.HiringSearchEvaluationAtlasRunner --authorize-disposable-atlas --output .local/data/search-evaluation --source-revision REV --concurrency 1'   # and 8
+sbt 'IntegrationTest/runMain com.example.graphQL.cats.repository.mongo.SearchEvaluationAtlasRunner --database search_evaluation_sweep --output .local/data/search-evaluation --source-revision REV --concurrency 1 --temperature cold'   # and warm, 1 and 8
+```
+
+Each runner also writes a `criterion-evidence-*.json` record beside its report (not read by `SearchEvaluationRecordTable`): `criterion-evidence-search-<concurrency>-<temperature>-<ts>.json` names MVR-07.L, HSE-06.L and MVR-08.L with per-bucket Recall@K against exact search, ANN p50/p95/p99, errors, throughput and the `local-container` label; `criterion-evidence-curated-<concurrency>-<ts>.json` names SEB-02.L and SEB-04.L, the capture files and the fixture tags. For MVR-08.L run the baseline first, then each sweep point with `--baseline <baseline criterion-evidence-search file>` (same concurrency and temperature, same seed, corpus and page size; only `--num-candidates` or `--quantization` differs; the rule compares branch limit, vector storage, stored source, page size, documents, queries, dimensions and seed and retains current settings if any differs or if both swept settings differ). The record then states `retain current settings` or `candidate for cloud confirmation` under the decision-4 limits; the setting counts as a candidate only when the records for concurrency 1 and 8, cold and warm, all say so. No change is adopted from `.L` evidence.
+
 ## Tabulating recorded runs
 
 `sbt 'Test / runMain com.example.graphQL.cats.service.search.SearchEvaluationRecordTable --input .local/data/search-evaluation'` reads the recorded `curated-*.json` and `search-evaluation-*.json` files without opening any client and prints one row per run: strategy, deployment label, outcome counts, recall@K, NDCG@K, recall against exact search (the ANN-versus-exact drift) and latency percentiles. Runners label loopback deployments `local-container`; the table repeats that label and states that such rows are correctness evidence, not Atlas figures. Records written before 2026-10-08 labelled local runs as Atlas and should be regenerated.

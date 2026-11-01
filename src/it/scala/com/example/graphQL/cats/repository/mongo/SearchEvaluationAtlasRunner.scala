@@ -40,7 +40,8 @@ object SearchEvaluationAtlasRunner extends IOApp {
       concurrency: Int,
       temperature: String,
       seed: Long,
-      sourceRevision: String
+      sourceRevision: String,
+      baseline: Option[Path]
   )
 
   private final case class TimedRanking(
@@ -112,6 +113,14 @@ object SearchEvaluationAtlasRunner extends IOApp {
         (),
         s"--num-candidates must cover branch limit (page size <= branch limit <= 100) and be at most $MaxNumCandidates"
       )
+      baselinePath <- values
+        .get("baseline")
+        .traverse(value =>
+          Either
+            .catchNonFatal(Path.of(value).normalize())
+            .leftMap(_ => "Invalid --baseline")
+            .filterOrElse(_.startsWith(Path.of(".local/data")), "--baseline must be beneath .local/data")
+        )
       _ <- Either.cond(Set(1, 8).contains(concurrency), (), "--concurrency must be 1 or 8")
       _ <- Either.cond(Set("cold", "warm").contains(temperature), (), "--temperature must be cold or warm")
       _ <- Either.cond(
@@ -140,7 +149,8 @@ object SearchEvaluationAtlasRunner extends IOApp {
       concurrency,
       temperature,
       seed,
-      sourceRevision
+      sourceRevision,
+      baselinePath
     )
   }
 
@@ -470,7 +480,71 @@ object SearchEvaluationAtlasRunner extends IOApp {
         Files.writeString(settings.outputDirectory.resolve(filename), json, StandardCharsets.UTF_8)
         ()
       }
+      figures = runFigures(settings, indexBytes, results)
+      baselineFigures <- settings.baseline.traverse { path =>
+        IO.blocking(Files.readString(path, StandardCharsets.UTF_8))
+          .flatMap(text =>
+            IO.fromEither(AtlasLocalCriterionEvidence.parseFigures(text).leftMap(new IllegalArgumentException(_)))
+          )
+      }
+      decision = AtlasLocalCriterionEvidence.decide(baselineFigures, figures)
+      evidence = AtlasLocalCriterionEvidence.searchEvaluationRecord(
+        com.example.hiring.testing.DisposableAtlas.deployment(settings.uri),
+        atlasVersion,
+        settings.sourceRevision,
+        filename,
+        durationMillis,
+        figures,
+        settings.baseline.map(_.toString),
+        decision
+      )
+      _ <- IO.blocking {
+        Files.writeString(
+          settings.outputDirectory.resolve(
+            s"criterion-evidence-search-${settings.concurrency}-${settings.temperature}-${timestamp.toEpochMilli}.json"
+          ),
+          evidence.spaces2,
+          StandardCharsets.UTF_8
+        )
+        ()
+      }
     } yield ()
+  }
+
+  /** Per filter bucket Recall@K against exact search and ANN latency percentiles, keyed by the sweep settings. */
+  private def runFigures(
+      settings: Settings,
+      indexBytes: Option[Long],
+      results: List[PairedRanking]
+  ): AtlasLocalCriterionEvidence.RunFigures = {
+    def sample(value: PairedRanking) =
+      AtlasLocalCriterionEvidence.Sample(
+        value.ann.ids,
+        value.enn.ids,
+        value.ann.latencyMillis,
+        value.ann.error.isDefined || value.enn.error.isDefined
+      )
+    val grouped = results.groupBy(value => AtlasLocalCriterionEvidence.bucketName(value.queryId.drop(2).toInt))
+    AtlasLocalCriterionEvidence.RunFigures(
+      AtlasLocalCriterionEvidence.Settings(
+        settings.numCandidates,
+        settings.quantization.getOrElse("none"),
+        settings.branchLimit,
+        settings.vectorStorage,
+        settings.storedSource,
+        settings.pageSize,
+        settings.datasetDocuments,
+        settings.queryCount,
+        settings.dimensions,
+        settings.seed
+      ),
+      settings.concurrency,
+      settings.temperature,
+      indexBytes,
+      List("Broad", "Selective", "Empty").map(name =>
+        AtlasLocalCriterionEvidence.bucketFigures(name, grouped.getOrElse(name, Nil).map(sample))
+      )
+    )
   }
 
   private def judgedRelevantIds(settings: Settings, queryId: String): Set[String] = {

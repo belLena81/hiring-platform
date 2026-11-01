@@ -200,7 +200,7 @@ final class AtlasHiringSearchIntegrationSpec extends CatsEffectSuite {
   }
 
   test(
-    "MVR-04.L MVR-05.L production vector and application RRF branches enforce the consent truth table and current eligibility"
+    "MVR-04.L MVR-05.L SEB-04.L production vector and application RRF branches enforce the consent truth table and current eligibility"
   ) {
     live { (db, policy) =>
       for {
