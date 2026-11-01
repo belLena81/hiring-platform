@@ -139,7 +139,7 @@ object OperationalEventKafkaRuntime {
               config.publisher.workerId,
               transactionalId,
               now,
-              now.plusSeconds(config.publisher.leaseSeconds.toLong),
+              config.publisher.leaseSeconds.seconds,
               allowed
             )
           )
@@ -223,16 +223,15 @@ object OperationalEventKafkaRuntime {
       claim: ClaimedOperationalEvent,
       clock: Clock[IO] = Clock[IO]
   )(send: IO[Unit]): IO[Unit] = {
-    val renew: IO[Either[LeaseLost, Unit]] = clock.realTimeInstant.flatMap { now =>
+    val renew: IO[Either[LeaseLost, Unit]] =
       requireOutboxSuccess(
         outbox.renewLease(
           claim.event.eventId,
           claim.leaseToken,
           claim.subjectIds,
-          now.plusSeconds(config.publisher.leaseSeconds.toLong)
+          config.publisher.leaseSeconds.seconds
         )
       ).as(Either.right[LeaseLost, Unit](()))
-    }
     // A failed renewal raises, so the guard answers only with the send outcome; a lease it reports lost is a fault.
     LeaseHeartbeat
       .guard(config.publisher.leaseSeconds.seconds)(renew)(send.attempt)

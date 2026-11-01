@@ -3,39 +3,47 @@ package com.example.graphQL.cats.repository.mongo
 import com.example.graphQL.cats.service.RepositoryError
 import munit.CatsEffectSuite
 
-import java.time.Instant
+import scala.concurrent.duration.*
 
 final class MongoLeaseRequestSpec extends CatsEffectSuite {
-  private val now = Instant.parse("2026-10-20T10:00:00Z")
 
-  test("AC-08.2 a request needs a worker of bounded length and a lease that ends after it starts") {
-    assertEquals(LeaseRequest.validate("worker", now, now.plusSeconds(1)), Right(()))
-    assertEquals(LeaseRequest.validate("", now, now.plusSeconds(1)), Left(LeaseRequestError.EmptyWorker))
+  test("AC-08.2 DDR-01 a request needs a worker of bounded length and a positive lease duration within the maximum") {
+    assertEquals(LeaseRequest.validate("worker", 1.second), Right(()))
+    assertEquals(LeaseRequest.validate("", 1.second), Left(LeaseRequestError.EmptyWorker))
+    assertEquals(LeaseRequest.validate("w" * 129, 1.second), Left(LeaseRequestError.WorkerTooLong))
+    assertEquals(LeaseRequest.validate("w" * 128, 1.second), Right(()))
+    assertEquals(LeaseRequest.validate("worker", 0.millis), Left(LeaseRequestError.DurationNotPositive))
+    assertEquals(LeaseRequest.validate("worker", (-1).millis), Left(LeaseRequestError.DurationNotPositive))
+    assertEquals(LeaseRequest.validate("worker", 1.millis), Right(()))
+    assertEquals(LeaseRequest.validate("worker", LeaseRequest.MaxLeaseDuration), Right(()))
     assertEquals(
-      LeaseRequest.validate("w" * 129, now, now.plusSeconds(1)),
-      Left(LeaseRequestError.WorkerTooLong)
+      LeaseRequest.validate("worker", LeaseRequest.MaxLeaseDuration + 1.millis),
+      Left(LeaseRequestError.DurationTooLong)
     )
-    assertEquals(LeaseRequest.validate("w" * 128, now, now.plusSeconds(1)), Right(()))
-    assertEquals(LeaseRequest.validate("worker", now, now), Left(LeaseRequestError.WindowNotAfterNow))
-    assertEquals(LeaseRequest.validate("worker", now, now.minusMillis(1)), Left(LeaseRequestError.WindowNotAfterNow))
   }
 
-  test("AC-08.2 a renewal names no worker and checks the window only") {
-    assertEquals(LeaseRequest.validateWindow(now, now.plusMillis(1)), Right(()))
-    assertEquals(LeaseRequest.validateWindow(now, now), Left(LeaseRequestError.WindowNotAfterNow))
+  test("AC-08.2 DDR-01 a renewal names no worker and checks the duration only") {
+    assertEquals(LeaseRequest.validateDuration(1.milli), Right(()))
+    assertEquals(LeaseRequest.validateDuration(0.millis), Left(LeaseRequestError.DurationNotPositive))
+    assertEquals(
+      LeaseRequest.validateDuration(LeaseRequest.MaxLeaseDuration + 1.second),
+      Left(LeaseRequestError.DurationTooLong)
+    )
   }
 
   test("AC-08.2 every queue reports an invalid request the same way and never runs the guarded work") {
     for {
       ran <- cats.effect.Ref.of[cats.effect.IO, Boolean](false)
       guarded = com.example.graphQL.cats.service.port.RepositoryF.lift(ran.set(true))
-      worker <- LeaseRequest.whenValid("", now, now.plusSeconds(1))(guarded).value
-      window <- LeaseRequest.whenWindowValid(now, now)(guarded).value
-      accepted <- LeaseRequest.whenValid("worker", now, now.plusSeconds(1))(guarded).value
+      worker <- LeaseRequest.whenValid("", 1.second)(guarded).value
+      duration <- LeaseRequest.whenDurationValid(0.millis)(guarded).value
+      untouched <- ran.get
+      accepted <- LeaseRequest.whenValid("worker", 1.second)(guarded).value
       executed <- ran.get
     } yield {
       assertEquals(worker, Left(RepositoryError.InvalidEvent))
-      assertEquals(window, Left(RepositoryError.InvalidEvent))
+      assertEquals(duration, Left(RepositoryError.InvalidEvent))
+      assert(!untouched)
       assertEquals(accepted, Right(()))
       assert(executed)
     }

@@ -140,9 +140,13 @@ final class MongoEmbeddingCoverageIntegrationSpec extends MongoIntegrationSuite 
           atBoundary,
           pastBoundary
         )
-      def claimed(key: EmbeddingWorkKey, lease: Instant, at: Instant = enqueuedAt): IO[ClaimedEmbeddingWork] =
+      def claimed(key: EmbeddingWorkKey, at: Instant = enqueuedAt): IO[ClaimedEmbeddingWork] =
         successful(work.enqueue(key, at)) *>
-          successful(work.claim("worker", at, lease)).flatMap(IO.fromOption(_)(new AssertionError("claim")))
+          successful(work.claim("worker", at, 30.seconds)).flatMap(IO.fromOption(_)(new AssertionError("claim")))
+      // The report classifies a lease by its stored expiry against the report instant. Pin the expiries only after
+      // every claim, so a pinned (already expired on the database clock) lease cannot be reclaimed by a later claim.
+      def pin(key: EmbeddingWorkKey, lease: Instant): IO[Unit] =
+        LeaseTestSupport.setExpiry(db, MongoCollections.EmbeddingWork, key.value, lease)
       for {
         _ <- insert(db, MongoCollections.Jobs, jobs.map(MongoHiringCodecs.job(_)))
         _ <- insert(
@@ -150,14 +154,14 @@ final class MongoEmbeddingCoverageIntegrationSpec extends MongoIntegrationSuite 
           MongoCollections.Users,
           List(candidateCurrent, candidateWaiting, candidateFailed, recruiter).map(MongoHiringCodecs.user(_))
         )
-        retry <- claimed(jobKey(changedRetrying), now.plusSeconds(60))
+        retry <- claimed(jobKey(changedRetrying))
         _ <- successful(work.retry(retry, now.plusSeconds(3600)))
-        _ <- claimed(jobKey(leaseExpired), enqueuedAt.plusSeconds(300))
-        _ <- claimed(jobKey(otherModel), now.plusSeconds(600))
-        exhausted <- claimed(jobKey(failed), now.plusSeconds(60), now.minusSeconds(10800))
+        _ <- claimed(jobKey(leaseExpired))
+        _ <- claimed(jobKey(otherModel))
+        exhausted <- claimed(jobKey(failed), now.minusSeconds(10800))
         _ <- successful(work.fail(exhausted, EmbeddingWorkFailure.InvalidResponse, now))
-        _ <- claimed(jobKey(oldProcessing), now.plusSeconds(600), now.minusSeconds(7200))
-        tooLarge <- claimed(candidateKey(candidateFailed), now.plusSeconds(60), now.minusSeconds(10800))
+        _ <- claimed(jobKey(oldProcessing), now.minusSeconds(7200))
+        tooLarge <- claimed(candidateKey(candidateFailed), now.minusSeconds(10800))
         _ <- successful(work.fail(tooLarge, EmbeddingWorkFailure.DocumentTooLarge, now))
         _ <- successful(work.enqueue(jobKey(currentWaiting), now.minusSeconds(30)))
         _ <- successful(work.enqueue(candidateKey(candidateWaiting), now.minusSeconds(30)))
@@ -165,6 +169,9 @@ final class MongoEmbeddingCoverageIntegrationSpec extends MongoIntegrationSuite 
         // stuckBefore is now - 15 min and the comparison is strict: exactly at the bound is not stuck, 1 ms older is.
         _ <- successful(work.enqueue(jobKey(atBoundary), now.minusSeconds(15 * 60)))
         _ <- successful(work.enqueue(jobKey(pastBoundary), now.minusSeconds(15 * 60).minusMillis(1)))
+        _ <- pin(jobKey(leaseExpired), enqueuedAt.plusSeconds(300))
+        _ <- pin(jobKey(otherModel), now.plusSeconds(600))
+        _ <- pin(jobKey(oldProcessing), now.plusSeconds(600))
         repository = new MongoEmbeddingCoverageRepository(db, Diagnostics.noop[IO])
         unfiltered <- successful(repository.observe(request(None)))
         filtered <- successful(repository.observe(request(Some("model-a"))))

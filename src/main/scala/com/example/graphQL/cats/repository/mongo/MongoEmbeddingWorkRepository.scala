@@ -12,6 +12,7 @@ import mongo4cats.client.ClientSession
 import mongo4cats.database.MongoDatabase
 import org.bson.{Document, BsonDocument, BsonString, BsonInt32, BsonInt64, BsonDateTime, BsonArray, BsonValue}
 import java.time.Instant
+import scala.concurrent.duration.FiniteDuration
 import scala.jdk.CollectionConverters.*
 
 trait MongoEmbeddingWorkEnqueuer {
@@ -214,7 +215,7 @@ final class MongoEmbeddingWorkRepository(
   override def claim(
       workerId: String,
       now: Instant,
-      leaseUntil: Instant
+      leaseDuration: FiniteDuration
   ): RepositoryF[IO, Option[ClaimedEmbeddingWork]] =
     RepositoryF.lift(uuidGen.randomUUID.map(_.toString)).flatMap { token =>
       MongoRepositorySupport
@@ -226,17 +227,17 @@ final class MongoEmbeddingWorkRepository(
             workerId,
             token,
             now,
-            leaseUntil,
+            leaseDuration,
             Sorts.ascending(MongoFields.AvailableAt, MongoFields.Id)
           )(document => MongoF.fromEither(readClaim(document)))
         }
     }
 
-  override def renew(claim: ClaimedEmbeddingWork, now: Instant, leaseUntil: Instant): RepositoryF[IO, Boolean] =
-    LeaseRequest.whenWindowValid(now, leaseUntil) {
+  override def renew(claim: ClaimedEmbeddingWork, leaseDuration: FiniteDuration): RepositoryF[IO, Boolean] =
+    LeaseRequest.whenDurationValid(leaseDuration) {
       MongoRepositorySupport.repositoryGuard(diagnostics, "embeddingWork.renew") {
         MongoLeaseQueue
-          .renewHeld(collection, None, MongoFilter.and(leaseFilter(claim), MongoLeaseQueue.leaseHeld(now)), leaseUntil)
+          .renewHeld(collection, None, MongoFilter.and(leaseFilter(claim), MongoLeaseQueue.leaseHeld), leaseDuration)
       }
     }
 

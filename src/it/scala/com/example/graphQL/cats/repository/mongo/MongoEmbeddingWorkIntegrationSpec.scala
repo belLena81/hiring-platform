@@ -32,7 +32,7 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
     result.value.flatMap(_.fold(error => IO.raiseError(new AssertionError(s"Repository failure: $error")), IO.pure))
 
   private def claimed(repository: EmbeddingWorkRepository[IO], at: Instant): IO[ClaimedEmbeddingWork] =
-    successful(repository.claim("worker", at, at.plusSeconds(30)))
+    successful(repository.claim("worker", at, 30.seconds))
       .flatMap(IO.fromOption(_)(new AssertionError("Expected durable claim")))
 
   private def stored(db: MongoDatabase[IO], key: EmbeddingWorkKey): IO[Document] =
@@ -318,38 +318,109 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
       for {
         _ <- successful(work.enqueue(key, now))
         first <- claimed(work, now)
-        extended <- successful(work.renew(first, now.plusSeconds(20), now.plusSeconds(60)))
-        busy <- successful(work.claim("other", now.plusSeconds(31), now.plusSeconds(61)))
+        extended <- successful(work.renew(first, 60.seconds))
+        busy <- successful(work.claim("other", now.plusSeconds(31), 30.seconds))
         _ <- successful(work.enqueue(key, now.plusSeconds(32)))
-        newer <- successful(work.renew(first, now.plusSeconds(33), now.plusSeconds(90)))
-        expired <- successful(work.renew(first, now.plusSeconds(61), now.plusSeconds(90)))
+        newer <- successful(work.renew(first, 90.seconds))
       } yield {
         assert(extended)
         assertEquals(busy, None)
         assert(!newer)
-        assert(!expired)
       }
     }
   }
 
-  test("a lease is reclaimable at exactly its expiry instant and held one millisecond earlier") {
+  test("DDR-01.1 a lease stored at claim and at renewal ends at database time plus the requested duration") {
     database.use { case (db, _) =>
       val work = new MongoEmbeddingWorkRepository(db, Diagnostics.noop[IO])
       val key = EmbeddingWorkKey(EmbeddingWorkKind.Job, UUID.randomUUID().toString)
-      val leaseUntil = now.plusSeconds(30)
       for {
         _ <- successful(work.enqueue(key, now))
-        first <- claimed(work, now)
-        held <- successful(work.claim("other", leaseUntil.minusMillis(1L), leaseUntil.plusSeconds(30)))
-        renewedAtExpiry <- successful(work.renew(first, leaseUntil, leaseUntil.plusSeconds(30)))
-        reclaimed <- successful(work.claim("other", leaseUntil, leaseUntil.plusSeconds(30)))
+        claimWindow <- LeaseTestSupport.withinDatabaseWindow(db)(claimed(work, now))
+        (first, claimBefore, claimAfter) = claimWindow
+        claimExpiry <- LeaseTestSupport.storedExpiry(db, MongoCollections.EmbeddingWork, key.value)
+        renewWindow <- LeaseTestSupport.withinDatabaseWindow(db)(successful(work.renew(first, 90.seconds)))
+        (renewed, renewBefore, renewAfter) = renewWindow
+        renewExpiry <- LeaseTestSupport.storedExpiry(db, MongoCollections.EmbeddingWork, key.value)
         document <- stored(db, key)
       } yield {
-        assertEquals(held, None)
-        assert(!renewedAtExpiry)
-        assert(reclaimed.exists(_.leaseToken != first.leaseToken))
-        assertEquals(document.getString(MongoFields.LeaseOwner), "other")
-        assertEquals(document.getDate(MongoFields.UpdatedAt), Date.from(leaseUntil))
+        assert(!claimExpiry.isBefore(claimBefore.plusSeconds(30)), clue(claimExpiry -> claimBefore))
+        assert(!claimExpiry.isAfter(claimAfter.plusSeconds(30)), clue(claimExpiry -> claimAfter))
+        assert(renewed)
+        assert(!renewExpiry.isBefore(renewBefore.plusSeconds(90)), clue(renewExpiry -> renewBefore))
+        assert(!renewExpiry.isAfter(renewAfter.plusSeconds(90)), clue(renewExpiry -> renewAfter))
+        // The caller's instant is only a scheduling value: it stamps `updatedAt`, never the lease.
+        assertEquals(document.getDate(MongoFields.UpdatedAt), Date.from(now))
+      }
+    }
+  }
+
+  test("DDR-01.2 a worker whose clock is skewed by plus or minus 10 minutes cannot reclaim a live lease") {
+    database.use { case (db, _) =>
+      val work = new MongoEmbeddingWorkRepository(db, Diagnostics.noop[IO])
+      val key = EmbeddingWorkKey(EmbeddingWorkKind.Job, UUID.randomUUID().toString)
+      val wall = Instant.now()
+      for {
+        _ <- successful(work.enqueue(key, wall.minusSeconds(1)))
+        holder <- claimed(work, wall)
+        ahead <- successful(work.claim("fast-clock", wall.plusSeconds(600), 30.seconds))
+        behind <- successful(work.claim("slow-clock", wall.minusSeconds(600), 30.seconds))
+        stillHeld <- successful(work.renew(holder, 30.seconds))
+        document <- stored(db, key)
+      } yield {
+        assertEquals(ahead, None)
+        assertEquals(behind, None)
+        assert(stillHeld)
+        assertEquals(document.getString(MongoFields.LeaseToken), holder.leaseToken)
+        assertEquals(document.getString(MongoFields.LeaseOwner), "worker")
+      }
+    }
+  }
+
+  test("DDR-01.3 an expired lease is reclaimed by exactly one of many concurrent claimers") {
+    database.use { case (db, _) =>
+      val work = new MongoEmbeddingWorkRepository(db, Diagnostics.noop[IO])
+      val key = EmbeddingWorkKey(EmbeddingWorkKind.Job, UUID.randomUUID().toString)
+      val wall = Instant.now()
+      for {
+        _ <- successful(work.enqueue(key, wall.minusSeconds(1)))
+        _ <- claimed(work, wall)
+        _ <- LeaseTestSupport.expire(db, MongoCollections.EmbeddingWork, key.value)
+        results <- (1 to 12).toList.parTraverse(i => successful(work.claim(s"claimer-$i", wall, 30.seconds)))
+        document <- stored(db, key)
+      } yield {
+        val winners = results.flatten
+        assertEquals(winners.size, 1)
+        assertEquals(document.getString(MongoFields.LeaseToken), winners.head.leaseToken)
+      }
+    }
+  }
+
+  test("DDR-01.4 renewal after expiry reports loss and the displaced worker's writes are rejected") {
+    database.use { case (db, _) =>
+      val work = new MongoEmbeddingWorkRepository(db, Diagnostics.noop[IO])
+      val key = EmbeddingWorkKey(EmbeddingWorkKind.Job, UUID.randomUUID().toString)
+      val wall = Instant.now()
+      for {
+        _ <- successful(work.enqueue(key, wall.minusSeconds(1)))
+        stale <- claimed(work, wall)
+        _ <- LeaseTestSupport.expire(db, MongoCollections.EmbeddingWork, key.value)
+        lostBeforeTakeover <- successful(work.renew(stale, 30.seconds))
+        takeover <- successful(work.claim("successor", wall, 30.seconds))
+        lostAfterTakeover <- successful(work.renew(stale, 30.seconds))
+        staleComplete <- work.complete(stale).value
+        staleRetry <- work.retry(stale, wall).value
+        staleFail <- work.fail(stale, EmbeddingWorkFailure.RetryExhausted, wall).value
+        document <- stored(db, key)
+      } yield {
+        assert(!lostBeforeTakeover)
+        assert(takeover.exists(_.leaseToken != stale.leaseToken))
+        assert(!lostAfterTakeover)
+        List(staleComplete, staleRetry, staleFail).foreach(result =>
+          assertEquals(result, Left(RepositoryError.Conflict))
+        )
+        assertEquals(document.getString(MongoFields.LeaseOwner), "successor")
+        assertEquals(document.getString(MongoFields.State), "Processing")
       }
     }
   }
@@ -367,7 +438,7 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
         assertEquals(document.getLong(MongoFields.Generation).longValue, 2L)
         assertEquals(document.getString(MongoFields.State), "Processing")
         assertEquals(document.getString(MongoFields.LeaseToken), first.leaseToken)
-        assertEquals(document.getDate(MongoFields.LeaseUntil), Date.from(now.plusSeconds(30)))
+        assert(document.getDate(MongoFields.LeaseUntil).toInstant.isAfter(Instant.now().minusSeconds(60)))
         assertEquals(document.getDate(MongoFields.AvailableAt), Date.from(now))
       }
     }
@@ -384,8 +455,10 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
         oldComplete <- repository.complete(original).value
         oldRetry <- repository.retry(original, now.plusSeconds(2)).value
         oldFailure <- repository.fail(original, EmbeddingWorkFailure.RetryExhausted, now.plusSeconds(2)).value
-        beforeExpiry <- successful(repository.claim("other", now.plusSeconds(2), now.plusSeconds(32)))
+        beforeExpiry <- successful(repository.claim("other", now.plusSeconds(2), 30.seconds))
+        _ <- LeaseTestSupport.expire(db, MongoCollections.EmbeddingWork, key.value)
         newer <- claimed(repository, now.plusSeconds(31))
+        _ <- LeaseTestSupport.expire(db, MongoCollections.EmbeddingWork, key.value)
         sameGeneration <- claimed(repository, now.plusSeconds(62))
         reclaimedComplete <- repository.complete(newer).value
         reclaimedRetry <- repository.retry(newer, now.plusSeconds(63)).value

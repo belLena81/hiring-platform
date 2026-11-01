@@ -159,19 +159,19 @@ final class InterviewPublicationFencingIntegrationSpec extends KafkaIntegrationS
           MutationWriteContext.directWrite
         )
       )
-      claims <- success(repository.claimDueCommands("fencing-proof", now, now.plusSeconds(600), 1))
+      claims <- success(repository.claimDueCommands("fencing-proof", now, 600.seconds, 1))
       initial <- IO.fromOption(claims.headOption)(new AssertionError("missing command claim"))
       claim <-
         if (!result) IO.pure(initial)
         else
           for {
-            outcome <- success(repository.claimExecution(initial.record, "result-proof", now, now.plusSeconds(600), 3))
+            outcome <- success(repository.claimExecution(initial.record, "result-proof", now, 600.seconds, 3))
             executing <- outcome match {
               case InterviewExecutionClaimOutcome.Acquired(value) => IO.pure(value)
               case other => IO.raiseError(new AssertionError(s"Missing execution claim: $other"))
             }
             _ <- success(repository.recordResult(executing, InterviewResult.Succeeded, now))
-            results <- success(repository.claimDueCommands("result-fencing-proof", now, now.plusSeconds(600), 1))
+            results <- success(repository.claimDueCommands("result-fencing-proof", now, 600.seconds, 1))
             publishing <- IO.fromOption(results.headOption)(new AssertionError("missing result claim"))
           } yield publishing
       message = InterviewMessage(
@@ -230,8 +230,8 @@ final class InterviewPublicationFencingIntegrationSpec extends KafkaIntegrationS
                     repository.authorizePublication(item.claim, transport.generationFor(item.message), at)
                   )
                   _ = assert(firstPermission)
-                  _ <- success(repository.retry(item.claim, at, at, InterviewFailureCode.PublicationUnavailable))
-                  nextClaims <- success(repository.claimDueCommands("fencing-proof-retry", at, at.plusSeconds(600), 1))
+                  _ <- success(repository.retry(item.claim, at, InterviewFailureCode.PublicationUnavailable))
+                  nextClaims <- success(repository.claimDueCommands("fencing-proof-retry", at, 600.seconds, 1))
                   nextClaim <- IO.fromOption(nextClaims.headOption)(new AssertionError("missing retry claim"))
                   _ = assert(
                     nextClaim.fencingToken != item.claim.fencingToken,
@@ -246,7 +246,7 @@ final class InterviewPublicationFencingIntegrationSpec extends KafkaIntegrationS
                   currentRecord <- IO.fromOption(stored)(new AssertionError("missing authorized command"))
                   currentClaim = nextClaim.copy(record = currentRecord)
                   _ = assertEquals(currentClaim.record.publicationAttempts, 2)
-                  renewed <- success(repository.renewPublication(currentClaim, at, at.plusSeconds(600)))
+                  renewed <- success(repository.renewPublication(currentClaim, 600.seconds))
                   _ = assert(renewed, "replacement denial must use a currently owned publication claim")
                   _ <- authorized.complete(currentClaim)
                   _ <- release.get

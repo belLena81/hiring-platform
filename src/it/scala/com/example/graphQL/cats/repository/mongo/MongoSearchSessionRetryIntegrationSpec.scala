@@ -37,8 +37,12 @@ class MongoSearchSessionRetryIntegrationSpec extends MongoIntegrationSuite {
           def enqueue(work: PendingSearchSessionWork, at: Instant): RepositoryF[IO, Unit] = underlying.enqueue(work, at)
           def findForActor(actor: UserId, id: UUID): RepositoryF[IO, Option[SearchSessionLookup]] =
             underlying.findForActor(actor, id)
-          def claim(worker: String, at: Instant, until: Instant): RepositoryF[IO, Option[ClaimedSearchSessionWork]] =
-            underlying.claim(worker, at, until)
+          def claim(
+              worker: String,
+              at: Instant,
+              duration: FiniteDuration
+          ): RepositoryF[IO, Option[ClaimedSearchSessionWork]] =
+            underlying.claim(worker, at, duration)
           def complete(claim: ClaimedSearchSessionWork, at: Instant): RepositoryF[IO, Unit] =
             RepositoryF.fromFEither(executions.update(_ :+ claim.attempts).as(Left(RepositoryError.Unavailable)))
           def retry(claim: ClaimedSearchSessionWork, at: Instant): RepositoryF[IO, Unit] = underlying.retry(claim, at)
@@ -90,12 +94,13 @@ class MongoSearchSessionRetryIntegrationSpec extends MongoIntegrationSuite {
         _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- repository.enqueue(PendingSearchSessionWork(session), now).value.flatMap(result)
         first <- repository
-          .claim("first", now, now.plusSeconds(1))
+          .claim("first", now, 1.seconds)
           .value
           .flatMap(result)
           .map(_.getOrElse(fail("Missing initial claim")))
+        _ <- LeaseTestSupport.expire(fixture.database, MongoCollections.SearchSessionWork, session.id.toString)
         recovered <- repository
-          .claim("second", now.plusSeconds(2), now.plusSeconds(30))
+          .claim("second", now.plusSeconds(2), 30.seconds)
           .value
           .flatMap(result)
           .map(_.getOrElse(fail("Missing recovered claim")))
@@ -103,7 +108,7 @@ class MongoSearchSessionRetryIntegrationSpec extends MongoIntegrationSuite {
         staleFailure <- repository.fail(first, SearchSessionWorkFailure.RetryExhausted, now.plusSeconds(3)).value
         _ <- repository.retry(recovered, now.plusSeconds(3)).value.flatMap(result)
         next <- repository
-          .claim("second", now.plusSeconds(4), now.plusSeconds(40))
+          .claim("second", now.plusSeconds(4), 40.seconds)
           .value
           .flatMap(result)
           .map(_.getOrElse(fail("Missing retry claim")))
@@ -118,10 +123,9 @@ class MongoSearchSessionRetryIntegrationSpec extends MongoIntegrationSuite {
     }
   }
 
-  test("a search-session lease is reclaimable at exactly its expiry instant and held one millisecond earlier") {
+  test("DDR-01.3 a search-session lease is held until the database clock passes its expiry, then reclaimable") {
     mongoResource.use { fixture =>
       val now = Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MILLIS)
-      val leaseUntil = now.plusSeconds(1)
       val session = SearchSession(
         UUID.randomUUID(),
         UserId(UUID.randomUUID()),
@@ -138,9 +142,11 @@ class MongoSearchSessionRetryIntegrationSpec extends MongoIntegrationSuite {
       for {
         _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- repository.enqueue(PendingSearchSessionWork(session), now).value.flatMap(result)
-        first <- repository.claim("first", now, leaseUntil).value.flatMap(result)
-        held <- repository.claim("second", leaseUntil.minusMillis(1L), leaseUntil.plusSeconds(30)).value.flatMap(result)
-        reclaimed <- repository.claim("second", leaseUntil, leaseUntil.plusSeconds(30)).value.flatMap(result)
+        first <- repository.claim("first", now, 30.seconds).value.flatMap(result)
+        // A caller clock ahead of the database cannot take a live lease.
+        held <- repository.claim("second", now.plusSeconds(600), 30.seconds).value.flatMap(result)
+        _ <- LeaseTestSupport.expire(fixture.database, MongoCollections.SearchSessionWork, session.id.toString)
+        reclaimed <- repository.claim("second", now, 30.seconds).value.flatMap(result)
         stored <- MongoRepositoryTestSupport.findOne(
           fixture.database,
           MongoCollections.SearchSessionWork,
@@ -151,7 +157,7 @@ class MongoSearchSessionRetryIntegrationSpec extends MongoIntegrationSuite {
         assertEquals(held, None)
         assert(reclaimed.exists(claim => first.exists(_.leaseToken != claim.leaseToken)))
         assertEquals(stored.map(_.getString("leaseOwner")), Some("second"))
-        assertEquals(stored.map(_.getDate("updatedAt")), Some(java.util.Date.from(leaseUntil)))
+        assertEquals(stored.map(_.getDate("updatedAt")), Some(java.util.Date.from(now)))
       }
     }
   }

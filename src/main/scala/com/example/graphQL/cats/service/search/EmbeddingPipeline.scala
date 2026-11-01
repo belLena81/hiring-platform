@@ -81,7 +81,7 @@ final class EmbeddingPipeline[F[_]](using F: Temporal[F])(
   private def claimNext: F[Option[ClaimedEmbeddingWork]] =
     now.flatMap(instant =>
       work
-        .claim(workerId, instant, instant.plusMillis(leaseDuration.toMillis))
+        .claim(workerId, instant, leaseDuration)
         .foldF(
           error => workerHealth(false) *> reportRepositoryFailure(error).as(None),
           claim => workerHealth(true).as(claim)
@@ -220,12 +220,10 @@ final class EmbeddingPipeline[F[_]](using F: Temporal[F])(
   /** A reported failure to renew is an unknown lease, handled as a lost one: the work is abandoned to lease recovery.
     */
   private def renewClaim(claim: ClaimedEmbeddingWork): F[Either[LeaseLost, Unit]] =
-    now.flatMap(at =>
-      work
-        .renew(claim, at, at.plusMillis(leaseDuration.toMillis))
-        .orReport(diagnostics, LogEvent.EmbeddingProcessingFailed)(false)
-        .map(held => Either.cond(held, (), LeaseLost.Expired))
-    )
+    work
+      .renew(claim, leaseDuration)
+      .orReport(diagnostics, LogEvent.EmbeddingProcessingFailed)(false)
+      .map(held => Either.cond(held, (), LeaseLost.Expired))
 
   private def process(claim: ClaimedEmbeddingWork): F[ProcessingOutcome] =
     onKey(claim)(processJob)(processCandidate)

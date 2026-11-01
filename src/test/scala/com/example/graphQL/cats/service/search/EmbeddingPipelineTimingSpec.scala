@@ -22,13 +22,13 @@ final class EmbeddingPipelineTimingSpec extends CatsEffectSuite {
       override def claim(
           workerId: String,
           now: Instant,
-          leaseUntil: Instant
+          leaseDuration: FiniteDuration
       ): RepositoryF[IO, Option[ClaimedEmbeddingWork]] =
         RepositoryF.lift(
           IO.monotonic.flatMap(at => claimedAt.update(_ :+ at)) *>
             IO.raiseError[Option[ClaimedEmbeddingWork]](new IllegalStateException("claim broke"))
         )
-      override def renew(claim: ClaimedEmbeddingWork, now: Instant, leaseUntil: Instant): RepositoryF[IO, Boolean] =
+      override def renew(claim: ClaimedEmbeddingWork, leaseDuration: FiniteDuration): RepositoryF[IO, Boolean] =
         unused
       override def complete(claim: ClaimedEmbeddingWork): RepositoryF[IO, Unit] = unused
       override def retry(

@@ -637,7 +637,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
                 .collection(database, MongoCollections.EventOutbox)
                 .flatMap(_.insertMany(List(outboxRecord(value), outboxRecord(secondValue))))
             )
-            claimed <- outbox.claim("fence-test", transactionalId, now, now.plusSeconds(60L), 50).value
+            claimed <- outbox.claim("fence-test", transactionalId, now, 60.seconds, 50).value
             _ = assert(claimed.exists(_.size == 1), clues(claimed))
             fence <- MongoRepositoryTestSupport.first(
               database
@@ -653,8 +653,19 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
     }
   }
 
+  /** The holder stopped renewing: the event lease and the subject leases of its claim are in the database's past. */
+  private def expireClaim(
+      database: mongo4cats.database.MongoDatabase[IO],
+      claimed: Either[RepositoryError, List[com.example.graphQL.cats.service.port.ClaimedOperationalEvent]]
+  ): IO[Unit] =
+    IO.fromEither(claimed.leftMap(error => new AssertionError(error.toString)))
+      .flatMap(_.traverse_ { claim =>
+        LeaseTestSupport.expire(database, MongoCollections.EventOutbox, claim.event.eventId.toString) *>
+          claim.subjectIds.traverse_(LeaseTestSupport.expire(database, MongoCollections.OutboxSubjectFences, _))
+      })
+
   test(
-    "HAL-05-FENCE-02.1 an outbox lease is reclaimable at exactly its expiry instant and held one millisecond earlier"
+    "HAL-05-FENCE-02.1 DDR-01.3 an outbox lease is held until the database clock passes its expiry, then reclaimable"
   ) {
     replicaSet.use { instance =>
       MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
@@ -672,30 +683,31 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
               OperationalEventPayload.JobSnapshot(uuid(901L), List("Scala"), JobStatus.Open)
             )
           )
-          val leaseUntil = now.plusSeconds(60L)
           for {
             _ <- MongoHiringSetup.initialize(database, Diagnostics.noop[IO])
             _ <- MongoRepositoryTestSupport.first(
               database.getCollection(MongoCollections.EventOutbox).insertOne(outboxRecord(value))
             )
             first <- outbox
-              .claim("boundary-a", "hiring-publisher-00000000-0000-0000-0000-000000000391", now, leaseUntil, 1)
+              .claim("boundary-a", "hiring-publisher-00000000-0000-0000-0000-000000000391", now, 60.seconds, 1)
               .value
+            // A caller clock a day ahead cannot take a live lease: only the database clock decides.
             held <- outbox
               .claim(
                 "boundary-b",
                 "hiring-publisher-00000000-0000-0000-0000-000000000392",
-                leaseUntil.minusMillis(1L),
-                leaseUntil.plusSeconds(60L),
+                now.plusSeconds(86400L),
+                60.seconds,
                 1
               )
               .value
+            _ <- expireClaim(database, first)
             reclaimed <- outbox
               .claim(
                 "boundary-b",
                 "hiring-publisher-00000000-0000-0000-0000-000000000393",
-                leaseUntil,
-                leaseUntil.plusSeconds(60L),
+                now,
+                60.seconds,
                 1
               )
               .value
@@ -765,17 +777,18 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
                 "publisher-a",
                 firstPublisher,
                 now,
-                now.plusSeconds(60L),
+                60.seconds,
                 1
               )
               .value
             _ = assertEquals(firstClaim.map(_.map(_.event.eventId)), Right(List(eventValue.eventId)))
+            _ <- expireClaim(database, firstClaim)
             expiredLeaseClaim <- outbox
               .claim(
                 "publisher-b",
                 secondPublisher,
                 now.plusSeconds(61L),
-                now.plusSeconds(121L),
+                60.seconds,
                 1
               )
               .value
@@ -790,6 +803,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
               .value
             _ = assertEquals(generationsBeforeRace.map(_.toList), Right(List(firstPublisher, secondPublisher).sorted))
             _ = assert(fenceBeforeRace.forall(!_.containsKey("transactionalIds")))
+            _ <- expireClaim(database, expiredLeaseClaim)
             requestWritten <- Deferred[IO, Unit]
             allowDeletionToContinue <- Deferred[IO, Unit]
             deletionFiber <- runner
@@ -809,7 +823,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
                 "publisher-c",
                 racingPublisher,
                 deletionAt,
-                deletionAt.plusSeconds(60L),
+                60.seconds,
                 1
               )
               .value
@@ -857,12 +871,13 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
             )
             _ = assertEquals(storedUser.map(_.getString("accountStatus")), Some("Deleted"))
             _ = assertEquals(requestAfterDeletion.map(_.getString("receiptId")), Some(receiptId))
+            _ <- expireClaim(database, racingClaim)
             lateClaim <- outbox
               .claim(
                 "publisher-d",
                 "hiring-publisher-00000000-0000-0000-0000-000000000388",
                 deletionAt.plusSeconds(200L),
-                deletionAt.plusSeconds(260L),
+                60.seconds,
                 1
               )
               .value

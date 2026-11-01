@@ -80,7 +80,7 @@ object SearchSessionHandoff {
     // Only a pass that reached the store and handled its claim (or found none) is progress for readiness.
     clock.realTimeInstant.flatMap { now =>
       repository
-        .claim(config.workerId, now, now.plusMillis(config.lease.toMillis))
+        .claim(config.workerId, now, config.lease)
         .foldF(
           error =>
             diagnostics.emit(LogEvent.RuntimeFailed, fields = rejectedFields(error)) *> F.sleep(config.pollInterval),

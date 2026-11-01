@@ -548,10 +548,15 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
         workerId: String,
         transactionalId: String,
         at: Instant,
-        until: Instant,
+        duration: scala.concurrent.duration.FiniteDuration,
         limit: Int
     ): RepositoryF[IO, List[ClaimedOperationalEvent]] = RepositoryF.at[IO].raise(RepositoryError.Unavailable)
-    def renewLease(id: UUID, token: String, subjects: List[String], until: Instant): RepositoryF[IO, Unit] =
+    def renewLease(
+        id: UUID,
+        token: String,
+        subjects: List[String],
+        duration: scala.concurrent.duration.FiniteDuration
+    ): RepositoryF[IO, Unit] =
       RepositoryF.fromFEither(renewal)
     def markPublished(id: UUID, token: String, at: Instant, expires: Instant): RepositoryF[IO, Unit] =
       RepositoryF.fromFEither(published)

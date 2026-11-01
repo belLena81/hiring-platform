@@ -84,22 +84,18 @@ final class MongoInterviewWorkflowStore(
     case None                                                 => ().asRepository
     case Some(claim) if claim.record.workflowId != workflowId => MongoF.raise(RepositoryError.Conflict)
     case Some(claim)                                          =>
-      RepositoryF
-        .lift(clock.realTimeInstant)
-        .flatMap(now =>
-          guardWrite(
-            commands,
-            session,
-            MongoFilter.and(
-              MongoFilter.eq(MongoFields.Id, commandId(workflowId, claim.record.stepId)),
-              MongoFilter.eq(CommandStateField, InterviewWorkflowCommandState.Executing.toString),
-              MongoFilter.eq(Lease.owner, claim.owner),
-              MongoFilter.eq(Lease.token, claim.fencingToken.toString),
-              MongoFilter.gt(Lease.until, now.toDate)
-            ),
-            MongoUpdate.inc("effectFence", 1L)
-          )
-        )
+      guardWrite(
+        commands,
+        session,
+        MongoFilter.and(
+          MongoFilter.eq(MongoFields.Id, commandId(workflowId, claim.record.stepId)),
+          MongoFilter.eq(CommandStateField, InterviewWorkflowCommandState.Executing.toString),
+          MongoFilter.eq(Lease.owner, claim.owner),
+          MongoFilter.eq(Lease.token, claim.fencingToken.toString),
+          Lease.held
+        ),
+        MongoUpdate.inc("effectFence", 1L)
+      )
   }
 
   /** Moves the workflow from `expectedRevision` to `next`; extra filters and updates carry the caller's own guards. */

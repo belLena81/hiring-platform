@@ -162,7 +162,7 @@ final class MongoOperationalCollectionValidatorsIntegrationSpec extends MongoInt
         _ <- insert(fixture.database, MongoCollections.EventOutbox, inserted)
         fresh <- find(fixture.database, MongoCollections.EventOutbox, value.eventId.toString)
         claimed <- outbox
-          .claim("validator-test", s"hiring-publisher-${UUID.randomUUID()}", now.plusSeconds(1), now.plusSeconds(30), 1)
+          .claim("validator-test", s"hiring-publisher-${UUID.randomUUID()}", now.plusSeconds(1), 30.seconds, 1)
           .value
           .flatMap(result)
         leased <- find(fixture.database, MongoCollections.EventOutbox, value.eventId.toString)
@@ -173,7 +173,7 @@ final class MongoOperationalCollectionValidatorsIntegrationSpec extends MongoInt
         released <- find(fixture.database, MongoCollections.EventOutbox, value.eventId.toString)
         _ <- work.enqueue(PendingSearchSessionWork(session), now).value.flatMap(result)
         pending <- find(fixture.database, MongoCollections.SearchSessionWork, session.id.toString)
-        lease <- work.claim("validator-test", now.plusSeconds(1), now.plusSeconds(30)).value.flatMap(result)
+        lease <- work.claim("validator-test", now.plusSeconds(1), 30.seconds).value.flatMap(result)
         _ <- work.complete(lease.get, now.plusSeconds(2)).value.flatMap(result)
         stored <- find(fixture.database, MongoCollections.SearchSessions, session.id.toString)
       } yield {

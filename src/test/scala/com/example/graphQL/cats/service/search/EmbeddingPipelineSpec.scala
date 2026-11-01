@@ -308,11 +308,11 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
         override def claim(
             workerId: String,
             at: Instant,
-            leaseUntil: Instant
+            leaseDuration: FiniteDuration
         ): RepositoryF[IO, Option[ClaimedEmbeddingWork]] =
-          work.claim(workerId, at, leaseUntil)
-        override def renew(claim: ClaimedEmbeddingWork, now: Instant, leaseUntil: Instant): RepositoryF[IO, Boolean] =
-          work.renew(claim, now, leaseUntil)
+          work.claim(workerId, at, leaseDuration)
+        override def renew(claim: ClaimedEmbeddingWork, leaseDuration: FiniteDuration): RepositoryF[IO, Boolean] =
+          work.renew(claim, leaseDuration)
         override def complete(claim: ClaimedEmbeddingWork): RepositoryF[IO, Unit] =
           RepositoryF.at[IO].raise(RepositoryError.Unavailable)
         override def retry(
@@ -364,10 +364,10 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
         override def claim(
             workerId: String,
             at: Instant,
-            leaseUntil: Instant
+            leaseDuration: FiniteDuration
         ): RepositoryF[IO, Option[ClaimedEmbeddingWork]] = RepositoryF.at[IO].raise(RepositoryError.Overloaded)
-        override def renew(claim: ClaimedEmbeddingWork, now: Instant, leaseUntil: Instant): RepositoryF[IO, Boolean] =
-          work.renew(claim, now, leaseUntil)
+        override def renew(claim: ClaimedEmbeddingWork, leaseDuration: FiniteDuration): RepositoryF[IO, Boolean] =
+          work.renew(claim, leaseDuration)
         override def complete(claim: ClaimedEmbeddingWork): RepositoryF[IO, Unit] = work.complete(claim)
         override def retry(
             claim: ClaimedEmbeddingWork,
@@ -624,6 +624,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
         calls <- Ref.of[IO, Int](0)
         clock <- Ref.of[IO, Instant](now)
         work <- InMemoryEmbeddingWorkRepository.create
+        _ <- work.setDatabaseTime(now)
         key = EmbeddingWorkKeys.keyFor(changed)
         changedProfile = CandidateProfile(Set("Scala", "Kafka"), Some("Updated summary"), None)
         _ <- successful(work.enqueue(key, now))
@@ -656,6 +657,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
         staleUsers <- usersRef.get
         staleJobs <- jobsRef.get
         _ <- clock.set(now.plusSeconds(31))
+        _ <- work.setDatabaseTime(now.plusSeconds(31))
         _ <- controlledWorker(
           ObservableWork(work, newCompletion),
           InMemoryUsers(usersRef),
@@ -780,6 +782,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
         calls <- Ref.of[IO, Int](0)
         clock <- Ref.of[IO, Instant](now)
         work <- InMemoryEmbeddingWorkRepository.create
+        _ <- work.setDatabaseTime(now)
         key = EmbeddingWorkKeys.keyFor(changed)
         _ <- successful(work.enqueue(key, now))
         _ <- controlledWorker(
@@ -794,6 +797,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
         beforeUsers <- usersRef.get
         beforeJobs <- jobsRef.get
         _ <- clock.set(now.plusSeconds(31))
+        _ <- work.setDatabaseTime(now.plusSeconds(31))
         _ <- controlledWorker(
           ObservableWork(work, completion),
           InMemoryUsers(usersRef),
@@ -830,6 +834,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
         calls <- Ref.of[IO, Int](0)
         clock <- Ref.of[IO, Instant](now)
         work <- InMemoryEmbeddingWorkRepository.create
+        _ <- work.setDatabaseTime(now)
         key = EmbeddingWorkKeys.keyFor(changed)
         interruptedWork = ObservableWork(work, completion, beforeCompletion.complete(()).void *> IO.never[Unit])
         _ <- successful(work.enqueue(key, now))
@@ -842,6 +847,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
         ).use(wakeups => wakeups.offer(()) *> beforeCompletion.get)
         interrupted <- work.snapshot
         _ <- clock.set(now.plusSeconds(31))
+        _ <- work.setDatabaseTime(now.plusSeconds(31))
         _ <- controlledWorker(
           ObservableWork(work, completion),
           InMemoryUsers(usersRef),
@@ -916,12 +922,15 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
     for {
       repository <- InMemoryEmbeddingWorkRepository.create
       _ <- repository.enqueue(work, first).value
-      claim <- repository.claim("worker-a", first, first.plusSeconds(30)).value
+      _ <- repository.setDatabaseTime(first)
+      claim <- repository.claim("worker-a", first, 30.seconds).value
       claimed <- IO.fromOption(claim.toOption.flatten)(new AssertionError("expected work claim"))
       _ <- repository.enqueue(work, second).value
       completed <- repository.complete(claimed).value
-      blockedClaim <- repository.claim("worker-b", second, second.plusSeconds(30)).value
-      nextClaim <- repository.claim("worker-b", first.plusSeconds(31), first.plusSeconds(61)).value
+      _ <- repository.setDatabaseTime(second)
+      blockedClaim <- repository.claim("worker-b", second, 30.seconds).value
+      _ <- repository.setDatabaseTime(first.plusSeconds(31))
+      nextClaim <- repository.claim("worker-b", first.plusSeconds(31), 30.seconds).value
       snapshot <- repository.snapshot
     } yield {
       assertEquals(completed, Left(RepositoryError.Conflict))
@@ -1293,7 +1302,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
             _ <- started.get
             _ <- IO.sleep(300.millis)
             at <- IO.realTimeInstant
-            competing <- successful(work.claim("other", at, at.plusSeconds(1)))
+            competing <- successful(work.claim("other", at, 1.second))
             _ <- release.complete(()).void
             _ <- eventually(work.snapshot)(_.isEmpty)
           } yield assertEquals(competing, None)
@@ -1312,12 +1321,12 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
         observed <- Ref.of[IO, List[LogEvent]](Nil)
         adapter = new EmbeddingWorkRepository[IO] {
           def enqueue(key: EmbeddingWorkKey, at: Instant) = work.enqueue(key, at)
-          def claim(worker: String, at: Instant, until: Instant) =
+          def claim(worker: String, at: Instant, duration: FiniteDuration) =
             RepositoryF.fromFEither((if (failClaim) first.getAndSet(false) else IO.pure(false)).flatMap {
               case true  => IO.raiseError(new IllegalStateException("unexpected claim failure"))
-              case false => work.claim(worker, at, until).value
+              case false => work.claim(worker, at, duration).value
             })
-          def renew(claim: ClaimedEmbeddingWork, at: Instant, until: Instant) = work.renew(claim, at, until)
+          def renew(claim: ClaimedEmbeddingWork, duration: FiniteDuration) = work.renew(claim, duration)
           def complete(claim: ClaimedEmbeddingWork) =
             RepositoryF.fromFEither((if (!failClaim) first.getAndSet(false) else IO.pure(false)).flatMap {
               case true  => IO.raiseError(new IllegalStateException("unexpected completion failure"))
@@ -1450,11 +1459,11 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
     override def claim(
         workerId: String,
         now: Instant,
-        leaseUntil: Instant
+        leaseDuration: FiniteDuration
     ): RepositoryF[IO, Option[ClaimedEmbeddingWork]] =
-      delegate.claim(workerId, now, leaseUntil)
-    override def renew(claim: ClaimedEmbeddingWork, now: Instant, leaseUntil: Instant): RepositoryF[IO, Boolean] =
-      delegate.renew(claim, now, leaseUntil)
+      delegate.claim(workerId, now, leaseDuration)
+    override def renew(claim: ClaimedEmbeddingWork, leaseDuration: FiniteDuration): RepositoryF[IO, Boolean] =
+      delegate.renew(claim, leaseDuration)
     override def complete(claim: ClaimedEmbeddingWork): RepositoryF[IO, Unit] = RepositoryF.fromFEither(
       beforeCompletion *> delegate.complete(claim).value.flatTap(result => completion.complete(result).void)
     )
@@ -1623,9 +1632,18 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
       failure: Option[EmbeddingWorkFailure]
   )
 
-  private final class InMemoryEmbeddingWorkRepository(ref: Ref[IO, Map[String, StoredWork]])
-      extends EmbeddingWorkRepository[IO] {
+  /** The in-memory store models the database clock: real time unless a test pins it with `setDatabaseTime`. Lease
+    * expiry is always decided on that clock; the caller's `now` only drives `availableAt` scheduling.
+    */
+  private final class InMemoryEmbeddingWorkRepository(
+      ref: Ref[IO, Map[String, StoredWork]],
+      databaseClock: Ref[IO, Option[Instant]]
+  ) extends EmbeddingWorkRepository[IO] {
     def snapshot: IO[Map[String, StoredWork]] = ref.get
+
+    def setDatabaseTime(at: Instant): IO[Unit] = databaseClock.set(Some(at))
+
+    private def databaseNow: IO[Instant] = databaseClock.get.flatMap(_.fold(IO.realTimeInstant)(IO.pure))
 
     override def enqueue(key: EmbeddingWorkKey, now: Instant): RepositoryF[IO, Unit] =
       com.example.graphQL.cats.service.port.RepositoryF.fromFEither(
@@ -1651,34 +1669,44 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
     override def claim(
         workerId: String,
         now: Instant,
-        leaseUntil: Instant
+        leaseDuration: FiniteDuration
     ): RepositoryF[IO, Option[ClaimedEmbeddingWork]] =
-      com.example.graphQL.cats.service.port.RepositoryF.fromFEither(IO.randomUUID.flatMap { token =>
-        ref.modify { current =>
-          current.values.toList
-            .sortBy(_.key.value)
-            .find(work =>
-              ((work.state == "Ready" || work.state == "Retry") && !work.availableAt.isAfter(now)) ||
-                (work.state == "Processing" && work.leaseUntil.exists(_.isBefore(now)))
-            )
-            .fold(current -> Right(None)) { found =>
-              val claimed =
-                found.copy(state = "Processing", leaseToken = Some(token.toString), leaseUntil = Some(leaseUntil))
-              current.updated(found.key.value, claimed) -> Right(
-                Some(ClaimedEmbeddingWork(found.key, found.generation, found.attempts, token.toString))
+      com.example.graphQL.cats.service.port.RepositoryF.fromFEither((IO.randomUUID, databaseNow).flatMapN {
+        (token, dbNow) =>
+          ref.modify { current =>
+            current.values.toList
+              .sortBy(_.key.value)
+              .find(work =>
+                ((work.state == "Ready" || work.state == "Retry") && !work.availableAt.isAfter(now)) ||
+                  (work.state == "Processing" && work.leaseUntil.exists(!_.isAfter(dbNow)))
               )
-            }
-        }
+              .fold(current -> Right(None)) { found =>
+                val claimed =
+                  found.copy(
+                    state = "Processing",
+                    leaseToken = Some(token.toString),
+                    leaseUntil = Some(dbNow.plusMillis(leaseDuration.toMillis))
+                  )
+                current.updated(found.key.value, claimed) -> Right(
+                  Some(ClaimedEmbeddingWork(found.key, found.generation, found.attempts, token.toString))
+                )
+              }
+          }
       })
 
-    override def renew(claim: ClaimedEmbeddingWork, now: Instant, leaseUntil: Instant): RepositoryF[IO, Boolean] =
-      RepositoryF.fromFEither(ref.modify { current =>
-        current.get(claim.key.value) match {
-          case Some(found)
-              if found.generation == claim.generation && found.state == "Processing" &&
-                found.leaseToken.contains(claim.leaseToken) && found.leaseUntil.exists(_.isAfter(now)) =>
-            current.updated(claim.key.value, found.copy(leaseUntil = Some(leaseUntil))) -> Right(true)
-          case _ => current -> Right(false)
+    override def renew(claim: ClaimedEmbeddingWork, leaseDuration: FiniteDuration): RepositoryF[IO, Boolean] =
+      RepositoryF.fromFEither(databaseNow.flatMap { dbNow =>
+        ref.modify { current =>
+          current.get(claim.key.value) match {
+            case Some(found)
+                if found.generation == claim.generation && found.state == "Processing" &&
+                  found.leaseToken.contains(claim.leaseToken) && found.leaseUntil.exists(_.isAfter(dbNow)) =>
+              current.updated(
+                claim.key.value,
+                found.copy(leaseUntil = Some(dbNow.plusMillis(leaseDuration.toMillis)))
+              ) -> Right(true)
+            case _ => current -> Right(false)
+          }
         }
       })
 
@@ -1727,6 +1755,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
 
   private object InMemoryEmbeddingWorkRepository {
     def create: IO[InMemoryEmbeddingWorkRepository] =
-      Ref.of[IO, Map[String, StoredWork]](Map.empty).map(new InMemoryEmbeddingWorkRepository(_))
+      (Ref.of[IO, Map[String, StoredWork]](Map.empty), Ref.of[IO, Option[Instant]](None))
+        .mapN(new InMemoryEmbeddingWorkRepository(_, _))
   }
 }

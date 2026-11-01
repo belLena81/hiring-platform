@@ -205,7 +205,7 @@ private[application] final class InterviewMessageReceiver[F[_]: Temporal](
                 command,
                 settings.workerId,
                 claimAt,
-                claimAt.plusMillis(settings.claimLease.toMillis),
+                settings.claimLease,
                 settings.maxAttempts
               )
               .foldF(

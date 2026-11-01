@@ -38,7 +38,7 @@ final class SearchSessionHandoffTimingSpec extends CatsEffectSuite {
       override def claim(
           workerId: String,
           now: Instant,
-          leaseUntil: Instant
+          leaseDuration: FiniteDuration
       ): RepositoryF[IO, Option[ClaimedSearchSessionWork]] =
         RepositoryF.lift(
           IO.monotonic.flatMap(at =>
@@ -89,7 +89,7 @@ final class SearchSessionHandoffTimingSpec extends CatsEffectSuite {
       throwing = new SearchSessionWorkRepository[IO] {
         override def enqueue(work: PendingSearchSessionWork, now: Instant) = base.enqueue(work, now)
         override def findForActor(actorId: UserId, searchId: UUID) = base.findForActor(actorId, searchId)
-        override def claim(workerId: String, now: Instant, leaseUntil: Instant) =
+        override def claim(workerId: String, now: Instant, leaseDuration: FiniteDuration) =
           RepositoryF.lift(
             for {
               at <- IO.monotonic

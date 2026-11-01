@@ -99,7 +99,7 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
       calls <- Ref.of[IO, Calls](noCalls)
       recorded <- Ref.of[IO, Option[InterviewResult]](None)
       stored = record(workflow, command, None)
-      claim = ClaimedInterviewWorkflowCommand(stored, "executor", new UUID(0L, 90L), clock.plusSeconds(60))
+      claim = ClaimedInterviewWorkflowCommand(stored, "executor", new UUID(0L, 90L))
       repository = new TestInterviewWorkflowRepository {
         override def findForAdmin(id: InterviewWorkflowId) = RepositoryF.at[IO].pure(Some(workflow))
         override def findCommand(id: InterviewWorkflowId, step: String) = RepositoryF.at[IO].pure(Some(stored))
@@ -107,7 +107,7 @@ final class InterviewLifecycleExecutorSpec extends CatsEffectSuite {
             value: InterviewWorkflowCommandRecord,
             workerId: String,
             now: Instant,
-            leaseUntil: Instant,
+            leaseDuration: FiniteDuration,
             maxAttempts: Int
         ) = RepositoryF.at[IO].pure(InterviewExecutionClaimOutcome.Acquired(claim))
         override def recordResult(

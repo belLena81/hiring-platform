@@ -185,15 +185,15 @@ final class MongoProducerRegistrationsIntegrationSpec extends MongoIntegrationSu
           MongoCollections.OutboxSubjectFences,
           new Document("_id", hot.value.toString)
             .append("deleted", false)
-            .append("leaseUntil", Date.from(now.plusSeconds(60)))
+            .append("leaseUntil", Date.from(Instant.parse("2100-01-01T00:00:00Z")))
         )
         _ <- ((1L to 128L).map(n => event(n, hot)).toList :+ desired).traverse_(value =>
           IO.fromEither(MongoHiringCodecs.outboxRecord(value, now).leftMap(new AssertionError(_)))
             .flatMap(row => MongoRepositoryTestSupport.insertOne(fixture.database, MongoCollections.EventOutbox, row))
         )
-        first <- success(outbox.claim("fair-worker", "hiring-publisher-test", now, now.plusSeconds(60), 1))
-        second <- success(outbox.claim("fair-worker", "hiring-publisher-test", now, now.plusSeconds(60), 1))
-        third <- success(outbox.claim("fair-worker", "hiring-publisher-test", now, now.plusSeconds(60), 1))
+        first <- success(outbox.claim("fair-worker", "hiring-publisher-test", now, 60.seconds, 1))
+        second <- success(outbox.claim("fair-worker", "hiring-publisher-test", now, 60.seconds, 1))
+        third <- success(outbox.claim("fair-worker", "hiring-publisher-test", now, 60.seconds, 1))
       } yield {
         // With no extra pages per claim, each claim checkpoints one page of busy subjects and the next resumes there.
         assertEquals(first, Nil)
@@ -229,15 +229,15 @@ final class MongoProducerRegistrationsIntegrationSpec extends MongoIntegrationSu
           MongoCollections.OutboxSubjectFences,
           new Document("_id", hot.value.toString)
             .append("deleted", false)
-            .append("leaseUntil", Date.from(now.plusSeconds(60)))
+            .append("leaseUntil", Date.from(Instant.parse("2100-01-01T00:00:00Z")))
         )
         _ <- ((1L to 128L).map(n => event(n, hot)).toList :+ desired).traverse_(value =>
           IO.fromEither(MongoHiringCodecs.outboxRecord(value, now).leftMap(new AssertionError(_)))
             .flatMap(row => MongoRepositoryTestSupport.insertOne(fixture.database, MongoCollections.EventOutbox, row))
         )
-        first <- success(outbox.claim("fair-worker", "hiring-publisher-test", now, now.plusSeconds(60), 1))
-        second <- success(outbox.claim("fair-worker", "hiring-publisher-test", now, now.plusSeconds(60), 1))
-        third <- success(outbox.claim("fair-worker", "hiring-publisher-test", now, now.plusSeconds(60), 1))
+        first <- success(outbox.claim("fair-worker", "hiring-publisher-test", now, 60.seconds, 1))
+        second <- success(outbox.claim("fair-worker", "hiring-publisher-test", now, 60.seconds, 1))
+        third <- success(outbox.claim("fair-worker", "hiring-publisher-test", now, 60.seconds, 1))
       } yield {
         // The scan used to checkpoint page by page over three claims; it now continues over the next pages (bounded by
         // MaxScanPages) so the independent event is claimed at once, and the later claims find nothing free.

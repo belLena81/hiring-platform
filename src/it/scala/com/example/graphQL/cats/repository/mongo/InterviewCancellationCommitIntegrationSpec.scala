@@ -303,7 +303,7 @@ final class InterviewCancellationCommitIntegrationSpec extends MongoIntegrationS
         document <- a.workflowDocument
         expiry <- a.repository.findCommand(a.workflow.id, s"${a.workflow.id.value}:1:0").value
         inform <- a.repository.findCommand(a.workflow.id, s"${a.workflow.id.value}:1:1").value
-        claimed <- a.repository.claimDueCommands("worker", now.plusSeconds(60), now.plusSeconds(120), 5).value
+        claimed <- a.repository.claimDueCommands("worker", now.plusSeconds(60), 60.seconds, 5).value
         cancelled <- apply(
           a,
           InterviewLifecycleEvent.Cancel(InterviewCancellationInitiator.Recruiter, now),

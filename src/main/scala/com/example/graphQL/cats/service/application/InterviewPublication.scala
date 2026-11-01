@@ -39,7 +39,7 @@ private[application] final class InterviewPublication[F[_]: Temporal](
     for {
       now <- currentTime
       claimed <- observe(
-        repository.claimDueCommands(settings.workerId, now, now.plusMillis(settings.claimLease.toMillis), 1),
+        repository.claimDueCommands(settings.workerId, now, settings.claimLease, 1),
         "interviewWorkflow.claimPublication"
       )
       results <- claimed.toList.flatten.traverse(publishClaim(transport, _))
@@ -87,7 +87,6 @@ private[application] final class InterviewPublication[F[_]: Temporal](
       observe(
         repository.retry(
           claim,
-          at,
           at.plusMillis(settings.initialBackoff.toMillis),
           InterviewFailureCode.PublicationCoordinationUnavailable
         ),
@@ -112,7 +111,7 @@ private[application] final class InterviewPublication[F[_]: Temporal](
               settings.maxBackoff.toMillis
             )
             observe(
-              repository.retry(claim, at, at.plusMillis(delay), InterviewFailureCode.PublicationUnavailable),
+              repository.retry(claim, at.plusMillis(delay), InterviewFailureCode.PublicationUnavailable),
               "interviewWorkflow.retryPublication"
             ).as(false)
           }
@@ -137,14 +136,13 @@ private[application] final class InterviewPublication[F[_]: Temporal](
       message: InterviewMessage,
       claim: ClaimedInterviewWorkflowCommand
   ): F[PublicationOutcome] = {
-    val renew: F[Either[LeaseLost, Unit]] = currentTime.flatMap { now =>
+    val renew: F[Either[LeaseLost, Unit]] =
       repository
-        .renewPublication(claim, now, now.plusMillis(settings.claimLease.toMillis))
+        .renewPublication(claim, settings.claimLease)
         .fold[Either[LeaseLost, Unit]](
           _ => Left(LeaseLost.Unavailable),
           renewed => Either.cond(renewed, (), LeaseLost.Expired)
         )
-    }
     // Loading and authorization can consume most of the original claim lease, so it is renewed before publishing.
     LeaseHeartbeat.guard(settings.claimLease)(renew)(transport.publish(message)).map {
       case Right(_)                    => PublicationOutcome.Published

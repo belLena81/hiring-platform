@@ -65,9 +65,19 @@ final class OutboxBatchClaimIntegrationSpec extends MongoIntegrationSuite {
       limit: Int
   ): IO[List[ClaimedOperationalEvent]] =
     repository
-      .claim(worker, s"hiring-publisher-$worker", at, at.plusSeconds(lease.toSeconds), limit)
+      .claim(worker, s"hiring-publisher-$worker", at, lease, limit)
       .value
       .flatMap(_.fold(error => IO.raiseError(new AssertionError(s"claim failed: $error")), IO.pure))
+
+  /** The holder stopped renewing: the event leases and the subject leases of its claim are in the database's past. */
+  private def expireClaims(
+      fixture: MongoAccessEvaluationSupport.Fixture,
+      claimed: List[ClaimedOperationalEvent]
+  ): IO[Unit] =
+    claimed.traverse_ { claim =>
+      LeaseTestSupport.expire(fixture.database, MongoCollections.EventOutbox, claim.event.eventId.toString) *>
+        claim.subjectIds.traverse_(LeaseTestSupport.expire(fixture.database, MongoCollections.OutboxSubjectFences, _))
+    }
 
   private def row(fixture: MongoAccessEvaluationSupport.Fixture, id: UUID): IO[Document] =
     MongoRepositoryTestSupport
@@ -188,10 +198,10 @@ final class OutboxBatchClaimIntegrationSpec extends MongoIntegrationSuite {
         _ <- repository.markPublished(values(1).eventId, token, now.plusSeconds(2), now.plusSeconds(3600)).value
         fences <- subjects.traverse(fence(fixture, _))
         stillOwned <- repository
-          .renewLease(values.head.eventId, token, List(subjects.head.value.toString), now.plusSeconds(60))
+          .renewLease(values.head.eventId, token, List(subjects.head.value.toString), 60.seconds)
           .value
         otherOwner <- repository
-          .renewLease(values.head.eventId, token, List(subjects(2).value.toString), now.plusSeconds(60))
+          .renewLease(values.head.eventId, token, List(subjects(2).value.toString), 60.seconds)
           .value
       } yield {
         assert(fences(0).exists(_.containsKey(MongoFields.LeaseToken)), clue(fences))
@@ -215,6 +225,7 @@ final class OutboxBatchClaimIntegrationSpec extends MongoIntegrationSuite {
         _ <- seed(fixture, values)
         stale <- claim(repository, "slow", now.plusSeconds(1), limit = 3)
         beforeExpiry <- claim(repository, "fast", now.plusSeconds(10), limit = 3)
+        _ <- expireClaims(fixture, stale)
         reclaimed <- claim(repository, "fast", now.plusSeconds(1 + lease.toSeconds), limit = 3)
         late <- repository
           .markPublished(values.head.eventId, stale.head.leaseToken, now.plusSeconds(40), now.plusSeconds(3600))
@@ -224,7 +235,7 @@ final class OutboxBatchClaimIntegrationSpec extends MongoIntegrationSuite {
             values.head.eventId,
             stale.head.leaseToken,
             stale.head.subjectIds,
-            now.plusSeconds(90)
+            90.seconds
           )
           .value
         current <- repository
@@ -473,6 +484,7 @@ final class OutboxBatchClaimIntegrationSpec extends MongoIntegrationSuite {
         // A's lease is held (its subject lease protects only the actor); B must still wait.
         held <- claim(repository, "other", now.plusSeconds(5), limit = 10)
         // The holder died: the expired lease makes A claimable again, and A, not B, is the event returned.
+        _ <- expireClaims(fixture, first)
         expired <- claim(repository, "other", now.plusSeconds(1 + lease.toSeconds), limit = 10)
       } yield {
         assertEquals(ids(first), List(a.eventId))
@@ -681,7 +693,7 @@ final class OutboxBatchClaimIntegrationSpec extends MongoIntegrationSuite {
         )
         // A stale page read could still offer B; the claim transaction refuses it without the page filter.
         stale <- repository
-          .claimCandidates("w", "hiring-publisher-w", now.plusSeconds(3), now.plusSeconds(33), List(candidate(b)))
+          .claimCandidates("w", "hiring-publisher-w", now.plusSeconds(3), 30.seconds, List(candidate(b)))
           .value
         state <- row(fixture, b.eventId).map(_.getString(MongoFields.State))
         // Both offered together: only the earlier one is leased.
@@ -690,7 +702,7 @@ final class OutboxBatchClaimIntegrationSpec extends MongoIntegrationSuite {
             "w",
             "hiring-publisher-w",
             now.plusSeconds(601),
-            now.plusSeconds(631),
+            30.seconds,
             List(candidate(a), candidate(b))
           )
           .value

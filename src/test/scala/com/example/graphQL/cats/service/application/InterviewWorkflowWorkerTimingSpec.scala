@@ -41,8 +41,7 @@ final class InterviewWorkflowWorkerTimingSpec extends CatsEffectSuite {
   private val claim = ClaimedInterviewWorkflowCommand(
     command.copy(state = InterviewWorkflowCommandState.Claimed, publicationAttempts = 0),
     "worker",
-    new UUID(0L, 77L),
-    observedAt.plusSeconds(60)
+    new UUID(0L, 77L)
   )
 
   private def passes(sequence: List[InterviewPublicationPass], pollInterval: FiniteDuration) =
@@ -81,7 +80,7 @@ final class InterviewWorkflowWorkerTimingSpec extends CatsEffectSuite {
       cancelled <- Ref.of[IO, Boolean](false)
       store = new TestInterviewWorkflowRepository {
         private var served = false
-        override def claimDueCommands(workerId: String, now: Instant, leaseUntil: Instant, limit: Int) =
+        override def claimDueCommands(workerId: String, now: Instant, leaseDuration: FiniteDuration, limit: Int) =
           RepositoryF.lift(IO { val due = if (served) Nil else List(claim); served = true; due })
         override def findForAdmin(id: InterviewWorkflowId) = RepositoryF.at[IO].pure(Some(workflow))
         override def authorizePublication(
@@ -89,13 +88,12 @@ final class InterviewWorkflowWorkerTimingSpec extends CatsEffectSuite {
             generation: InterviewPublisherGeneration,
             now: Instant
         ) = RepositoryF.at[IO].pure(true)
-        override def renewPublication(value: ClaimedInterviewWorkflowCommand, now: Instant, leaseUntil: Instant) =
+        override def renewPublication(value: ClaimedInterviewWorkflowCommand, leaseDuration: FiniteDuration) =
           RepositoryF.fromFEither(renewed.getAndUpdate(_ + 1).map(renewals))
         override def markPublished(value: ClaimedInterviewWorkflowCommand, at: Instant) =
           RepositoryF.lift(published.update(_ + 1))
         override def retry(
             value: ClaimedInterviewWorkflowCommand,
-            now: Instant,
             availableAt: Instant,
             failureCode: InterviewFailureCode
         ) = RepositoryF.lift(retried.update(_ + 1))

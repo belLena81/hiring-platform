@@ -36,8 +36,7 @@ object MongoBacklogSources {
   private[mongo] def embeddingClaimable(now: Instant): MongoFilter =
     MongoLeaseQueue.claimable(
       MongoLeaseQueue.readyDue(EmbeddingReady, now),
-      MongoFilter.eq(MongoFields.State, EmbeddingProcessing),
-      now
+      MongoFilter.eq(MongoFields.State, EmbeddingProcessing)
     )
 
   private[mongo] def outboxClaimable(now: Instant): MongoFilter =
@@ -45,12 +44,12 @@ object MongoBacklogSources {
 
   private[mongo] val embeddingAgeReads: List[AgeRead] = List(
     AgeRead(MongoLeaseQueue.readyDue(EmbeddingReady, _), MongoFields.AvailableAt),
-    AgeRead(MongoLeaseQueue.leaseExpired(EmbeddingProcessing, _), MongoFields.AvailableAt)
+    AgeRead(_ => MongoLeaseQueue.leaseExpired(EmbeddingProcessing), MongoFields.AvailableAt)
   )
 
   private[mongo] val outboxAgeReads: List[AgeRead] = List(
     AgeRead(MongoOperationalEventOutboxRepository.Claimable.retryableDue, MongoFields.OccurredAt),
-    AgeRead(MongoOperationalEventOutboxRepository.Claimable.expiredInFlight, MongoFields.OccurredAt)
+    AgeRead(_ => MongoOperationalEventOutboxRepository.Claimable.expiredInFlight, MongoFields.OccurredAt)
   )
 
   /** Embedding age runs from when the oldest claimable row became available; a retry resets `availableAt`. */

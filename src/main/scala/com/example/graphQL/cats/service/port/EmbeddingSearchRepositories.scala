@@ -11,6 +11,7 @@ import com.example.graphQL.cats.service.search.{
   VectorSearchQuery
 }
 import java.time.Instant
+import scala.concurrent.duration.FiniteDuration
 
 trait EmbeddingService[F[_]] {
   def embed(input: EmbeddingInput): F[Either[EmbeddingError, EmbeddingVector]]
@@ -57,12 +58,16 @@ enum EmbeddingWorkState {
 
 trait EmbeddingWorkRepository[F[_]] {
   def enqueue(key: EmbeddingWorkKey, now: Instant): RepositoryF[F, Unit]
+
+  /** Claims due work; the lease ends `leaseDuration` after the database time of the claim (never a caller instant). */
   def claim(
       workerId: String,
       now: Instant,
-      leaseUntil: Instant
+      leaseDuration: FiniteDuration
   ): RepositoryF[F, Option[ClaimedEmbeddingWork]]
-  def renew(claim: ClaimedEmbeddingWork, now: Instant, leaseUntil: Instant): RepositoryF[F, Boolean]
+
+  /** Extends the lease to `leaseDuration` after database time; `false` when the lease expired or was taken over. */
+  def renew(claim: ClaimedEmbeddingWork, leaseDuration: FiniteDuration): RepositoryF[F, Boolean]
   def complete(claim: ClaimedEmbeddingWork): RepositoryF[F, Unit]
 
   /** Revision conflicts reschedule with chargeAttempt=false; actual failed processing consumes the durable budget. */

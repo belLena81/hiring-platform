@@ -56,7 +56,7 @@ final class InterviewProposalExpiryIntegrationSpec extends MongoIntegrationSuite
       for {
         open <- proposed(s)
         due = open.proposal.map(_.expiresAt).getOrElse(fail("no proposal"))
-        claims <- success(s.repository.claimDueCommands("publisher", due.plusSeconds(1), due.plusSeconds(60), 8))
+        claims <- success(s.repository.claimDueCommands("publisher", due.plusSeconds(1), 60.seconds, 8))
         claim <- IO.fromOption(claims.find(_.record.command.isInstanceOf[InterviewLifecycleCommand.ExpireProposal]))(
           new AssertionError("the expiry was not claimable once due")
         )
@@ -64,7 +64,7 @@ final class InterviewProposalExpiryIntegrationSpec extends MongoIntegrationSuite
           s.repository.requireRepair(claim, due.plusSeconds(2), InterviewFailureCode.PublicationExhausted)
         )
         after <- s.current
-        again <- success(s.repository.claimDueCommands("publisher", due.plusSeconds(3), due.plusSeconds(60), 8))
+        again <- success(s.repository.claimDueCommands("publisher", due.plusSeconds(3), 60.seconds, 8))
         row <- expiryRow(s)
       } yield {
         assertEquals(resolution, InterviewPublicationResolution.Repaired)
@@ -84,7 +84,7 @@ final class InterviewProposalExpiryIntegrationSpec extends MongoIntegrationSuite
       for {
         open <- proposed(s)
         due = open.proposal.map(_.expiresAt).getOrElse(fail("no proposal"))
-        claims <- success(s.repository.claimDueCommands("publisher", due.plusSeconds(1), due.plusSeconds(60), 8))
+        claims <- success(s.repository.claimDueCommands("publisher", due.plusSeconds(1), 60.seconds, 8))
         claim <- IO.fromOption(claims.find(_.record.command.isInstanceOf[InterviewLifecycleCommand.ExpireProposal]))(
           new AssertionError("the expiry was not claimable once due")
         )
@@ -152,7 +152,7 @@ final class InterviewProposalExpiryIntegrationSpec extends MongoIntegrationSuite
       for {
         open <- proposed(s)
         due = open.proposal.map(_.expiresAt).getOrElse(fail("no proposal"))
-        claims <- success(s.repository.claimDueCommands("publisher", due.plusSeconds(1), due.plusSeconds(60), 8))
+        claims <- success(s.repository.claimDueCommands("publisher", due.plusSeconds(1), 60.seconds, 8))
         claim <- IO.fromOption(claims.find(_.record.command.isInstanceOf[InterviewLifecycleCommand.ExpireProposal]))(
           new AssertionError("the expiry was not claimable once due")
         )
@@ -161,7 +161,7 @@ final class InterviewProposalExpiryIntegrationSpec extends MongoIntegrationSuite
         afterDefer <- expiryRow(s)
         published <- s.repository.markPublished(claim, due.plusSeconds(2)).value
         afterPublish <- expiryRow(s)
-        early <- success(s.repository.claimDueCommands("publisher", due.plusSeconds(10), due.plusSeconds(60), 8))
+        early <- success(s.repository.claimDueCommands("publisher", due.plusSeconds(10), 60.seconds, 8))
         expired <- s
           .worker("late-worker", clock = IO.pure(availableAt.plusSeconds(2)))
           .receiveCommand(messageFor(open, afterDefer))

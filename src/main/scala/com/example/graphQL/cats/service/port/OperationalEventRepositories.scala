@@ -2,6 +2,7 @@ package com.example.graphQL.cats.service.port
 
 import com.example.graphQL.cats.service.events.OperationalEventEnvelope
 import java.time.Instant
+import scala.concurrent.duration.FiniteDuration
 
 final case class ClaimedOperationalEvent(
     event: OperationalEventEnvelope,
@@ -17,18 +18,22 @@ enum OperationalEventFailureCategory {
 }
 
 trait OperationalEventOutboxRepository[F[_]] {
+
+  /** Claims due events; every lease ends `leaseDuration` after the database time (never a caller instant). */
   def claim(
       workerId: String,
       transactionalId: String,
       now: Instant,
-      leaseUntil: Instant,
+      leaseDuration: FiniteDuration,
       limit: Int
   ): RepositoryF[F, List[ClaimedOperationalEvent]]
+
+  /** Extends the event and subject leases to `leaseDuration` after database time; `Conflict` when the lease is lost. */
   def renewLease(
       eventId: java.util.UUID,
       leaseToken: String,
       subjectIds: List[String],
-      leaseUntil: Instant
+      leaseDuration: FiniteDuration
   ): RepositoryF[F, Unit]
   def markPublished(
       eventId: java.util.UUID,

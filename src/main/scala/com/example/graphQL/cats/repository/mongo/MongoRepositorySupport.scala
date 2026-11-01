@@ -41,6 +41,9 @@ import org.bson.Document
 import scala.jdk.CollectionConverters.*
 import java.time.Instant
 import org.bson.conversions.Bson
+import org.bson.{BsonArray, BsonDateTime, BsonDocument, BsonInt64, BsonString, BsonValue}
+import fs2.interop.reactivestreams.*
+import scala.concurrent.duration.FiniteDuration
 
 /** Effectfully acquired document collections used by repository adapters. */
 private[mongo] object Mongo4catsCollections {
@@ -73,6 +76,10 @@ private[mongo] object MongoFilter {
         lt(MongoFields.Id, id)
       )
     )
+
+  /** An aggregation expression evaluated per document, for example a comparison against `$$NOW`. */
+  def expr(expression: BsonDocument): MongoFilter =
+    MongoFilter(Filters.expr(expression), Filter.eq("$expr", expression))
   def and(filters: MongoFilter*): MongoFilter =
     if (filters.isEmpty) exists(MongoFields.Id)
     else MongoFilter(Filters.and(filters.map(_.bson).asJava), Filter.and(filters.map(_.sessionFilter)*))
@@ -97,6 +104,9 @@ private[mongo] object MongoUpdate {
       updates.map(_.sessionUpdate).reduce(_.combinedWith(_))
     )
 }
+
+/** A single-document update pipeline; `upsert` inserts the document from the filter's equality when none matches. */
+private[mongo] final case class PipelineUpdate(filter: MongoFilter, pipeline: Seq[Bson], upsert: Boolean = false)
 
 private[mongo] object MongoSessionOperations {
   type Documents = MongoCollection[IO, Document]
@@ -152,6 +162,28 @@ private[mongo] object MongoSessionOperations {
       val upsert = new UpdateOptions().upsert(true)
       val commands = entries.map { case (filter, update) =>
         mongo4cats.models.collection.WriteCommand.UpdateOne(filter.sessionFilter, update.sessionUpdate, upsert)
+      }
+      val options = new com.mongodb.client.model.BulkWriteOptions()
+      collection
+        .flatMap(c => session.fold(c.bulkWrite(commands, options))(active => c.bulkWrite(active, commands, options)))
+        .void
+    }
+
+  /** One ordered bulk write of single-document pipeline updates (so `$$NOW` is usable): one command for any number of
+    * entries; the first failing entry (for example a duplicate key) fails the whole write. An upserting entry cannot
+    * carry an `$expr` predicate (the server refuses it), so a lease acquisition pairs a non-upserting entry that holds
+    * the expiry predicate with an upserting entry that only matches the document it just leased.
+    */
+  def pipelineEach(
+      collection: IO[Documents],
+      session: Option[ClientSession[IO]],
+      entries: List[PipelineUpdate]
+  ): IO[Unit] =
+    if (entries.isEmpty) IO.unit
+    else {
+      val commands = entries.map { entry =>
+        mongo4cats.models.collection.WriteCommand
+          .PipelinedUpdateOne(entry.filter.sessionFilter, entry.pipeline, new UpdateOptions().upsert(entry.upsert))
       }
       val options = new com.mongodb.client.model.BulkWriteOptions()
       collection
@@ -226,6 +258,36 @@ private[mongo] object MongoSessionOperations {
       )
     )
 
+  /** `findOneAndUpdate` with an update pipeline (so `$$NOW` is usable); the collection keeps its write concern. */
+  def findOneAndUpdatePipeline(
+      collection: IO[Documents],
+      session: Option[ClientSession[IO]],
+      filter: MongoFilter,
+      pipeline: Seq[Bson],
+      options: FindOneAndUpdateOptions
+  ): IO[Option[Document]] =
+    collection.flatMap { c =>
+      val publisher = session.fold(c.underlying.findOneAndUpdate(filter.bson, pipeline.asJava, options))(active =>
+        c.underlying.findOneAndUpdate(active.underlying, filter.bson, pipeline.asJava, options)
+      )
+      publisher.toStreamBuffered[IO](bufferSize = 1).compile.last
+    }
+
+  /** `updateMany` with an update pipeline (so `$$NOW` is usable); the collection keeps its write concern. */
+  def updateManyPipeline(
+      collection: IO[Documents],
+      session: Option[ClientSession[IO]],
+      filter: MongoFilter,
+      pipeline: Seq[Bson],
+      options: UpdateOptions = new UpdateOptions
+  ): IO[UpdateResult] =
+    collection.flatMap { c =>
+      val publisher = session.fold(c.underlying.updateMany(filter.bson, pipeline.asJava, options))(active =>
+        c.underlying.updateMany(active.underlying, filter.bson, pipeline.asJava, options)
+      )
+      publisher.toStreamBuffered[IO](bufferSize = 1).compile.lastOrError
+    }
+
   def deleteOne(
       collection: IO[Documents],
       session: Option[ClientSession[IO]],
@@ -237,63 +299,97 @@ private[mongo] object MongoSessionOperations {
     )
 }
 
-/** Shared lease semantics for durable work queues (embedding work, search-session work, the event outbox).
+/** Shared lease semantics for durable work queues (embedding work, search-session work, the event outbox, interview
+  * commands).
   *
-  * A lease is held while `leaseUntil > now` and reclaimable once `leaseUntil <= now`; every claim stamps the same lease
-  * fields plus `updatedAt`. State names and sort orders stay repository-owned because stored values differ per queue.
+  * The database clock decides every lease: a lease is held while `leaseUntil > $$NOW` and reclaimable once
+  * `leaseUntil <= $$NOW`, and a claim or renewal stamps `leaseUntil = $$NOW + duration` in an update pipeline. No
+  * caller instant takes part in an ownership decision, so skewed application clocks cannot reclaim a live lease or
+  * displace its holder. `availableAt` and retry backoff stay caller-supplied scheduling values. State names and sort
+  * orders stay repository-owned because stored values differ per queue.
   */
 private[mongo] object MongoLeaseQueue {
+  private val DatabaseNow = new BsonString("$$NOW")
+
+  private def literal(value: String): BsonDocument = new BsonDocument("$literal", new BsonString(value))
+
+  /** `$$NOW + duration` as a BSON date, evaluated by the server. */
+  private def databaseNowPlus(duration: FiniteDuration): BsonDocument =
+    new BsonDocument("$add", new BsonArray(List[BsonValue](DatabaseNow, new BsonInt64(duration.toMillis)).asJava))
+
+  /** A pipeline of one `$set` stage. */
+  def setStage(fields: (String, BsonValue)*): Seq[Bson] =
+    List(new BsonDocument("$set", fields.foldLeft(new BsonDocument())((doc, field) => doc.append(field._1, field._2))))
 
   /** Stored names of a queue's lease: most queues use `leaseOwner`/`leaseToken`/`leaseUntil`. */
   final case class LeaseFields(owner: String, token: String, until: String) {
-    def held(now: Instant): MongoFilter = MongoFilter.gt(until, now.toDate)
 
-    def expired(now: Instant): MongoFilter = MongoFilter.lte(until, now.toDate)
+    private def compareToNow(operator: String): MongoFilter =
+      MongoFilter.expr(
+        new BsonDocument(
+          operator,
+          new BsonArray(List[BsonValue](new BsonString("$" + until), DatabaseNow).asJava)
+        )
+      )
+
+    /** The lease is held while its expiry is after the database clock. */
+    val held: MongoFilter = compareToNow("$gt")
+
+    /** The lease is reclaimable once its expiry is at or before the database clock. */
+    val expired: MongoFilter = compareToNow("$lte")
 
     /** Clears the lease so the work is claimable again; combined with the queue's own state change. */
     val release: MongoUpdate =
       MongoUpdate.combine(MongoUpdate.unset(owner), MongoUpdate.unset(token), MongoUpdate.unset(until))
 
-    def stamp(workerId: String, leaseToken: String, leaseUntil: Instant): MongoUpdate =
-      MongoUpdate.combine(
-        MongoUpdate.set(owner, workerId),
-        MongoUpdate.set(token, leaseToken),
-        MongoUpdate.set(until, leaseUntil.toDate)
+    /** The `$set` fields of a claim: holder, fencing token and `$$NOW + duration` as expiry. */
+    def stamp(workerId: String, leaseToken: String, duration: FiniteDuration): List[(String, BsonValue)] =
+      List(
+        owner -> literal(workerId),
+        token -> literal(leaseToken),
+        until -> databaseNowPlus(duration)
       )
+
+    /** The `$set` field of a renewal. */
+    def extension(duration: FiniteDuration): (String, BsonValue) = until -> databaseNowPlus(duration)
   }
 
   val Standard: LeaseFields = LeaseFields(MongoFields.LeaseOwner, MongoFields.LeaseToken, MongoFields.LeaseUntil)
 
-  def leaseHeld(now: Instant): MongoFilter = Standard.held(now)
+  val leaseHeld: MongoFilter = Standard.held
 
-  /** Ready work that is due at `now`. */
+  /** Ready work that is due at the caller's `now` (`availableAt` is a caller scheduling value). */
   def readyDue(readyStates: List[String], now: Instant): MongoFilter =
     MongoFilter.and(
       MongoFilter.in(MongoFields.State, readyStates),
       MongoFilter.lte(MongoFields.AvailableAt, now.toDate)
     )
 
-  /** In-progress work whose lease has expired at `now`. */
-  def leaseExpired(inProgressState: String, now: Instant): MongoFilter =
-    MongoFilter.and(MongoFilter.eq(MongoFields.State, inProgressState), Standard.expired(now))
+  /** In-progress work whose lease has expired on the database clock. */
+  def leaseExpired(inProgressState: String): MongoFilter =
+    MongoFilter.and(MongoFilter.eq(MongoFields.State, inProgressState), Standard.expired)
 
-  /** Work is claimable when it is available or when its in-progress lease has expired at `now`. */
-  def claimable(available: MongoFilter, inProgress: MongoFilter, now: Instant): MongoFilter =
-    MongoFilter.or(available, MongoFilter.and(inProgress, Standard.expired(now)))
+  /** Work is claimable when it is available or when its in-progress lease has expired on the database clock. */
+  def claimable(available: MongoFilter, inProgress: MongoFilter): MongoFilter =
+    MongoFilter.or(available, MongoFilter.and(inProgress, Standard.expired))
 
   val releaseLease: MongoUpdate = Standard.release
 
+  /** The claim update: state, holder, token, `leaseUntil = $$NOW + duration` and the caller's `updatedAt`, plus the
+    * queue's own `extra` fields, as one pipeline stage.
+    */
   def leaseStamp(
       inProgressState: String,
       workerId: String,
       leaseToken: String,
-      leaseUntil: Instant,
-      now: Instant
-  ): MongoUpdate =
-    MongoUpdate.combine(
-      MongoUpdate.set(MongoFields.State, inProgressState),
-      Standard.stamp(workerId, leaseToken, leaseUntil),
-      MongoUpdate.set(MongoFields.UpdatedAt, now.toDate)
+      duration: FiniteDuration,
+      now: Instant,
+      extra: (String, BsonValue)*
+  ): Seq[Bson] =
+    setStage(
+      (List[(String, BsonValue)](MongoFields.State -> literal(inProgressState)) ++
+        Standard.stamp(workerId, leaseToken, duration) ++
+        List[(String, BsonValue)](MongoFields.UpdatedAt -> new BsonDateTime(now.toEpochMilli)) ++ extra)*
     )
 
   /** Atomically claims the first claimable document in `sort` order and decodes the post-claim document. */
@@ -301,12 +397,12 @@ private[mongo] object MongoLeaseQueue {
       collection: IO[MongoSessionOperations.Documents],
       session: Option[ClientSession[IO]],
       claimable: MongoFilter,
-      claim: MongoUpdate,
+      claim: Seq[Bson],
       sort: Bson
   )(decode: Document => RepositoryF[IO, A]): RepositoryF[IO, Option[A]] =
     RepositoryF
       .lift(
-        MongoSessionOperations.findOneAndUpdate(
+        MongoSessionOperations.findOneAndUpdatePipeline(
           collection,
           session,
           claimable,
@@ -327,33 +423,35 @@ private[mongo] object MongoLeaseQueue {
       workerId: String,
       token: String,
       now: Instant,
-      leaseUntil: Instant,
+      duration: FiniteDuration,
       sort: Bson
   )(decode: Document => RepositoryF[IO, A]): RepositoryF[IO, Option[A]] =
-    LeaseRequest.whenValid(workerId, now, leaseUntil) {
+    LeaseRequest.whenValid(workerId, duration) {
       claimNext(
         collection,
         None,
-        claimable(readyDue(readyStates, now), MongoFilter.eq(MongoFields.State, inProgressState), now),
-        leaseStamp(inProgressState, workerId, token, leaseUntil, now),
+        claimable(readyDue(readyStates, now), MongoFilter.eq(MongoFields.State, inProgressState)),
+        leaseStamp(inProgressState, workerId, token, duration, now),
         sort
       )(decode)
     }
 
-  /** Extends a lease only while `held` still matches; `false` reports a lost lease without failing. */
+  /** Extends a lease to `$$NOW + duration` only while `held` still matches; `false` reports a lost lease without
+    * failing.
+    */
   def renewHeld(
       collection: IO[MongoSessionOperations.Documents],
       session: Option[ClientSession[IO]],
       held: MongoFilter,
-      leaseUntil: Instant,
-      leaseField: String = MongoFields.LeaseUntil
+      duration: FiniteDuration,
+      leaseFields: LeaseFields = Standard
   ): RepositoryF[IO, Boolean] =
     RepositoryF
       .lift(
         MongoSessionOperations
-          .updateOne(collection, session, held, MongoUpdate.set(leaseField, leaseUntil.toDate))
+          .updateOnePipeline(collection, session, held, setStage(leaseFields.extension(duration)), new UpdateOptions)
       )
-      .map(_.getMatchedCount == 1L)
+      .map(_.getMatchedCount == 1)
 }
 
 private[mongo] object MongoRepositorySupport {

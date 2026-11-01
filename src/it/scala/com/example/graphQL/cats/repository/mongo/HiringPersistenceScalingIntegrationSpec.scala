@@ -339,7 +339,7 @@ final class HiringPersistenceScalingIntegrationSpec extends MongoIntegrationSuit
     def operation(workers: Queue[IO, String]): IO[Result] = workers.take.bracket { worker =>
       for {
         claimed <- requireResult(
-          repository.claim(worker, "hiring-publisher-" + id("generation"), now, now.plusSeconds(60), 1)
+          repository.claim(worker, "hiring-publisher-" + id("generation"), now, 60.seconds, 1)
         )
         _ <- claimed.traverse_(value =>
           requireResult(

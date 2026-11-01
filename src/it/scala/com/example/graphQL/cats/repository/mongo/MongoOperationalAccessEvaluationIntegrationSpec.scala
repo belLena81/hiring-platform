@@ -756,7 +756,7 @@ final class MongoOperationalAccessEvaluationIntegrationSpec extends MongoIntegra
               "synthetic-publisher",
               "hiring-publisher-" + support.deterministicId("synthetic-publisher-generation").toString,
               now,
-              now.plusSeconds(60),
+              60.seconds,
               1
             )
           )
@@ -774,7 +774,7 @@ final class MongoOperationalAccessEvaluationIntegrationSpec extends MongoIntegra
           Capability(
             "embeddingClaimComplete",
             "Worker",
-            successful(work.claim("synthetic-worker", now, now.plusSeconds(60)))
+            successful(work.claim("synthetic-worker", now, 60.seconds))
               .flatMap(_.fold(IO.pure(0))(claim => successful(work.complete(claim)).as(1))),
             prepareWork,
             minimumReturned = 1,

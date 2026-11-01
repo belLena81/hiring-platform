@@ -8,6 +8,7 @@ import org.bson.Document
 import java.time.Instant
 import java.util.UUID
 import scala.jdk.CollectionConverters.*
+import scala.concurrent.duration.*
 
 final class MongoOutboxTransactionRetryIntegrationSpec extends MongoIntegrationSuite {
   override protected def dedicatedMongo: Boolean = true
@@ -42,11 +43,11 @@ final class MongoOutboxTransactionRetryIntegrationSpec extends MongoIntegrationS
             )
         )
         claimed <- outbox
-          .claim("retry-fixture", "hiring-publisher-00000000-0000-0000-0000-000000000001", now, now.plusSeconds(30), 1)
+          .claim("retry-fixture", "hiring-publisher-00000000-0000-0000-0000-000000000001", now, 30.seconds, 1)
           .value
         _ = assertEquals(claimed.map(_.map(_.event.eventId)), Right(List(event.eventId)))
         repeated <- outbox
-          .claim("other-fixture", "hiring-publisher-00000000-0000-0000-0000-000000000002", now, now.plusSeconds(30), 1)
+          .claim("other-fixture", "hiring-publisher-00000000-0000-0000-0000-000000000002", now, 30.seconds, 1)
           .value
         _ = assertEquals(repeated.map(_.size), Right(0))
         stored <- MongoRepositoryTestSupport.findOne(
@@ -95,7 +96,7 @@ final class MongoOutboxTransactionRetryIntegrationSpec extends MongoIntegrationS
             )
         )
         claimed <- outbox
-          .claim("retry-fixture", "hiring-publisher-00000000-0000-0000-0000-000000000001", now, now.plusSeconds(30), 1)
+          .claim("retry-fixture", "hiring-publisher-00000000-0000-0000-0000-000000000001", now, 30.seconds, 1)
           .value
         _ = assertEquals(claimed.map(_.size), Right(0))
         stored <- MongoRepositoryTestSupport.findOne(

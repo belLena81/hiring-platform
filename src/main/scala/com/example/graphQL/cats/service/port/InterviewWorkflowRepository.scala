@@ -13,6 +13,7 @@ import com.example.graphQL.cats.domain.workflow.{
   InterviewWorkflowId
 }
 import java.time.Instant
+import scala.concurrent.duration.FiniteDuration
 import java.util.UUID
 
 final case class InterviewWorkflowAccess(actorId: UserId, role: UserRole)
@@ -85,8 +86,7 @@ enum InterviewNotificationSettlement {
 final case class ClaimedInterviewWorkflowCommand(
     record: InterviewWorkflowCommandRecord,
     owner: String,
-    fencingToken: UUID,
-    leaseUntil: Instant
+    fencingToken: UUID
 )
 
 enum InterviewExecutionClaimOutcome {
@@ -107,7 +107,7 @@ trait InterviewWorkflowRepository[F[_]] {
       command: InterviewWorkflowCommandRecord,
       workerId: String,
       now: Instant,
-      leaseUntil: Instant,
+      leaseDuration: FiniteDuration,
       maxAttempts: Int
   ): RepositoryF[F, InterviewExecutionClaimOutcome]
   def authorizePublication(
@@ -243,21 +243,19 @@ trait InterviewWorkflowRepository[F[_]] {
   def claimDueCommands(
       workerId: String,
       now: Instant,
-      leaseUntil: Instant,
+      leaseDuration: FiniteDuration,
       limit: Int
   ): RepositoryF[F, List[ClaimedInterviewWorkflowCommand]]
 
   def renewPublication(
       claim: ClaimedInterviewWorkflowCommand,
-      now: Instant,
-      leaseUntil: Instant
+      leaseDuration: FiniteDuration
   ): RepositoryF[F, Boolean]
 
   def markPublished(claim: ClaimedInterviewWorkflowCommand, publishedAt: Instant): RepositoryF[F, Unit]
 
   def retry(
       claim: ClaimedInterviewWorkflowCommand,
-      now: Instant,
       availableAt: Instant,
       failureCode: InterviewFailureCode
   ): RepositoryF[F, Unit]

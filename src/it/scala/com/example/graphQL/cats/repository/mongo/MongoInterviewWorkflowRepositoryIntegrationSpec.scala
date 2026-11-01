@@ -112,7 +112,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         release <- Deferred[IO, Unit]
         provider <- (blocked.complete(()).void *> release.get *> users.updateEmbedding(observed, embedding).value).start
         _ <- blocked.get
-        claims <- success(repository.claimDueCommands("publisher", now, now.plusSeconds(60), 1))
+        claims <- success(repository.claimDueCommands("publisher", now, 60.seconds, 1))
         claim <- IO.fromOption(claims.headOption)(new AssertionError("publication missing"))
         permitted <- success(
           repository.authorizePublication(
@@ -440,7 +440,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
       val notification = LedgerInterviewNotificationProvider.durable(workflowRepository)
       val value = workflow(UUID.randomUUID(), UUID.randomUUID(), UserId(UUID.randomUUID()), UserId(UUID.randomUUID()))
       val claimAt = now.plusSeconds(10)
-      val leaseUntil = claimAt.plusSeconds(30)
+      val afterExpiry = claimAt.plusSeconds(30)
       val receipt = InterviewNotificationReceipt(
         value.id,
         value.candidateId,
@@ -460,12 +460,19 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
             MutationWriteContext.directWrite
           )
         )
-        initial <- success(workflowRepository.claimDueCommands("worker-a", claimAt, leaseUntil, 1))
+        initial <- success(workflowRepository.claimDueCommands("worker-a", claimAt, 30.seconds, 1))
           .flatMap(claims => IO.fromOption(claims.headOption)(new AssertionError("Expected command claim")))
-        expired <- workflowRepository.markPublished(initial, leaseUntil).value
-        current <- success(workflowRepository.claimDueCommands("worker-b", leaseUntil, leaseUntil.plusSeconds(30), 1))
+        // The database clock decides expiry: the holder stopped renewing, so its stored lease is in the past.
+        _ <- LeaseTestSupport.expire(
+          fixture.database,
+          MongoCollections.InterviewWorkflowCommands,
+          MongoInterviewWorkflowCodec.commandId(initial.record.workflowId, initial.record.stepId),
+          "claimUntil"
+        )
+        expired <- workflowRepository.markPublished(initial, afterExpiry).value
+        current <- success(workflowRepository.claimDueCommands("worker-b", afterExpiry, 30.seconds, 1))
           .flatMap(claims => IO.fromOption(claims.headOption)(new AssertionError("Expected reclaimed command")))
-        published <- workflowRepository.markPublished(current, leaseUntil.plusSeconds(1)).value
+        published <- workflowRepository.markPublished(current, afterExpiry.plusSeconds(1)).value
         _ <- providerSuccess(
           LedgerInterviewCalendarProvider
             .durable(workflowRepository)
@@ -776,7 +783,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         )
         claimedAt <- IO.realTimeInstant
         reservePublished <- success(
-          repository.claimDueCommands("repair-race-publisher", claimedAt, claimedAt.plusSeconds(60), 1)
+          repository.claimDueCommands("repair-race-publisher", claimedAt, 60.seconds, 1)
         ).flatMap(value => IO.fromOption(value.headOption)(new AssertionError("Missing reservation publication")))
         _ <- success(repository.markPublished(reservePublished, claimedAt))
         reserveExecution <- success(
@@ -784,7 +791,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
             reservePublished.record,
             "repair-race-worker",
             claimedAt,
-            claimedAt.plusSeconds(60),
+            60.seconds,
             5
           )
         ).flatMap(executionClaim)
@@ -817,7 +824,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         )
         _ <- success(repository.commitHiring(statusPending, claimedAt))
         notificationPublished <- success(
-          repository.claimDueCommands("repair-race-publisher", claimedAt, claimedAt.plusSeconds(60), 16)
+          repository.claimDueCommands("repair-race-publisher", claimedAt, 60.seconds, 16)
         ).flatMap(commands =>
           IO.fromOption(commands.find(_.record.command match {
             case InterviewWorkflowCommand.Notify(InterviewParticipant.Candidate, _) => true
@@ -830,7 +837,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
             notificationPublished.record,
             "repair-race-worker",
             claimedAt,
-            claimedAt.plusSeconds(60),
+            60.seconds,
             5
           )
         ).flatMap(executionClaim)
@@ -895,17 +902,19 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
           )
         )
         fresh <- IO.realTimeInstant
-        publishedClaim <- success(repository.claimDueCommands("publisher", fresh, fresh.plusSeconds(60), 1))
+        publishedClaim <- success(repository.claimDueCommands("publisher", fresh, 60.seconds, 1))
           .flatMap(value => IO.fromOption(value.headOption)(new AssertionError("Missing publication claim")))
         _ <- success(repository.markPublished(publishedClaim, fresh))
         command = publishedClaim.record
-        first <- success(repository.claimExecution(command, "worker-old", fresh, fresh.plusMillis(300), 5))
+        first <- success(repository.claimExecution(command, "worker-old", fresh, 300.millis, 5))
           .flatMap(executionClaim)
         _ <- providerSuccess(
           calendar.reserve(value.id, key, value.candidateId, value.recruiterId, value.interval, fresh, Some(first))
         )
+        // The database clock must pass the 300 ms lease before the recovery claim can see it expired.
+        _ <- IO.sleep(500.millis)
         currentAt = fresh.plusSeconds(1)
-        recovered <- success(repository.claimExecution(command, "worker-new", currentAt, currentAt.plusSeconds(60), 5))
+        recovered <- success(repository.claimExecution(command, "worker-new", currentAt, 60.seconds, 5))
         staleReserve <- calendar
           .reserve(value.id, key, value.candidateId, value.recruiterId, value.interval, currentAt, Some(first))
           .value
@@ -1173,16 +1182,16 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
             now
           )
         )
-        due <- success(repository.claimDueCommands("publisher", now, now.plusSeconds(3600), 16))
+        due <- success(repository.claimDueCommands("publisher", now, 3600.seconds, 16))
         commit <- IO.fromOption(
           due.find(_.record.command.isInstanceOf[InterviewWorkflowCommand.CommitAcceptedToInterview])
         )(new AssertionError("Missing hiring command"))
         _ <- success(repository.markPublished(commit, now))
-        executing <- success(repository.claimExecution(commit.record, "worker", now, now.plusSeconds(3600), 5))
+        executing <- success(repository.claimExecution(commit.record, "worker", now, 3600.seconds, 5))
           .flatMap(executionClaim)
         _ <- success(repository.commitHiring(pending.workflow, now, Some(executing)))
         _ <- success(repository.recordResult(executing, InterviewResult.Succeeded, now))
-        result <- success(repository.claimDueCommands("publisher", now, now.plusSeconds(3600), 16)).flatMap(claims =>
+        result <- success(repository.claimDueCommands("publisher", now, 3600.seconds, 16)).flatMap(claims =>
           IO.fromOption(claims.find(_.record.stepId == commit.record.stepId))(new AssertionError("Missing result"))
         )
         resolution <- success(repository.requireRepair(result, now, InterviewFailureCode.PublicationExhausted))
@@ -1221,6 +1230,12 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
           override def generationFor(message: InterviewMessage): InterviewPublisherGeneration = generation
           override def publish(message: InterviewMessage): IO[Unit] =
             sends.update(_ + 1) *> clock.update(_.plusSeconds(61)) *>
+              LeaseTestSupport.expireWhere(
+                fixture.database,
+                MongoCollections.InterviewWorkflowCommands,
+                com.mongodb.client.model.Filters.eq("workflowId", value.id.value.toString),
+                "claimUntil"
+              ) *>
               IO.raiseError(new java.io.IOException("simulated transport failure"))
         }
         worker = new com.example.graphQL.cats.service.application.InterviewWorkflowWorker[IO](
@@ -1260,17 +1275,21 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
             MutationWriteContext.directWrite
           )
         )
-        claimed <- success(repository.claimDueCommands("publisher", now, now.plusSeconds(60), 1))
+        claimed <- success(repository.claimDueCommands("publisher", now, 60.seconds, 1))
           .flatMap(values => IO.fromOption(values.headOption)(new AssertionError("Missing command")))
         _ <- success(repository.markPublished(claimed, now))
         outcomes <- (
-          repository.claimExecution(claimed.record, "a", now, now.plusSeconds(60), 1).value,
-          repository.claimExecution(claimed.record, "b", now, now.plusSeconds(60), 1).value
+          repository.claimExecution(claimed.record, "a", now, 60.seconds, 1).value,
+          repository.claimExecution(claimed.record, "b", now, 60.seconds, 1).value
         ).parTupled
         count <- success(repository.attemptCount(value.id, claimed.record.command))
-        expired <- success(
-          repository.claimExecution(claimed.record, "recovery", now.plusSeconds(61), now.plusSeconds(120), 1)
+        _ <- LeaseTestSupport.expire(
+          fixture.database,
+          MongoCollections.InterviewWorkflowCommands,
+          MongoInterviewWorkflowCodec.commandId(claimed.record.workflowId, claimed.record.stepId),
+          "claimUntil"
         )
+        expired <- success(repository.claimExecution(claimed.record, "recovery", now.plusSeconds(61), 60.seconds, 1))
         stored <- success(repository.findCommand(value.id, claimed.record.stepId))
         after <- success(repository.attemptCount(value.id, claimed.record.command))
       } yield {
@@ -1464,7 +1483,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
             MutationWriteContext.directWrite
           )
         )
-        publication <- success(repository.claimDueCommands("prepaid", now, now.plusSeconds(600), 1)).map(_.head)
+        publication <- success(repository.claimDueCommands("prepaid", now, 600.seconds, 1)).map(_.head)
         _ <- success(repository.markPublished(publication, now))
         collection <- Mongo4catsCollections.documents(fixture.database, MongoCollections.InterviewWorkflowCommands)
         _ <- collection.updateOne(
@@ -1473,12 +1492,12 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         )
         charged <- success(repository.findCommand(value.id, publication.record.stepId))
           .map(_.getOrElse(fail("missing command")))
-        outcome <- success(repository.claimExecution(charged, "prepaid-execute", now, now.plusSeconds(600), 1))
+        outcome <- success(repository.claimExecution(charged, "prepaid-execute", now, 600.seconds, 1))
         claim <- executionClaim(outcome)
         count <- success(repository.attemptCount(value.id, charged.command))
         _ = assertEquals(count, 1L, "a conservatively charged queued command reuses its only slot")
         _ <- success(repository.recordResult(claim, InterviewResult.OutcomeUnknown, now))
-        resultClaim <- success(repository.claimDueCommands("required-result", now, now.plusSeconds(600), 1)).map(_.head)
+        resultClaim <- success(repository.claimDueCommands("required-result", now, 600.seconds, 1)).map(_.head)
         repaired <- success(repository.requireRepair(resultClaim, now, InterviewFailureCode.Provider))
         state <- success(repository.findForAdmin(value.id))
         result <- success(repository.findCommand(value.id, resultClaim.record.stepId))
@@ -1507,7 +1526,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
             MutationWriteContext.directWrite
           )
         )
-        publication <- success(repository.claimDueCommands("distinct", now, now.plusSeconds(600), 1)).map(_.head)
+        publication <- success(repository.claimDueCommands("distinct", now, 600.seconds, 1)).map(_.head)
         _ <- success(repository.markPublished(publication, now))
         existing <- MongoRepositoryTestSupport.findOne(
           fixture.database,
@@ -1523,8 +1542,8 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         duplicate <- success(repository.findCommand(value.id, duplicateStep))
           .map(_.getOrElse(fail("missing duplicate intent")))
         outcomes <- (
-          repository.claimExecution(publication.record, "first-intent", now, now.plusSeconds(600), 1).value,
-          repository.claimExecution(duplicate, "second-intent", now, now.plusSeconds(600), 1).value
+          repository.claimExecution(publication.record, "first-intent", now, 600.seconds, 1).value,
+          repository.claimExecution(duplicate, "second-intent", now, 600.seconds, 1).value
         ).parTupled
         count <- success(repository.attemptCount(value.id, duplicate.command))
       } yield {

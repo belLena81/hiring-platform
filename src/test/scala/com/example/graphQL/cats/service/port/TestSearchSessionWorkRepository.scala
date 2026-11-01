@@ -4,6 +4,7 @@ import cats.effect.IO
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 
 import java.time.Instant
+import scala.concurrent.duration.*
 import java.util.UUID
 
 private[cats] object TestSearchSessionWorkRepository extends SearchSessionWorkRepository[IO] {
@@ -19,7 +20,7 @@ private[cats] object TestSearchSessionWorkRepository extends SearchSessionWorkRe
   override def claim(
       workerId: String,
       now: Instant,
-      leaseUntil: Instant
+      leaseDuration: FiniteDuration
   ): RepositoryF[IO, Option[ClaimedSearchSessionWork]] =
     com.example.graphQL.cats.service.port.RepositoryF.fromFEither(IO.pure(Right(None)))
 

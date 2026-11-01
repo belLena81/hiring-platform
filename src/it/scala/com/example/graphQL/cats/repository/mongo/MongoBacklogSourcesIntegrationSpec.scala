@@ -181,8 +181,9 @@ final class MongoBacklogSourcesIntegrationSpec extends MongoIntegrationSuite {
         _ <- work.enqueue(key(3), now.plusSeconds(3600)).value.map(unwrap)
         due <- source.sample(now)
         // The oldest row is leased and its worker then crashes: the lease is live, then expires.
-        claimed <- work.claim("crashing-worker", now, now.plusSeconds(60)).value.map(unwrap)
+        claimed <- work.claim("crashing-worker", now, 60.seconds).value.map(unwrap)
         live <- source.sample(now)
+        _ <- LeaseTestSupport.expire(fixture.database, MongoCollections.EmbeddingWork, key(1).value)
         expired <- source.sample(expiredAt)
         _ <- assertIndexedCount(
           fixture,
@@ -207,9 +208,9 @@ final class MongoBacklogSourcesIntegrationSpec extends MongoIntegrationSuite {
         _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- work.enqueue(key(1), now.minusSeconds(100)).value.map(unwrap)
         _ <- work.enqueue(key(2), now.minusSeconds(50)).value.map(unwrap)
-        first <- work.claim("worker", now, now.plusSeconds(60)).value.map(unwrap)
+        first <- work.claim("worker", now, 60.seconds).value.map(unwrap)
         _ <- work.fail(first.get, EmbeddingWorkFailure.RetryExhausted, now).value.map(unwrap)
-        second <- work.claim("worker", now, now.plusSeconds(60)).value.map(unwrap)
+        second <- work.claim("worker", now, 60.seconds).value.map(unwrap)
         _ <- work.retry(second.get, now.minusSeconds(20)).value.map(unwrap)
         snapshot <- MongoBacklogSources.embeddingWork(fixture.database).sample(now)
       } yield {
@@ -238,7 +239,7 @@ final class MongoBacklogSourcesIntegrationSpec extends MongoIntegrationSuite {
               now.minusSeconds(5000),
               now.minusSeconds(5000),
               state = "InFlight",
-              leaseUntil = Some(now.plusSeconds(60))
+              leaseUntil = Some(Instant.parse("2100-01-01T00:00:00Z"))
             ),
             // Crashed publisher: the lease expired, so the entry is claimable again and ages from when it occurred.
             outboxEntry(

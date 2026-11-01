@@ -96,6 +96,28 @@ disagreeing about the time, not a slow worker.
 | DDR-01.4 | Renewal after expiry reports loss, and the stale worker's writes are rejected (token fence unchanged). |
 | DDR-01.5 | Recorded query plans before and after show the claimable-work indexes still serve the queries, or the finding is documented. |
 
+### Findings and evidence (2026-11-01)
+
+Implemented at HEAD 462aac9 plus uncommitted changes; independent Code Reviewer, Security Engineer and QA verdicts are tracked by the coordinator.
+
+- **Gate result.** `$expr: {$lte: ["$leaseUntil", "$$NOW"]}` does not prevent index use. The planner folds `$$NOW` to a date constant and derives the bound `[MinKey, now]` on `leaseUntil`; every claim query keeps its index and examines the same keys. The `$expr` remains a residual `FETCH` filter, which re-fetches the expired candidates. No index changed, so there is no migration.
+- **Plans** (MongoDB 8.0.32 test replica set, 4000 rows per collection, `LeaseQueueClaimPlanIntegrationSpec`; the caller-clock figure is the replaced predicate, kept in the spec as baseline):
+
+| Query | Pinned index | Keys (caller, DB clock) | Docs (caller, DB clock) | Returned |
+|---|---|---|---|---|
+| embedding claim | `embedding_work_available_lease` | 2002, 2002 | 400, 600 | 1 |
+| search-session claim | `search_session_work_claim` | 2002, 2002 | 400, 600 | 1 |
+| outbox page (limit 64) | `event_outbox_claim` | 2001, 2001 | 64, 264 | 64 |
+| outbox page after cursor | `event_outbox_claim` | 2001, 2001 | 400, 600 | 0 |
+| interview claim | `interview_workflow_commands_due`, `_lease` | 401, 401 | 400, 201 | 1 |
+| backlog embedding count (cap 10000) | `embedding_work_available_lease` | 2002 | 600 | 400 |
+| backlog embedding age reads | `embedding_work_available_lease` | 1, 9 | 1, 1 | 1 |
+| backlog outbox count | `event_outbox_claim` | 2001 | 600 | 400 |
+| backlog outbox age reads | `event_outbox_claim` | 1, 9 | 1, 1 | 1 |
+
+- **Decisions.** Lease expiry and every ownership predicate use the database clock (`$$NOW`); `availableAt`, retry backoff and `updatedAt` stay caller values; the `leaseToken` fence is unchanged. Renewal after expiry is a lost lease even before a takeover. An upsert cannot carry `$expr` (server error 224), so outbox subject leases use two ordered bulk entries per subject. The interview effect fence (`fenceExecution`) uses the database-clock held predicate and no longer reads the clock. Out of scope and confirmed not to be queue ownership decisions: the analytics worker heartbeat readiness (`MongoAnalyticsRepositories` `workerReady`) and the `EmbeddingCoverage` report classification (read-only reporting).
+- **Tests.** `sbt test`: 1724 passed, 0 failed. Lease and queue integration set run by the author (20 spec globs: lease, outbox, interview, embedding work, search-session, backlog, producer registration, Kafka compose; it did not include `MongoEmbeddingCoverageIntegrationSpec`'s regression because that run predated the fixture fix below): 330 total, 325 passed, 5 skipped, 0 failed. QA's independent run of the wider set: 328 total, 322 passed, 1 failed, 5 skipped; the one failure was `MongoEmbeddingCoverageIntegrationSpec` "ECR-02 ECR-03 the cross-tab counts every searchable entity once", a fixture defect (it pinned an already-expired lease before later claims, so a later claim reclaimed it). Fixed by pinning the report-time expiries after all claims; rerun of `MongoEmbeddingCoverageIntegrationSpec` and `MongoEmbeddingWorkIntegrationSpec`: 19 total, 18 passed, 1 skipped, 0 failed, and `sbt test` 1724 passed. DDR-01.1 to 01.4 are in `LeaseExpiryDatabaseClockIntegrationSpec` (search-session, outbox, interview, including the effect fence refused with a stale caller clock and the subject-lease duplicate key at the lease write) and `MongoEmbeddingWorkIntegrationSpec`; DDR-01.5 in `LeaseQueueClaimPlanIntegrationSpec`.
+
 ### Owners and gates
 
 Data Engineer (query shape, plans), Scala Developer (ports, callers, tests). Independent Code Reviewer, Security

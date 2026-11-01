@@ -6,18 +6,19 @@ import com.example.graphQL.cats.domain.workflow.*
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.RepositoryError
 import java.time.Instant
+import scala.concurrent.duration.*
 import java.util.UUID
 
 private[cats] class TestInterviewWorkflowRepository extends InterviewWorkflowRepository[IO] {
   private def unexpected[A]: RepositoryF[IO, A] =
     RepositoryF.lift(IO.raiseError(new AssertionError("Unexpected repository operation")))
-  override def claimDueCommands(workerId: String, now: Instant, leaseUntil: Instant, limit: Int) =
+  override def claimDueCommands(workerId: String, now: Instant, leaseDuration: FiniteDuration, limit: Int) =
     RepositoryF.at[IO].fromEither[List[ClaimedInterviewWorkflowCommand]](Left(RepositoryError.Unavailable))
   override def claimExecution(
       command: InterviewWorkflowCommandRecord,
       workerId: String,
       now: Instant,
-      leaseUntil: Instant,
+      leaseDuration: FiniteDuration,
       maxAttempts: Int
   ) =
     unexpected[InterviewExecutionClaimOutcome]
@@ -26,7 +27,7 @@ private[cats] class TestInterviewWorkflowRepository extends InterviewWorkflowRep
       generation: InterviewPublisherGeneration,
       now: Instant
   ) = unexpected[Boolean]
-  override def renewPublication(claim: ClaimedInterviewWorkflowCommand, now: Instant, leaseUntil: Instant) =
+  override def renewPublication(claim: ClaimedInterviewWorkflowCommand, leaseDuration: FiniteDuration) =
     unexpected[Boolean]
   override def attemptCount(workflowId: InterviewWorkflowId, command: InterviewCommand) = unexpected[Long]
   override def quarantine(identity: String, now: Instant) = unexpected[Unit]
@@ -94,7 +95,6 @@ private[cats] class TestInterviewWorkflowRepository extends InterviewWorkflowRep
   override def markPublished(claim: ClaimedInterviewWorkflowCommand, publishedAt: Instant) = unexpected[Unit]
   override def retry(
       claim: ClaimedInterviewWorkflowCommand,
-      now: Instant,
       availableAt: Instant,
       failureCode: InterviewFailureCode
   ) = unexpected[Unit]

@@ -13,9 +13,12 @@ import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.RepositoryError
 import com.mongodb.client.model.{Sorts, UpdateOptions}
 import mongo4cats.client.ClientSession
-import org.bson.Document
+import org.bson.conversions.Bson
+import org.bson.{BsonArray, BsonDocument, BsonInt32, BsonString, BsonValue, Document}
 
 import java.time.Instant
+import scala.concurrent.duration.FiniteDuration
+import scala.jdk.CollectionConverters.*
 import java.util.{Date, UUID}
 
 private enum RepairOutcome {
@@ -36,12 +39,12 @@ final class MongoInterviewCommandQueue(
       command: InterviewWorkflowCommandRecord,
       workerId: String,
       now: Instant,
-      leaseUntil: Instant,
+      leaseDuration: FiniteDuration,
       maxAttempts: Int
   ): RepositoryF[IO, InterviewExecutionClaimOutcome] =
     if (maxAttempts <= 0) MongoF.raise(RepositoryError.InvalidEvent)
     else
-      LeaseRequest.whenValid(workerId, now, leaseUntil)(RepositoryF.lift(uuids.randomUUID)).flatMap { token =>
+      LeaseRequest.whenValid(workerId, leaseDuration)(RepositoryF.lift(uuids.randomUUID)).flatMap { token =>
         transactionRunner.run { session =>
           loadWorkflow(command.workflowId, session).flatMap {
             case None =>
@@ -66,27 +69,39 @@ final class MongoInterviewCommandQueue(
                               case InterviewExecutionLeaseDisposition.Busy =>
                                 MongoF.pure(InterviewExecutionClaimOutcome.Busy)
                               case InterviewExecutionLeaseDisposition.Reconcile =>
-                                guardWrite(
-                                  commands,
-                                  session,
-                                  MongoFilter.and(
-                                    MongoFilter.eq(MongoFields.Id, commandId(stored.workflowId, stored.stepId)),
-                                    MongoFilter
-                                      .eq(CommandStateField, InterviewWorkflowCommandState.Executing.toString),
-                                    MongoFilter.eq(Lease.owner, lease.owner),
-                                    MongoFilter.eq(Lease.token, lease.token.toString),
-                                    MongoFilter.lte(Lease.until, now.toDate),
-                                    MongoFilter.exists("result", false)
-                                  ),
-                                  MongoUpdate.combine(
-                                    MongoUpdate.set("result", InterviewResult.OutcomeUnknown.toString),
-                                    MongoUpdate
-                                      .set(CommandStateField, InterviewWorkflowCommandState.ResultPending.toString),
-                                    availableFrom(stored.command, now),
-                                    Lease.release
+                                // The caller's clock only suggests the lease expired; the database clock decides. A
+                                // lease still live there (a skewed caller) matches nothing and stays `Busy`.
+                                RepositoryF
+                                  .lift(
+                                    MongoSessionOperations.updateOne(
+                                      commands,
+                                      session,
+                                      MongoFilter.and(
+                                        MongoFilter.eq(MongoFields.Id, commandId(stored.workflowId, stored.stepId)),
+                                        MongoFilter
+                                          .eq(CommandStateField, InterviewWorkflowCommandState.Executing.toString),
+                                        MongoFilter.eq(Lease.owner, lease.owner),
+                                        MongoFilter.eq(Lease.token, lease.token.toString),
+                                        Lease.expired,
+                                        MongoFilter.exists("result", false)
+                                      ),
+                                      MongoUpdate.combine(
+                                        MongoUpdate.set("result", InterviewResult.OutcomeUnknown.toString),
+                                        MongoUpdate
+                                          .set(
+                                            CommandStateField,
+                                            InterviewWorkflowCommandState.ResultPending.toString
+                                          ),
+                                        availableFrom(stored.command, now),
+                                        Lease.release
+                                      )
+                                    )
                                   )
-                                )
-                                  .as(InterviewExecutionClaimOutcome.ReconciliationQueued)
+                                  .map(result =>
+                                    if (result.getMatchedCount == 1L)
+                                      InterviewExecutionClaimOutcome.ReconciliationQueued
+                                    else InterviewExecutionClaimOutcome.Busy
+                                  )
                             }
                           }
                         }
@@ -121,21 +136,29 @@ final class MongoInterviewCommandQueue(
                                   )
                                     .as(InterviewExecutionClaimOutcome.RepairRequired)
                               case InterviewExecutionBudgetDisposition.Acquire(additional) =>
-                                guardWrite(
-                                  commands,
+                                guardPipelineWrite(
                                   session,
                                   MongoFilter.and(
                                     MongoFilter.eq(MongoFields.Id, commandId(stored.workflowId, stored.stepId)),
                                     MongoFilter.eq(RevisionField, stored.revision),
                                     MongoFilter.eq(CommandStateField, stored.state.toString)
                                   ),
-                                  MongoUpdate.combine(
-                                    MongoUpdate
-                                      .set(CommandStateField, InterviewWorkflowCommandState.Executing.toString),
-                                    MongoUpdate.set(Lease.owner, workerId),
-                                    MongoUpdate.set(Lease.token, token.toString),
-                                    MongoUpdate.set(Lease.until, leaseUntil.toDate),
-                                    MongoUpdate.inc("executionAttempts", additional)
+                                  MongoLeaseQueue.setStage(
+                                    (List[(String, BsonValue)](
+                                      CommandStateField -> new BsonDocument(
+                                        "$literal",
+                                        new BsonString(InterviewWorkflowCommandState.Executing.toString)
+                                      ),
+                                      "executionAttempts" -> new BsonDocument(
+                                        "$add",
+                                        new BsonArray(
+                                          List[BsonValue](
+                                            new BsonString("$executionAttempts"),
+                                            new BsonInt32(additional)
+                                          ).asJava
+                                        )
+                                      )
+                                    ) ++ Lease.stamp(workerId, token.toString, leaseDuration))*
                                   )
                                 )
                                   .as(
@@ -143,8 +166,7 @@ final class MongoInterviewCommandQueue(
                                       ClaimedInterviewWorkflowCommand(
                                         stored.copy(executionAttempts = stored.executionAttempts + additional),
                                         workerId,
-                                        token,
-                                        leaseUntil
+                                        token
                                       )
                                     )
                                   )
@@ -175,10 +197,10 @@ final class MongoInterviewCommandQueue(
         session,
         if (valid)
           MongoFilter.and(
-            claimFilter(claim, now),
+            claimFilter(claim),
             MongoFilter.eq(MongoFields.Attempts, Int.box(claim.record.publicationAttempts))
           )
-        else claimFilter(claim, now),
+        else claimFilter(claim),
         if (valid)
           MongoUpdate.combine(
             MongoUpdate.set("publicationCheckedAt", now.toDate),
@@ -356,7 +378,7 @@ final class MongoInterviewCommandQueue(
                 MongoFilter.eq(Lease.owner, claim.owner),
                 MongoFilter.eq(Lease.token, claim.fencingToken.toString),
                 MongoFilter.eq(CommandStateField, InterviewWorkflowCommandState.Executing.toString),
-                MongoFilter.gt(Lease.until, now.toDate),
+                Lease.held,
                 MongoFilter.exists("result", false)
               ),
               MongoUpdate.combine(
@@ -553,46 +575,39 @@ final class MongoInterviewCommandQueue(
   def claimDueCommands(
       workerId: String,
       now: Instant,
-      leaseUntil: Instant,
+      leaseDuration: FiniteDuration,
       limit: Int
   ): RepositoryF[IO, List[ClaimedInterviewWorkflowCommand]] =
     if (limit < 0 || limit > 64) MongoF.raise(RepositoryError.InvalidEvent)
     else
-      LeaseRequest.whenValid(workerId, now, leaseUntil) {
+      LeaseRequest.whenValid(workerId, leaseDuration) {
         if (limit == 0) List.empty[ClaimedInterviewWorkflowCommand].asRepository
         else
-          claimOne(workerId, now, leaseUntil).flatMap {
+          claimOne(workerId, now, leaseDuration).flatMap {
             case None        => List.empty[ClaimedInterviewWorkflowCommand].asRepository
-            case Some(claim) => claimDueCommands(workerId, now, leaseUntil, limit - 1).map(claim :: _)
+            case Some(claim) => claimDueCommands(workerId, now, leaseDuration, limit - 1).map(claim :: _)
           }
       }
 
   private def claimOne(
       workerId: String,
       now: Instant,
-      leaseUntil: Instant
+      leaseDuration: FiniteDuration
   ): RepositoryF[IO, Option[ClaimedInterviewWorkflowCommand]] =
     RepositoryF.lift(uuids.randomUUID).flatMap { token =>
-      val available = MongoFilter.and(
-        MongoFilter.in(
-          CommandStateField,
-          List(InterviewWorkflowCommandState.Pending.toString, InterviewWorkflowCommandState.ResultPending.toString)
-        ),
-        MongoFilter.lte(MongoFields.AvailableAt, now.toDate)
-      )
-      val expired = MongoFilter.and(
-        MongoFilter.eq(CommandStateField, InterviewWorkflowCommandState.Claimed.toString),
-        Lease.expired(now)
-      )
-      val update = MongoUpdate.combine(
-        MongoUpdate.set(CommandStateField, InterviewWorkflowCommandState.Claimed.toString),
-        Lease.stamp(workerId, token.toString, leaseUntil)
+      val update = MongoLeaseQueue.setStage(
+        (List[(String, BsonValue)](
+          CommandStateField -> new BsonDocument(
+            "$literal",
+            new BsonString(InterviewWorkflowCommandState.Claimed.toString)
+          )
+        ) ++ Lease.stamp(workerId, token.toString, leaseDuration))*
       )
       MongoRepositorySupport.repositoryGuard(diagnostics, "interviewWorkflow.claim") {
         MongoLeaseQueue.claimNext(
           commands,
           None,
-          MongoFilter.or(available, expired),
+          MongoInterviewCommandQueue.claimable(now),
           update,
           Sorts.ascending(MongoFields.AvailableAt, MongoFields.Id)
         )(document => MongoF.fromEither(readClaim(document)))
@@ -601,12 +616,11 @@ final class MongoInterviewCommandQueue(
 
   def renewPublication(
       claim: ClaimedInterviewWorkflowCommand,
-      now: Instant,
-      leaseUntil: Instant
+      leaseDuration: FiniteDuration
   ): RepositoryF[IO, Boolean] =
-    LeaseRequest.whenWindowValid(now, leaseUntil) {
+    LeaseRequest.whenDurationValid(leaseDuration) {
       MongoRepositorySupport.repositoryGuard(diagnostics, "interviewWorkflow.renewPublication") {
-        MongoLeaseQueue.renewHeld(commands, None, claimFilter(claim, now), leaseUntil, Lease.until)
+        MongoLeaseQueue.renewHeld(commands, None, claimFilter(claim), leaseDuration, Lease)
       }
     }
 
@@ -622,13 +636,11 @@ final class MongoInterviewCommandQueue(
         MongoUpdate.set("publishedAt", publishedAt.toDate),
         Lease.release
       ),
-      "interviewWorkflow.markPublished",
-      publishedAt
+      "interviewWorkflow.markPublished"
     )
 
   def retry(
       claim: ClaimedInterviewWorkflowCommand,
-      now: Instant,
       availableAt: Instant,
       failureCode: InterviewFailureCode
   ): RepositoryF[IO, Unit] =
@@ -640,8 +652,7 @@ final class MongoInterviewCommandQueue(
         MongoUpdate.set(FailureCodeField, failureCode.wire),
         Lease.release
       ),
-      "interviewWorkflow.retry",
-      now
+      "interviewWorkflow.retry"
     )
 
   def requireRepair(
@@ -659,7 +670,7 @@ final class MongoInterviewCommandQueue(
             guardWrite(
               commands,
               session,
-              claimFilter(claim, now),
+              claimFilter(claim),
               terminalCommand(InterviewWorkflowCommandState.Superseded, failureCode, now)
             )
               .as(InterviewPublicationResolution.Superseded)
@@ -677,7 +688,7 @@ final class MongoInterviewCommandQueue(
                 case RepairOutcome.ProposalExpired => InterviewWorkflowCommandState.Superseded
                 case RepairOutcome.CommandOnly     => InterviewWorkflowCommandState.RepairRequired
               }
-              guardWrite(commands, session, claimFilter(claim, now), terminalCommand(rowState, failureCode, now))
+              guardWrite(commands, session, claimFilter(claim), terminalCommand(rowState, failureCode, now))
                 .as(InterviewPublicationResolution.Repaired)
             }
         }
@@ -773,26 +784,35 @@ final class MongoInterviewCommandQueue(
   private def transitionClaim(
       claim: ClaimedInterviewWorkflowCommand,
       update: MongoUpdate,
-      operation: String,
-      now: Instant
+      operation: String
   ): RepositoryF[IO, Unit] =
     MongoRepositorySupport.repositoryGuard(diagnostics, operation) {
       RepositoryF
         .lift(
           MongoSessionOperations
-            .updateOne(commands, None, claimFilter(claim, now), update)
+            .updateOne(commands, None, claimFilter(claim), update)
         )
         .subflatMap(MongoRepositorySupport.matchedOne(_))
     }
 
-  private def claimFilter(claim: ClaimedInterviewWorkflowCommand, now: Instant): MongoFilter =
+  /** A guarded single-document pipeline update (so `$$NOW` is usable): exactly one match, else `Conflict`. */
+  private def guardPipelineWrite(
+      session: Option[ClientSession[IO]],
+      filter: MongoFilter,
+      pipeline: Seq[Bson]
+  ): RepositoryF[IO, Unit] =
+    RepositoryF
+      .lift(MongoSessionOperations.updateOnePipeline(commands, session, filter, pipeline, new UpdateOptions))
+      .subflatMap(result => Either.cond(result.getMatchedCount == 1L, (), RepositoryError.Conflict))
+
+  private def claimFilter(claim: ClaimedInterviewWorkflowCommand): MongoFilter =
     MongoFilter.and(
       MongoFilter.eq(MongoFields.Id, commandId(claim.record.workflowId, claim.record.stepId)),
       MongoFilter.eq(CommandStateField, InterviewWorkflowCommandState.Claimed.toString),
       MongoFilter.eq(Lease.owner, claim.owner),
       MongoFilter.eq(Lease.token, claim.fencingToken.toString),
       MongoFilter.eq(RevisionField, java.lang.Long.valueOf(claim.record.revision)),
-      Lease.held(now)
+      Lease.held
     )
 
   private def readLease(document: Document): Either[RepositoryError, InterviewExecutionLease] =
@@ -806,5 +826,28 @@ final class MongoInterviewCommandQueue(
     for {
       record <- MongoInterviewWorkflowCommandCodec.decode(document)
       lease <- readLease(document)
-    } yield ClaimedInterviewWorkflowCommand(record, lease.owner, lease.token, lease.until)
+    } yield ClaimedInterviewWorkflowCommand(record, lease.owner, lease.token)
+}
+
+private[mongo] object MongoInterviewCommandQueue {
+
+  /** Due `Pending`/`ResultPending` commands (a caller scheduling value) plus `Claimed` commands whose lease expired on
+    * the database clock.
+    */
+  def claimable(now: Instant): MongoFilter = {
+    import MongoInterviewFields.*
+    MongoFilter.or(
+      MongoFilter.and(
+        MongoFilter.in(
+          CommandStateField,
+          List(InterviewWorkflowCommandState.Pending.toString, InterviewWorkflowCommandState.ResultPending.toString)
+        ),
+        MongoFilter.lte(MongoFields.AvailableAt, now.toDate)
+      ),
+      MongoFilter.and(
+        MongoFilter.eq(CommandStateField, InterviewWorkflowCommandState.Claimed.toString),
+        Lease.expired
+      )
+    )
+  }
 }

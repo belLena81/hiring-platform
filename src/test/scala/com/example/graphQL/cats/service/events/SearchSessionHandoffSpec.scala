@@ -48,7 +48,7 @@ final class SearchSessionHandoffSpec extends CatsEffectSuite {
         claimed <- Ref.of[IO, Int](0)
         terminal <- Deferred[IO, Unit]
         repository = failingRepository(claimed, retried, failed, terminal, Some(error))
-        claim <- repository.claim("worker", now, now.plusSeconds(30)).value.flatMap {
+        claim <- repository.claim("worker", now, 30.seconds).value.flatMap {
           case Right(Some(value)) => IO.pure(value)
           case other              => IO.raiseError(new AssertionError(other.toString))
         }
@@ -66,7 +66,7 @@ final class SearchSessionHandoffSpec extends CatsEffectSuite {
         claimed <- Ref.of[IO, Int](0)
         terminal <- Deferred[IO, Unit]
         repository = failingRepository(claimed, retried, failed, terminal, Some(error))
-        claim <- repository.claim("worker", now, now.plusSeconds(30)).value.flatMap {
+        claim <- repository.claim("worker", now, 30.seconds).value.flatMap {
           case Right(Some(value)) => IO.pure(value)
           case other              => IO.raiseError(new AssertionError(other.toString))
         }
@@ -90,7 +90,7 @@ final class SearchSessionHandoffSpec extends CatsEffectSuite {
 
   test("search-session workers claim with the injected clock and the configured lease") {
     for {
-      observed <- Deferred[IO, (Instant, Instant)]
+      observed <- Deferred[IO, (Instant, FiniteDuration)]
       repository = new SearchSessionWorkRepository[IO] {
         override def enqueue(work: PendingSearchSessionWork, createdAt: Instant): RepositoryF[IO, Unit] =
           RepositoryF.at[IO].pure(())
@@ -99,9 +99,9 @@ final class SearchSessionHandoffSpec extends CatsEffectSuite {
         override def claim(
             workerId: String,
             currentTime: Instant,
-            leaseUntil: Instant
+            leaseDuration: FiniteDuration
         ): RepositoryF[IO, Option[ClaimedSearchSessionWork]] =
-          RepositoryF.lift(observed.complete((currentTime, leaseUntil)).as(None))
+          RepositoryF.lift(observed.complete((currentTime, leaseDuration)).as(None))
         override def complete(claim: ClaimedSearchSessionWork, completedAt: Instant): RepositoryF[IO, Unit] =
           RepositoryF.at[IO].raise(RepositoryError.Unavailable)
         override def retry(claim: ClaimedSearchSessionWork, availableAt: Instant): RepositoryF[IO, Unit] =
@@ -120,7 +120,7 @@ final class SearchSessionHandoffSpec extends CatsEffectSuite {
           FixedTestClock.at(now)
         )
         .use(_ => observed.get)
-    } yield assertEquals(result, (now, now.plusSeconds(45)))
+    } yield assertEquals(result, (now, 45.seconds))
   }
 
   private def beats(unavailable: Boolean): IO[Int] =
@@ -134,9 +134,9 @@ final class SearchSessionHandoffSpec extends CatsEffectSuite {
       repository = new SearchSessionWorkRepository[IO] {
         def enqueue(work: PendingSearchSessionWork, createdAt: Instant) = base.enqueue(work, createdAt)
         def findForActor(actor: UserId, search: UUID) = base.findForActor(actor, search)
-        def claim(workerId: String, currentTime: Instant, leaseUntil: Instant) =
+        def claim(workerId: String, currentTime: Instant, leaseDuration: FiniteDuration) =
           if (unavailable) RepositoryF.raise[IO, Option[ClaimedSearchSessionWork]](RepositoryError.Unavailable)
-          else base.claim(workerId, currentTime, leaseUntil)
+          else base.claim(workerId, currentTime, leaseDuration)
         def complete(claim: ClaimedSearchSessionWork, completedAt: Instant) = base.complete(claim, completedAt)
         def retry(claim: ClaimedSearchSessionWork, availableAt: Instant) = base.retry(claim, availableAt)
         def fail(claim: ClaimedSearchSessionWork, failure: SearchSessionWorkFailure, failedAt: Instant) =
@@ -192,7 +192,7 @@ final class SearchSessionHandoffSpec extends CatsEffectSuite {
       override def claim(
           workerId: String,
           currentTime: Instant,
-          leaseUntil: Instant
+          leaseDuration: FiniteDuration
       ): RepositoryF[IO, Option[ClaimedSearchSessionWork]] =
         com.example.graphQL.cats.service.port.RepositoryF.fromFEither(claimed.modify { attempt =>
           val next = attempt + 1

@@ -112,9 +112,9 @@ final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
       remaining <- Ref.of[IO, Int](3)
       sent <- Ref.of[IO, Int](0)
       record = command.copy(state = InterviewWorkflowCommandState.Claimed, publicationAttempts = 0)
-      claim = ClaimedInterviewWorkflowCommand(record, "worker", new UUID(0L, 77L), observedAt.plusSeconds(60))
+      claim = ClaimedInterviewWorkflowCommand(record, "worker", new UUID(0L, 77L))
       store = new TestInterviewWorkflowRepository {
-        override def claimDueCommands(workerId: String, now: Instant, leaseUntil: Instant, limit: Int) =
+        override def claimDueCommands(workerId: String, now: Instant, leaseDuration: FiniteDuration, limit: Int) =
           RepositoryF.lift(remaining.modify(n => (math.max(0, n - 1), if (n > 0) List(claim) else Nil)))
         override def findForAdmin(id: InterviewWorkflowId) = RepositoryF.at[IO].pure(Some(workflow))
         override def authorizePublication(
@@ -122,7 +122,7 @@ final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
             generation: InterviewPublisherGeneration,
             now: Instant
         ) = RepositoryF.at[IO].pure(true)
-        override def renewPublication(value: ClaimedInterviewWorkflowCommand, now: Instant, leaseUntil: Instant) =
+        override def renewPublication(value: ClaimedInterviewWorkflowCommand, leaseDuration: FiniteDuration) =
           RepositoryF.at[IO].pure(true)
         override def markPublished(value: ClaimedInterviewWorkflowCommand, now: Instant) =
           RepositoryF.at[IO].pure(())
@@ -260,7 +260,7 @@ final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
             record: InterviewWorkflowCommandRecord,
             workerId: String,
             now: Instant,
-            leaseUntil: Instant,
+            leaseDuration: FiniteDuration,
             maxAttempts: Int
         ) = RepositoryF.lift(claims.update(_ + 1).as(InterviewExecutionClaimOutcome.AlreadyHandled))
         override def attemptCount(id: InterviewWorkflowId, requested: InterviewCommand) =
@@ -296,9 +296,9 @@ final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
       marked <- Ref.of[IO, Boolean](false)
       requested <- Ref.of[IO, Vector[Int]](Vector.empty)
       record = command.copy(state = InterviewWorkflowCommandState.Claimed, publicationAttempts = 0)
-      claim = ClaimedInterviewWorkflowCommand(record, "worker", new UUID(0L, 70L), observedAt.plusSeconds(1))
+      claim = ClaimedInterviewWorkflowCommand(record, "worker", new UUID(0L, 70L))
       store = new TestInterviewWorkflowRepository {
-        override def claimDueCommands(workerId: String, now: Instant, leaseUntil: Instant, limit: Int) =
+        override def claimDueCommands(workerId: String, now: Instant, leaseDuration: FiniteDuration, limit: Int) =
           RepositoryF.lift(requested.modify(values => (values :+ limit, if (values.isEmpty) List(claim) else Nil)))
         override def findForAdmin(id: InterviewWorkflowId) = RepositoryF.at[IO].pure(Some(workflow))
         override def authorizePublication(
@@ -307,7 +307,7 @@ final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
             now: Instant
         ) =
           RepositoryF.at[IO].pure(true)
-        override def renewPublication(value: ClaimedInterviewWorkflowCommand, now: Instant, leaseUntil: Instant) =
+        override def renewPublication(value: ClaimedInterviewWorkflowCommand, leaseDuration: FiniteDuration) =
           RepositoryF.lift(renewCount.getAndUpdate(_ + 1).flatMap { count =>
             if (count == 0) IO.pure(true) else renewed.complete(()).as(true)
           })
@@ -342,9 +342,9 @@ final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
       retries <- Ref.of[IO, Int](0)
       renewals <- Ref.of[IO, Int](0)
       record = command.copy(state = InterviewWorkflowCommandState.Claimed, publicationAttempts = 0)
-      claim = ClaimedInterviewWorkflowCommand(record, "worker", new UUID(0L, 72L), observedAt.plusSeconds(1))
+      claim = ClaimedInterviewWorkflowCommand(record, "worker", new UUID(0L, 72L))
       store = new TestInterviewWorkflowRepository {
-        override def claimDueCommands(workerId: String, now: Instant, leaseUntil: Instant, limit: Int) =
+        override def claimDueCommands(workerId: String, now: Instant, leaseDuration: FiniteDuration, limit: Int) =
           RepositoryF.at[IO].pure(List(claim))
         override def findForAdmin(id: InterviewWorkflowId) = RepositoryF.at[IO].pure(Some(workflow))
         override def authorizePublication(
@@ -352,11 +352,10 @@ final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
             generation: InterviewPublisherGeneration,
             now: Instant
         ) = RepositoryF.at[IO].pure(true)
-        override def renewPublication(value: ClaimedInterviewWorkflowCommand, now: Instant, leaseUntil: Instant) =
+        override def renewPublication(value: ClaimedInterviewWorkflowCommand, leaseDuration: FiniteDuration) =
           RepositoryF.lift(renewals.getAndUpdate(_ + 1).map(_ == 0))
         override def retry(
             value: ClaimedInterviewWorkflowCommand,
-            now: Instant,
             availableAt: Instant,
             failureCode: InterviewFailureCode
         ) = RepositoryF.lift(retries.update(_ + 1))
@@ -387,9 +386,9 @@ final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
         retried <- Ref.of[IO, Int](0)
         failures <- Ref.of[IO, Vector[String]](Vector.empty)
         record = command.copy(state = InterviewWorkflowCommandState.Claimed, publicationAttempts = 0)
-        claim = ClaimedInterviewWorkflowCommand(record, "worker", new UUID(0L, 80L), observedAt.plusSeconds(60))
+        claim = ClaimedInterviewWorkflowCommand(record, "worker", new UUID(0L, 80L))
         store = new TestInterviewWorkflowRepository {
-          override def claimDueCommands(workerId: String, now: Instant, leaseUntil: Instant, limit: Int) =
+          override def claimDueCommands(workerId: String, now: Instant, leaseDuration: FiniteDuration, limit: Int) =
             RepositoryF.at[IO].pure(List(claim))
           override def findForAdmin(id: InterviewWorkflowId) = RepositoryF.at[IO].pure(Some(workflow))
           override def authorizePublication(
@@ -397,11 +396,10 @@ final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
               generation: InterviewPublisherGeneration,
               now: Instant
           ) = RepositoryF.at[IO].pure(true)
-          override def renewPublication(value: ClaimedInterviewWorkflowCommand, now: Instant, leaseUntil: Instant) =
+          override def renewPublication(value: ClaimedInterviewWorkflowCommand, leaseDuration: FiniteDuration) =
             RepositoryF.at[IO].fromEither(renewal)
           override def retry(
               value: ClaimedInterviewWorkflowCommand,
-              now: Instant,
               availableAt: Instant,
               failureCode: InterviewFailureCode
           ) = RepositoryF.lift(retried.update(_ + 1) *> failures.update(_ :+ failureCode.wire))
@@ -431,15 +429,15 @@ final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
     }
   }
 
-  test("slow publication preparation refreshes the lease before sending") {
+  test("DDR-01.4 slow publication preparation refreshes the lease by duration before sending") {
     for {
       clock <- Ref.of[IO, Instant](observedAt)
-      expiry <- Ref.of[IO, Instant](observedAt.plusMillis(60))
+      events <- Ref.of[IO, Vector[String]](Vector.empty)
       claims <- Ref.of[IO, Int](0)
       record = command.copy(state = InterviewWorkflowCommandState.Claimed, publicationAttempts = 0)
-      claim = ClaimedInterviewWorkflowCommand(record, "worker", new UUID(0L, 82L), observedAt.plusMillis(60))
+      claim = ClaimedInterviewWorkflowCommand(record, "worker", new UUID(0L, 82L))
       store = new TestInterviewWorkflowRepository {
-        override def claimDueCommands(workerId: String, now: Instant, leaseUntil: Instant, limit: Int) =
+        override def claimDueCommands(workerId: String, now: Instant, leaseDuration: FiniteDuration, limit: Int) =
           RepositoryF.lift(claims.getAndUpdate(_ + 1).map(n => if (n == 0) List(claim) else Nil))
         override def findForAdmin(id: InterviewWorkflowId) =
           RepositoryF.lift(clock.set(observedAt.plusMillis(59)).as(Some(workflow)))
@@ -447,18 +445,17 @@ final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
             value: ClaimedInterviewWorkflowCommand,
             generation: InterviewPublisherGeneration,
             now: Instant
-        ) = RepositoryF.at[IO].pure(now.isBefore(claim.leaseUntil))
-        override def renewPublication(value: ClaimedInterviewWorkflowCommand, now: Instant, leaseUntil: Instant) =
-          RepositoryF.lift(expiry.set(leaseUntil).as(now.isBefore(claim.leaseUntil)))
+        ) = RepositoryF.at[IO].pure(true)
+        // The caller names only a duration; the repository decides the expiry on the database clock.
+        override def renewPublication(value: ClaimedInterviewWorkflowCommand, leaseDuration: FiniteDuration) =
+          RepositoryF.lift(events.update(_ :+ s"renew:${leaseDuration.toMillis}").as(true))
         override def markPublished(value: ClaimedInterviewWorkflowCommand, now: Instant) =
           RepositoryF.at[IO].pure(())
       }
       sender = new InterviewTransport[IO] {
         def generationFor(value: InterviewMessage) =
           InterviewPublisherGeneration(InterviewPublisherRole.Orchestrator, new UUID(0L, 83L))
-        def publish(value: InterviewMessage) = clock.set(observedAt.plusMillis(70)) *> expiry.get.flatMap(until =>
-          IO(assert(until.isAfter(observedAt.plusMillis(70))))
-        )
+        def publish(value: InterviewMessage) = clock.set(observedAt.plusMillis(70)) *> events.update(_ :+ "publish")
       }
       worker = new InterviewWorkflowWorker[IO](
         store,
@@ -469,8 +466,8 @@ final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
         clock.get
       )
       _ <- worker.publishDue(sender)
-      renewedUntil <- expiry.get
-    } yield assertEquals(renewedUntil, observedAt.plusMillis(119))
+      recorded <- events.get
+    } yield assertEquals(recorded.take(2), Vector("renew:60", "publish"))
   }
 
   test("a matching timely command reaches execution claiming without quarantine") {

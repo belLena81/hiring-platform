@@ -18,6 +18,7 @@ import com.mongodb.client.model.{Sorts, UpdateOptions}
 import org.bson.Document
 
 import java.time.Instant
+import scala.concurrent.duration.FiniteDuration
 import java.util.{Date, UUID}
 import scala.jdk.CollectionConverters.*
 
@@ -105,7 +106,7 @@ final class MongoSearchSessionWorkRepository(
   override def claim(
       workerId: String,
       now: Instant,
-      leaseUntil: Instant
+      leaseDuration: FiniteDuration
   ): RepositoryF[IO, Option[ClaimedSearchSessionWork]] =
     RepositoryF.lift(uuidGen.randomUUID.map(_.toString)).flatMap { token =>
       MongoRepositorySupport
@@ -117,7 +118,7 @@ final class MongoSearchSessionWorkRepository(
             workerId,
             token,
             now,
-            leaseUntil,
+            leaseDuration,
             Sorts.ascending(MongoFields.AvailableAt, MongoFields.CreatedAt, MongoFields.Id)
           )(document => MongoF.fromEither(MongoSearchSessionWorkCodecs.readClaim(document).toStored))
         }

@@ -167,7 +167,7 @@ final class MongoOutboxEnvelopeSourceIntegrationSpec extends MongoIntegrationSui
         different <- sessions.record(changed).value
         stored <- row
         claimed <- outbox
-          .claim("envelope-source", s"hiring-publisher-${UUID.randomUUID()}", now, now.plusSeconds(30), 10)
+          .claim("envelope-source", s"hiring-publisher-${UUID.randomUUID()}", now, 30.seconds, 10)
           .value
         token = claimed.toOption.flatMap(_.headOption).map(_.leaseToken).getOrElse("")
         published <- outbox.markPublished(value.eventId, token, now, now.plusSeconds(3600)).value

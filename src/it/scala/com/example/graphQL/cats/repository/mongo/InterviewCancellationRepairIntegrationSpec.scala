@@ -294,7 +294,7 @@ final class InterviewCancellationRepairIntegrationSpec extends MongoIntegrationS
         cancelling <- cancel(s)
         _ <- spendBudget(s, s"${cancelling.revision}:0")
         cancelRow <- stored(s, s"${cancelling.revision}:0")
-        claimed <- success(s.repository.claimExecution(cancelRow, "worker", now, now.plusSeconds(60), 5))
+        claimed <- success(s.repository.claimExecution(cancelRow, "worker", now, 60.seconds, 5))
         afterCancel <- s.current
         cancelAfter <- stored(s, s"${cancelling.revision}:0")
       } yield {
@@ -308,7 +308,7 @@ final class InterviewCancellationRepairIntegrationSpec extends MongoIntegrationS
         proposed <- propose(s, 0L)
         _ <- spendBudget(s, s"${proposed.revision}:1")
         notifyRow <- stored(s, s"${proposed.revision}:1")
-        claimed <- success(s.repository.claimExecution(notifyRow, "worker", now, now.plusSeconds(60), 5))
+        claimed <- success(s.repository.claimExecution(notifyRow, "worker", now, 60.seconds, 5))
         after <- s.current
         repairs <- success(s.repository.findNotificationRepairs(s.id))
       } yield {
@@ -327,7 +327,7 @@ final class InterviewCancellationRepairIntegrationSpec extends MongoIntegrationS
     scenario { s =>
       for {
         cancelling <- cancel(s)
-        claims <- success(s.repository.claimDueCommands("publisher", now.plusSeconds(1), now.plusSeconds(60), 4))
+        claims <- success(s.repository.claimDueCommands("publisher", now.plusSeconds(1), 60.seconds, 4))
         claim <- IO.fromOption(claims.find(_.record.stepId.endsWith(s":${cancelling.revision}:0")))(
           new AssertionError("cancel intent not claimable")
         )
@@ -343,7 +343,7 @@ final class InterviewCancellationRepairIntegrationSpec extends MongoIntegrationS
     } *> scenario { s =>
       for {
         proposed <- propose(s, 0L)
-        claims <- success(s.repository.claimDueCommands("publisher", now.plusSeconds(1), now.plusSeconds(60), 4))
+        claims <- success(s.repository.claimDueCommands("publisher", now.plusSeconds(1), 60.seconds, 4))
         claim <- IO.fromOption(claims.find(_.record.command.isInstanceOf[InterviewLifecycleCommand.Notify]))(
           new AssertionError("notification not claimable")
         )
