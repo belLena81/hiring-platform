@@ -185,6 +185,8 @@ def check_segment(tokens, cwd):
     if tokens[0] == WRAPPER:
         if re.search(r"[`$]", " ".join(args)):
             return "deny", "Shell substitution is not allowed in wrapper arguments."
+        if args in (["--help"], ["-h"]):
+            return None  # prints static usage text only; runs before any docker, git, flock or test action
         verb = args[0] if args else ""
         if verb not in WRAPPER_VERBS:
             return "deny", f"Unknown test wrapper verb '{verb}'."

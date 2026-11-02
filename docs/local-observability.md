@@ -38,6 +38,8 @@ docker compose -f compose.yaml -f compose.observability.yaml --profile api up -d
 scripts/generate-local-traffic.sh 120
 ```
 
+`generate-local-traffic.sh [seconds=60] [base-url=http://127.0.0.1:8080]` first checks `/health` (BLOCKED, exit 2, if there is no answer), then sends the request cycle for exactly the given duration (each request limited to 3 s), prints `ok/4xx/5xx/failed` counts every 10 s and ends with `RESULT: PASS|FAIL|BLOCKED ...`. One 4xx per cycle is the intentional invalid query; the run fails on any 5xx or failed request. `--help` lists the exit codes (see "Operator scripts" in `engineering-quality.md`).
+
 Grafana: `http://127.0.0.1:3000`, user `admin`, password `$GRAFANA_ADMIN_PASSWORD` (default `admin`). Prometheus: `http://127.0.0.1:9090`. Tear down with `docker compose -f compose.yaml -f compose.observability.yaml --profile api down`; Tempo and Loki data is on tmpfs and disappears with the containers.
 
 ## First-run verification checklist

@@ -1,6 +1,26 @@
+"""Validates the project-local role skills and subagent definitions.
+
+Contract: see "Operator scripts" in docs/engineering-quality.md.
+"""
+
 from pathlib import Path
 import re
 import sys
+import time
+
+HELP = """Usage: python3 -I scripts/check-skills.py
+       python3 -I scripts/check-skills.py --help
+
+Checks offline (no network, about 1 second, so no progress lines) that every role named in AGENTS.md has a project-local
+.claude/skills/<role>/SKILL.md with valid frontmatter, that no unexpected skill folder exists, and that each delegated
+role has a subagent definition in .claude/agents with an explicit tool list (read-only reviewers get no write tools).
+
+Exit codes: 0 PASS, 1 FAIL (problems are listed), 2 usage error or required file missing (BLOCKED), 130 interrupted.
+The last line is "RESULT: PASS|FAIL|BLOCKED skills=<n> agents=<n> problems=<n> duration=<s>".
+
+Example:
+  python3 -I scripts/check-skills.py
+"""
 
 READ_ONLY_ROLES = {"code-reviewer", "security-engineer", "qa-engineer"}
 WRITE_TOOLS = {"Edit", "Write", "NotebookEdit"}
@@ -65,15 +85,57 @@ def main():
         if role in READ_ONLY_ROLES and not tools:
             errors.append(f"Read-only reviewer must declare an explicit tool list: {role}")
 
+    counts = f"skills={len(expected_roles)} agents={len(delegated_roles)}"
     if errors:
         print("\n".join(errors), file=sys.stderr)
+        print(
+            "check-skills: next: fix the problems listed above (each names the role), then run again",
+            file=sys.stderr,
+        )
+        print(
+            f"RESULT: FAIL {counts} problems={len(errors)} duration={time.monotonic() - STARTED:.1f}s",
+            file=sys.stderr,
+        )
         return 1
     print(
         f"Validated {len(expected_roles)} project skills and {len(delegated_roles)} subagent definitions "
         "in .claude/skills and .claude/agents"
     )
+    print(f"RESULT: PASS {counts} problems=0 duration={time.monotonic() - STARTED:.1f}s")
     return 0
 
 
+STARTED = time.monotonic()
+
+
+def run():
+    arguments = sys.argv[1:]
+    if arguments in (["-h"], ["--help"]):
+        print(HELP, end="")
+        return 0
+    if arguments:
+        print(f"check-skills: unexpected argument: {arguments[0]}", file=sys.stderr)
+        print("check-skills: run python3 -I scripts/check-skills.py --help for usage", file=sys.stderr)
+        print("RESULT: BLOCKED reason=usage skills=0 agents=0 problems=0 duration=0.0s", file=sys.stderr)
+        return 2
+    print(
+        "check-skills: validating project skills (.claude/skills) and subagent definitions (.claude/agents) "
+        "against AGENTS.md; no parameters; offline, about 1 s"
+    )
+    try:
+        return main()
+    except OSError as error:
+        print(f"check-skills: cannot read a required file: {error.filename or error}", file=sys.stderr)
+        print("check-skills: next: run from the project checkout; AGENTS.md and .claude/ must exist", file=sys.stderr)
+        print(
+            f"RESULT: BLOCKED reason=missing-file skills=0 agents=0 problems=0 duration={time.monotonic() - STARTED:.1f}s",
+            file=sys.stderr,
+        )
+        return 2
+    except KeyboardInterrupt:
+        print("\ncheck-skills: interrupted; nothing was modified (read-only check)", file=sys.stderr)
+        return 130
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run())

@@ -21,7 +21,9 @@
       "Bash(scripts/run-local-tests.sh interview)",
       "Bash(scripts/run-local-tests.sh retention)",
       "Bash(scripts/run-local-tests.sh recovery)",
-      "Bash(scripts/run-local-tests.sh start)"
+      "Bash(scripts/run-local-tests.sh start)",
+      "Bash(scripts/run-local-tests.sh --help)",
+      "Bash(scripts/run-local-tests.sh -h)"
     ],
     "ask": [
       "Bash(git commit:*)",

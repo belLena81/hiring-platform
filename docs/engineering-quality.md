@@ -74,6 +74,20 @@ The command uses Python 3.9+ to validate project-local skills, checks Java 17+ (
 
 Scala compiler warnings are checked by the build. Scalafmt is configured with standard Scalafmt rules for the Scala 3.9 application and separate Scala 3.7.4 analytics build. At the repository root, run `sbt scalafmtAll scalafmtSbt` to format the application and its build definitions, then `cd analytics && sbt scalafmtAll scalafmtSbt` to format analytics. Check them with `sbt scalafmtCheckAll scalafmtSbtCheck` in each build. The unit suite (`sbt test`) is Docker-independent. The application has the explicit `sbt 'IntegrationTest / test'` task for live HTTP and disposable MongoDB checks; `scripts/check-local.sh` requires Docker because it includes these suites and the merged coverage gate. Coverage can also be run directly with `sbt jacoco 'IntegrationTest / jacoco'`, which fails below 85% merged line coverage. GraphQL SDL and operation fixtures are checked in the unit suite. Transactions and migrations require disposable MongoDB tests; connectivity tests cannot certify those guarantees. Missing integration/migration/compatibility tests cannot be deferred to a future CI pipeline.
 
+## Operator scripts
+
+Every script in `scripts/` that an operator runs (`generate-local-traffic.sh`, `run-local-tests.sh`, `check-local.sh`, `check-container-runtime.sh`, `scan-container-images.sh`, `verify-account-deletion-recovery.sh`, `check-skills.py`) follows one contract, so nobody has to guess whether a run is stuck. Container entrypoints under `docker/` and the `guard-harness.py` hook are outside it.
+
+1. **Start line:** what the script does, its parameters with defaults, and the expected duration or bound.
+2. **Progress:** any wait or loop longer than about 10 s prints a status line at least every 10 s (traffic: elapsed/total and request counts by result; test wrapper: phase, elapsed time, last log line).
+3. **Bounds:** every network call and wait has an explicit timeout; retries are bounded; the total run respects its stated duration or a documented limit (`HIRING_TEST_TIMEOUT_SECONDS`, per sbt invocation, default 4 h because a whole `check-local.sh` is recorded at 1h48m-2h18m; `HIRING_TEST_LOCK_WAIT_SECONDS`; `COMPOSE_TIMEOUT_SECONDS`, per docker compose call; `SCAN_TIMEOUT_SECONDS`; `CHECK_LOCAL_FORMAT_TIMEOUT_SECONDS`). Out-of-range values exit 2.
+4. **Interrupt:** Ctrl+C, SIGTERM or SIGHUP (closed terminal) prints an "interrupted" line with what was completed, stops only processes and temporary files the script itself started, and exits 130.
+5. **End:** one line `RESULT: PASS|FAIL|BLOCKED` with counts, duration and the log path where one exists. Exit codes: 0 pass, 1 fail, 2 usage error or precondition not met (BLOCKED), 130 interrupted.
+6. **Help and arguments:** `--help` prints usage, parameters, exit codes and examples; invalid arguments exit 2 with a message.
+7. **Failures** name what failed and the next action; they never end in a bare stack trace or a silent exit.
+
+Output carries no secrets: base URLs with credentials are rejected, and log excerpts come from build and test output only. `scripts/operator-lib.sh` (sourced, not run) holds the shared bounded runner, heartbeat and test-count helpers used by the test wrapper, `check-local.sh` and the image scan. The test wrapper and the check-local formatting steps write sbt output to a log and print a heartbeat instead of streaming it; follow a log with `tail -f`. The phase shown for `test` and `analytics` runs is inferred from the first sbt summary line in the log.
+
 ## Review before and after coding
 
 Before substantial implementation, relevant specialists check the ready spec for missing flows, unnecessary complexity, pure/effect boundaries, access patterns, migration/compatibility impact, and testability. Reuse the existing Architect, Data Engineer, Big Data Engineer, Security Engineer, Code Reviewer, and QA roles rather than spawning duplicate reviewer personas.
