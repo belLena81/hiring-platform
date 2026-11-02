@@ -1,22 +1,35 @@
+# Local rules. Thresholds, windows and the traffic floor are PROVISIONAL local values, not SLOs (no measured
+# workload yet; see docs/specs/hiring-observability-resilience.md, "Alert and runbook behavior").
+# HTTP expressions count only http_phase="body": the middleware also records a "headers" phase sample without a
+# status code for every request, which would double the denominator and mix a second latency into the histogram.
+# User traffic excludes the /health probes (classifier!="/health"): idle probes alone run at about 0.11 req/s and would
+# pass the floor and dilute ratios and quantiles. Traffic floor: ratios and quantiles are evaluated only when the
+# non-probe request rate over the window is at least 0.1 req/s (6 per minute). Below it the rule yields no data (does
+# not fire, and is not reported as healthy). Accepted limitation: below the floor even a total 5xx outage does not fire.
 groups:
   - name: hiring-api
     rules:
       - alert: HiringApiHighErrorRate
         expr: |
-          sum(rate(http_server_request_duration_seconds_count{http_response_status_code=~"5.."}[1m]))
-            / sum(rate(http_server_request_duration_seconds_count[1m])) > 0.05
+          (
+            sum(rate(http_server_request_duration_seconds_count{http_phase="body",classifier!="/health",http_response_status_code=~"5.."}[1m]))
+              / sum(rate(http_server_request_duration_seconds_count{http_phase="body",classifier!="/health"}[1m]))
+          > 0.05
+          )
+          and
+          sum(rate(http_server_request_duration_seconds_count{http_phase="body",classifier!="/health"}[1m])) >= 0.1
         for: 2m
         labels:
           severity: page
         annotations:
-          summary: More than 5% of API requests returned 5xx for 2 minutes.
+          summary: More than 5% of API requests returned 5xx for 2 minutes (provisional threshold; evaluated only at 0.1 non-probe req/s or more).
       - alert: HiringBacklogOldestPendingTooOld
         expr: hiring_backlog_oldest_pending_age_seconds > 300
         for: 2m
         labels:
           severity: ticket
         annotations:
-          summary: Oldest pending {{ $labels.hiring_capability }} item is older than 5 minutes.
+          summary: Oldest pending {{ $labels.hiring_capability }} item is older than 5 minutes (provisional threshold).
       - alert: HiringBacklogUnobserved
         expr: hiring_backlog_sample_age_seconds > 60 or absent(hiring_backlog_sample_age_seconds)
         for: 2m
@@ -26,9 +39,13 @@ groups:
           summary: Backlog sampling is stale or absent; backlog state is unknown, not zero.
       - alert: HiringApiSlowRequests
         expr: |
-          histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket[1m]))) > 0.3
+          (
+            histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket{http_phase="body",classifier!="/health"}[1m]))) > 0.3
+          )
+          and
+          sum(rate(http_server_request_duration_seconds_count{http_phase="body",classifier!="/health"}[1m])) >= 0.1
         for: 2m
         labels:
           severity: ticket
         annotations:
-          summary: API p95 latency above 300 ms for 2 minutes.
+          summary: API p95 latency above 300 ms for 2 minutes (provisional threshold; evaluated only at 0.1 non-probe req/s or more).

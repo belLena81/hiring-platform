@@ -12,6 +12,14 @@ services:
       OTEL_TRACES_EXPORTER: otlp
       OTEL_LOGS_EXPORTER: none
       OTEL_METRIC_EXPORT_INTERVAL: "5000"
+      # Sampling and exporter bounds (policy: docs/specs/hiring-observability-resilience.md, "Sampling/bounds").
+      # Local values, provisional until the overhead baseline (HOR-10); not production settings.
+      OTEL_TRACES_SAMPLER: parentbased_always_on        # 100% of root spans locally; honors an incoming sampling decision
+      OTEL_BSP_MAX_QUEUE_SIZE: "2048"                   # spans buffered; a full queue drops new spans, never blocks a request
+      OTEL_BSP_MAX_EXPORT_BATCH_SIZE: "512"             # must be <= queue size
+      OTEL_BSP_SCHEDULE_DELAY: "2000"                   # ms between span batch exports
+      OTEL_BSP_EXPORT_TIMEOUT: "10000"                  # ms before one span batch export is abandoned (its spans are lost)
+      OTEL_EXPORTER_OTLP_TIMEOUT: "10000"               # ms per OTLP request (traces and metrics)
     depends_on:
       otel-collector:
         condition: service_started

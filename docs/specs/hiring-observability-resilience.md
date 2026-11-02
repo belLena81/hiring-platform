@@ -136,7 +136,7 @@ Use fake providers with explicit synchronization and injected clocks for local t
 | Export destination | Reuse existing OpenTelemetry boundary with local/no-op capture; self-managed collector/backend versus managed service for deployment. | Operations + Security compare access, data residency, retention, egress, idle/storage cost and maintenance. | Production exporter credentials, provisioning and routing. |
 | Alert evaluation | Local scripted/runbook checks first; backend alert rules after deployment selection. | Operations demonstrates durable routing, no-data handling and receiver availability. | Production incident delivery/signoff. |
 | Thresholds/windows | Derive from accepted workload/SLO and recovery budget; do not pick arbitrary default latency percentiles. | PM + QA + capability owner measure normal/burst/outage baseline. | Production alert tuning and claimed SLO acceptance. |
-| Sampling/bounds | Finite queue and bounded diagnostic sampling; always preserve safe aggregate failure counts when feasible. | Scala Developer/QA measure request overhead, memory, loss and cardinality budget. | Final instrument configuration. |
+| Sampling/bounds | Finite queue and bounded diagnostic sampling; always preserve safe aggregate failure counts when feasible. Local policy recorded under [Sampling/bounds](#samplingbounds-local-policy-item-6). | Scala Developer/QA measure request overhead, memory, loss and cardinality budget. | Final instrument configuration (deployed values). |
 | Repair exposure | Reuse workflow-owned restricted CLI/Admin boundary; no automatic replay from alert transport. | Security + workflow owner complete DHW repair contract. | Actionable remote repair integration. |
 | Local log alignment | Keep known `_logs` baseline visible; align to `.local/logs/` in a scoped configuration slice. | Runtime owner verifies packaged/default/override behavior and docs. | Log-path modification only. |
 
@@ -198,5 +198,49 @@ Dependencies added for item 4 (per [engineering quality](../engineering-quality.
 Advisory and compatibility evidence (2026-11-02, via the OSV API `api.osv.dev/v1/query` and the GitHub Advisory Database API): no known advisories for `io.opentelemetry.instrumentation:opentelemetry-runtime-telemetry:2.32.0-alpha` (also none for its `opentelemetry-instrumentation-api`) or for `org.typelevel:otel4s-instrumentation-metrics_3:1.1.0`. The Maven POM of `opentelemetry-runtime-telemetry:2.32.0-alpha` depends on `opentelemetry-api` 1.66.0, the version the build uses. A point-in-time check; repeat before release.
 
 Counting is bounded in work as well as labels: root-field collection expands each fragment once per document and stops at 1000 root selections (`GraphQLOperationOutcomesSpec` includes a 25-level doubling fragment chain).
+
+#### Item 1 observed (coordinator, 2026-11-02, HEAD 5193b81)
+
+First-run checklist run on a healthy stack with `scripts/generate-local-traffic.sh 120`; local evidence for one run, not a load or deployed result.
+
+| Check | Observed |
+|---|---|
+| Services | all up, api healthy; Prometheus target `otel-collector` up |
+| HTTP metric | `http_server_request_duration_seconds_count` exists with `http_request_method` and `http_response_status_code`; GET 237 all 200; POST 226 x 200 and 226 x 400 (the script's deliberate `{ notAField }`). No `http_route` label. Follow-up (item 5): the series also carry `classifier` (the bounded route template) and `http_phase` (`headers` without status code, `body` with it) |
+| Backlog | `hiring_backlog_pending` 0 for `embedding_work` and `operational_event_outbox`; `hiring_backlog_sample_age_seconds` present; no oldest-age series with an empty backlog |
+| Mongo stop (about 07:52Z) | both backlog series disappeared (no flat zero); `HiringBacklogUnobserved` pending 07:53:45Z, firing 07:55:48Z |
+| Traces | Tempo has `POST /graphql` and `GET /health` traces for `hiring-api` |
+| Logs | Loki `{service_name="api"}` 718 lines; 0 matches for JWT/bearer, password, email, Mongo URI, raw GraphQL text; masking enabled |
+| Alerts | all four rules load, health ok |
+| New names (now observed) | `hiring_graphql_root_field_executions_total{graphql_operation_type,hiring_graphql_root_field,hiring_graphql_outcome}` (seen `_invalid`/`rejected` 226, `_introspection`/`success` 226); `db_client_operation_duration_seconds_{bucket,count,sum}{db_operation_name,db_collection_name,hiring_mongo_client}`; `jvm_*`; `cats_effect_runtime_cpu_starvation_*`; `cats_effect_runtime_wstp_compute_*` |
+
+The "Not verified" cells of items 2–4 for Prometheus names are thereby closed (names observed); trace shape of Mongo spans in Tempo, container run overhead and dashboard/alert use under real GraphQL error traffic remain open.
+
+#### Item 5 alert hygiene (implemented 2026-11-02, static and live-query validation only)
+
+- Why `http_route` is missing: the http4s otel4s server metrics middleware 0.19.0 has no route attribute. `OtelMetrics` labels each sample with the `classifier` string passed to `Metrics(...)`, and `TelemetryRuntime` already passes `routeLabel`, which returns only a path from the fixed public list (`HiringHttpPaths.public`) or `_unmatched`. Chosen: change the dashboard panel to the existing bounded label `classifier`; no application change (an extra `http.route` attribute would duplicate the classifier for no benefit).
+- Second defect found while verifying: every request is recorded twice, once at response headers (`http_phase="headers"`, no status code) and once at body completion (`http_phase="body"`). The old alert and dashboard expressions counted both, doubling request rates and the error-ratio denominator and mixing header-time durations into latency. All HTTP expressions now select `http_phase="body"`.
+- `HiringApiHighErrorRate` and `HiringApiSlowRequests` are evaluated only when the body request rate excluding `/health` probes (`classifier!="/health"`) over the 1 m window is at least 0.1 req/s (6 per minute). Probes are excluded from the guard and from the ratio and quantile aggregates because idle probes alone measured 0.109 req/s and would pass the floor and dilute both. Below that floor the expression returns no data, so sparse traffic neither fires nor reports healthy; the dashboard panels still draw whatever data exists. Thresholds (5% 5xx, p95 300 ms, backlog age 300 s) and the floor are provisional local values, not SLOs; calibrate after the HOR-10 baseline. `HiringBacklogUnobserved` is deliberately unguarded. **Accepted limitation:** below the guard (6 non-probe requests per minute) a total 5xx outage does not fire; this is a provisional local trade-off to avoid flapping on sparse traffic, to be revisited with a measured workload. Dashboard panels for 5xx ratio, latency and status codes also exclude `/health`; the route panel keeps all routes as the total-requests view.
+- Dashboard `hiring-api-red.json` (version 2): per-route panel uses `classifier`; new panel "GraphQL root-field outcomes" (`sum by (hiring_graphql_outcome, hiring_graphql_root_field)` of the counter rate) and "Mongo command duration p95 by operation" (`db_operation_name`, `hiring_mongo_client="hiring"`). Both draw only closed label sets.
+- No alert on GraphQL `internal`/`denied` outcomes: this specification does not require one, and a threshold without a measured baseline would be invented.
+- Validation: the dashboard JSON parses; every alert and panel expression was parsed and run through the Prometheus HTTP query API of the running stack (all `success`; observed after the probe exclusion at idle, with only `/health` traffic: `/health` body rate 0.109 req/s, non-probe rate 0, the `>= 0.1` guard returns no data, and both guarded alert expressions return no data). `promtool check rules` was not run: no local binary, and the project hook blocks `docker exec/run` into containers.
+
+#### Sampling/bounds (local policy, item 6)
+
+Set in `compose.observability.yaml` for the `api` service through standard `OTEL_*` variables (read by the OpenTelemetry SDK autoconfiguration under otel4s). Local values; none is a production or SLO value, and none has been overhead-measured (item 7).
+
+| Setting | Value | Effect when exceeded |
+|---|---|---|
+| `OTEL_TRACES_SAMPLER` | `parentbased_always_on` | 100% of root requests sampled locally; an incoming parent's decision is honored. No tail sampling. |
+| `OTEL_BSP_MAX_QUEUE_SIZE` | 2048 spans | The span queue is non-blocking: when full, new spans are dropped; requests are never delayed. No dropped-span counter has been observed in this setup (known gap). |
+| `OTEL_BSP_MAX_EXPORT_BATCH_SIZE` | 512 | Batch of at most 512 spans per export. |
+| `OTEL_BSP_SCHEDULE_DELAY` | 2000 ms | Interval between span batch exports. |
+| `OTEL_BSP_EXPORT_TIMEOUT` | 10000 ms | A span batch whose export has not completed is abandoned; its spans are lost, not retried by the processor. |
+| `OTEL_EXPORTER_OTLP_TIMEOUT` | 10000 ms | One OTLP request (traces or metrics) is cancelled after 10 s. |
+| `OTEL_METRIC_EXPORT_INTERVAL` | 5000 ms (unchanged) | Metrics are aggregated in memory by instrument and attribute set (closed sets), so there is no metric queue to overflow; a failed export loses that interval's export, and cumulative values recover at the next success. |
+
+Overload policy, in order of what is dropped: (1) spans first (queue full or export timeout) - diagnostics only, hiring work unaffected; (2) a failed metric export interval - counters and histograms are cumulative, so only resolution is lost; gauges (backlog) go stale and then disappear through the collector `metric_expiration` of 45 s, which `HiringBacklogUnobserved` reports as unobserved, not as zero; (3) logs are never dropped: the container Logback `AsyncAppender` has `neverBlock=false` and a 256-entry queue, so when stdout (and the Alloy/Loki path behind it) is slower than the log rate, the logging call blocks and request handling is delayed instead of losing log lines. That is the current policy and is kept deliberately; changing it (`neverBlock=true`, loss counters) needs its own decision. Durable hiring work (outbox, embedding work) is never governed by telemetry queues. The exporter being down never fails a request: exports run on SDK background threads.
+
+Not yet verified: the overlay was changed statically; the first run after the change must confirm the API starts and traces/metrics still arrive (re-verify commands in the handoff). Dropped-span visibility needs SDK self-metrics, not scoped here.
 
 Checkpoint (superseded for items 2–4 by the table above): specification drafted; no implementation acceptance completed. Future tests/drills listed here have not run. No exporter backend/provider was provisioned. Next action: independent specification review, then finalize the instrument catalog for the first slice. Future Code Reviewer: pending. Future Security Engineer: pending. Future QA: pending. Documentation-delivery evidence and verdicts are tracked separately in the [roadmap readiness index](../development-milestones.md#specification-ownership-and-readiness).
