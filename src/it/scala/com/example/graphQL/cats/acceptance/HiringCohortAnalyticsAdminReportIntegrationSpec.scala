@@ -56,8 +56,9 @@ class HiringCohortAnalyticsAdminReportIntegrationSpec
           val at = c.get[String]("occurredAt").toOption.map(java.time.Instant.parse)
           val app = c.downField("payload").get[String]("applicationId").toOption
           val kind = c.get[String]("eventType").toOption
-          val status = c.downField("payload").get[String]("newStatus").toOption
-          (app, at, kind, status).tupled.map { case (a, t, k, st) => (a, k, st, t) }.toVector
+          // Only status changes carry `newStatus`; creation events carry `status`, so absence must not drop the event.
+          val status = c.downField("payload").get[String]("newStatus").toOption.getOrElse("")
+          (app, at, kind).tupled.map { case (a, t, k) => (a, k, status, t) }.toVector
         }
       val created = stages.collect { case (a, "APPLICATION_CREATED", _, t) => a -> t }.toMap
       val hired = stages.collect { case (a, "APPLICATION_STATUS_CHANGED", "Hired", t) => a -> t }.toMap

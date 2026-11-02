@@ -502,7 +502,9 @@ class HiringRoleMatrixAcceptanceIntegrationSpec extends HiringStoryStackSuite {
     val tampered = valid.dropRight(2) + (if (valid.endsWith("AA")) "BB" else "AA")
     List("not-a-token", tampered)
       .traverse { token =>
-        operations.run("query Q { me { id } }", Json.obj(), Some(actors(Role.CandidateOwner).copy(token = token)))
+        // The API answers an invalid token with 401 before reading the body and drops the connection, so each request
+        // gets its own connection instead of the pooled one (see GraphQLClient.executeOnFreshConnection).
+        stack.running.client.executeOnFreshConnection("query Q { me { id } }", Json.obj(), Some(token))
       }
       .map(_.foreach { response =>
         assertEquals(response.status, 401)

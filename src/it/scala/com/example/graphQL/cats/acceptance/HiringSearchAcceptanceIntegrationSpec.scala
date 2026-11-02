@@ -235,14 +235,17 @@ final class HiringSearchAcceptanceIntegrationSpec extends munit.CatsEffectSuite 
         case StoryOutcome.Succeeded(value) => value
         case other                         => fail(s"candidateMatches expected success but was $other")
       }
+    // A present residence filter requires a country and may add a city; every story candidate lives in "DE".
+    def residence(city: String): Option[Json] = Some(Json.obj("country" -> "DE".asJson, "city" -> city.asJson))
     val everyone = story.candidates.map(_.key).toSet
     for {
       unfiltered <- eventually("candidate index", indexLagDeadline)(matches(None))(response =>
         hitCandidateKeys(answerOf(response)).toSet == everyone
       )
-      karlsruhe <- matches(Some(Json.obj("city" -> "Karlsruhe".asJson)))
-      hamburg <- matches(Some(Json.obj("city" -> "Hamburg".asJson)))
-      nowhere <- matches(Some(Json.obj("city" -> "Atlantis".asJson)))
+      karlsruhe <- matches(residence("Karlsruhe"))
+      hamburg <- matches(residence("Hamburg"))
+      nowhere <- matches(residence("Atlantis"))
+      cityOnly <- matches(Some(Json.obj("city" -> "Karlsruhe".asJson)))
       probe <- operations.run(
         "query Probe($jobId: JobID!) { candidateMatches(jobId: $jobId, first: 3) { ... on RankedCandidateResults { results { candidate { email residence { city } } } } } }",
         Json.obj("jobId" -> jobId.asJson),
@@ -278,6 +281,11 @@ final class HiringSearchAcceptanceIntegrationSpec extends munit.CatsEffectSuite 
       assertEquals(hitCandidateKeys(answerOf(karlsruhe)).toSet, Set(story.cy.key, story.dee.key))
       assertEquals(hitCandidateKeys(answerOf(hamburg)).toSet, Set(story.dee.key))
       assertEquals(hitCandidateKeys(answerOf(nowhere)).toSet, Set(story.dee.key))
+      // A city without a country is not a residence filter.
+      StoryOutcome.of(cityOnly, "candidateMatches") match {
+        case StoryOutcome.Refused(code, _, _) => assertEquals(code, "INVALID_SEARCH_FILTER")
+        case other                            => fail(s"a city-only residence filter must be refused, got $other")
+      }
     }
   }
 
