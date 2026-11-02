@@ -33,6 +33,7 @@ abstract class HiringStoryStackSuite extends CatsEffectSuite {
           client <- MongoDatabaseProbe.clientResource(namespace.manifest.mongoUri)
           database <- LocalTestServices.database(client)
           _ <- Resource.onFinalize(ConsumerGroupDrain.awaitEmpty(namespace))
+          _ <- OutboxDiagnostics.resource(database)
           running <- HiringStoryStack.resource(
             namespace.manifest,
             namespace,

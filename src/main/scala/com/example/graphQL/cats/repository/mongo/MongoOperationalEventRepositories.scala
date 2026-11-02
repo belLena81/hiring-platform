@@ -221,9 +221,9 @@ final class MongoOperationalEventOutboxRepository(
         pinned: Boolean,
         pagesLeft: Int,
         pageFull: Boolean
-    ): RepositoryF[IO, List[ClaimedOperationalEvent]] = {
+    ): RepositoryF[IO, Scanned] = {
       val need = limit - values.size
-      if (need <= 0) cursor.traverse_(checkpoint).as(values)
+      if (need <= 0) cursor.traverse_(checkpoint).as(Scanned(values, reachedEnd = false))
       else if (rows.isEmpty) {
         val next = if (pageFull && pagesLeft > 0) position.map(row => cursorFilter(row, MongoFields.Id)) else None
         next match {
@@ -245,7 +245,7 @@ final class MongoOperationalEventOutboxRepository(
                   )
                 )
               )
-          case None => cursor.traverse_(checkpoint).as(values)
+          case None => cursor.traverse_(checkpoint).as(Scanned(values, reachedEnd = !pageFull))
         }
       } else {
         val batch = MongoOutboxClaimBatch.select(rows.map(candidate), need, blocked)
@@ -285,7 +285,7 @@ final class MongoOperationalEventOutboxRepository(
       found <- page(after)
       rows <- if (found.isEmpty && after.nonEmpty) page(None) else MongoF.pure(found)
       behind <- pendingBehind(rows)
-      result <- scan(
+      first <- scan(
         rows,
         behind,
         Nil,
@@ -295,8 +295,31 @@ final class MongoOperationalEventOutboxRepository(
         maxScanPages,
         rows.size >= MongoProducerRegistrations.BatchSize
       )
+      // Everything after the cursor was examined to its end and nothing could be claimed (typically only rows that
+      // wait for an earlier event of their aggregate remain there), so a row the cursor passed earlier may be the one
+      // that unblocks them: read the table from its start once. An empty page after the cursor already wrapped above.
+      result <-
+        if (first.values.isEmpty && first.reachedEnd && after.nonEmpty && found.nonEmpty)
+          for {
+            start <- page(None)
+            startBehind <- pendingBehind(start)
+            second <- scan(
+              start,
+              startBehind,
+              Nil,
+              None,
+              None,
+              false,
+              maxScanPages,
+              start.size >= MongoProducerRegistrations.BatchSize
+            )
+          } yield second.values
+        else MongoF.pure(first.values)
     } yield result
   }
+
+  /** The outcome of one scan: the claimed events and whether the scan read to the end of the due rows. */
+  private final case class Scanned(values: List[ClaimedOperationalEvent], reachedEnd: Boolean)
 
   private def candidate(row: Document): MongoOutboxClaimBatch.Candidate =
     MongoOutboxClaimBatch.Candidate(

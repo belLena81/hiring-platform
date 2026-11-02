@@ -677,6 +677,39 @@ final class OutboxBatchClaimIntegrationSpec extends MongoIntegrationSuite {
     }
   }
 
+  test(
+    "DDR-06.1 an event skipped for a shared subject is reached again although every follower of its aggregate is blocked"
+  ) {
+    mongoResource.use { fixture =>
+      // One recruiter acts on two jobs. X (job 2) comes first, so the claim of [X, A, B] takes X and skips A, which
+      // shares X's subject; B waits for A. A cursor that passed A would find only the blocked B after it, would not
+      // wrap to the start and would never return A (the stall of the acceptance story's outbox).
+      val recruiter = UserId(UUID.randomUUID())
+      val jobOne = UUID.randomUUID()
+      val x = eventOn(UUID.randomUUID(), recruiter, now)
+      val a = eventOn(jobOne, recruiter, now.plusMillis(1))
+      val b = eventOn(jobOne, recruiter, now.plusMillis(2))
+      val repository = outbox(fixture)
+      for {
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
+        _ <- seed(fixture, List(x, a, b))
+        first <- claim(repository, "w", now.plusSeconds(1), limit = 10)
+        _ <- succeeded(
+          repository.markPublished(x.eventId, first.head.leaseToken, now.plusSeconds(2), now.plusSeconds(60))
+        )
+        second <- claim(repository, "w", now.plusSeconds(3), limit = 10)
+        _ <- succeeded(
+          repository.markPublished(a.eventId, second.head.leaseToken, now.plusSeconds(4), now.plusSeconds(60))
+        )
+        third <- claim(repository, "w", now.plusSeconds(5), limit = 10)
+      } yield {
+        assertEquals(ids(first), List(x.eventId), "A shares X's subject, so only X is leased")
+        assertEquals(ids(second), List(a.eventId), "A is not lost behind its blocked follower")
+        assertEquals(ids(third), List(b.eventId))
+      }
+    }
+  }
+
   test("DDR-06.1 the in-transaction check alone refuses a later event of a pending aggregate") {
     mongoResource.use { fixture =>
       val job = UUID.randomUUID()
