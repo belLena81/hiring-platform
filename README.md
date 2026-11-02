@@ -108,7 +108,10 @@ bash scripts/check-local.sh                                                     
 scripts/run-local-tests.sh analytics '*HiringAnalyticsStreamingBoundaryRecoveryIntegrationSpec'  # one or more analytics integration suites (glob)
 scripts/run-local-tests.sh recovery                                                 # AccountDeletionRecoveryIntegrationSpec (HAL-04.4)
 scripts/run-local-tests.sh retention                                                # KafkaTopicRetentionCheck: shortened Kafka topic retention
+scripts/run-acceptance.sh [--repeat 2]                                              # one scripted UC01-UC13 acceptance run with an evidence file under .local/logs/acceptance/
 ```
+
+`scripts/run-acceptance.sh` is condition 2 of the MVP definition ([end-to-end acceptance specification](docs/specs/hiring-end-to-end-acceptance.md)). It runs the Tier A story and role matrix, the Kafka, Spark and Delta chain to the Admin report, and, when Atlas Local is started and authorized (`ATLAS_TEST_URI='mongodb://127.0.0.1:27018/?directConnection=true' ATLAS_TEST_DISPOSABLE=true ATLAS_TEST_ALLOWED_HOSTS=127.0.0.1:27018` after `docker compose -f compose.atlas-local.yaml up -d --wait`), the search story (UC02, UC06, UC10) against a local deterministic embedding stub. Without Atlas Local those three use cases are reported BLOCKED, never passed. See `scripts/run-acceptance.sh --help`.
 
 The `analytics` mode with suite globs runs integration suites only; unit suites run with `sbt test` in the root or in `analytics/`. In a default analytics run `AccountDeletionRecoveryIntegrationSpec` and opt-in cases such as the broker-outage and retired-publisher checks in `KafkaPublisherAccessIntegrationSpec` are reported as ignored or NOT RUN, not passed. Latency and burst drain-time qualification are deferred to Phase 15; a functional test pass is not an SLO pass.
 

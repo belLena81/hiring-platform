@@ -165,7 +165,13 @@ final class StoryOperations(client: GraphQLClient) {
 
   val accountPassword = "story-account-password-1"
 
-  def signUpCandidate(name: String, skills: List[String], city: String = "Berlin"): IO[StoryActor] =
+  def signUpCandidate(
+      name: String,
+      skills: List[String],
+      city: String = "Berlin",
+      experienceSummary: String = "Five years of backend work",
+      recruiterSearchOptIn: Boolean = true
+  ): IO[StoryActor] =
     send(
       "signUp",
       Json.obj(
@@ -175,9 +181,9 @@ final class StoryOperations(client: GraphQLClient) {
         "profile" -> Json.obj(
           "candidate" -> Json.obj(
             "skills" -> skills.asJson,
-            "experienceSummary" -> "Five years of backend work".asJson,
+            "experienceSummary" -> experienceSummary.asJson,
             "residence" -> Json.obj("country" -> "DE".asJson, "city" -> city.asJson),
-            "recruiterSearchOptIn" -> true.asJson
+            "recruiterSearchOptIn" -> recruiterSearchOptIn.asJson
           )
         )
       ),
@@ -196,10 +202,25 @@ final class StoryOperations(client: GraphQLClient) {
       None
     ).map(authenticate("signUp", _, name, "RECRUITER"))
 
-  def jobInput(title: String, city: String, skills: List[String]): Json = Json.obj(
+  def jobInput(title: String, city: String, skills: List[String]): Json =
+    jobDocument(
+      title,
+      s"$title: a fictional posting used by the acceptance story",
+      List("Two years of relevant experience"),
+      city,
+      skills
+    )
+
+  def jobDocument(
+      title: String,
+      description: String,
+      requirements: List[String],
+      city: String,
+      skills: List[String]
+  ): Json = Json.obj(
     "title" -> title.asJson,
-    "description" -> s"$title: a fictional posting used by the acceptance story".asJson,
-    "requirements" -> List("Two years of relevant experience").asJson,
+    "description" -> description.asJson,
+    "requirements" -> requirements.asJson,
     "skills" -> skills.asJson,
     "country" -> "DE".asJson,
     "city" -> city.asJson,

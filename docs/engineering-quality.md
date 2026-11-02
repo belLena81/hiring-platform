@@ -76,7 +76,7 @@ Scala compiler warnings are checked by the build. Scalafmt is configured with st
 
 ## Operator scripts
 
-Every script in `scripts/` that an operator runs (`generate-local-traffic.sh`, `run-local-tests.sh`, `check-local.sh`, `check-container-runtime.sh`, `scan-container-images.sh`, `verify-account-deletion-recovery.sh`, `check-skills.py`) follows one contract, so nobody has to guess whether a run is stuck. Container entrypoints under `docker/` and the `guard-harness.py` hook are outside it.
+Every script in `scripts/` that an operator runs (`generate-local-traffic.sh`, `run-local-tests.sh`, `check-local.sh`, `check-container-runtime.sh`, `scan-container-images.sh`, `verify-account-deletion-recovery.sh`, `run-acceptance.sh`, `check-skills.py`) follows one contract, so nobody has to guess whether a run is stuck. Container entrypoints under `docker/` and the `guard-harness.py` hook are outside it.
 
 1. **Start line:** what the script does, its parameters with defaults, and the expected duration or bound.
 2. **Progress:** any wait or loop longer than about 10 s prints a status line at least every 10 s (traffic: elapsed/total and request counts by result; test wrapper: phase, elapsed time, last log line).

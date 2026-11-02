@@ -33,7 +33,7 @@ object HiringStoryStack {
   private val configurablePortRange = 1024 to 32767
   private val maxPortAttempts = 200
 
-  private def freePort: IO[Int] = IO.blocking {
+  private[acceptance] def freePort: IO[Int] = IO.blocking {
     val address = InetAddress.getByName("127.0.0.1")
     val start = scala.util.Random.nextInt(configurablePortRange.size)
     Iterator
@@ -46,7 +46,7 @@ object HiringStoryStack {
       .getOrElse(throw new java.io.IOException(s"No free port found in $configurablePortRange"))
   }
 
-  private val childClasspath: String = {
+  private[acceptance] val childClasspath: String = {
     val integrationClasses = Path.of(getClass.getProtectionDomain.getCodeSource.getLocation.toURI)
     val outputDirectory = integrationClasses.getParent
     val projectOutputs =
@@ -56,7 +56,7 @@ object HiringStoryStack {
     (projectOutputs :+ System.getProperty("java.class.path")).mkString(java.io.File.pathSeparator)
   }
 
-  private def hocon(value: String): String = "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+  private[acceptance] def hocon(value: String): String = "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 
   private def configuration(
       manifest: LocalTestServices.Manifest,
@@ -110,7 +110,7 @@ object HiringStoryStack {
       interview: Boolean
   ): Resource[IO, Running] =
     for {
-      root <- runDirectory(manifest)
+      root <- runDirectory(manifest.workspace)
       port <- Resource.eval(freePort)
       jwtSecret = UUID.randomUUID().toString + UUID.randomUUID().toString
       baseUrl = s"http://127.0.0.1:$port"
@@ -119,9 +119,9 @@ object HiringStoryStack {
       _ <- Resource.eval(awaitReady(baseUrl, process))
     } yield Running(baseUrl, database, manifest.mongoUri, namespace, client)
 
-  private def runDirectory(manifest: LocalTestServices.Manifest): Resource[IO, Path] =
+  private[acceptance] def runDirectory(workspace: String): Resource[IO, Path] =
     Resource.make(IO.blocking {
-      val parent = Path.of(manifest.workspace).resolve(".local/data/hiring-story-acceptance")
+      val parent = Path.of(workspace).resolve(".local/data/hiring-story-acceptance")
       val _ = Files.createDirectories(parent)
       Files.createTempDirectory(
         parent,
@@ -145,28 +145,47 @@ object HiringStoryStack {
       root: Path,
       interview: Boolean
   ): Resource[IO, Process] =
+    launch(
+      manifest.workspace,
+      configuration(manifest, namespace, database, port, jwtSecret, interview),
+      root,
+      Nil,
+      "hiring-story-acceptance"
+    )
+
+  /** Starts the real `Main` as a child JVM with a private, owner-only configuration file and a cleared environment. It
+    * is stopped (TERM, then KILL after 15 s) when the resource is released.
+    */
+  private[acceptance] def launch(
+      workspace: String,
+      configText: String,
+      root: Path,
+      jvmOptions: List[String],
+      logName: String
+  ): Resource[IO, Process] =
     Resource.make(IO.blocking {
       val configFile = root.resolve("api.conf")
-      val _ = Files.writeString(configFile, configuration(manifest, namespace, database, port, jwtSecret, interview))
+      val _ = Files.writeString(configFile, configText)
       Files.setPosixFilePermissions(configFile, PosixFilePermissions.fromString("rw-------"))
-      val logs = Path.of(manifest.workspace).resolve(".local/logs/test-services")
+      val logs = Path.of(workspace).resolve(".local/logs/test-services")
       val _ = Files.createDirectories(logs)
       val builder = new ProcessBuilder(
         RecoveryApiProcess.command(
           List(
             Path.of(System.getProperty("java.home"), "bin", "java").toString,
             "-Dfile.encoding=UTF-8",
-            "-Dotel.sdk.disabled=true",
+            "-Dotel.sdk.disabled=true"
+          ) ++ jvmOptions ++ List(
             s"-Dconfig.file=${configFile.toAbsolutePath}",
             "-cp",
             childClasspath,
             "com.example.graphQL.cats.Main"
           )
         )*
-      ).directory(Files.createDirectories(logs.resolve("hiring-story-acceptance")).toFile)
+      ).directory(Files.createDirectories(logs.resolve(logName)).toFile)
       // Inherited application or provider configuration cannot override the synthetic fixture configuration.
       builder.environment().clear()
-      val _ = builder.redirectErrorStream(true).redirectOutput(logs.resolve("hiring-story-acceptance-api.log").toFile)
+      val _ = builder.redirectErrorStream(true).redirectOutput(logs.resolve(s"$logName-api.log").toFile)
       builder.start()
     })(process =>
       IO.blocking {
@@ -179,7 +198,11 @@ object HiringStoryStack {
       }
     )
 
-  private def awaitReady(baseUrl: String, process: Process): IO[Unit] = {
+  private[acceptance] def awaitReady(
+      baseUrl: String,
+      process: Process,
+      deadline: FiniteDuration = readyDeadline
+  ): IO[Unit] = {
     val http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build()
     val probe = IO
       .blocking {
@@ -191,7 +214,7 @@ object HiringStoryStack {
       }
       .handleErrorWith(error => if (process.isAlive) IO.pure(false) else IO.raiseError(error))
     def loop: IO[Unit] = probe.flatMap(ready => if (ready) IO.unit else IO.sleep(500.millis) *> loop)
-    loop.timeoutTo(readyDeadline, IO.raiseError(new IllegalStateException("The real Main did not become ready")))
+    loop.timeoutTo(deadline, IO.raiseError(new IllegalStateException("The real Main did not become ready")))
   }
 }
 
