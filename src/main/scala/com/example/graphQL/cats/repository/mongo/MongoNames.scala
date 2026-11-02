@@ -34,6 +34,39 @@ private[mongo] object MongoCollections {
   val InterviewCalendarReservations = "interview_calendar_reservations"
   val InterviewCalendarParticipantLocks = "interview_calendar_participant_locks"
   val InterviewNotificationReceipts = "interview_notification_receipts"
+
+  /** Every collection name above; the closed set of `db.collection.name` values in telemetry. */
+  val All: Set[String] = Set(
+    InterviewSubjectCleanup,
+    RecruiterJobClosureWork,
+    Users,
+    Jobs,
+    Applications,
+    ApplicationEvents,
+    AccountRegistry,
+    EmbeddingWork,
+    EventOutbox,
+    OutboxSubjectFences,
+    SearchSessions,
+    SearchSessionWork,
+    ConsumerReceipts,
+    MutationReceipts,
+    EventQuarantine,
+    AnalyticsErasureRequests,
+    AnalyticsErasureCompletions,
+    AnalyticsErasureDeltaFiles,
+    AnalyticsWorkerHeartbeats,
+    AnalyticsReportSnapshots,
+    AnalyticsReportControl,
+    AnalyticsReportRuns,
+    HiringMigrationLedger,
+    InterviewWorkflows,
+    InterviewWorkflowCommands,
+    InterviewWorkflowInbox,
+    InterviewCalendarReservations,
+    InterviewCalendarParticipantLocks,
+    InterviewNotificationReceipts
+  )
 }
 
 /** Persisted ordinary index names; every index is created and verified by `MongoHiringIndexSetup`. */

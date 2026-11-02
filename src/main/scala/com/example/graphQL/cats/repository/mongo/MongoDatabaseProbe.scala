@@ -15,9 +15,11 @@ import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
 object MongoDatabaseProbe {
-  def effectiveSettings(uri: String): MongoClientSettings =
-    MongoClientSettings
-      .builder()
+  def effectiveSettings(
+      uri: String,
+      instrumentation: MongoClientSettings.Builder => MongoClientSettings.Builder = MongoCommandTelemetry.none
+  ): MongoClientSettings =
+    instrumentation(MongoClientSettings.builder())
       .applyConnectionString(new com.mongodb.ConnectionString(uri))
       // Explicit after the URI so the effective concern never depends on the URI or a server default (DDR-05.2).
       .writeConcern(MongoConcernPolicy.writeConcern)
@@ -34,8 +36,11 @@ object MongoDatabaseProbe {
       }
       .build()
 
-  def clientResource(uri: String): Resource[IO, CatsMongoClient[IO]] =
-    CatsMongoClient.create[IO](effectiveSettings(uri))
+  def clientResource(
+      uri: String,
+      instrumentation: MongoClientSettings.Builder => MongoClientSettings.Builder = MongoCommandTelemetry.none
+  ): Resource[IO, CatsMongoClient[IO]] =
+    CatsMongoClient.create[IO](effectiveSettings(uri, instrumentation))
 
   def connectionMetadata(uri: String, database: String): Map[LogField, String] =
     Map(

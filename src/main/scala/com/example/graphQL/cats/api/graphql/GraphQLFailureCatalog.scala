@@ -317,6 +317,30 @@ private[graphql] object GraphQLFailureCatalog {
   private[graphql] def codesWithConflictingDescriptions: List[String] =
     errorCodes.groupBy(_._1).collect { case (code, entries) if entries.size > 1 => code }.toList.sorted
 
+  private val UnauthenticatedCodes = Set("UNAUTHORIZED", "INVALID_CREDENTIALS")
+  private val DeniedCodes = Set("FORBIDDEN", "CANDIDATE_REQUIRED", "RECRUITER_REQUIRED", "ADMIN_BOOTSTRAP_ONLY")
+  private val RejectedCodes = Set("RATE_LIMITED")
+  // Marked exceptional (a top-level error) although the caller caused it.
+  private val CallerInputCodes = Set("INPUT_TOO_LARGE")
+  private val ExceptionalCodes: Set[String] = FailureMetadata.values.filter(_.exceptional).map(_.code).toSet
+  private val KnownCodes: Set[String] = FailureMetadata.values.map(_.code).toSet
+
+  /** The bounded outcome class of an error code in a GraphQL response, for metrics. An absent or unrecognised code (for
+    * example the generic `Execution failed` error) is `Internal`, so a new failure never silently counts as a client
+    * error. A known code marked exceptional (a dependency or capability failure) is `Internal`; every other known code
+    * is an expected `FieldError`.
+    */
+  private[graphql] def outcomeOf(code: Option[String]): GraphQLOutcome =
+    code match {
+      case Some(value) if UnauthenticatedCodes.contains(value) => GraphQLOutcome.Unauthenticated
+      case Some(value) if DeniedCodes.contains(value)          => GraphQLOutcome.Denied
+      case Some(value) if RejectedCodes.contains(value)        => GraphQLOutcome.Rejected
+      case Some(value) if CallerInputCodes.contains(value)     => GraphQLOutcome.FieldError
+      case Some(value) if ExceptionalCodes.contains(value)     => GraphQLOutcome.Internal
+      case Some(value) if KnownCodes.contains(value)           => GraphQLOutcome.FieldError
+      case _                                                   => GraphQLOutcome.Internal
+    }
+
   def classify(error: UseCaseError): GraphQLFailure =
     error match {
       case UseCaseError.Authentication(value)    => classifyAuthentication(value)

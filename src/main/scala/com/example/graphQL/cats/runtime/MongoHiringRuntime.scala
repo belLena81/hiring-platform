@@ -53,7 +53,9 @@ import com.example.graphQL.cats.infrastructure.auth.{
 import com.example.graphQL.cats.infrastructure.kafka.OperationalEventKafkaRuntime
 import scala.concurrent.duration.*
 import com.example.graphQL.cats.infrastructure.embedding.VoyageEmbeddingService
+import com.mongodb.MongoClientSettings
 import com.example.graphQL.cats.repository.mongo.{
+  MongoCommandTelemetry,
   MongoApplicationRepository,
   MongoAdminSeed,
   MongoInterviewWorkflowRepository,
@@ -96,7 +98,11 @@ object MongoHiringRuntime {
     override def wake: IO[Unit] = IO.unit
   }
 
-  def resource(config: AppConfig, diagnostics: Diagnostics[IO]): Resource[IO, MongoHiringRuntime] = {
+  def resource(
+      config: AppConfig,
+      diagnostics: Diagnostics[IO],
+      mongoInstrumentation: MongoClientSettings.Builder => MongoClientSettings.Builder = MongoCommandTelemetry.none
+  ): Resource[IO, MongoHiringRuntime] = {
     // Every service-stamped timestamp is persisted by MongoDB at millisecond precision; one clock keeps them equal.
     val clock: Clock[IO] = MillisecondClock(Clock[IO])
     for {
@@ -114,7 +120,7 @@ object MongoHiringRuntime {
           breakers.atlasSearch
         )
       )
-      client <- MongoDatabaseProbe.clientResource(config.mongoUri)
+      client <- MongoDatabaseProbe.clientResource(config.mongoUri, mongoInstrumentation)
       database <- Resource.eval(client.getDatabase(config.mongoDatabase))
       // Startup fails closed: nothing below runs, and readiness never opens, unless setup succeeded.
       _ <- Resource.eval(

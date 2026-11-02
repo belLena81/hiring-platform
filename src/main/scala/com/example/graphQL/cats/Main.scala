@@ -29,9 +29,15 @@ import com.example.graphQL.cats.infrastructure.telemetry.{
   BacklogCapability,
   BacklogMetrics,
   BacklogSampler,
+  GraphQLOutcomeMetrics,
   TelemetryRuntime
 }
-import com.example.graphQL.cats.repository.mongo.{MongoBacklogSources, MongoDatabaseProbe}
+import com.example.graphQL.cats.repository.mongo.{
+  MongoBacklogSources,
+  MongoClientRole,
+  MongoCommandTelemetry,
+  MongoDatabaseProbe
+}
 import com.example.graphQL.cats.runtime.{HiringLogValues, HiringPlatformServer, MongoHiringRuntime}
 
 object Main extends IOApp {
@@ -45,10 +51,15 @@ object Main extends IOApp {
       persistedQueries: PersistedQueryPolicy,
       diagnostics: Diagnostics[IO]
   ): Resource[IO, Unit] = for {
-    telemetry <- TelemetryRuntime.resource
-    runtime <- MongoHiringRuntime.resource(config, diagnostics)
+    telemetry <- TelemetryRuntime.resource(this.runtime.metrics)
+    graphQLOutcomes <- Resource.eval(GraphQLOutcomeMetrics.create(telemetry.meterProvider))
+    mongoCommands <- Resource.eval(IO.delay(MongoCommandTelemetry.create(telemetry.openTelemetry)))
+    runtime <- MongoHiringRuntime.resource(config, diagnostics, mongoCommands.instrument(MongoClientRole.Hiring))
     // Read-only sampling uses its own small client so a slow sample cannot take a connection from hiring work.
-    samplingClient <- MongoDatabaseProbe.clientResource(config.mongoUri)
+    samplingClient <- MongoDatabaseProbe.clientResource(
+      config.mongoUri,
+      mongoCommands.instrument(MongoClientRole.BacklogSampler)
+    )
     samplingDatabase <- Resource.eval(samplingClient.getDatabase(config.mongoDatabase))
     backlogSampler <- Resource.eval(
       BacklogSampler.create(
@@ -87,7 +98,8 @@ object Main extends IOApp {
         ClientAddressResolver(config.trustedProxy),
         config.discovery.maxRoots,
         config.graphql.schemaExposure,
-        persistedQueries
+        persistedQueries,
+        graphQLOutcomes
       ),
       telemetry.tracer
     )
@@ -115,6 +127,7 @@ object Main extends IOApp {
   /** The configuration is read once; the masking flag is read leniently first so invalid files still log safely. */
   def run(args: List[String]): IO[ExitCode] =
     for {
+      _ <- TelemetryRuntime.selectContextStorage
       (mask, loaded) <- AppConfig.loadWithMask
       diagnostics <- SafeDiagnostics.configure(mask, HiringLogValues.allowed)
       exit <- loaded.fold(

@@ -4,7 +4,15 @@ import cats.data.{Kleisli, OptionT}
 import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.api.auth.AuthFailure
-import com.example.graphQL.cats.api.graphql.{CostReceipt, GraphQLRequest, HiringGraphQLSchema, RequestContextParameters}
+import com.example.graphQL.cats.api.graphql.{
+  CostReceipt,
+  GraphQLOperationOutcomes,
+  GraphQLOutcome,
+  GraphQLRequest,
+  GraphQLRootFieldOutcome,
+  HiringGraphQLSchema,
+  RequestContextParameters
+}
 import com.example.graphQL.cats.shared.HiringHttpPaths
 import com.example.graphQL.cats.service.{ActorContext, Diagnostics, LogEvent, LogField, LogOutcome}
 import com.example.graphQL.cats.service.Diagnostics.*
@@ -46,6 +54,10 @@ private[http] final class GraphQLHttpRoutes(
 ) {
   private object dsl extends Http4sDsl[IO]
   import dsl.*
+
+  /** Counting never changes the response: a recorder failure is swallowed, cancellation still propagates. */
+  private def count(outcomes: List[GraphQLRootFieldOutcome]): IO[Unit] =
+    dependencies.graphQLOutcomes.record(outcomes).handleError(_ => ())
 
   private def error(status: Status, message: String, mediaType: MediaType): Response[IO] =
     HttpMiddleware.errorResponse(status, message).putHeaders(`Content-Type`(mediaType))
@@ -129,10 +141,13 @@ private[http] final class GraphQLHttpRoutes(
         .foldF(
           _ => rejected(HttpRejection.InvalidRequest, requestId, mediaType = mediaType),
           parsed =>
-            if (!dependencies.persistedQueries.admits(parsed.query)) persistedQueryNotFound(requestId, mediaType)
+            if (!dependencies.persistedQueries.admits(parsed.query))
+              count(GraphQLOperationOutcomes.invalidRequest) *> persistedQueryNotFound(requestId, mediaType)
             else
               dependencies.documentCache.document(parsed.query).flatMap {
-                case Left(_)         => rejected(HttpRejection.InvalidQuery, requestId, mediaType = mediaType)
+                case Left(_) =>
+                  count(GraphQLOperationOutcomes.invalidRequest) *>
+                    rejected(HttpRejection.InvalidQuery, requestId, mediaType = mediaType)
                 case Right(document) => {
                   val context = dependencies.contextFactory.resource(
                     RequestContextParameters(
@@ -161,11 +176,18 @@ private[http] final class GraphQLHttpRoutes(
                       case Right(result) =>
                         completedGraphQL(parsed, result, requestId, mediaType, Some(document.document))
                       case Left(HiringGraphQLSchema.Failure.InvalidQuery) =>
-                        rejected(HttpRejection.InvalidQuery, requestId, mediaType = mediaType)
+                        count(GraphQLOperationOutcomes.invalidRequest) *>
+                          rejected(HttpRejection.InvalidQuery, requestId, mediaType = mediaType)
                       case Left(HiringGraphQLSchema.Failure.CostBudgetExhausted(retryAfterSeconds, cost)) =>
-                        costBudgetExhausted(retryAfterSeconds, cost, requestId, mediaType)
+                        count(
+                          GraphQLOperationOutcomes
+                            .refused(document.document, parsed.operationName, GraphQLOutcome.Rejected)
+                        ) *> costBudgetExhausted(retryAfterSeconds, cost, requestId, mediaType)
                       case Left(HiringGraphQLSchema.Failure.Internal) =>
-                        rejected(HttpRejection.Internal, requestId, mediaType = mediaType)
+                        count(
+                          GraphQLOperationOutcomes
+                            .refused(document.document, parsed.operationName, GraphQLOutcome.Internal)
+                        ) *> rejected(HttpRejection.Internal, requestId, mediaType = mediaType)
                     }
                 }
               }
@@ -186,7 +208,12 @@ private[http] final class GraphQLHttpRoutes(
         (if (result.hcursor.downField("errors").succeeded) LogOutcome.FieldError else LogOutcome.Completed).wire
     ) ++
       operationName.map(LogField.OperationName -> _)
-    diagnostics
+    val counted = document.fold(IO.unit)(parsedDocument =>
+      IO.delay(GraphQLOperationOutcomes.classify(parsedDocument, parsed.operationName, result))
+        .attempt
+        .flatMap(_.traverse_(count))
+    )
+    counted *> diagnostics
       .emit(LogEvent.GraphQLCompleted, Some(requestId), fields = fields)
       .as(graphqlJson(Status.Ok, result, mediaType))
   }

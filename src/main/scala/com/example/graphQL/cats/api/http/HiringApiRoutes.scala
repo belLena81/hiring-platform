@@ -9,7 +9,12 @@ import com.example.graphQL.cats.api.admission.{
   PersistedQueryPolicy
 }
 import com.example.graphQL.cats.api.auth.AuthFailure
-import com.example.graphQL.cats.api.graphql.{GraphQLDocumentCache, HiringGraphQLServices, RequestContextFactory}
+import com.example.graphQL.cats.api.graphql.{
+  GraphQLDocumentCache,
+  GraphQLOutcomeRecorder,
+  HiringGraphQLServices,
+  RequestContextFactory
+}
 import com.example.graphQL.cats.shared.HiringHttpPaths
 import com.example.graphQL.cats.service.{
   ActorContext,
@@ -86,7 +91,8 @@ object HiringApiRoutes {
       clientAddressResolver: ClientAddressResolver,
       discoveryMaxRoots: Int = 4,
       schemaExposure: Boolean = false,
-      persistedQueries: PersistedQueryPolicy = PersistedQueryPolicy.Off
+      persistedQueries: PersistedQueryPolicy = PersistedQueryPolicy.Off,
+      graphQLOutcomes: GraphQLOutcomeRecorder = GraphQLOutcomeRecorder.noop
   )
 
   final case class HttpConfig(admissionPermits: Long, requestTimeout: FiniteDuration)

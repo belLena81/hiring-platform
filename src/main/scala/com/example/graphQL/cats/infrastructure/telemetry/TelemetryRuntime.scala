@@ -9,7 +9,9 @@ import org.http4s.otel4s.middleware.trace.PerRequestFilter
 import org.http4s.otel4s.middleware.trace.redact.{PathRedactor, QueryRedactor}
 import org.http4s.otel4s.middleware.trace.server.{ServerMiddleware, ServerSpanDataProvider}
 import org.http4s.server.middleware.Metrics
+import org.typelevel.otel4s.context.LocalProvider
 import org.typelevel.otel4s.oteljava.OtelJava
+import org.typelevel.otel4s.oteljava.context.{Context, IOLocalContextStorage, LocalContextProvider}
 import org.typelevel.otel4s.metrics.MeterProvider
 import org.typelevel.otel4s.trace.Tracer
 import org.typelevel.otel4s.trace.TracerProvider
@@ -22,7 +24,8 @@ import org.typelevel.otel4s.trace.TracerProvider
 final case class TelemetryRuntime(
     tracer: Tracer[IO],
     tracerProvider: TracerProvider[IO],
-    meterProvider: MeterProvider[IO]
+    meterProvider: MeterProvider[IO],
+    openTelemetry: io.opentelemetry.api.OpenTelemetry
 ) {
   def instrument(routes: HttpRoutes[IO]): Resource[IO, HttpApp[IO]] = Resource.eval {
     given TracerProvider[IO] = tracerProvider
@@ -60,12 +63,37 @@ object TelemetryRuntime {
   private[telemetry] def routeLabel(request: Request[IO]): String =
     if (isSafe(request.uri.path)) request.uri.path.renderString else "_unmatched"
 
-  def resource: Resource[IO, TelemetryRuntime] =
-    OtelJava.autoConfigured[IO]().flatMap { otel =>
-      Resource.eval(
-        otel.tracerProvider
-          .get(TracerName)
-          .map(tracer => TelemetryRuntime(tracer, otel.tracerProvider, otel.meterProvider))
-      )
+  private val ContextStorageProperty = "io.opentelemetry.context.contextStorageProvider"
+
+  /** Must run before the first OpenTelemetry use in the process. `otel4s-oteljava-context-storage` registers a
+    * fiber-backed Java context storage by service loader; without `-Dcats.effect.trackFiberContext=true` that storage
+    * throws on every `Context.current()` and `makeCurrent()`, which breaks otel4s instruments and the SDK. So when
+    * fiber tracking is off the standard thread-local storage is selected explicitly (an operator's own setting is
+    * kept).
+    */
+  def selectContextStorage: IO[Unit] =
+    IO.delay {
+      if (!cats.effect.IOLocal.isPropagating && Option(System.getProperty(ContextStorageProperty)).isEmpty)
+        System.setProperty(ContextStorageProperty, "default"): Unit
+    }
+
+  /** The fiber-following context provider when `-Dcats.effect.trackFiberContext=true` is set; otherwise otel4s's own
+    * `IOLocal` provider. With the first, `Context.current()` on a thread running a fiber is that fiber's context, which
+    * is how the MongoDB driver adapter finds the request span for its client spans. Without the flag everything else
+    * works as before and Mongo commands are recorded as metrics only (no spans).
+    */
+  private[telemetry] def contextProvider: IO[LocalContextProvider[IO]] = {
+    val following: LocalContextProvider[IO] = IOLocalContextStorage.localProvider[IO]
+    following.local.as(following).handleError(_ => LocalProvider[IO, Context])
+  }
+
+  def resource(runtimeMetrics: cats.effect.unsafe.metrics.IORuntimeMetrics): Resource[IO, TelemetryRuntime] =
+    Resource.eval(contextProvider).flatMap { provider =>
+      OtelJava.autoConfigured[IO]()(using summon, provider).flatMap { otel =>
+        for {
+          tracer <- Resource.eval(otel.tracerProvider.get(TracerName))
+          _ <- RuntimeMetrics.register(otel.underlying, otel.meterProvider, runtimeMetrics)
+        } yield TelemetryRuntime(tracer, otel.tracerProvider, otel.meterProvider, otel.underlying)
+      }
     }
 }

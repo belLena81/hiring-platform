@@ -13,6 +13,22 @@ Opt-in, local-workstation-only stack for looking at the API's metrics, traces an
 
 Files: `compose.observability.yaml`, `docker/observability/**`, `scripts/generate-local-traffic.sh`.
 
+## Metric list (application instruments)
+
+OpenTelemetry names as defined in code. The Prometheus names are derived from the collector's usual translation (dots become underscores, a unit suffix is added, counters get `_total`) and have **not** been observed on a running stack; confirm them in the first-run checklist before dashboards or alerts depend on them.
+
+| Instrument (OpenTelemetry) | Type, unit | Attributes (closed sets) | Source |
+|---|---|---|---|
+| `hiring.backlog.pending`, `hiring.backlog.oldest_pending_age`, `hiring.backlog.sample_age` | gauges, `{item}`, `s`, `s` | `hiring.capability` = `embedding_work`, `operational_event_outbox` | `BacklogMetrics` |
+| `hiring.graphql.root_field.executions` | counter, `{execution}` | `graphql.operation.type` = `query`, `mutation`, `_unknown`; `hiring.graphql.root_field` = a Query or Mutation field name of the schema, or `_introspection`, `_unknown`, `_invalid`; `hiring.graphql.outcome` = `success`, `field_error`, `denied`, `unauthenticated`, `rejected`, `internal` | `GraphQLOutcomeMetrics`, counted in `GraphQLHttpRoutes` (rule: `GraphQLOperationOutcomes`) |
+| `db.client.operation.duration` | histogram, `s` (buckets 1 ms to 10 s) | `db.system.name` = `mongodb`; `db.operation.name` = fixed command list or `other`; `db.collection.name` = a persisted collection or `other` (absent for commands without one); `hiring.mongo.client` = `hiring`, `backlog_sampler`; `error.type` (failures only) = `duplicate_key`, `write_conflict`, `timeout`, `unavailable`, `write_error`, `command_error` | `MongoCommandTelemetry` (driver command listener) |
+| `jvm.memory.used`, `jvm.memory.committed`, `jvm.memory.limit`, `jvm.memory.used_after_last_gc`, `jvm.gc.duration`, `jvm.thread.count`, `jvm.class.loaded`, `jvm.class.unloaded`, `jvm.class.count`, `jvm.cpu.time`, `jvm.cpu.count`, `jvm.cpu.recent_utilization` | OpenTelemetry JVM semantic conventions | `jvm.memory.type`, `jvm.memory.pool.name`, `jvm.gc.name`, `jvm.gc.action`, `jvm.thread.daemon`, `jvm.thread.state` | `RuntimeMetrics` (`opentelemetry-runtime-telemetry`) |
+| `cats.effect.runtime.cpu.starvation.count`, `.clock.drift.current`, `.clock.drift.max`; `cats.effect.runtime.wstp.compute.thread.count`, `.thread.active.count`, `.thread.searching.count`, `.thread.blocked.count`, `.fiber.enqueued.count`, `.fiber.suspended.count` | counter and gauges (`{event}`, `ms`, `{thread}`, `{fiber}`) | `pool.id` (compute metrics only) | `RuntimeMetrics` (`otel4s-instrumentation-metrics`) |
+
+The existing HTTP server metrics and spans come from the http4s otel4s middleware.
+
+Mongo client spans (`<command> <collection>`, kind CLIENT, the same attributes) are children of the current request span only when the JVM runs with `-Dcats.effect.trackFiberContext=true` (set for `sbt run` and tests). The container deliberately does not set it (decision D13 of the container runtime specification), so in the container Mongo operations record the duration histogram without span parenting and create no span; the same holds for background workers (outbox publisher, embedding workers, backlog sampler). When the flag is off, `Main` selects the standard OpenTelemetry thread-local context storage (`TelemetryRuntime.selectContextStorage`), because the fiber-backed storage that `otel4s-oteljava-context-storage` registers throws on every otel4s instrument call without the flag. GraphQL requests rejected before a document exists (malformed JSON, unsupported media type, HTTP authentication failures, payload too large) appear only in the HTTP server metrics, not in the GraphQL counter; parse failures, invalid documents and persisted-query misses are the `_invalid` count. Field-level GraphQL errors return HTTP 200, so use `hiring.graphql.root_field.executions` by `hiring.graphql.outcome`, not the HTTP status, for GraphQL failure ratios; a typed business payload (for example an interview action refusal) is not an error entry and counts as `success`.
+
 ## Run
 
 Create the secret files described in the README ("Container runtime"), then:

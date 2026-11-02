@@ -10,6 +10,9 @@ lazy val http4sVersion = "0.23.37"
 lazy val otel4sVersion = "1.1.0"
 lazy val http4sOtelMiddlewareVersion = "0.19.0"
 lazy val opentelemetryVersion = "1.66.0"
+// 2.32.0-alpha is the instrumentation release built against OpenTelemetry API 1.66.0 (opentelemetryVersion). "alpha" is
+// the upstream label of the whole instrumentation distribution; the emitted jvm.* metric names are stable conventions.
+lazy val opentelemetryInstrumentationVersion = "2.32.0-alpha"
 lazy val jwtScalaVersion = "11.0.4"
 lazy val argon2Version = "2.12"
 lazy val log4catsVersion = "2.8.0"
@@ -116,6 +119,8 @@ lazy val root = (project in file("."))
       "org.http4s" %% "http4s-otel4s-middleware-metrics" % http4sOtelMiddlewareVersion,
       "org.typelevel" %% "otel4s-oteljava" % otel4sVersion,
       "org.typelevel" %% "otel4s-oteljava-context-storage" % otel4sVersion,
+      "org.typelevel" %% "otel4s-instrumentation-metrics" % otel4sVersion,
+      "io.opentelemetry.instrumentation" % "opentelemetry-runtime-telemetry" % opentelemetryInstrumentationVersion,
       "io.opentelemetry" % "opentelemetry-exporter-otlp" % opentelemetryVersion % Runtime,
       "io.opentelemetry" % "opentelemetry-sdk-extension-autoconfigure" % opentelemetryVersion % Runtime,
       "io.circe" %% "circe-core" % circeVersion,

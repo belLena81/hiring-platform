@@ -67,3 +67,6 @@ spark-warehouse/
 
 # Personal article drafts
 /posts/
+
+# sbt-jacoco runtime data written to the working directory
+/jacoco.exec
