@@ -18,6 +18,7 @@ import mongo4cats.database.MongoDatabase
   *   2. the append-only `application_events` row;
   *   3. the outbox rows.
   *
+  * Conflicts at this step are logged as `APPLICATION_WRITE_CONFLICT` whoever calls it, including the interview stores.
   * The caller supplies the transaction session; all three steps commit or abort together, so `applications.status`
   * equals the `newStatus` of the latest event of that application.
   */
@@ -43,6 +44,19 @@ private[mongo] final class ApplicationStatusWrite(database: MongoDatabase[IO], d
       event: ApplicationEvent,
       operationalEvents: List[OperationalEventEnvelope]
   ): RepositoryF[IO, Unit] =
+    ApplicationWriteConflict.onTransient(
+      diagnostics,
+      ConflictSource.StatusWriteConflict,
+      "applications.statusWrite",
+      Some(updated.id.value)
+    )(sequence(session, updated, event, operationalEvents))
+
+  private def sequence(
+      session: Option[ClientSession[IO]],
+      updated: Application,
+      event: ApplicationEvent,
+      operationalEvents: List[OperationalEventEnvelope]
+  ): RepositoryF[IO, Unit] =
     for {
       previous <- MongoF.fromEither(
         Either
@@ -52,12 +66,24 @@ private[mongo] final class ApplicationStatusWrite(database: MongoDatabase[IO], d
       result <- RepositoryF.lift(
         MongoSessionOperations.updateOne(applications, session, guard(updated, previous), set(updated))
       )
-      _ <- MongoF.fromEither(MongoRepositorySupport.matchedOne(result))
+      _ <- onConflict(ConflictSource.StatusGuardNoMatch, "applications.statusGuard", updated)(
+        MongoF.fromEither(MongoRepositorySupport.matchedOne(result))
+      )
       _ <- MongoRepositorySupport.repositoryGuard(diagnostics, "applications.insertStatusEvent") {
-        RepositoryF.lift(MongoApplicationEventInsertion.insert(events, session, event)).void
+        ApplicationWriteConflict.onDuplicateKey(
+          diagnostics,
+          ConflictSource.HistoryDuplicateKey,
+          "applications.insertStatusEvent",
+          Some(updated.id.value)
+        )(RepositoryF.lift(MongoApplicationEventInsertion.insert(events, session, event)).void)
       }(MongoErrors.duplicateAs(RepositoryError.Conflict))
       _ <- MongoOperationalEventInsertion.insert(outbox, session, operationalEvents, updated.updatedAt, diagnostics)
     } yield ()
+
+  private def onConflict[A](source: ConflictSource, operation: String, updated: Application)(
+      step: RepositoryF[IO, A]
+  ): RepositoryF[IO, A] =
+    ApplicationWriteConflict.onConflict(diagnostics, source, operation, Some(updated.id.value))(step)
 
   private def guard(updated: Application, previous: ApplicationStatus) =
     MongoFilter.and(

@@ -470,6 +470,16 @@ private[mongo] object MongoRepositorySupport {
   ): Either[RepositoryError, Unit] =
     Either.cond(result.getDeletedCount == 1L, (), mismatch)
 
+  /** A transaction that ran out of retries: the failure metadata plus the conflict source `transaction-exhausted`. */
+  def reportExhausted(diagnostics: Diagnostics[IO], error: Throwable, applicationOperation: Option[String]): IO[Unit] =
+    applicationOperation.traverse_(
+      ApplicationWriteConflict.report(diagnostics, ConflictSource.TransactionExhausted, _)
+    ) *> diagnostics.emit(
+      LogEvent.MongoRepositoryFailed,
+      fields = LogFields.failure(error) + (LogField.SpanName -> "transaction.exhausted") +
+        (LogField.ConflictSource -> ConflictSource.TransactionExhausted.label)
+    )
+
   def reportFailure(diagnostics: Diagnostics[IO], operation: String, error: Throwable): IO[Unit] =
     diagnostics.emit(
       LogEvent.MongoRepositoryFailed,
@@ -483,7 +493,8 @@ private[mongo] object MongoRepositorySupport {
     */
   def guard[A](diagnostics: Diagnostics[IO], operation: String)(result: IO[A])(map: Throwable => A): IO[A] =
     result.handleErrorWith { error =>
-      // A retriable conflict is routine under contention: only the owning runner logs it, once, when retries run out.
+      // A retriable conflict is routine under contention: the owning runner logs it once, when retries run out. Write
+      // steps that attribute their own retried attempts (`ApplicationWriteConflict.onTransient`) log before re-raising.
       if (MongoErrors.isTransient(error)) IO.raiseError[A](error)
       else reportFailure(diagnostics, operation, error).as(map(error))
     }

@@ -166,7 +166,12 @@ final class MongoApplicationRepository private (
       MongoRepositorySupport
         .repositoryGuard(diagnostics, "applications.createWithEvents") {
           MongoMutationWriteContext.run(context, transactionRunner, transactionRequired = true)(session =>
-            fenced("applications.submitFence", writeFence.forSubmit(session, actor, application.jobId)) *>
+            fenced(
+              "applications.submitFence",
+              writeFence.forSubmit(session, actor, application.jobId),
+              application.id.value,
+              actor.id.value
+            ) *>
               submitOnceWithSession(observedJob, application, initialEvent, operationalEvents, session)
           )
         }(MongoErrors.duplicateAs(RepositoryError.DuplicateApplication))
@@ -186,7 +191,10 @@ final class MongoApplicationRepository private (
           MongoMutationWriteContext.run(context, transactionRunner, transactionRequired = true)(session =>
             fenced(
               "applications.statusFence",
-              writeFence.forStatusChange(session, actor, application.jobId, application.candidateId, application.status)
+              writeFence
+                .forStatusChange(session, actor, application.jobId, application.candidateId, application.status),
+              application.id.value,
+              actor.id.value
             ) *>
               updateStatusWithSession(application, event, operationalEvents, session)
           )
@@ -199,9 +207,34 @@ final class MongoApplicationRepository private (
       session: Option[ClientSession[IO]]
   ): RepositoryF[IO, Unit] = statusWrite(session, application, event, operationalEvents)
 
-  /** A duplicate key on the actor's fence document is a lost race (`Conflict`), never a `DuplicateApplication`. */
-  private def fenced(operation: String, fence: RepositoryF[IO, Unit]): RepositoryF[IO, Unit] =
-    MongoRepositorySupport.repositoryGuard(diagnostics, operation)(fence)(MongoErrors.duplicateAsConflict)
+  /** A duplicate key on the actor's fence document is a lost race (`Conflict`), never a `DuplicateApplication`. Only
+    * the duplicate key and the retried write conflicts are attributed here; the other typed `Conflict` of the fence
+    * (the job's recruiter is no longer active) is a business refusal and is deliberately not logged as a write
+    * conflict.
+    */
+  private def fenced(
+      operation: String,
+      fence: RepositoryF[IO, Unit],
+      application: java.util.UUID,
+      actor: java.util.UUID
+  ): RepositoryF[IO, Unit] =
+    MongoRepositorySupport.repositoryGuard(diagnostics, operation)(
+      ApplicationWriteConflict.onDuplicateKey(
+        diagnostics,
+        ConflictSource.FenceDuplicateKey,
+        operation,
+        Some(application),
+        Some(actor)
+      )(
+        ApplicationWriteConflict.onTransient(
+          diagnostics,
+          ConflictSource.FenceWriteConflict,
+          operation,
+          Some(application),
+          Some(actor)
+        )(fence)
+      )
+    )(MongoErrors.duplicateAsConflict)
 
   private def baseFilter(field: String, id: String, page: ApplicationPageRequest): MongoFilter = {
     val statusFilter = page.status.map(status => MongoFilter.eq(MongoFields.Status, status.toString))
@@ -286,7 +319,13 @@ object MongoApplicationRepository {
     new MongoApplicationRepository(
       database,
       MongoTransactionRunner
-        .sessions(client, RepositoryError.DuplicateApplication, diagnostics = diagnostics, breaker = breaker),
+        .sessions(
+          client,
+          RepositoryError.DuplicateApplication,
+          diagnostics = diagnostics,
+          breaker = breaker,
+          exhaustedOperation = Some("applications.writeTransaction")
+        ),
       diagnostics
     )
 }

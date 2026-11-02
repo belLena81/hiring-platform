@@ -80,7 +80,12 @@ final class MongoMutationReceiptRepository(
               }
             } yield result
           case Some(receipt) if receipt.fingerprint != fingerprint =>
-            MongoF.pure(MutationReceiptExecution.FingerprintMismatch)
+            RepositoryF
+              .lift(
+                ApplicationWriteConflict
+                  .report(diagnostics, ConflictSource.ReceiptFingerprint, "mutationReceipt.execute")
+              )
+              .as(MutationReceiptExecution.FingerprintMismatch)
           case Some(receipt) if receipt.state == MutationReceiptState.InProgress =>
             MongoF.pure(MutationReceiptExecution.InProgress)
           case Some(receipt) =>
@@ -108,7 +113,10 @@ final class MongoMutationReceiptRepository(
   private def insert(session: Option[ClientSession[IO]], receipt: Document): RepositoryF[IO, Unit] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "mutationReceipt.insert")(
-        RepositoryF.lift(MongoSessionOperations.insertOne(collection, session, receipt)).void
+        ApplicationWriteConflict
+          .onDuplicateKey(diagnostics, ConflictSource.ReceiptDuplicateKey, "mutationReceipt.insert")(
+            RepositoryF.lift(MongoSessionOperations.insertOne(collection, session, receipt)).void
+          )
       )(MongoErrors.duplicateAsConflict)
 
   private def complete(
@@ -132,9 +140,21 @@ final class MongoMutationReceiptRepository(
     )
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "mutationReceipt.complete")(
-        RepositoryF
-          .lift(MongoSessionOperations.updateOne(collection, session, filter, update))
-          .subflatMap(MongoRepositorySupport.matchedOne(_))
+        ApplicationWriteConflict.onDuplicateKey(
+          diagnostics,
+          ConflictSource.ReceiptDuplicateKey,
+          "mutationReceipt.complete"
+        )(
+          ApplicationWriteConflict.onConflict(
+            diagnostics,
+            ConflictSource.ReceiptCompletionNoMatch,
+            "mutationReceipt.complete"
+          )(
+            RepositoryF
+              .lift(MongoSessionOperations.updateOne(collection, session, filter, update))
+              .subflatMap(MongoRepositorySupport.matchedOne(_))
+          )
+        )
       )(MongoErrors.duplicateAsConflict)
 
   private def remove(session: Option[ClientSession[IO]], key: MutationReceiptKey): IO[Unit] =
@@ -212,7 +232,13 @@ object MongoMutationReceiptRepository {
   ): MongoMutationReceiptRepository =
     new MongoMutationReceiptRepository(
       database,
-      MongoTransactionRunner.sessions(client, RepositoryError.Conflict, diagnostics = diagnostics, breaker = breaker),
+      MongoTransactionRunner.sessions(
+        client,
+        RepositoryError.Conflict,
+        diagnostics = diagnostics,
+        breaker = breaker,
+        exhaustedOperation = Some("mutationReceipt.writeTransaction")
+      ),
       diagnostics,
       uuidGen
     )

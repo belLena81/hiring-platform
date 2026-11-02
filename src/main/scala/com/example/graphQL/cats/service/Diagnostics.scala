@@ -78,6 +78,13 @@ enum LogEvent(val category: String, val component: String, val message: String, 
         "A durable backlog sample failed; its metrics are unobserved",
         LogLevel.Warn
       )
+  case ApplicationWriteConflict
+      extends LogEvent(
+        "APPLICATION_WRITE_CONFLICT",
+        "MONGO",
+        "A write was refused as a conflict; the source says which step",
+        LogLevel.Warn
+      )
   case LocalUnmasked
       extends LogEvent("LOCAL_UNMASKED", "SECURITY", "Diagnostic metadata masking is disabled", LogLevel.Warn)
 
@@ -131,6 +138,7 @@ enum LogField(val key: String, val sensitive: Boolean = false) {
   case BreakerTransition extends LogField("breakerTransition")
   case SearchKind extends LogField("searchKind")
   case ErrorCode extends LogField("errorCode")
+  case ConflictSource extends LogField("conflictSource")
 }
 
 /** Startup-injected allow-lists of values owned by outer layers (adapter/driver failure classes, configuration keys).
@@ -142,6 +150,20 @@ object PublicLogValues {
 }
 
 object LogFields {
+
+  /** The documented write-conflict sources (`repository.mongo.ConflictSource`, kept equal by a unit test). */
+  val ConflictSourceLabels: Set[String] = Set(
+    "receipt-fingerprint",
+    "receipt-duplicate-key",
+    "receipt-completion-no-match",
+    "fence-duplicate-key",
+    "fence-write-conflict",
+    "status-write-conflict",
+    "status-guard-no-match",
+    "history-duplicate-key",
+    "transaction-exhausted"
+  )
+
   val reasons: Set[String] = FailureReason.values.map(_.reason).toSet
 
   private val jdkErrorTypes = Set(
@@ -225,6 +247,7 @@ object LogFields {
       case LogField.BreakerTransition           => CircuitBreakerPolicy.Transition.values.exists(_.wire == value)
       case LogField.SearchKind                  => SearchKindWires.contains(value)
       case LogField.ErrorCode                   => value.matches("[A-Z][A-Z0-9_]{0,63}")
+      case LogField.ConflictSource              => ConflictSourceLabels.contains(value)
       case _                                    => false
     }
 }

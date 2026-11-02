@@ -33,7 +33,8 @@ private[mongo] object MongoTransactionRunner {
       retryPolicy: RetryPolicy = RetryPolicy(),
       diagnostics: Diagnostics[IO],
       transientExhaustionError: RepositoryError = RepositoryError.Conflict,
-      breaker: CircuitBreaker[IO] = CircuitBreaker.disabled[IO]
+      breaker: CircuitBreaker[IO] = CircuitBreaker.disabled[IO],
+      exhaustedOperation: Option[String] = None
   ): MongoTransactionRunner =
     new MongoTransactionRunner {
       override def run[A](
@@ -85,9 +86,10 @@ private[mongo] object MongoTransactionRunner {
             )
             .map(_.leftMap(_ => RepositoryError.Unavailable).flatten)
             .handleErrorWith(error =>
-              // Per-attempt conflicts are not logged; the exhausted outcome is.
+              // The runner logs only the exhausted outcome (`transaction.exhausted`, with the conflict source). The
+              // write steps of application writes log each retried attempt themselves (`ApplicationWriteConflict`).
               MongoRepositorySupport
-                .reportFailure(diagnostics, "transaction.exhausted", error)
+                .reportExhausted(diagnostics, error, exhaustedOperation)
                 .whenA(MongoErrors.isTransient(error))
                 .as(MongoErrors.toRepositoryError(error, duplicateKeyError, transientExhaustionError))
             )
