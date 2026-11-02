@@ -16,18 +16,32 @@ import scala.jdk.CollectionConverters.*
 /** The application classifies records; Logback is the sole severity policy. */
 object SafeDiagnostics {
   private val loggerName = "hiring.foundation"
-  private val DefaultLogDirectory = Paths.get("_logs")
 
   def configure(maskSensitive: Boolean, allowed: PublicLogValues): IO[Diagnostics[IO]] =
-    IO.blocking {
-      Files.createDirectories(DefaultLogDirectory)
-      val diagnostics = apply(maskSensitive, allowed)
-      if (!maskSensitive) {
-        restrictToCurrentUser(DefaultLogDirectory)
-        activeLogFiles.foreach(restrictToCurrentUser)
-        requireSafeUnmaskedDestination().map(_ => diagnostics)
-      } else Right(diagnostics)
-    }.flatMap(IO.fromEither)
+    configure(maskSensitive, allowed, IO.blocking(activeLogFiles))
+
+  /** Only directories of file appenders that are actually configured are created; a stdout-only setup touches no
+    * filesystem path, so it also starts on a read-only root filesystem.
+    */
+  private[logging] def configure(
+      maskSensitive: Boolean,
+      allowed: PublicLogValues,
+      logFiles: IO[List[Path]]
+  ): IO[Diagnostics[IO]] =
+    logFiles
+      .flatMap { files =>
+        IO.blocking {
+          val directories = files.flatMap(file => Option(file.getParent)).distinct
+          directories.foreach(Files.createDirectories(_))
+          val diagnostics = apply(maskSensitive, allowed)
+          if (!maskSensitive) {
+            directories.foreach(restrictToCurrentUser)
+            files.filter(Files.exists(_)).foreach(restrictToCurrentUser)
+            requireSafeUnmaskedDestination(files).map(_ => diagnostics)
+          } else Right(diagnostics)
+        }
+      }
+      .flatMap(IO.fromEither)
       .flatTap { diagnostics =>
         if (maskSensitive) IO.unit else diagnostics.emit(LogEvent.LocalUnmasked)
       }
@@ -67,8 +81,7 @@ object SafeDiagnostics {
       case LogLevel.Error => logger.isErrorEnabled
     }
 
-  private def requireSafeUnmaskedDestination(): Either[IllegalStateException, Unit] = {
-    val files = activeLogFiles
+  private def requireSafeUnmaskedDestination(files: List[Path]): Either[IllegalStateException, Unit] = {
     val unsafe = files.isEmpty || files.exists { file =>
       val directory = file.getParent
       !Files.isRegularFile(file) || !Files.isDirectory(directory) || !Files.isWritable(directory) || !privatePath(

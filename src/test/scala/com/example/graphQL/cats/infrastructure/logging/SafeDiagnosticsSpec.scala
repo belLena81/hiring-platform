@@ -6,6 +6,11 @@ import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFie
 import com.example.graphQL.cats.service.Diagnostics.*
 import com.example.graphQL.cats.config.AppConfigFixtures
 import io.circe.parser.parse
+import ch.qos.logback.classic.AsyncAppender
+import ch.qos.logback.classic.LoggerContext
+import ch.qos.logback.classic.joran.JoranConfigurator
+import ch.qos.logback.core.FileAppender
+import java.nio.file.{Files, Path}
 import java.time.Instant
 import munit.CatsEffectSuite
 import org.slf4j.LoggerFactory
@@ -339,6 +344,73 @@ class SafeDiagnosticsSpec extends CatsEffectSuite {
         }
         assert(LoggerFactory.getLogger("hiring.foundation").isInfoEnabled)
       }
+    }
+  }
+
+  private val tempDirectory = ResourceFunFixture(
+    Resource.make(IO.blocking(Files.createTempDirectory("safe-diagnostics")))(root =>
+      IO.blocking {
+        Files.walk(root).sorted(java.util.Comparator.reverseOrder[Path]()).forEach(p => Files.delete(p))
+      }
+    )
+  )
+
+  tempDirectory.test("LOG-05 a stdout-only configuration creates no log directory") { root =>
+    val untouched = root.resolve("_logs")
+    SafeDiagnostics.configure(maskSensitive = true, PublicLogValues.none, IO.pure(Nil)).map { _ =>
+      assert(!Files.exists(untouched))
+      assertEquals(Files.list(root).count(), 0L)
+    }
+  }
+
+  tempDirectory.test("LOG-05 a configured file appender gets its directory created") { root =>
+    val file = root.resolve("nested").resolve("app.log")
+    SafeDiagnostics.configure(maskSensitive = true, PublicLogValues.none, IO.pure(List(file))).map { _ =>
+      assert(Files.isDirectory(file.getParent))
+    }
+  }
+
+  tempDirectory.test("LOG-05 unmasked mode restricts the file directory and file to the current user") { root =>
+    val file = root.resolve("private").resolve("app.log")
+    val prepare = IO.blocking {
+      Files.createDirectories(file.getParent)
+      Files.createFile(file): Unit
+    }
+    (prepare *> SafeDiagnostics.configure(maskSensitive = false, PublicLogValues.none, IO.pure(List(file)))).map { _ =>
+      val dirMode = Files.getPosixFilePermissions(file.getParent).asScala.map(_.toString).toSet
+      val fileMode = Files.getPosixFilePermissions(file).asScala.map(_.toString).toSet
+      assertEquals(dirMode, Set("OWNER_READ", "OWNER_WRITE", "OWNER_EXECUTE"))
+      assertEquals(fileMode, Set("OWNER_READ", "OWNER_WRITE"))
+    }
+  }
+
+  test("LOG-05 unmasked mode is refused without a file destination") {
+    SafeDiagnostics
+      .configure(maskSensitive = false, PublicLogValues.none, IO.pure(Nil))
+      .attempt
+      .map(result => assert(result.left.exists(_.isInstanceOf[IllegalStateException]), clues(result)))
+  }
+
+  tempDirectory.test("LOG-05 unmasked mode is refused when the log file is missing") { root =>
+    val file = root.resolve("absent").resolve("app.log")
+    SafeDiagnostics
+      .configure(maskSensitive = false, PublicLogValues.none, IO.pure(List(file)))
+      .attempt
+      .map(result => assert(result.left.exists(_.isInstanceOf[IllegalStateException]), clues(result)))
+  }
+
+  test("LOG-05 the container Logback configuration declares no file appender") {
+    IO.blocking {
+      val context = new LoggerContext()
+      val configurator = new JoranConfigurator()
+      configurator.setContext(context)
+      configurator.doConfigure(getClass.getClassLoader.getResource("logback-container.xml"))
+      val appenders = context.getLoggerList.asScala.flatMap(_.iteratorForAppenders.asScala).toList
+      val async = appenders.collect { case a: AsyncAppender => a }
+      assert(async.nonEmpty)
+      val nested = async.flatMap(_.iteratorForAppenders.asScala.toList)
+      assert((appenders ++ nested).forall(!_.isInstanceOf[FileAppender[?]]), clues(appenders ++ nested))
+      context.stop()
     }
   }
 }

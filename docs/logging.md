@@ -4,6 +4,8 @@ Application diagnostics are single-line JSON records in `_logs/hiring-platform.l
 
 The repository convention is `.local/logs/` for local logs. The packaged appender still uses `_logs/`; the commands below describe that actual runtime behavior. Moving its destination requires a scoped runtime configuration change and validation of the private-file disclosure checks. New manually captured diagnostics belong in `.local/logs/`.
 
+The container image selects `logback-container.xml` (stdout only, same bounded async appender) and runs with a read-only root filesystem. At startup `SafeDiagnostics.configure` creates and restricts a log directory only for file appenders that are actually configured, so a stdout-only configuration touches no filesystem path. Unmasked mode still requires a private, pre-provisioned file destination and is refused otherwise. A unit test asserts that `logback-container.xml` declares no file appender.
+
 The application uses log4cats `StructuredLogger` for structured fields and otel4s for tracing. The active OpenTelemetry trace ID is the request correlation ID. HTTP server spans, child spans, W3C propagation, active-request metrics, and duration/status are owned by otel4s and its http4s middleware. Application diagnostics retain bounded rejection, GraphQL, and readiness records without synthetic span lifecycle or timing events.
 
 ```bash
