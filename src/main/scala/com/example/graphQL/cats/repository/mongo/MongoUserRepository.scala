@@ -10,7 +10,7 @@ import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.RepositoryError
-import com.example.graphQL.cats.service.Diagnostics
+import com.example.graphQL.cats.service.{Diagnostics, TransactionOperation}
 import com.mongodb.client.model.{Filters, FindOneAndUpdateOptions, ReturnDocument, UpdateOptions}
 import mongo4cats.client.{ClientSession, MongoClient}
 import mongo4cats.database.MongoDatabase
@@ -207,7 +207,7 @@ final class MongoUserRepository(
       EitherT.leftT[IO, Unit](RepositoryError.Conflict)
     else
       MongoMutationWriteContext
-        .run(context, transactionRunner, transactionRequired = true) { session =>
+        .run(context, transactionRunner, TransactionOperation.UserBootstrap, transactionRequired = true) { session =>
           bootstrapWithSession(user, passwordHash, session)
         }
         .pipe(effect =>
@@ -292,6 +292,7 @@ final class MongoUserRepository(
       .run(
         context,
         transactionRunner,
+        TransactionOperation.UserCreateAccount,
         transactionRequired = user.role == UserRole.Candidate && embeddingWork.requiresTransaction
       )(session => writeAccountSession(user, passwordHash, now, session))
       .pipe(effect =>
@@ -320,7 +321,12 @@ final class MongoUserRepository(
     profile match {
       case _: UserProfile.Candidate =>
         MongoMutationWriteContext
-          .run(context, transactionRunner, transactionRequired = embeddingWork.requiresTransaction) { session =>
+          .run(
+            context,
+            transactionRunner,
+            TransactionOperation.UserUpdateProfile,
+            transactionRequired = embeddingWork.requiresTransaction
+          ) { session =>
             updateProfileReturning(userId, profile, now, session, Some(UserRole.Candidate)).flatTap(_ =>
               embeddingWork.enqueue(
                 session,
@@ -336,8 +342,9 @@ final class MongoUserRepository(
           )
       case _ =>
         MongoMutationWriteContext
-          .run(context, transactionRunner, transactionRequired = false) { session =>
-            updateProfileReturning(userId, profile, now, session, None)
+          .run(context, transactionRunner, TransactionOperation.UserUpdateProfile, transactionRequired = false) {
+            session =>
+              updateProfileReturning(userId, profile, now, session, None)
           }
           .pipe(effect =>
             MongoRepositorySupport.repositoryGuard(diagnostics, "MongoUserRepository.write")(effect)(
@@ -409,7 +416,7 @@ final class MongoUserRepository(
       context: MutationWriteContext
   ): RepositoryF[IO, Unit] =
     MongoMutationWriteContext
-      .run(context, transactionRunner, transactionRequired = true) { session =>
+      .run(context, transactionRunner, TransactionOperation.UserDeleteAccount, transactionRequired = true) { session =>
         deleteAccountWithSession(userId, now, tombstone, session)
       }
       .pipe(effect =>

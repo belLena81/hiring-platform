@@ -11,7 +11,7 @@ import mongo4cats.database.MongoDatabase
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.RepositoryError
-import com.example.graphQL.cats.service.Diagnostics
+import com.example.graphQL.cats.service.{Diagnostics, TransactionOperation}
 import com.example.graphQL.cats.infrastructure.events.OperationalEventWireCodec
 import com.example.graphQL.cats.service.events.{OperationalEventEnvelope, OperationalEvents, SearchSession}
 import com.mongodb.client.model.{Sorts, UpdateOptions}
@@ -128,7 +128,7 @@ final class MongoSearchSessionWorkRepository(
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "searchSessionWork.complete") {
         transactionRunner
-          .run { active =>
+          .run(TransactionOperation.SearchSessionWorkComplete) { active =>
             val lease = leaseFilter(claim)
             val sessionDocument = MongoHiringCodecs.searchSession(claim.work.session.copy(query = None))
             sessionDocument.remove("query")

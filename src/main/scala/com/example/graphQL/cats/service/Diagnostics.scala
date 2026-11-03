@@ -139,6 +139,47 @@ enum LogField(val key: String, val sensitive: Boolean = false) {
   case SearchKind extends LogField("searchKind")
   case ErrorCode extends LogField("errorCode")
   case ConflictSource extends LogField("conflictSource")
+  case TransactionOperation extends LogField("transactionOperation")
+}
+
+/** Names the repository transaction that ran out of retries. A closed set: the log sink allow-lists exactly these
+  * labels, so a new transaction caller must add a case here and cannot log an unlisted name. Names are stable
+  * `<store>.<operation>` business names. `reportsApplicationWriteConflict` marks the two operations whose exhaustion
+  * also emits `APPLICATION_WRITE_CONFLICT`.
+  */
+enum TransactionOperation(val label: String, val reportsApplicationWriteConflict: Boolean = false) {
+  case ApplicationWrite extends TransactionOperation("applications.writeTransaction", true)
+  case MutationReceiptWrite extends TransactionOperation("mutationReceipt.writeTransaction", true)
+  case OutboxClaimBatch extends TransactionOperation("outbox.claimBatch")
+  case OutboxRenewLease extends TransactionOperation("outbox.renewLease")
+  case SearchSessionWorkComplete extends TransactionOperation("searchSessionWork.complete")
+  case InterviewWorkflowCreate extends TransactionOperation("interviewWorkflow.create")
+  case InterviewWorkflowAdvance extends TransactionOperation("interviewWorkflow.advance")
+  case InterviewWorkflowCommitHiring extends TransactionOperation("interviewWorkflow.commitHiring")
+  case InterviewWorkflowApplyLifecycle extends TransactionOperation("interviewWorkflow.applyLifecycle")
+  case InterviewWorkflowApproveRescheduledInterval
+      extends TransactionOperation("interviewWorkflow.approveRescheduledInterval")
+  case InterviewWorkflowClaimExecution extends TransactionOperation("interviewWorkflow.claimExecution")
+  case InterviewWorkflowAuthorizePublication extends TransactionOperation("interviewWorkflow.authorizePublication")
+  case InterviewWorkflowRecordResult extends TransactionOperation("interviewWorkflow.recordResult")
+  case InterviewWorkflowRequireRepair extends TransactionOperation("interviewWorkflow.requireRepair")
+  case InterviewWorkflowRepairNotifications extends TransactionOperation("interviewWorkflow.repairNotifications")
+  case InterviewCalendarReserve extends TransactionOperation("interviewCalendar.reserve")
+  case InterviewCalendarRelease extends TransactionOperation("interviewCalendar.release")
+  case InterviewCalendarCancel extends TransactionOperation("interviewCalendar.cancel")
+  case InterviewNotificationDeliver extends TransactionOperation("interviewNotification.deliverOnce")
+  case EmbeddingWorkInspect extends TransactionOperation("embeddingWork.inspectForAdmin")
+  case EmbeddingWorkRepair extends TransactionOperation("embeddingWork.repairFailed")
+  case AnalyticsErasureEnqueue extends TransactionOperation("analyticsErasure.enqueue")
+  case AnalyticsErasureMarkComplete extends TransactionOperation("analyticsErasure.markComplete")
+  case AnalyticsReportLatest extends TransactionOperation("analyticsReport.latest")
+  case RecruiterJobClosureClose extends TransactionOperation("recruiterJobClosure.close")
+  case JobCreate extends TransactionOperation("jobs.createWithEvents")
+  case JobUpdate extends TransactionOperation("jobs.updateWithEvents")
+  case UserBootstrap extends TransactionOperation("users.bootstrap")
+  case UserCreateAccount extends TransactionOperation("users.createAccount")
+  case UserUpdateProfile extends TransactionOperation("users.updateProfile")
+  case UserDeleteAccount extends TransactionOperation("users.deleteAccount")
 }
 
 /** Startup-injected allow-lists of values owned by outer layers (adapter/driver failure classes, configuration keys).
@@ -163,6 +204,8 @@ object LogFields {
     "history-duplicate-key",
     "transaction-exhausted"
   )
+
+  val TransactionOperationLabels: Set[String] = TransactionOperation.values.map(_.label).toSet
 
   val reasons: Set[String] = FailureReason.values.map(_.reason).toSet
 
@@ -248,6 +291,7 @@ object LogFields {
       case LogField.SearchKind                  => SearchKindWires.contains(value)
       case LogField.ErrorCode                   => value.matches("[A-Z][A-Z0-9_]{0,63}")
       case LogField.ConflictSource              => ConflictSourceLabels.contains(value)
+      case LogField.TransactionOperation        => TransactionOperationLabels.contains(value)
       case _                                    => false
     }
 }

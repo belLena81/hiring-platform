@@ -25,7 +25,7 @@ import com.example.graphQL.cats.service.port.{
   RepositoryF
 }
 import com.example.graphQL.cats.service.RepositoryError
-import com.example.graphQL.cats.service.Diagnostics
+import com.example.graphQL.cats.service.{Diagnostics, TransactionOperation}
 import com.example.graphQL.cats.shared.Parsing
 import com.mongodb.client.model.UpdateOptions
 import mongo4cats.client.{ClientSession, MongoClient}
@@ -101,7 +101,12 @@ final class MongoAnalyticsErasureRequestRepository(
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "analyticsErasure.enqueue")(
         RepositoryF.lift(UUIDGen[IO].randomUUID.map(_.toString)).flatMap { freshReceiptId =>
-          MongoMutationWriteContext.run(context, transactionRunner, transactionRequired = true) { session =>
+          MongoMutationWriteContext.run(
+            context,
+            transactionRunner,
+            TransactionOperation.AnalyticsErasureEnqueue,
+            transactionRequired = true
+          ) { session =>
             val requestId = userId.value.toString
             receiptOrAssign(completions, session, requestId, freshReceiptId)
               .orElse(receiptOrAssign(collection, session, requestId, freshReceiptId))
@@ -212,45 +217,47 @@ final class MongoAnalyticsErasureRequestRepository(
 
   override def markComplete(userId: UserId, now: Instant): RepositoryF[IO, Unit] =
     MongoRepositorySupport
-      .repositoryGuard(diagnostics, "analyticsErasure.markComplete")(transactionRunner.run { session =>
-        val requestId = userId.value.toString
-        val user =
-          RepositoryF.lift(MongoSessionOperations.findOne(users, session, MongoFilter.eq(MongoFields.Id, requestId)))
-        user
-          .flatMap {
-            case Some(document) if storedString(document, MongoFields.AccountStatus).contains(Some("Deleted")) =>
-              val filter = MongoFilter.and(
-                MongoFilter.eq(MongoFields.Id, requestId),
-                MongoFilter.in(MongoFields.State, List("Pending", "Processing"))
-              )
-              val update = MongoUpdate.combine(
-                MongoUpdate.set(MongoFields.State, "Complete"),
-                MongoUpdate.set(MongoFields.CompletedAt, now.toDate),
-                MongoUpdate.set(MongoFields.ExpiresAt, Date.from(now.plusSeconds(31L * 24L * 60L * 60L)))
-              )
-              val requests =
-                RepositoryF.lift(
-                  MongoSessionOperations.updateOne(collection, session, filter, update, new UpdateOptions)
+      .repositoryGuard(diagnostics, "analyticsErasure.markComplete")(
+        transactionRunner.run(TransactionOperation.AnalyticsErasureMarkComplete) { session =>
+          val requestId = userId.value.toString
+          val user =
+            RepositoryF.lift(MongoSessionOperations.findOne(users, session, MongoFilter.eq(MongoFields.Id, requestId)))
+          user
+            .flatMap {
+              case Some(document) if storedString(document, MongoFields.AccountStatus).contains(Some("Deleted")) =>
+                val filter = MongoFilter.and(
+                  MongoFilter.eq(MongoFields.Id, requestId),
+                  MongoFilter.in(MongoFields.State, List("Pending", "Processing"))
                 )
-              requests.flatMap { result =>
-                if (result.getMatchedCount == 1L) persistCompletion(session, requestId, now)
-                else {
-                  val completed = RepositoryF.lift(
-                    MongoSessionOperations.findOne(
-                      collection,
-                      session,
-                      MongoFilter
-                        .and(MongoFilter.eq(MongoFields.Id, requestId), MongoFilter.eq(MongoFields.State, "Complete"))
+                val update = MongoUpdate.combine(
+                  MongoUpdate.set(MongoFields.State, "Complete"),
+                  MongoUpdate.set(MongoFields.CompletedAt, now.toDate),
+                  MongoUpdate.set(MongoFields.ExpiresAt, Date.from(now.plusSeconds(31L * 24L * 60L * 60L)))
+                )
+                val requests =
+                  RepositoryF.lift(
+                    MongoSessionOperations.updateOne(collection, session, filter, update, new UpdateOptions)
+                  )
+                requests.flatMap { result =>
+                  if (result.getMatchedCount == 1L) persistCompletion(session, requestId, now)
+                  else {
+                    val completed = RepositoryF.lift(
+                      MongoSessionOperations.findOne(
+                        collection,
+                        session,
+                        MongoFilter
+                          .and(MongoFilter.eq(MongoFields.Id, requestId), MongoFilter.eq(MongoFields.State, "Complete"))
+                      )
                     )
-                  )
-                  completed.flatMap(
-                    _.fold(MongoF.raise(RepositoryError.Conflict))(_ => persistCompletion(session, requestId, now))
-                  )
+                    completed.flatMap(
+                      _.fold(MongoF.raise(RepositoryError.Conflict))(_ => persistCompletion(session, requestId, now))
+                    )
+                  }
                 }
-              }
-            case _ => MongoF.raise(RepositoryError.Conflict)
-          }
-      })
+              case _ => MongoF.raise(RepositoryError.Conflict)
+            }
+        }
+      )
 
   private def persistCompletion(
       session: Option[ClientSession[IO]],
@@ -309,45 +316,49 @@ final class MongoAnalyticsReportRepository(
 
   override def latest: RepositoryF[IO, Option[AnalyticsReportSnapshot]] =
     MongoRepositorySupport
-      .repositoryGuard(diagnostics, "analyticsReport.latest")(transactionRunner.run { session =>
-        for {
-          stored <- RepositoryF.lift(
-            MongoSessionOperations
-              .findOne(control, session, MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.ControlId))
-          )
-          state <- MongoF.fromEither(
-            stored.traverse(
-              MongoHiringPersistenceCodecs
-                .decodeAnalyticsReportControl(_)
-                .leftMap(_ => RepositoryError.InvalidStoredData)
+      .repositoryGuard(diagnostics, "analyticsReport.latest")(
+        transactionRunner.run(TransactionOperation.AnalyticsReportLatest) { session =>
+          for {
+            stored <- RepositoryF.lift(
+              MongoSessionOperations
+                .findOne(control, session, MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.ControlId))
             )
-          )
-          published = state.filter(value =>
-            value.state == AnalyticsReportSnapshotDocument.Published && value.generation >= 0L &&
-              value.lastPublishedRevision >= 0L
-          )
-          now <- RepositoryF.lift(clock.realTimeInstant)
-          snapshot <- published.flatTraverse { control =>
-            RepositoryF
-              .lift(
-                MongoSessionOperations.findOne(
-                  collection,
-                  session,
-                  MongoFilter.and(
-                    MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.CurrentId),
-                    MongoFilter.eq(MongoFields.State, AnalyticsReportSnapshotDocument.Published),
-                    MongoFilter.eq(MongoFields.Generation, control.generation),
-                    MongoFilter.eq(MongoFields.Revision, control.lastPublishedRevision),
-                    MongoFilter.gt(MongoFields.ExpiresAt, now.toDate)
+            state <- MongoF.fromEither(
+              stored.traverse(
+                MongoHiringPersistenceCodecs
+                  .decodeAnalyticsReportControl(_)
+                  .leftMap(_ => RepositoryError.InvalidStoredData)
+              )
+            )
+            published = state.filter(value =>
+              value.state == AnalyticsReportSnapshotDocument.Published && value.generation >= 0L &&
+                value.lastPublishedRevision >= 0L
+            )
+            now <- RepositoryF.lift(clock.realTimeInstant)
+            snapshot <- published.flatTraverse { control =>
+              RepositoryF
+                .lift(
+                  MongoSessionOperations.findOne(
+                    collection,
+                    session,
+                    MongoFilter.and(
+                      MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.CurrentId),
+                      MongoFilter.eq(MongoFields.State, AnalyticsReportSnapshotDocument.Published),
+                      MongoFilter.eq(MongoFields.Generation, control.generation),
+                      MongoFilter.eq(MongoFields.Revision, control.lastPublishedRevision),
+                      MongoFilter.gt(MongoFields.ExpiresAt, now.toDate)
+                    )
                   )
                 )
-              )
-              .subflatMap(
-                _.traverse(document => MongoDocumentFields.toRepository(AnalyticsReportSnapshotDocument.read(document)))
-              )
-          }
-        } yield snapshot
-      })
+                .subflatMap(
+                  _.traverse(document =>
+                    MongoDocumentFields.toRepository(AnalyticsReportSnapshotDocument.read(document))
+                  )
+                )
+            }
+          } yield snapshot
+        }
+      )
 }
 
 object MongoAnalyticsReportRepository {

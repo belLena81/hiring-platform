@@ -11,7 +11,7 @@ import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.events.OperationalEventEnvelope
 import com.example.graphQL.cats.domain.pagination.*
-import com.example.graphQL.cats.service.Diagnostics
+import com.example.graphQL.cats.service.{Diagnostics, TransactionOperation}
 import com.mongodb.client.model.Filters
 import mongo4cats.client.{ClientSession, MongoClient}
 import mongo4cats.database.MongoDatabase
@@ -165,7 +165,12 @@ final class MongoApplicationRepository private (
     else
       MongoRepositorySupport
         .repositoryGuard(diagnostics, "applications.createWithEvents") {
-          MongoMutationWriteContext.run(context, transactionRunner, transactionRequired = true)(session =>
+          MongoMutationWriteContext.run(
+            context,
+            transactionRunner,
+            TransactionOperation.ApplicationWrite,
+            transactionRequired = true
+          )(session =>
             fenced(
               "applications.submitFence",
               writeFence.forSubmit(session, actor, application.jobId),
@@ -188,7 +193,12 @@ final class MongoApplicationRepository private (
     else
       MongoRepositorySupport
         .repositoryGuard(diagnostics, "applications.updateStatusWithContext") {
-          MongoMutationWriteContext.run(context, transactionRunner, transactionRequired = true)(session =>
+          MongoMutationWriteContext.run(
+            context,
+            transactionRunner,
+            TransactionOperation.ApplicationWrite,
+            transactionRequired = true
+          )(session =>
             fenced(
               "applications.statusFence",
               writeFence
@@ -323,8 +333,7 @@ object MongoApplicationRepository {
           client,
           RepositoryError.DuplicateApplication,
           diagnostics = diagnostics,
-          breaker = breaker,
-          exhaustedOperation = Some("applications.writeTransaction")
+          breaker = breaker
         ),
       diagnostics
     )

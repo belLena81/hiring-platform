@@ -2,7 +2,7 @@ package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.{IO, Ref, Resource}
 import cats.syntax.all.*
-import com.example.graphQL.cats.service.Diagnostics
+import com.example.graphQL.cats.service.{Diagnostics, TransactionOperation}
 import com.example.graphQL.cats.service.port.{RepositoryF}
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.domain.policy.CircuitBreakerPolicy
@@ -83,7 +83,7 @@ final class MongoTransactionRunnerSpec extends CatsEffectSuite {
         breaker = breaker
       )
       result <- runner
-        .run(_ =>
+        .run(TransactionOperation.OutboxClaimBatch)(_ =>
           RepositoryF
             .lift(
               counters.operations

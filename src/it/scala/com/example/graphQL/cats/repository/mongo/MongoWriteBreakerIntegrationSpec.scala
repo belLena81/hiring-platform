@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.service.TransactionOperation
 import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.policy.CircuitBreakerPolicy
@@ -29,11 +30,15 @@ class MongoWriteBreakerIntegrationSpec extends MongoIntegrationSuite {
             diagnostics = Diagnostics.noop[IO],
             breaker = breaker
           )
-          submit = runner.run { session =>
-            RepositoryF
-              .lift(MongoSessionOperations.insertOne(IO.pure(documents), session, new Document("_id", "candidate-job")))
-              .as("accepted")
-          }.value
+          submit = runner
+            .run(TransactionOperation.ApplicationWrite) { session =>
+              RepositoryF
+                .lift(
+                  MongoSessionOperations.insertOne(IO.pure(documents), session, new Document("_id", "candidate-job"))
+                )
+                .as("accepted")
+            }
+            .value
           results <- List.fill(12)(submit).parSequence
           stored <- documents.count
           state <- breaker.current

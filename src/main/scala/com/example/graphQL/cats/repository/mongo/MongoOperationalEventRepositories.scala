@@ -22,7 +22,7 @@ import com.example.graphQL.cats.service.port.{
   SearchSessionRepository
 }
 import com.example.graphQL.cats.service.RepositoryError
-import com.example.graphQL.cats.service.Diagnostics
+import com.example.graphQL.cats.service.{Diagnostics, TransactionOperation}
 import com.mongodb.MongoCommandException
 import scala.concurrent.duration.FiniteDuration
 import com.mongodb.client.model.{Sorts, UpdateOptions, Projections}
@@ -395,7 +395,7 @@ final class MongoOperationalEventOutboxRepository(
       MongoRepositorySupport
         .repositoryGuard(diagnostics, "outbox.renewLease")(
           transactionRunner
-            .run { session =>
+            .run(TransactionOperation.OutboxRenewLease) { session =>
               // Renewal after expiry (on the database clock) is a lost lease, even before another claim takes it over.
               val held = MongoFilter.and(
                 MongoFilter.eq(MongoFields.Id, eventId.toString),
@@ -446,9 +446,11 @@ final class MongoOperationalEventOutboxRepository(
       RepositoryF.lift(uuidGen.randomUUID).flatMap { id =>
         val token = id.toString
         MongoRepositorySupport
-          .repositoryGuard(diagnostics, "outbox.claimBatch")(transactionRunner.run { session =>
-            claimInSession(session, workerId, transactionalId, now, leaseDuration, candidates, token)
-          })
+          .repositoryGuard(diagnostics, "outbox.claimBatch")(
+            transactionRunner.run(TransactionOperation.OutboxClaimBatch) { session =>
+              claimInSession(session, workerId, transactionalId, now, leaseDuration, candidates, token)
+            }
+          )
           .leftFlatMap {
             case RepositoryError.Conflict if attempts > 1 =>
               claimBatch(workerId, transactionalId, now, leaseDuration, candidates, attempts - 1)

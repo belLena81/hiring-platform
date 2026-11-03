@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.service.TransactionOperation
 import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.*
@@ -474,7 +475,7 @@ final class LeaseExpiryDatabaseClockIntegrationSpec extends MongoIntegrationSuit
           diagnostics = Diagnostics.noop[IO]
         )
         offered <- runner
-          .run(session =>
+          .run(TransactionOperation.ApplicationWrite)(session =>
             repository
               .leaseSubjects(session, List(intruder), "hiring-publisher-intruder", "intruder-token", wall, 30.seconds)
           )

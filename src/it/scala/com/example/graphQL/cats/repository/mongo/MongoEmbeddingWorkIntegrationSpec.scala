@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.service.TransactionOperation
 import cats.effect.{IO, Resource, Deferred, Ref}
 import cats.syntax.all.*
 import com.example.graphQL.cats.service.Diagnostics
@@ -432,7 +433,11 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
       for {
         _ <- successful(repository.enqueue(key, now))
         first <- claimed(repository, now)
-        _ <- successful(transactions.run(session => repository.enqueue(session, key, now.plusSeconds(1))))
+        _ <- successful(
+          transactions.run(TransactionOperation.EmbeddingWorkRepair)(session =>
+            repository.enqueue(session, key, now.plusSeconds(1))
+          )
+        )
         document <- stored(db, key)
       } yield {
         assertEquals(document.getLong(MongoFields.Generation).longValue, 2L)
@@ -484,10 +489,16 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
       val repository = new MongoEmbeddingWorkRepository(db, Diagnostics.noop[IO])
       val key = EmbeddingWorkKey(EmbeddingWorkKind.Job, UUID.randomUUID().toString)
       for {
-        _ <- successful(transactions.run(session => repository.enqueue(session, key, now)))
+        _ <- successful(
+          transactions.run(TransactionOperation.EmbeddingWorkRepair)(session => repository.enqueue(session, key, now))
+        )
         original <- claimed(repository, now)
         _ <- successful(repository.fail(original, EmbeddingWorkFailure.DocumentTooLarge, now))
-        _ <- successful(transactions.run(session => repository.enqueue(session, key, now.plusSeconds(1))))
+        _ <- successful(
+          transactions.run(TransactionOperation.EmbeddingWorkRepair)(session =>
+            repository.enqueue(session, key, now.plusSeconds(1))
+          )
+        )
         reset <- stored(db, key)
         ready <- claimed(repository, now.plusSeconds(1))
         _ <- successful(repository.retry(ready, now.plusSeconds(100)))

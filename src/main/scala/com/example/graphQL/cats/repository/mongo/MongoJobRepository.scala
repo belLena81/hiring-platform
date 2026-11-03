@@ -12,7 +12,7 @@ import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.events.OperationalEventEnvelope
 import com.example.graphQL.cats.domain.pagination.JobPageRequest
 import com.example.graphQL.cats.service.search.JobSearchFilter
-import com.example.graphQL.cats.service.Diagnostics
+import com.example.graphQL.cats.service.{Diagnostics, TransactionOperation}
 import com.mongodb.client.model.Filters
 import mongo4cats.client.{ClientSession, MongoClient}
 import mongo4cats.database.MongoDatabase
@@ -284,6 +284,7 @@ final class MongoJobRepository(
       .run(
         context,
         transactionRunner,
+        TransactionOperation.JobCreate,
         transactionRequired = embeddingWork.requiresTransaction || events.nonEmpty
       )(session => writeJobSession(job, now, events, session))
       .pipe(effect =>
@@ -314,6 +315,7 @@ final class MongoJobRepository(
       .run(
         context,
         transactionRunner,
+        TransactionOperation.JobUpdate,
         transactionRequired = embeddingWork.requiresTransaction || events.nonEmpty
       )(session => writeJobUpdateSession(expected, replacement, now, events, session))
       .pipe(effect =>

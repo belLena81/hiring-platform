@@ -15,7 +15,7 @@ import com.example.graphQL.cats.domain.model.{ApplicationEvent, ApplicationStatu
 import com.example.graphQL.cats.domain.policy.ApplicationLifecycle
 import com.example.graphQL.cats.domain.workflow.*
 import com.example.graphQL.cats.repository.mongo.MongoDocumentFields.Repository.*
-import com.example.graphQL.cats.service.Diagnostics
+import com.example.graphQL.cats.service.{Diagnostics, TransactionOperation}
 import com.example.graphQL.cats.service.events.OperationalEvents
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.RepositoryError
@@ -72,7 +72,7 @@ final class MongoInterviewWorkflowRepository(
       execution: Option[ClaimedInterviewWorkflowCommand] = None
   ): RepositoryF[IO, Unit] =
     MongoRepositorySupport.repositoryGuard(diagnostics, "interviewWorkflow.commitHiring") {
-      transactionRunner.run { session =>
+      transactionRunner.run(TransactionOperation.InterviewWorkflowCommitHiring) { session =>
         for {
           _ <- fenceExecution(session, workflow.id, execution)
           committed <- store.isHiringCommitted(session, workflow.id)
@@ -246,7 +246,12 @@ final class MongoInterviewWorkflowRepository(
         occurredAt = createdAt
       )
       MongoRepositorySupport.repositoryGuard(diagnostics, "interviewWorkflow.create")(
-        MongoMutationWriteContext.run(context, transactionRunner, transactionRequired = true) { session =>
+        MongoMutationWriteContext.run(
+          context,
+          transactionRunner,
+          TransactionOperation.InterviewWorkflowCreate,
+          transactionRequired = true
+        ) { session =>
           for {
             _ <- fenceParticipants(session, workflow)
             application <- RepositoryF
@@ -334,7 +339,7 @@ final class MongoInterviewWorkflowRepository(
     else {
       val inboxId = s"${workflow.id.value}:$inboxMessageId"
       MongoRepositorySupport.repositoryGuard(diagnostics, "interviewWorkflow.advance") {
-        transactionRunner.run { session =>
+        transactionRunner.run(TransactionOperation.InterviewWorkflowAdvance) { session =>
           for {
             _ <- fenceParticipants(session, workflow)
             duplicate <- RepositoryF.lift(MongoSessionOperations.findById(inbox, session, inboxId))

@@ -3,7 +3,7 @@ package com.example.graphQL.cats.repository.mongo
 import cats.effect.{IO, Ref}
 import cats.syntax.all.*
 import com.example.graphQL.cats.service.port.{MutationWriteContext, RepositoryF}
-import com.example.graphQL.cats.service.RepositoryError
+import com.example.graphQL.cats.service.{RepositoryError, TransactionOperation}
 import mongo4cats.client.ClientSession
 import munit.CatsEffectSuite
 
@@ -14,12 +14,22 @@ final class MongoTransactionRetrySpec extends CatsEffectSuite {
       operations <- Ref.of[IO, Int](0)
       runner = recordingRunner(runs)
       atomic <- MongoMutationWriteContext
-        .run(MutationWriteContext.directWrite, runner, transactionRequired = true) { _ =>
+        .run(
+          MutationWriteContext.directWrite,
+          runner,
+          TransactionOperation.ApplicationWrite,
+          transactionRequired = true
+        ) { _ =>
           RepositoryF.lift(operations.update(_ + 1)).as("atomic")
         }
         .value
       direct <- MongoMutationWriteContext
-        .run(MutationWriteContext.directWrite, runner, transactionRequired = false) { _ =>
+        .run(
+          MutationWriteContext.directWrite,
+          runner,
+          TransactionOperation.ApplicationWrite,
+          transactionRequired = false
+        ) { _ =>
           RepositoryF.lift(operations.update(_ + 1)).as("direct")
         }
         .value
@@ -38,7 +48,12 @@ final class MongoTransactionRetrySpec extends CatsEffectSuite {
       runs <- Ref.of[IO, Int](0)
       runner = recordingRunner(runs)
       result <- MongoMutationWriteContext
-        .run(MongoMutationWriteContext(None), runner, transactionRequired = true) { session =>
+        .run(
+          MongoMutationWriteContext(None),
+          runner,
+          TransactionOperation.ApplicationWrite,
+          transactionRequired = true
+        ) { session =>
           RepositoryF.at[IO].pure(session)
         }
         .value
@@ -55,7 +70,7 @@ final class MongoTransactionRetrySpec extends CatsEffectSuite {
       runs <- Ref.of[IO, Int](0)
       sessionFailure <- MongoMutationWriteContext.session(foreign).attempt
       runFailure <- MongoMutationWriteContext
-        .run(foreign, recordingRunner(runs), transactionRequired = false)(_ =>
+        .run(foreign, recordingRunner(runs), TransactionOperation.ApplicationWrite, transactionRequired = false)(_ =>
           RepositoryF.at[IO].fromEither(Right("unused"): Either[RepositoryError, String])
         )
         .value
@@ -70,7 +85,7 @@ final class MongoTransactionRetrySpec extends CatsEffectSuite {
 
   private def recordingRunner(runs: Ref[IO, Int]): MongoTransactionRunner =
     new MongoTransactionRunner {
-      override def run[A](
+      override def run[A](name: TransactionOperation)(
           operation: Option[ClientSession[IO]] => RepositoryF[IO, A]
       ): RepositoryF[IO, A] = RepositoryF.lift(runs.update(_ + 1)) *> operation(None)
     }

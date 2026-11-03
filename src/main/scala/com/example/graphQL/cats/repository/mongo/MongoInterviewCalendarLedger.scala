@@ -1,6 +1,7 @@
 package com.example.graphQL.cats.repository.mongo
 
 import com.example.graphQL.cats.repository.mongo.MongoF.asRepository
+import com.example.graphQL.cats.service.TransactionOperation
 import cats.data.EitherT
 import cats.effect.IO
 import cats.syntax.all.*
@@ -29,7 +30,7 @@ final class MongoInterviewCalendarLedger(store: MongoInterviewWorkflowStore) ext
     val participants = List(reservation.candidateId, reservation.recruiterId).distinct.sortBy(_.value.toString)
     val generation = InterviewCalendarKeys.reservationGeneration(reservation.workflowId, reservation.idempotencyKey)
     val write = MongoF.fromEither(generation.toRight(RepositoryError.Conflict)).flatMap { generation =>
-      transactionRunner.run { session =>
+      transactionRunner.run(TransactionOperation.InterviewCalendarReserve) { session =>
         for {
           _ <- fenceSubjects(session, participants)
           _ <- fenceExecution(session, reservation.workflowId, execution)
@@ -115,7 +116,7 @@ final class MongoInterviewCalendarLedger(store: MongoInterviewWorkflowStore) ext
       execution: Option[ClaimedInterviewWorkflowCommand] = None
   ): InterviewProviderF[IO, Unit] = {
     val result = MongoRepositorySupport.repositoryGuard(diagnostics, "interviewCalendar.release") {
-      transactionRunner.run { session =>
+      transactionRunner.run(TransactionOperation.InterviewCalendarRelease) { session =>
         RepositoryF
           .lift(MongoSessionOperations.findOne(reservations, session, MongoFilter.eq("releaseKey", idempotencyKey)))
           .flatMap {
@@ -149,7 +150,7 @@ final class MongoInterviewCalendarLedger(store: MongoInterviewWorkflowStore) ext
         val released = at.truncatedTo(ChronoUnit.MILLIS)
         val reserveKey = InterviewWorkflow.reservationKey(workflowId, generation)
         val result = MongoRepositorySupport.repositoryGuard(diagnostics, "interviewCalendar.cancel") {
-          transactionRunner.run { session =>
+          transactionRunner.run(TransactionOperation.InterviewCalendarCancel) { session =>
             RepositoryF
               .lift(MongoSessionOperations.findOne(reservations, session, reservationIdentity(workflowId, reserveKey)))
               .flatMap {

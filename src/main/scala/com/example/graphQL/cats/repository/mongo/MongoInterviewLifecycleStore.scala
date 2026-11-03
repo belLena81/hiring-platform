@@ -1,6 +1,7 @@
 package com.example.graphQL.cats.repository.mongo
 
 import com.example.graphQL.cats.repository.mongo.MongoF.asRepository
+import com.example.graphQL.cats.service.TransactionOperation
 import com.example.graphQL.cats.shared.StableIds
 import cats.data.EitherT
 import cats.effect.IO
@@ -40,7 +41,7 @@ final class MongoInterviewLifecycleStore(store: MongoInterviewWorkflowStore) {
       execution: ClaimedInterviewWorkflowCommand
   ): RepositoryF[IO, Unit] =
     MongoRepositorySupport.repositoryGuard(diagnostics, "interviewWorkflow.approveRescheduledInterval") {
-      transactionRunner.run { session =>
+      transactionRunner.run(TransactionOperation.InterviewWorkflowApproveRescheduledInterval) { session =>
         val receiptId = swapReceiptId(workflow.id, workflow.replacementGeneration)
         def held(generation: Int): RepositoryF[IO, InterviewCalendarReservation] =
           RepositoryF
@@ -131,7 +132,12 @@ final class MongoInterviewLifecycleStore(store: MongoInterviewWorkflowStore) {
   ): RepositoryF[IO, InterviewLifecycleOutcome] =
     MongoRepositorySupport.repositoryGuard(diagnostics, "interviewWorkflow.applyLifecycle") {
       MongoMutationWriteContext
-        .run(context, transactionRunner, transactionRequired = true) { session =>
+        .run(
+          context,
+          transactionRunner,
+          TransactionOperation.InterviewWorkflowApplyLifecycle,
+          transactionRequired = true
+        ) { session =>
           lifecycleReplay(session, workflowId, origin).flatMap {
             case Some(replayed) => replayed.asRepository
             case None           =>

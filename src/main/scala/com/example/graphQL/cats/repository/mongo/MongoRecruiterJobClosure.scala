@@ -5,7 +5,7 @@ import cats.effect.{Clock, IO}
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
-import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, RepositoryError}
+import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, RepositoryError, TransactionOperation}
 import com.example.graphQL.cats.service.Diagnostics.*
 import com.example.graphQL.cats.service.events.{OperationalEventPayload, OperationalEvents}
 import com.example.graphQL.cats.service.port.*
@@ -200,7 +200,7 @@ final class MongoRecruiterJobClosure private[mongo] (
   private def closeRow(id: String, now: Instant): RepositoryF[IO, RecruiterJobClosureProgress] =
     RepositoryF.fromFEither(
       transactionRunner
-        .run(session => closeFor(id, now, session))
+        .run(TransactionOperation.RecruiterJobClosureClose)(session => closeFor(id, now, session))
         .value
         .attempt
         .flatMap(

@@ -7,7 +7,7 @@ import com.example.graphQL.cats.repository.mongo.MongoRepositoryTestSupport.*
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.*
 import org.bson.Document
-import com.example.graphQL.cats.service.{Diagnostics, RepositoryError}
+import com.example.graphQL.cats.service.{Diagnostics, RepositoryError, TransactionOperation}
 import com.example.graphQL.cats.service.events.OperationalEventType
 import com.example.graphQL.cats.service.auth.{RecruiterJobClosureSchedule, RecruiterJobClosureWorker}
 import com.example.graphQL.cats.service.port.*
@@ -78,8 +78,10 @@ final class RecruiterJobClosureIntegrationSpec extends MongoIntegrationSuite {
       new MongoTransactionRunner {
         private val real =
           MongoTransactionRunner.sessions(fixture.client, RepositoryError.Conflict, diagnostics = Diagnostics.noop[IO])
-        override def run[A](operation: Option[mongo4cats.client.ClientSession[IO]] => RepositoryF[IO, A]) =
-          real.run(session =>
+        override def run[A](name: TransactionOperation)(
+            operation: Option[mongo4cats.client.ClientSession[IO]] => RepositoryF[IO, A]
+        ) =
+          real.run(name)(session =>
             operation(session) <* RepositoryF.lift[IO, Unit](IO.raiseError(new RuntimeException("crash")))
           )
       },
@@ -484,7 +486,9 @@ final class RecruiterJobClosureIntegrationSpec extends MongoIntegrationSuite {
         counting = MongoRecruiterJobClosure.withRunner(
           h.fixture.database,
           new MongoTransactionRunner {
-            override def run[A](operation: Option[mongo4cats.client.ClientSession[IO]] => RepositoryF[IO, A]) =
+            override def run[A](name: TransactionOperation)(
+                operation: Option[mongo4cats.client.ClientSession[IO]] => RepositoryF[IO, A]
+            ) =
               RepositoryF.lift[IO, Unit](runs.update(_ + 1)) *> operation(None)
           },
           Diagnostics.noop[IO],

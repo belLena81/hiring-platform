@@ -1,6 +1,7 @@
 package com.example.graphQL.cats.repository.mongo
 
 import com.example.graphQL.cats.repository.mongo.MongoF.asRepository
+import com.example.graphQL.cats.service.TransactionOperation
 import com.example.graphQL.cats.shared.StableIds
 import cats.data.EitherT
 import cats.effect.IO
@@ -45,7 +46,7 @@ final class MongoInterviewCommandQueue(
     if (maxAttempts <= 0) MongoF.raise(RepositoryError.InvalidEvent)
     else
       LeaseRequest.whenValid(workerId, leaseDuration)(RepositoryF.lift(uuids.randomUUID)).flatMap { token =>
-        transactionRunner.run { session =>
+        transactionRunner.run(TransactionOperation.InterviewWorkflowClaimExecution) { session =>
           loadWorkflow(command.workflowId, session).flatMap {
             case None =>
               (InterviewExecutionClaimOutcome.AlreadyHandled: InterviewExecutionClaimOutcome).asRepository
@@ -185,44 +186,45 @@ final class MongoInterviewCommandQueue(
       claim: ClaimedInterviewWorkflowCommand,
       generation: InterviewPublisherGeneration,
       now: Instant
-  ): RepositoryF[IO, Boolean] = transactionRunner.run { session =>
-    for {
-      workflow <- loadWorkflow(claim.record.workflowId, session).orConflict
-      _ <- fenceParticipants(session, workflow)
-      disposition <- publicationDisposition(session, workflow, claim.record, Int.MaxValue)
-      valid =
-        disposition == InterviewPublicationDisposition.Send && claim.record.state != InterviewWorkflowCommandState.Superseded
-      _ <- guardWrite(
-        commands,
-        session,
-        if (valid)
-          MongoFilter.and(
-            claimFilter(claim),
-            MongoFilter.eq(MongoFields.Attempts, Int.box(claim.record.publicationAttempts))
-          )
-        else claimFilter(claim),
-        if (valid)
-          MongoUpdate.combine(
-            MongoUpdate.set("publicationCheckedAt", now.toDate),
-            MongoUpdate.inc(MongoFields.Attempts, java.lang.Integer.valueOf(1))
-          )
-        else terminalCommand(InterviewWorkflowCommandState.Superseded, InterviewFailureCode.PublicationObsolete, now)
-      )
-      _ <-
-        if (valid)
-          participantsOf(workflow).distinct.traverse_(subject =>
-            MongoProducerRegistrations
-              .register(
-                database,
-                session,
-                subject.value.toString,
-                generation.transactionalId,
-                ProducerRegistrationValues.Interview,
-                now
-              )
-          )
-        else ().asRepository
-    } yield valid
+  ): RepositoryF[IO, Boolean] = transactionRunner.run(TransactionOperation.InterviewWorkflowAuthorizePublication) {
+    session =>
+      for {
+        workflow <- loadWorkflow(claim.record.workflowId, session).orConflict
+        _ <- fenceParticipants(session, workflow)
+        disposition <- publicationDisposition(session, workflow, claim.record, Int.MaxValue)
+        valid =
+          disposition == InterviewPublicationDisposition.Send && claim.record.state != InterviewWorkflowCommandState.Superseded
+        _ <- guardWrite(
+          commands,
+          session,
+          if (valid)
+            MongoFilter.and(
+              claimFilter(claim),
+              MongoFilter.eq(MongoFields.Attempts, Int.box(claim.record.publicationAttempts))
+            )
+          else claimFilter(claim),
+          if (valid)
+            MongoUpdate.combine(
+              MongoUpdate.set("publicationCheckedAt", now.toDate),
+              MongoUpdate.inc(MongoFields.Attempts, java.lang.Integer.valueOf(1))
+            )
+          else terminalCommand(InterviewWorkflowCommandState.Superseded, InterviewFailureCode.PublicationObsolete, now)
+        )
+        _ <-
+          if (valid)
+            participantsOf(workflow).distinct.traverse_(subject =>
+              MongoProducerRegistrations
+                .register(
+                  database,
+                  session,
+                  subject.value.toString,
+                  generation.transactionalId,
+                  ProducerRegistrationValues.Interview,
+                  now
+                )
+            )
+          else ().asRepository
+      } yield valid
   }
 
   private def publicationDisposition(
@@ -363,7 +365,7 @@ final class MongoInterviewCommandQueue(
       result: InterviewResult,
       now: Instant
   ): RepositoryF[IO, Unit] =
-    transactionRunner.run { session =>
+    transactionRunner.run(TransactionOperation.InterviewWorkflowRecordResult) { session =>
       val command = claim.record
       loadWorkflow(command.workflowId, session).flatMap {
         case None           => ().asRepository
@@ -528,7 +530,7 @@ final class MongoInterviewCommandQueue(
       actorId: UserId
   ): RepositoryF[IO, Int] =
     MongoRepositorySupport.repositoryGuard(diagnostics, "interviewWorkflow.repairNotifications") {
-      transactionRunner.run { session =>
+      transactionRunner.run(TransactionOperation.InterviewWorkflowRepairNotifications) { session =>
         val receiptId = s"${workflowId.value}:repair-notifications:$requestKey"
         RepositoryF
           .lift(MongoSessionOperations.findById(inbox, session, receiptId))
@@ -660,7 +662,7 @@ final class MongoInterviewCommandQueue(
       now: Instant,
       failureCode: InterviewFailureCode
   ): RepositoryF[IO, InterviewPublicationResolution] =
-    transactionRunner.run { session =>
+    transactionRunner.run(TransactionOperation.InterviewWorkflowRequireRepair) { session =>
       for {
         workflow <- loadWorkflow(claim.record.workflowId, session).orConflict
         _ <- fenceParticipants(session, workflow)

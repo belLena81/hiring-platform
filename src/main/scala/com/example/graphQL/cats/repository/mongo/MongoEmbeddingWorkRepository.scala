@@ -6,7 +6,7 @@ import cats.effect.std.UUIDGen
 import cats.syntax.all.*
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.RepositoryError
-import com.example.graphQL.cats.service.Diagnostics
+import com.example.graphQL.cats.service.{Diagnostics, TransactionOperation}
 import com.mongodb.client.model.{Sorts, UpdateOptions}
 import mongo4cats.client.ClientSession
 import mongo4cats.database.MongoDatabase
@@ -53,25 +53,26 @@ final class MongoEmbeddingWorkRepository(
       key: EmbeddingWorkKey,
       adminId: com.example.graphQL.cats.domain.model.Identifiers.UserId,
       transactions: MongoTransactionRunner
-  ): RepositoryF[IO, Option[EmbeddingWorkInspection]] = transactions.run { session =>
-    for {
-      _ <- authorizeAdmin(adminId, session)
-      row <- RepositoryF.lift(
-        MongoSessionOperations.findOne(collection, session, MongoFilter.eq(MongoFields.Id, key.value))
-      )
-      result <- row.traverse(document =>
-        MongoF.fromEither(MongoDocumentFields.toRepository(for {
-          generation <- MongoDocumentFields.requiredNumberAsLong(document, MongoFields.Generation)
-          attempts <- MongoDocumentFields.requiredNumberAsInt(document, MongoFields.Attempts)
-          state <- MongoDocumentFields.requiredEnum(document, MongoFields.State)(
-            MongoDocumentFields.byName(EmbeddingWorkState.values)
-          )
-          failure <- MongoDocumentFields.optionalEnum(document, MongoFields.Failure)(
-            MongoDocumentFields.byName(EmbeddingWorkFailure.values)
-          )
-        } yield EmbeddingWorkInspection(generation, attempts, state, failure)))
-      )
-    } yield result
+  ): RepositoryF[IO, Option[EmbeddingWorkInspection]] = transactions.run(TransactionOperation.EmbeddingWorkInspect) {
+    session =>
+      for {
+        _ <- authorizeAdmin(adminId, session)
+        row <- RepositoryF.lift(
+          MongoSessionOperations.findOne(collection, session, MongoFilter.eq(MongoFields.Id, key.value))
+        )
+        result <- row.traverse(document =>
+          MongoF.fromEither(MongoDocumentFields.toRepository(for {
+            generation <- MongoDocumentFields.requiredNumberAsLong(document, MongoFields.Generation)
+            attempts <- MongoDocumentFields.requiredNumberAsInt(document, MongoFields.Attempts)
+            state <- MongoDocumentFields.requiredEnum(document, MongoFields.State)(
+              MongoDocumentFields.byName(EmbeddingWorkState.values)
+            )
+            failure <- MongoDocumentFields.optionalEnum(document, MongoFields.Failure)(
+              MongoDocumentFields.byName(EmbeddingWorkFailure.values)
+            )
+          } yield EmbeddingWorkInspection(generation, attempts, state, failure)))
+        )
+      } yield result
   }
 
   private def authorizeAdmin(
@@ -101,7 +102,7 @@ final class MongoEmbeddingWorkRepository(
     if (expectedGeneration < 1L || expectedGeneration == Long.MaxValue)
       MongoF.raise(RepositoryError.InvalidStoredData)
     else
-      transactions.run { session =>
+      transactions.run(TransactionOperation.EmbeddingWorkRepair) { session =>
         for {
           _ <- authorizeAdmin(adminId, session)
           repaired <- RepositoryF.lift(

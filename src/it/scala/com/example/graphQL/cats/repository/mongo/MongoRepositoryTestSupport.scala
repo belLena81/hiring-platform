@@ -1,6 +1,7 @@
 package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.IO
+import com.example.graphQL.cats.service.TransactionOperation
 import com.example.graphQL.cats.service.port.RepositoryF
 import mongo4cats.client.ClientSession
 import mongo4cats.collection.MongoCollection
@@ -14,7 +15,7 @@ import org.bson.conversions.Bson
 
 private[graphQL] object MongoRepositoryTestSupport {
   val noTransaction: MongoTransactionRunner = new MongoTransactionRunner {
-    override def run[A](
+    override def run[A](name: TransactionOperation)(
         operation: Option[ClientSession[IO]] => RepositoryF[IO, A]
     ): RepositoryF[IO, A] = operation(None)
   }

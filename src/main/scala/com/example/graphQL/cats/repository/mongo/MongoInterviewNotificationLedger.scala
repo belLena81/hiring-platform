@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.service.TransactionOperation
 import cats.data.EitherT
 import cats.effect.IO
 import cats.syntax.all.*
@@ -23,7 +24,7 @@ final class MongoInterviewNotificationLedger(store: MongoInterviewWorkflowStore)
       execution: Option[ClaimedInterviewWorkflowCommand] = None
   ): InterviewProviderF[IO, InterviewNotificationReceipt] = {
     val result = MongoRepositorySupport.repositoryGuard(diagnostics, "interviewNotification.deliverOnce") {
-      transactionRunner.run { session =>
+      transactionRunner.run(TransactionOperation.InterviewNotificationDeliver) { session =>
         fenceExecution(session, receipt.workflowId, execution) *>
           loadWorkflow(receipt.workflowId, session).orConflict.flatMap(workflow =>
             for {

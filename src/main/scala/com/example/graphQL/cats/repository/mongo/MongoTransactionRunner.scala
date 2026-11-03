@@ -5,7 +5,7 @@ import com.example.graphQL.cats.domain.policy.CircuitBreakerPolicy.Completion
 import com.example.graphQL.cats.service.port.{RepositoryF}
 import com.example.graphQL.cats.config.MongoConcernPolicy
 import com.example.graphQL.cats.service.RepositoryError
-import com.example.graphQL.cats.service.Diagnostics
+import com.example.graphQL.cats.service.{Diagnostics, TransactionOperation}
 import com.example.graphQL.cats.service.resilience.CircuitBreaker
 import cats.syntax.all.*
 import mongo4cats.client.{ClientSession, MongoClient}
@@ -16,7 +16,9 @@ import retry.RetryPolicies.*
 import scala.concurrent.duration.*
 
 private[mongo] trait MongoTransactionRunner {
-  def run[A](operation: Option[ClientSession[IO]] => RepositoryF[IO, A]): RepositoryF[IO, A]
+
+  /** `name` identifies the transaction in the log line emitted when its retries are exhausted. */
+  def run[A](name: TransactionOperation)(operation: Option[ClientSession[IO]] => RepositoryF[IO, A]): RepositoryF[IO, A]
 }
 
 private[mongo] object MongoTransactionRunner {
@@ -33,11 +35,10 @@ private[mongo] object MongoTransactionRunner {
       retryPolicy: RetryPolicy = RetryPolicy(),
       diagnostics: Diagnostics[IO],
       transientExhaustionError: RepositoryError = RepositoryError.Conflict,
-      breaker: CircuitBreaker[IO] = CircuitBreaker.disabled[IO],
-      exhaustedOperation: Option[String] = None
+      breaker: CircuitBreaker[IO] = CircuitBreaker.disabled[IO]
   ): MongoTransactionRunner =
     new MongoTransactionRunner {
-      override def run[A](
+      override def run[A](name: TransactionOperation)(
           operation: Option[ClientSession[IO]] => RepositoryF[IO, A]
       ): RepositoryF[IO, A] = RepositoryF.fromFEither {
         // The error channel carries the original driver exception until the single final mapping below.
@@ -89,7 +90,7 @@ private[mongo] object MongoTransactionRunner {
               // The runner logs only the exhausted outcome (`transaction.exhausted`, with the conflict source). The
               // write steps of application writes log each retried attempt themselves (`ApplicationWriteConflict`).
               MongoRepositorySupport
-                .reportExhausted(diagnostics, error, exhaustedOperation)
+                .reportExhausted(diagnostics, error, name)
                 .whenA(MongoErrors.isTransient(error))
                 .as(MongoErrors.toRepositoryError(error, duplicateKeyError, transientExhaustionError))
             )

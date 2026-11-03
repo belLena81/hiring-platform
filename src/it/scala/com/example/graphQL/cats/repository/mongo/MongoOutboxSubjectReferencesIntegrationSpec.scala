@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.service.TransactionOperation
 import com.example.graphQL.cats.service.events.SearchFilterSnapshot
 import com.example.graphQL.cats.service.events.OperationalEventPayload.SearchKind
 import com.example.graphQL.cats.AccountValueFixtures.email
@@ -302,10 +303,12 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
             )
             _ = assertEquals(initial.map(_.getLong("generation").longValue()), Option(0L))
             _ = assertEquals(initial.map(_.getString("state")), Some("Unpublished"))
-            rolledBack <- runner.run { session =>
-              erasures.enqueue(deletedUser, now, MongoMutationWriteContext(session)) *>
-                RepositoryF.at[IO].raise(RepositoryError.Unavailable)
-            }.value
+            rolledBack <- runner
+              .run(TransactionOperation.ApplicationWrite) { session =>
+                erasures.enqueue(deletedUser, now, MongoMutationWriteContext(session)) *>
+                  RepositoryF.at[IO].raise(RepositoryError.Unavailable)
+              }
+              .value
             _ = assertEquals(rolledBack, Left(RepositoryError.Unavailable))
             afterRollback <- MongoRepositoryTestSupport.first(
               database
@@ -593,7 +596,11 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
                     .append("leaseUntil", java.util.Date.from(now.plusSeconds(60L)))
                 )
             )
-            receipt <- runner.run(session => erasures.enqueue(userId, now, MongoMutationWriteContext(session))).value
+            receipt <- runner
+              .run(TransactionOperation.ApplicationWrite)(session =>
+                erasures.enqueue(userId, now, MongoMutationWriteContext(session))
+              )
+              .value
             _ = assert(receipt.isRight)
             request <- MongoRepositoryTestSupport.first(
               database
@@ -807,7 +814,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
             requestWritten <- Deferred[IO, Unit]
             allowDeletionToContinue <- Deferred[IO, Unit]
             deletionFiber <- runner
-              .run { session =>
+              .run(TransactionOperation.ApplicationWrite) { session =>
                 val context = MongoMutationWriteContext(session)
                 for {
                   receiptId <- erasures.enqueue(userId, deletionAt, context)
@@ -841,14 +848,16 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
             finalDeletion <- firstDeletion match {
               case right @ Right(_) => IO.pure(right)
               case Left(_)          =>
-                runner.run { session =>
-                  val context = MongoMutationWriteContext(session)
-                  erasures.enqueue(userId, deletionAt.plusSeconds(1L), context).flatMap { receiptId =>
-                    users
-                      .deleteAccount(userId, deletionAt.plusSeconds(1L), "deleted-race-account", context)
-                      .as(receiptId)
+                runner
+                  .run(TransactionOperation.ApplicationWrite) { session =>
+                    val context = MongoMutationWriteContext(session)
+                    erasures.enqueue(userId, deletionAt.plusSeconds(1L), context).flatMap { receiptId =>
+                      users
+                        .deleteAccount(userId, deletionAt.plusSeconds(1L), "deleted-race-account", context)
+                        .as(receiptId)
+                    }
                   }
-                }.value
+                  .value
             }
             receiptId <- finalDeletion.fold(
               error => IO.raiseError[String](new AssertionError(s"Deletion retry failed after fence race: $error")),

@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.service.TransactionOperation
 import com.example.graphQL.cats.service.events.OperationalEventPayload
 import cats.data.EitherT
 import com.example.graphQL.cats.AccountValueFixtures.email
@@ -90,19 +91,27 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends MongoIntegrationSu
                   MongoSessionOperations.insertOne(IO.pure(documents), session, new Document("_id", id))
                 )
                 .void
-            first <- runner.run(session => insert("committed-1", session).as(1)).value
-            second <- runner.run(session => insert("committed-2", session).as(2)).value
-            rejected <- runner.run { session =>
-              insert("rejected", session) *> RepositoryF.at[IO].fromEither[Unit](Left(RepositoryError.Conflict))
-            }.value
-            failed <- runner.run { session =>
-              insert("failed", session) *> RepositoryF.lift[IO, Unit](
-                IO.raiseError(new IllegalStateException("injected operation failure"))
-              )
-            }.value
+            first <- runner
+              .run(TransactionOperation.ApplicationWrite)(session => insert("committed-1", session).as(1))
+              .value
+            second <- runner
+              .run(TransactionOperation.ApplicationWrite)(session => insert("committed-2", session).as(2))
+              .value
+            rejected <- runner
+              .run(TransactionOperation.ApplicationWrite) { session =>
+                insert("rejected", session) *> RepositoryF.at[IO].fromEither[Unit](Left(RepositoryError.Conflict))
+              }
+              .value
+            failed <- runner
+              .run(TransactionOperation.ApplicationWrite) { session =>
+                insert("failed", session) *> RepositoryF.lift[IO, Unit](
+                  IO.raiseError(new IllegalStateException("injected operation failure"))
+                )
+              }
+              .value
             entered <- Deferred[IO, Unit]
             fiber <- runner
-              .run { session =>
+              .run(TransactionOperation.ApplicationWrite) { session =>
                 insert("cancelled", session) *> RepositoryF.lift(entered.complete(()) *> IO.never[Unit])
               }
               .value

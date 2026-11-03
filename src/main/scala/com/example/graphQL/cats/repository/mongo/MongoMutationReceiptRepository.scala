@@ -7,7 +7,7 @@ import cats.effect.std.UUIDGen
 import cats.syntax.all.*
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.RepositoryError
-import com.example.graphQL.cats.service.Diagnostics
+import com.example.graphQL.cats.service.{Diagnostics, TransactionOperation}
 import mongo4cats.client.{ClientSession, MongoClient}
 import mongo4cats.database.MongoDatabase
 import org.bson.Document
@@ -28,12 +28,13 @@ private[mongo] object MongoMutationWriteContext {
   def run[A](
       context: MutationWriteContext,
       transactionRunner: MongoTransactionRunner,
+      name: TransactionOperation,
       transactionRequired: Boolean
   )(operation: Option[ClientSession[IO]] => RepositoryF[IO, A]): RepositoryF[IO, A] =
     context match {
       case MongoMutationWriteContext(value)                   => operation(value)
       case value if value eq MutationWriteContext.directWrite =>
-        if (transactionRequired) transactionRunner.run(operation) else operation(None)
+        if (transactionRequired) transactionRunner.run(name)(operation) else operation(None)
       case _ =>
         RepositoryF.lift(
           IO.raiseError(MongoSetupError("Mutation write context belongs to another repository adapter"))
@@ -61,46 +62,48 @@ final class MongoMutationReceiptRepository(
       write: MutationWriteContext => RepositoryF[IO, MutationWriteOutcome[A, E]]
   ): RepositoryF[IO, MutationReceiptExecution[A, E]] =
     MongoRepositorySupport
-      .repositoryGuard(diagnostics, "mutationReceipt.execute")(transactionRunner.run { session =>
-        find(session, key).flatMap {
-          case None =>
-            for {
-              pending <- RepositoryF.lift(inProgress(key, fingerprint, now, expiresAt))
-              _ <- insert(session, pending)
-              // A typed failure leaves the transaction uncommitted, so the runner aborts it together with the pending
-              // receipt. Deleting the receipt here would run in a transaction the server already aborted after a
-              // duplicate-key write, fail as a transient error, and turn that outcome into a retried `Conflict`.
-              outcome <- write(MongoMutationWriteContext(session))
-              result <- outcome match {
-                case MutationWriteOutcome.Rejected(error) =>
-                  RepositoryF.lift(remove(session, key)).as(MutationReceiptExecution.Rejected(error))
-                case MutationWriteOutcome.Applied(completed) =>
-                  complete(session, key, fingerprint, completed.entity, now, expiresAt)
-                    .as(MutationReceiptExecution.Applied(completed.value, completed.entity))
-              }
-            } yield result
-          case Some(receipt) if receipt.fingerprint != fingerprint =>
-            RepositoryF
-              .lift(
-                ApplicationWriteConflict
-                  .report(diagnostics, ConflictSource.ReceiptFingerprint, "mutationReceipt.execute")
+      .repositoryGuard(diagnostics, "mutationReceipt.execute")(
+        transactionRunner.run(TransactionOperation.MutationReceiptWrite) { session =>
+          find(session, key).flatMap {
+            case None =>
+              for {
+                pending <- RepositoryF.lift(inProgress(key, fingerprint, now, expiresAt))
+                _ <- insert(session, pending)
+                // A typed failure leaves the transaction uncommitted, so the runner aborts it together with the pending
+                // receipt. Deleting the receipt here would run in a transaction the server already aborted after a
+                // duplicate-key write, fail as a transient error, and turn that outcome into a retried `Conflict`.
+                outcome <- write(MongoMutationWriteContext(session))
+                result <- outcome match {
+                  case MutationWriteOutcome.Rejected(error) =>
+                    RepositoryF.lift(remove(session, key)).as(MutationReceiptExecution.Rejected(error))
+                  case MutationWriteOutcome.Applied(completed) =>
+                    complete(session, key, fingerprint, completed.entity, now, expiresAt)
+                      .as(MutationReceiptExecution.Applied(completed.value, completed.entity))
+                }
+              } yield result
+            case Some(receipt) if receipt.fingerprint != fingerprint =>
+              RepositoryF
+                .lift(
+                  ApplicationWriteConflict
+                    .report(diagnostics, ConflictSource.ReceiptFingerprint, "mutationReceipt.execute")
+                )
+                .as(MutationReceiptExecution.FingerprintMismatch)
+            case Some(receipt) if receipt.state == MutationReceiptState.InProgress =>
+              MongoF.pure(MutationReceiptExecution.InProgress)
+            case Some(receipt) =>
+              // A completed receipt without its rehydration key is corrupt; do not repeat the write.
+              MongoF.fromEither(
+                receipt.entity
+                  .toRight(RepositoryError.InvalidStoredData)
+                  .map(MutationReceiptExecution.Replay.apply)
               )
-              .as(MutationReceiptExecution.FingerprintMismatch)
-          case Some(receipt) if receipt.state == MutationReceiptState.InProgress =>
-            MongoF.pure(MutationReceiptExecution.InProgress)
-          case Some(receipt) =>
-            // A completed receipt without its rehydration key is corrupt; do not repeat the write.
-            MongoF.fromEither(
-              receipt.entity
-                .toRight(RepositoryError.InvalidStoredData)
-                .map(MutationReceiptExecution.Replay.apply)
-            )
+          }
+          /*
+           * The preceding branches keep receipt insertion, the caller write, and completion in the same
+           * transaction. A missing stored receipt is the only path that can start the write.
+           */
         }
-        /*
-         * The preceding branches keep receipt insertion, the caller write, and completion in the same
-         * transaction. A missing stored receipt is the only path that can start the write.
-         */
-      })(MongoErrors.duplicateAsConflict)
+      )(MongoErrors.duplicateAsConflict)
 
   private def find(
       session: Option[ClientSession[IO]],
@@ -236,8 +239,7 @@ object MongoMutationReceiptRepository {
         client,
         RepositoryError.Conflict,
         diagnostics = diagnostics,
-        breaker = breaker,
-        exhaustedOperation = Some("mutationReceipt.writeTransaction")
+        breaker = breaker
       ),
       diagnostics,
       uuidGen

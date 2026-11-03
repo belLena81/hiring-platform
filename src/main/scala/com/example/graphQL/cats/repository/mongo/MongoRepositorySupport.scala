@@ -21,7 +21,7 @@ import com.example.graphQL.cats.service.port.{RepositoryF}
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.events.OperationalEventEnvelope
 import com.example.graphQL.cats.domain.pagination.PageSize
-import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFields}
+import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFields, TransactionOperation}
 import com.example.graphQL.cats.service.Diagnostics.*
 import com.mongodb.{
   MongoBulkWriteException,
@@ -471,13 +471,14 @@ private[mongo] object MongoRepositorySupport {
     Either.cond(result.getDeletedCount == 1L, (), mismatch)
 
   /** A transaction that ran out of retries: the failure metadata plus the conflict source `transaction-exhausted`. */
-  def reportExhausted(diagnostics: Diagnostics[IO], error: Throwable, applicationOperation: Option[String]): IO[Unit] =
-    applicationOperation.traverse_(
-      ApplicationWriteConflict.report(diagnostics, ConflictSource.TransactionExhausted, _)
-    ) *> diagnostics.emit(
+  def reportExhausted(diagnostics: Diagnostics[IO], error: Throwable, operation: TransactionOperation): IO[Unit] =
+    ApplicationWriteConflict
+      .report(diagnostics, ConflictSource.TransactionExhausted, operation.label)
+      .whenA(operation.reportsApplicationWriteConflict) *> diagnostics.emit(
       LogEvent.MongoRepositoryFailed,
       fields = LogFields.failure(error) + (LogField.SpanName -> "transaction.exhausted") +
-        (LogField.ConflictSource -> ConflictSource.TransactionExhausted.label)
+        (LogField.ConflictSource -> ConflictSource.TransactionExhausted.label) +
+        (LogField.TransactionOperation -> operation.label)
     )
 
   def reportFailure(diagnostics: Diagnostics[IO], operation: String, error: Throwable): IO[Unit] =
