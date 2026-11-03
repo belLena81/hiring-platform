@@ -19,7 +19,7 @@ import com.example.graphQL.cats.domain.model.{
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.resilience.{LeaseHeartbeat, LeaseLost}
-import com.example.graphQL.cats.service.{BackgroundWorker, Diagnostics, LogEvent, LogFields}
+import com.example.graphQL.cats.service.{BackgroundWorker, Diagnostics, LogEvent, LogField, LogFields}
 import com.example.graphQL.cats.service.Diagnostics.*
 import com.example.graphQL.cats.service.RepositoryReporting.orReport
 import fs2.Stream
@@ -121,7 +121,10 @@ final class EmbeddingPipeline[F[_]](using F: Temporal[F])(
   private val conflictRereads: Int = math.max(retryAttempts - 1, 0)
 
   private def processClaim(claim: ClaimedEmbeddingWork): F[Unit] =
-    Ref.of[F, Option[HeldVector]](None).flatMap(held => processWithHeld(claim, held))
+    diagnostics
+      .emit(LogEvent.EmbeddingLeaseReclaimed, fields = Map(LogField.Count -> claim.attempts.toString))
+      .whenA(claim.reclaimedLease) *>
+      Ref.of[F, Option[HeldVector]](None).flatMap(held => processWithHeld(claim, held))
 
   private def processWithHeld(claim: ClaimedEmbeddingWork, held: Held): F[Unit] =
     LeaseHeartbeat

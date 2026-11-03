@@ -922,6 +922,29 @@ final class MongoConsumerReceiptRepository(database: MongoDatabase[IO], diagnost
         case MongoDuplicateKey(_) => Right(false)
         case _                    => Left(RepositoryError.Unavailable)
       }
+      .flatMap(inserted =>
+        if (inserted) RepositoryF.pure[IO, Boolean](true) else extend(consumerGroup, event, expiresAt)
+      )
+
+  /** A duplicate delivery moves the stored expiry forward, never back; a failed update is `Unavailable`, so the offset
+    * is not committed and the record is delivered again.
+    */
+  // If the TTL monitor removed the receipt between the duplicate-key insert and this update, the update matches nothing
+  // and the delivery is still treated as handled; the receipt window forbids that while Kafka still holds the record.
+  private def extend(consumerGroup: String, event: OperationalEventEnvelope, expiresAt: Instant) =
+    MongoRepositorySupport
+      .repositoryGuard(diagnostics, "consumerReceipt.extend")(
+        RepositoryF
+          .lift(
+            MongoSessionOperations.updateOne(
+              receipts,
+              None,
+              MongoFilter.eq(MongoFields.Id, s"$consumerGroup:${event.eventId.toString}"),
+              MongoUpdate.max(MongoFields.ExpiresAt, expiresAt.toDate)
+            )
+          )
+          .as(false)
+      )
 
 }
 

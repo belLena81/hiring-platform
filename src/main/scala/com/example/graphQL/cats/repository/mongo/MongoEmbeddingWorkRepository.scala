@@ -7,7 +7,7 @@ import cats.syntax.all.*
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.{Diagnostics, TransactionOperation}
-import com.mongodb.client.model.{Sorts, UpdateOptions}
+import com.mongodb.client.model.{ReturnDocument, Sorts, UpdateOptions}
 import mongo4cats.client.ClientSession
 import mongo4cats.database.MongoDatabase
 import org.bson.{Document, BsonDocument, BsonString, BsonInt32, BsonInt64, BsonDateTime, BsonArray, BsonValue}
@@ -229,8 +229,12 @@ final class MongoEmbeddingWorkRepository(
             token,
             now,
             leaseDuration,
-            Sorts.ascending(MongoFields.AvailableAt, MongoFields.Id)
-          )(document => MongoF.fromEither(readClaim(document)))
+            Sorts.ascending(MongoFields.AvailableAt, MongoFields.Id),
+            // The pre-image tells a takeover of an expired lease (it was Processing) from a fresh claim. The lease stamp
+            // changes neither generation nor attempts, and the new token is the one generated here, so nothing else
+            // is needed from the post-claim document and no field is stored for this.
+            ReturnDocument.BEFORE
+          )(document => MongoF.fromEither(readClaim(document, token)))
         }
     }
 
@@ -300,16 +304,24 @@ final class MongoEmbeddingWorkRepository(
       MongoFilter.eq(MongoFields.LeaseToken, claim.leaseToken)
     )
 
-  private def readClaim(document: Document): Either[RepositoryError, ClaimedEmbeddingWork] =
-    MongoDocumentFields.toRepository(for {
-      id <- MongoDocumentFields.requiredString(document, MongoFields.Id)
-      key <- EmbeddingWorkKey
-        .fromId(id)
-        .toRight(MongoHiringCodecs.StoredDocumentError.InvalidField(MongoFields.Id))
-      generation <- MongoDocumentFields.requiredNumberAsLong(document, MongoFields.Generation)
-      attempts <- MongoDocumentFields.requiredNumberAsInt(document, MongoFields.Attempts)
-      leaseToken <- MongoDocumentFields.requiredString(document, MongoFields.LeaseToken)
-    } yield ClaimedEmbeddingWork(key, generation, attempts, leaseToken))
+  private def readClaim(document: Document, leaseToken: String): Either[RepositoryError, ClaimedEmbeddingWork] =
+    MongoDocumentFields.toRepository(
+      for {
+        id <- MongoDocumentFields.requiredString(document, MongoFields.Id)
+        key <- EmbeddingWorkKey
+          .fromId(id)
+          .toRight(MongoHiringCodecs.StoredDocumentError.InvalidField(MongoFields.Id))
+        generation <- MongoDocumentFields.requiredNumberAsLong(document, MongoFields.Generation)
+        attempts <- MongoDocumentFields.requiredNumberAsInt(document, MongoFields.Attempts)
+        previousState <- MongoDocumentFields.requiredString(document, MongoFields.State)
+      } yield ClaimedEmbeddingWork(
+        key,
+        generation,
+        attempts,
+        leaseToken,
+        reclaimedLease = previousState == EmbeddingWorkState.Processing.toString
+      )
+    )
 }
 
 final case class EmbeddingWorkInspection(

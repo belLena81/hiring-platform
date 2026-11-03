@@ -57,6 +57,18 @@ enum LogEvent(val category: String, val component: String, val message: String, 
       extends LogEvent("EMBEDDING_PROCESSING_FAILED", "SEARCH", "Embedding work processing failed", LogLevel.Warn)
   case EmbeddingProviderFailed
       extends LogEvent("EMBEDDING_PROVIDER_FAILED", "SEARCH", "Embedding provider request failed", LogLevel.Warn)
+
+  /** A claim took over an expired `Processing` lease. The previous holder may have paid the provider for a vector it
+    * never stored, so the count of these events bounds the paid-twice residual of duplicate embedding work. Carries
+    * only the attempt count (`LogField.Count`), never an entity id or text.
+    */
+  case EmbeddingLeaseReclaimed
+      extends LogEvent(
+        "EMBEDDING_LEASE_RECLAIMED",
+        "SEARCH",
+        "Embedding work took over an expired lease; the previous holder may already have paid the provider",
+        LogLevel.Warn
+      )
   case SearchSessionVerificationFailed
       extends LogEvent(
         "SEARCH_SESSION_VERIFICATION_FAILED",

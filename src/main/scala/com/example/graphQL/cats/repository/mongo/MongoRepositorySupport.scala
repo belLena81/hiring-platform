@@ -95,6 +95,7 @@ private[mongo] object MongoUpdate {
   def setOnInsert[A](field: String, value: A): MongoUpdate =
     MongoUpdate(Updates.setOnInsert(field, value), Update.setOnInsert(field, value))
   def inc(field: String, value: Number): MongoUpdate = MongoUpdate(Updates.inc(field, value), Update.inc(field, value))
+  def max[A](field: String, value: A): MongoUpdate = MongoUpdate(Updates.max(field, value), Update.max(field, value))
   def unset(field: String): MongoUpdate = MongoUpdate(Updates.unset(field), Update.unset(field))
   def addToSet[A](field: String, value: A): MongoUpdate =
     MongoUpdate(Updates.addToSet(field, value), Update.addToSet(field, value))
@@ -398,7 +399,8 @@ private[mongo] object MongoLeaseQueue {
       session: Option[ClientSession[IO]],
       claimable: MongoFilter,
       claim: Seq[Bson],
-      sort: Bson
+      sort: Bson,
+      returned: ReturnDocument = ReturnDocument.AFTER
   )(decode: Document => RepositoryF[IO, A]): RepositoryF[IO, Option[A]] =
     RepositoryF
       .lift(
@@ -407,7 +409,7 @@ private[mongo] object MongoLeaseQueue {
           session,
           claimable,
           claim,
-          new FindOneAndUpdateOptions().sort(sort).returnDocument(ReturnDocument.AFTER)
+          new FindOneAndUpdateOptions().sort(sort).returnDocument(returned)
         )
       )
       .flatMap(_.traverse(decode))
@@ -424,7 +426,8 @@ private[mongo] object MongoLeaseQueue {
       token: String,
       now: Instant,
       duration: FiniteDuration,
-      sort: Bson
+      sort: Bson,
+      returned: ReturnDocument = ReturnDocument.AFTER
   )(decode: Document => RepositoryF[IO, A]): RepositoryF[IO, Option[A]] =
     LeaseRequest.whenValid(workerId, duration) {
       claimNext(
@@ -432,7 +435,8 @@ private[mongo] object MongoLeaseQueue {
         None,
         claimable(readyDue(readyStates, now), MongoFilter.eq(MongoFields.State, inProgressState)),
         leaseStamp(inProgressState, workerId, token, duration, now),
-        sort
+        sort,
+        returned
       )(decode)
     }
 

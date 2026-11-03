@@ -92,7 +92,9 @@ class KafkaClientSettingsSpec extends munit.FunSuite {
     )
   }
 
-  test("committed consumers join their group, commit manually, start earliest and skip aborted records") {
+  test(
+    "DDC-02.12 the committed consumer resets to earliest, reads committed records only and never auto-commits"
+  ) {
     val settings = KafkaClientSettings.committedConsumer("broker:9092", None, None, KafkaSaslSecurityProtocol.Tls, "g")
     assertEquals(
       List("group.id", "enable.auto.commit", "auto.offset.reset", "isolation.level")

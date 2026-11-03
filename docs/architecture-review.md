@@ -90,7 +90,7 @@ Gaps:
 - Invariants live in the store, not in preflight reads: unique `(candidateId, jobId)`, partial-unique admin singleton, unique email and name, unique receipts.
 - Optimistic concurrency via a `version` field with CAS filters on users, jobs and applications' sibling documents.
 - Keyset pagination on `(createdAt desc, _id desc)` with paired indexes.
-- Partial indexes keep claim scans off completed history; partial TTL indexes delete only published or failed rows.
+- Partial indexes keep claim scans off completed history; partial TTL indexes delete only Published `event_outbox` rows (`event_outbox_published_retention`) and Failed `search_session_work` rows; Failed outbox rows have no TTL.
 - Strict `$jsonSchema` validators with fail-closed drift checks at startup.
 - 19 ledger-tracked, idempotent, resumable migrations with a custom runner (correctly not Flyway).
 - Vector and hybrid search: `$vectorSearch` plus `$search`, application-side RRF fusion, final eligibility re-checked on the authoritative document.

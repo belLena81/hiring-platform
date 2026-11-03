@@ -54,7 +54,12 @@ final class OperationalEventConsumerReceiptWindowSpec extends CatsEffectSuite {
   }
 
   /** Runs the consumer while `until` is false (bounded), with the given sequence of topic answers per read. */
-  private def run(receiptTtlDays: Int, answers: Int => IO[TopicRetention])(
+  private def run(
+      receiptTtlDays: Int,
+      answers: Int => IO[TopicRetention],
+      recheck: FiniteDuration = OperationalEventKafkaRuntime.ReceiptWindowRecheck,
+      whileRunning: Harness => IO[Unit] = _ => IO.unit
+  )(
       until: Harness => IO[Boolean]
   ): IO[Harness] =
     harness.flatMap { h =>
@@ -68,14 +73,14 @@ final class OperationalEventConsumerReceiptWindowSpec extends CatsEffectSuite {
           quarantine,
           diagnostics(h),
           alive = alive,
-          topicRetention = gate
+          topicRetention = gate,
+          receiptWindowRecheck = recheck
         )
         .use(_ =>
           until(h)
             .flatMap(done => IO.sleep(100.millis).whenA(!done).as(done))
             .iterateUntil(identity)
-            .timeout(15.seconds)
-            .void
+            .timeout(15.seconds) *> whileRunning(h)
         )
         .as(h)
     }
@@ -160,6 +165,59 @@ final class OperationalEventConsumerReceiptWindowSpec extends CatsEffectSuite {
         assert(reads >= 2)
         assertEquals(events.count(_._1 == LogEvent.ConsumerReceiptWindowRefused), 1)
       }
+    }
+  }
+
+  test("DDC-02.10 a retention raise on a running consumer stops it at the next recheck and records no further beat") {
+    val answers: Int => IO[TopicRetention] = {
+      case 0 => IO.pure(sevenAndOne)
+      case _ => IO.pure(TopicRetention(30.days.toMillis, 1.day.toMillis))
+    }
+    for {
+      observed <- Ref.of[IO, Option[(Int, Int, Int)]](None)
+      // Read while the consumer resource is still alive: past the 1 s restart delay, so at least one start gate ran.
+      sample = (h: Harness) =>
+        IO.sleep(300.millis) *> h.beats.get.flatMap(settled =>
+          IO.sleep(2500.millis) *> (h.beats.get, h.reads.get)
+            .mapN((later, reads) => Some((settled, later, reads)))
+            .flatMap(observed.set)
+        )
+      h <- run(9, answers, recheck = 300.millis, whileRunning = sample)(refusedOnce)
+      sampled <- observed.get
+      events <- h.events.get
+    } yield {
+      val (settled, later, reads) = sampled.getOrElse(fail("the consumer was not observed while running"))
+      // The first read (the start gate) passed, so the refusal came from a recheck of the running consumer.
+      assert(settled > 0, "the consumer beat before the raise")
+      assertEquals(later, settled, "no beat after the recheck refused, across the restart delay")
+      assert(reads >= 3, s"start gate, recheck and a restart gate were read, saw $reads")
+      assert(events.exists(_._1 == LogEvent.ConsumerReceiptWindowRefused))
+    }
+  }
+
+  test(
+    "DDC-02.11 a recheck that cannot read the topic configuration stops the consumer; a corrected answer starts it"
+  ) {
+    val answers: Int => IO[TopicRetention] = {
+      case 0 => IO.pure(sevenAndOne)
+      case 1 => IO.raiseError(TopicConfigUnreadable("hiring.operational-events"))
+      case _ => IO.pure(sevenAndOne)
+    }
+    for {
+      atFailure <- Ref.of[IO, Option[Int]](None)
+      h <- run(9, answers, recheck = 300.millis) { h =>
+        (h.events.get, h.beats.get).flatMapN { (events, beats) =>
+          if (events.exists(_._1 == LogEvent.RuntimeFailed))
+            atFailure.modify(seen => (seen.orElse(Some(beats)), seen.exists(beats > _)))
+          else IO.pure(false)
+        }
+      }
+      failed <- h.events.get.map(_.collect { case (LogEvent.RuntimeFailed, fields) => fields })
+      snapshot <- atFailure.get
+      beats <- h.beats.get
+    } yield {
+      assertEquals(failed.head.get(LogField.ErrorType), Some(classOf[TopicConfigUnreadable].getName))
+      assert(snapshot.exists(beats > _), "the corrected answer restarted the consumer, which beat again")
     }
   }
 }

@@ -916,6 +916,67 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
     } yield ()
   }
 
+  test(
+    "DDC-05.1 a claim that took over an expired lease emits one EMBEDDING_LEASE_RECLAIMED event; a fresh claim emits none"
+  ) {
+    val key = EmbeddingWorkKey(EmbeddingWorkKind.Job, jobId.value.toString)
+    def run(expireFirstLease: Boolean): IO[List[(LogEvent, Map[LogField, String])]] =
+      for {
+        usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map.empty)
+        jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map.empty)
+        calls <- Ref.of[IO, Int](0)
+        clock <- Ref.of[IO, Instant](now)
+        work <- InMemoryEmbeddingWorkRepository.create
+        seen <- Ref.of[IO, List[(LogEvent, Map[LogField, String])]](Nil)
+        done <- Ref.of[IO, Boolean](false)
+        _ <- work.enqueue(key, now).value
+        _ <- work.setDatabaseTime(now)
+        // Given an earlier holder that claimed the work and never finished it
+        _ <- IO.whenA(expireFirstLease)(
+          work.claim("crashed-worker", now, 30.seconds).value *> work.setDatabaseTime(now.plusSeconds(31))
+        )
+        diagnostics = new Diagnostics[IO] {
+          override def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]): IO[Unit] =
+            seen.update(_ :+ (event -> fields))
+        }
+        _ <- Resource
+          .eval(Queue.bounded[IO, Unit](8))
+          .flatMap { wakeups =>
+            val worker = new EmbeddingPipeline[IO](
+              wakeups,
+              work,
+              InMemoryUsers(usersRef),
+              InMemoryJobs(jobsRef),
+              CountingEmbeddingService(calls),
+              "voyage-4-lite",
+              1,
+              3,
+              1.hour,
+              30.seconds,
+              clockOf(clock),
+              "fixture-worker",
+              diagnostics,
+              workerHealth = _ => done.set(true)
+            )
+            Resource.make(worker.stream.compile.drain.start)(_.cancel).as(wakeups)
+          }
+          // When the worker drains the queue
+          .use(wakeups => wakeups.offer(()) *> waitFor(done.get) *> waitFor(work.snapshot.map(_.isEmpty)))
+        events <- seen.get
+      } yield events
+
+    for {
+      reclaimed <- run(expireFirstLease = true)
+      fresh <- run(expireFirstLease = false)
+    } yield {
+      assertEquals(
+        reclaimed.filter(_._1 == LogEvent.EmbeddingLeaseReclaimed),
+        List(LogEvent.EmbeddingLeaseReclaimed -> Map(LogField.Count -> "0"))
+      )
+      assertEquals(fresh.count(_._1 == LogEvent.EmbeddingLeaseReclaimed), 0)
+    }
+  }
+
   test("durable embedding work preserves an active lease while coalescing newer updates") {
     val work = EmbeddingWorkKey(EmbeddingWorkKind.Job, jobId.value.toString)
     val first = now
@@ -1884,7 +1945,15 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
                     leaseUntil = Some(dbNow.plusMillis(leaseDuration.toMillis))
                   )
                 current.updated(found.key.value, claimed) -> Right(
-                  Some(ClaimedEmbeddingWork(found.key, found.generation, found.attempts, token.toString))
+                  Some(
+                    ClaimedEmbeddingWork(
+                      found.key,
+                      found.generation,
+                      found.attempts,
+                      token.toString,
+                      reclaimedLease = found.state == "Processing"
+                    )
+                  )
                 )
               }
           }

@@ -13,8 +13,15 @@ enum ConsumerReceiptWindowRefusal {
 }
 
 /** A duplicate receipt key means "already handled" only while the receipt outlives every message Kafka can still
-  * deliver. Kafka deletes closed segments only, so a record stays readable for `retention.ms + segment.ms`; the margin
-  * covers the retention check interval and clock skew. Mongo's TTL monitor only delays deletion, so it needs no margin.
+  * deliver. Time retention deletes a segment once its newest record is older than `retention.ms`, the active segment
+  * included (the broker rolls an empty one first), so a record stays readable for at most `retention.ms + segment.ms`
+  * even on a quiet topic; the margin covers the retention check interval and producer clock skew. Mongo's TTL monitor
+  * only delays deletion, so it needs no margin.
+  *
+  * Consumer-group offset expiry (`offsets.retention.minutes`) and any offset reset only cause re-reads from the
+  * earliest retained offset. Every re-read record is deduplicated by the same inequality, so the window does not depend
+  * on offset retention and the gate does not read that broker setting (it would need cluster `DESCRIBE_CONFIGS`). It
+  * does depend on `auto.offset.reset=earliest`: `latest` would lose events rather than duplicate them.
   */
 object ConsumerReceiptWindow {
   val Margin: FiniteDuration = 1.hour

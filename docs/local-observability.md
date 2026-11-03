@@ -29,6 +29,15 @@ The existing HTTP server metrics and spans come from the http4s otel4s middlewar
 
 Mongo client spans (`<command> <collection>`, kind CLIENT, the same attributes) are children of the current request span only when the JVM runs with `-Dcats.effect.trackFiberContext=true` (set for `sbt run` and tests). The container deliberately does not set it (decision D13 of the container runtime specification), so in the container Mongo operations record the duration histogram without span parenting and create no span; the same holds for background workers (outbox publisher, embedding workers, backlog sampler). When the flag is off, `Main` selects the standard OpenTelemetry thread-local context storage (`TelemetryRuntime.selectContextStorage`), because the fiber-backed storage that `otel4s-oteljava-context-storage` registers throws on every otel4s instrument call without the flag. GraphQL requests rejected before a document exists (malformed JSON, unsupported media type, HTTP authentication failures, payload too large) appear only in the HTTP server metrics, not in the GraphQL counter; parse failures, invalid documents and persisted-query misses are the `_invalid` count. Field-level GraphQL errors return HTTP 200, so use `hiring.graphql.root_field.executions` by `hiring.graphql.outcome`, not the HTTP status, for GraphQL failure ratios; a typed business payload (for example an interview action refusal) is not an error entry and counts as `success`.
 
+## Log events for delivery containment
+
+Names are the emitted `LogEvent` names in [Diagnostics](../src/main/scala/com/example/graphQL/cats/service/Diagnostics.scala), which holds the full catalog. Only these two events are listed here; the local query that finds them in Loki is not verified.
+
+| Event | Level | Emitted when | Fields |
+|---|---|---|---|
+| `CONSUMER_RECEIPT_WINDOW_REFUSED` | ERROR | The operational consumer's start gate, or a recheck while it runs, refuses the topic retention | `retentionMs`, `segmentMs`, `receiptTtlMs` (milliseconds, so `-1` stays visible), `windowRefusal`; the log sink renders other values as `[FILTERED]` |
+| `EMBEDDING_LEASE_RECLAIMED` | WARN | A claim takes over an expired `Processing` lease, once per such claim | `count` (the claim's attempt count, not a running total); no entity id or text |
+
 ## Run
 
 Create the secret files described in the README ("Container runtime"), then:

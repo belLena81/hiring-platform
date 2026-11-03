@@ -26,6 +26,22 @@ object KafkaShortRetention {
       val _ = admin.incrementalAlterConfigs(Map(target -> operations.asJava).asJava).all().get(10L, Timeout)
     }
 
+    /** Short retention with a one day segment roll, so only retention, never a time roll, can remove the records. */
+    def shortenRetentionOnly(topic: String): IO[Unit] = IO.blocking {
+      val target = new ConfigResource(ConfigResource.Type.TOPIC, topic)
+      val operations = Vector("retention.ms" -> "1500", "segment.ms" -> "86400000", "file.delete.delay.ms" -> "1000")
+        .map { case (key, value) => new AlterConfigOp(new ConfigEntry(key, value), AlterConfigOp.OpType.SET) }
+      val _ = admin.incrementalAlterConfigs(Map(target -> operations.asJava).asJava).all().get(10L, Timeout)
+    }
+
+    /** Polls the earliest offset without appending anything, so the active segment is never rolled by a new record. */
+    def awaitEarliestWithoutAppends(topic: String, barrier: Long, attempts: Int = 30): IO[Option[Long]] =
+      earliest(topic).flatMap { first =>
+        if (first >= barrier) IO.pure(Some(first))
+        else if (attempts > 0) IO.sleep(1.second) *> awaitEarliestWithoutAppends(topic, barrier, attempts - 1)
+        else IO.pure(None)
+      }
+
     def send(topic: String, value: String): IO[Unit] = IO.blocking {
       val _ = producer.send(new ProducerRecord(topic, "retention-probe", value)).get(10L, Timeout)
     }

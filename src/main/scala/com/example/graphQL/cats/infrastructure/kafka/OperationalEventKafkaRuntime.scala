@@ -52,6 +52,17 @@ object OperationalEventKafkaRuntime {
   private val PublicationWaveSize = 4
   private val OperationalRequestBytes = 1048576
 
+  /** How often a running consumer re-reads the topic retention (DDC-02.10): one admin describe per 5 minutes,
+    * independent of the 20 s heartbeat. A retention raise is detected long before any receipt written now can expire.
+    */
+  val ReceiptWindowRecheck: FiniteDuration = 5.minutes
+
+  /** Cleanup horizon for Published outbox rows (TTL index `event_outbox_published_retention`), independent of the
+    * topic's `retention.ms`: nothing re-sends a Published row (only an InFlight row whose lease expired is sent again),
+    * so the two values need not match. Receipt expiry covers re-sends through DDC-02.13.
+    */
+  val PublishedOutboxRetention: FiniteDuration = 7.days
+
   def resource(
       config: KafkaConfig,
       outbox: OperationalEventOutboxRepository[IO],
@@ -251,7 +262,12 @@ object OperationalEventKafkaRuntime {
         case Right(_) =>
           clock.realTimeInstant.flatMap(done =>
             requireOutboxSuccess(
-              outbox.markPublished(claim.event.eventId, claim.leaseToken, done, done.plusSeconds(7.days.toSeconds))
+              outbox.markPublished(
+                claim.event.eventId,
+                claim.leaseToken,
+                done,
+                done.plusSeconds(PublishedOutboxRetention.toSeconds)
+              )
             )
           )
         case Left(error) if KafkaRuntimeSupport.isProducerFenced(error) =>
@@ -304,7 +320,8 @@ object OperationalEventKafkaRuntime {
       diagnostics: Diagnostics[IO],
       clock: Clock[IO] = Clock[IO],
       alive: WorkerAlive[IO] = WorkerAlive.none[IO],
-      topicRetention: KafkaConfig => IO[TopicRetention] = KafkaTopicRetentionReader.read
+      topicRetention: KafkaConfig => IO[TopicRetention] = KafkaTopicRetentionReader.read,
+      receiptWindowRecheck: FiniteDuration = ReceiptWindowRecheck
   ): Resource[IO, Unit] = {
     val settings = KafkaClientSettings.committedConsumer(
       config.bootstrapServers,
@@ -337,7 +354,14 @@ object OperationalEventKafkaRuntime {
                 clock
               )
             )(message.offset.commit)
-          }).concurrently(Stream.awakeEvery[IO](alive.every).evalMap(_ => alive.beat)),
+          }).concurrently(Stream.awakeEvery[IO](alive.every).evalMap(_ => alive.beat))
+            // A refusal or unreadable configuration raises here; `concurrently` fails the foreground stream, the consumer
+            // closes and the restart re-runs the start gate, which keeps refusing until the topic is corrected.
+            .concurrently(
+              Stream
+                .awakeEvery[IO](receiptWindowRecheck)
+                .evalMap(_ => requireReceiptWindow(config, diagnostics, topicRetention(config)))
+            ),
           1.second,
           maxDelay = config.restartMaxDelaySeconds.seconds
         )

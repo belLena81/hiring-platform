@@ -72,7 +72,14 @@ trait OperationalEventOutboxRepository[F[_]] {
   */
 trait ConsumerReceiptRepository[F[_]] {
 
-  /** Inserts the receipt; `false` means another delivery of the same event already recorded it. */
+  /** Inserts the receipt; `false` means another delivery of the same event already recorded it.
+    *
+    * A duplicate delivery extends the stored `expiresAt` to the later of the stored and given value (DDC-02.13). An
+    * outbox row whose lease expires after a successful send is sent again as a new Kafka record with the same event id,
+    * possibly much later; its receipt must cover that later copy, so expiry is measured from the latest delivery and is
+    * never shortened. A failure of that extension is `Unavailable`, so the offset is not committed and the record is
+    * delivered again.
+    */
   def record(
       consumerGroup: String,
       event: OperationalEventEnvelope,

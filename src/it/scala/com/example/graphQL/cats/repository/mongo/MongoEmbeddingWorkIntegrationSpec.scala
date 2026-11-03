@@ -397,6 +397,27 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
     }
   }
 
+  test("DDC-05.2 a claim of an expired Processing lease reports a reclaim, a Ready row does not") {
+    database.use { case (db, _) =>
+      val work = new MongoEmbeddingWorkRepository(db, Diagnostics.noop[IO])
+      val key = EmbeddingWorkKey(EmbeddingWorkKind.Job, UUID.randomUUID().toString)
+      val wall = Instant.now()
+      for {
+        _ <- successful(work.enqueue(key, wall.minusSeconds(1)))
+        fresh <- claimed(work, wall)
+        _ <- LeaseTestSupport.expire(db, MongoCollections.EmbeddingWork, key.value)
+        reclaimed <- claimed(work, wall)
+        document <- stored(db, key)
+      } yield {
+        assert(!fresh.reclaimedLease)
+        assert(reclaimed.reclaimedLease)
+        // The returned token is the one stored by the claim, not the pre-image's.
+        assertEquals(document.getString(MongoFields.LeaseToken), reclaimed.leaseToken)
+        assertEquals((reclaimed.generation, reclaimed.attempts), (fresh.generation, fresh.attempts))
+      }
+    }
+  }
+
   test("DDR-01.4 renewal after expiry reports loss and the displaced worker's writes are rejected") {
     database.use { case (db, _) =>
       val work = new MongoEmbeddingWorkRepository(db, Diagnostics.noop[IO])

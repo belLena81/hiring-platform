@@ -41,11 +41,16 @@ object EmbeddingWorkKey {
     }
 }
 
+/** `reclaimedLease` is true when this claim took over an expired `Processing` lease. The previous holder may have paid
+  * the provider for a vector it never stored, so the count of reclaims bounds the paid-twice residual of duplicate
+  * embedding work (DDC-01).
+  */
 final case class ClaimedEmbeddingWork(
     key: EmbeddingWorkKey,
     generation: Long,
     attempts: Int,
-    leaseToken: String
+    leaseToken: String,
+    reclaimedLease: Boolean = false
 )
 
 enum EmbeddingWorkFailure {
