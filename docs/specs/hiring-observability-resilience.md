@@ -157,7 +157,7 @@ Implementers assign capability-named test/source paths when the relevant slice i
 | HOR-07 | Given worker kill/cancel/stale claim, when resumed, then no duplicate/lost effects arise and overdue/repair signals match durable state. | Workflow and embedding failure scenarios; DHW evidence links. | Not run |
 | HOR-08 | Given quarantined work and deleted subjects, when authorized repair/replay occurs, then scope/deletion guards hold and no raw payload leaks. | Forbidden repair, replay/deletion race and quarantine-drill tests. | Not run |
 | HOR-09 | Given each alert and no-data/recovery condition, when exercised, then an owner follows the documented action and evidence confirms resolution. | Independent runbook walkthrough with injected faults; production routing remains separately gated. | Not run |
-| HOR-10 | Given measured workload and accepted budgets, when instrumentation is enabled, then latency/throughput/resource/cardinality overhead stays within recorded limits. | Same-seed before/after run with p50/p95/p99, errors and resource counters. | Not run |
+| HOR-10 | Given measured workload and accepted budgets, when instrumentation is enabled, then latency/throughput/resource/cardinality overhead stays within recorded limits. | Same-seed before/after run with p50/p95/p99, errors and resource counters. | Local part observed 2026-11-03 (one workstation, not deployed, about 7.4 to 7.5 req/s): overlay on versus off, and full telemetry versus SDK disabled (`OTEL_SDK_DISABLED=true`), showed no latency or CPU difference beyond run-to-run variation, with 0 errors in any run; peak memory was higher with full telemetry in one session only, a hint and not a result. See [Item 7 overhead baseline](#item-7-overhead-baseline-2026-11-03). Not run: cardinality, dropped-span counts, and any deployed or higher-rate measurement |
 | HOR-11 | Given local config and optional exporter settings, when starting/stopping, then validated settings/resource ownership preserve current runtime contracts. | Config/Resource tests and configured format/root suite checks. | Not run |
 
 ## Performance, implementation handoff and checkpoint
@@ -185,13 +185,13 @@ Recommended 2026-10-29 from a source review of the existing telemetry and placed
 
 Slice order: (1) run the [local observability](../local-observability.md) first-run checklist and record observed names; (2) GraphQL root-field outcome counter (HOR-01, HOR-02); (3) Mongo operation spans and duration at the repository or driver boundary (HOR-02, HOR-03); (4) runtime metrics through the existing OpenTelemetry boundary; (5) minimum-traffic guards on local alerts, thresholds marked provisional; (6) documented `OTEL_*` sampler and exporter batch/queue bounds (HOR-05, local part); (7) overlay on/off overhead baseline (HOR-10, local part). Outbox/Kafka trace links, circuit-breaker state metrics and burn-rate SLO rules follow inside the phase. Tail sampling, metric-storage scaling, production routing and adaptive concurrency wait for deployed traffic (Phases 14–15).
 
-MVP slice items 2–4 (implemented 2026-11-02, local unit evidence only; Code, Security and QA verdicts pending; items 5–7 and the first-run verification of item 1 are separate):
+MVP slice items 2–4 (implemented 2026-11-02 in `5193b81`; Code Reviewer and Security Engineer PASS at that commit; QA PASS 2026-11-03 in the condition 7 verdicts below; items 5–7 and the first-run verification of item 1 are separate):
 
 | Item | Implementation | Unit evidence | Not verified |
 |---|---|---|---|
 | 2 GraphQL outcome counter (HOR-01, HOR-02) | `GraphQLOperationOutcomes` (rule in its scaladoc), `GraphQLFailureCatalog.outcomeOf`, `GraphQLOutcomeMetrics`, counted in `GraphQLHttpRoutes`. Counter `hiring.graphql.root_field.executions`, attributes `graphql.operation.type`, `hiring.graphql.root_field`, `hiring.graphql.outcome`. Counting rule: one count per distinct response key of the selected operation, labelled by schema field name; most severe error class of the key wins (internal, rejected, unauthenticated, denied, field_error); a path-less error applies to all root fields; `@skip`/`@include` fields count only if present in `data` or an error path; introspection collapses to `_introspection`, unknown fields to `_unknown`, parse/invalid/persisted-miss/missing-operation to one `_invalid` rejected count. Typed business payload refusals are not error entries and count as `success` (known limit). | `GraphQLOperationOutcomesSpec`, `GraphQLOutcomeMetricsSpec` | Metric name in Prometheus; dashboard and alert use |
 | 3 Mongo operations (HOR-02, HOR-03) | `MongoCommandTelemetry`: driver `CommandListener` plus `ReactiveContextProvider` on both application clients (`hiring`, `backlog_sampler`). Histogram `db.client.operation.duration` and CLIENT spans. Chosen over a repository wrapper because the repositories reach the driver through more than 150 call sites and the listener sees each command exactly once (no double count for transactions or `getMore`). Parent = context current when the operation is subscribed; it is the request span only with `-Dcats.effect.trackFiberContext=true` (`TelemetryRuntime.contextProvider` falls back to the previous provider without it, and `TelemetryRuntime.selectContextStorage`, run first in `Main.run`, selects the standard thread-local context storage when the flag is off, because the fiber-backed storage from `otel4s-oteljava-context-storage` throws on every otel4s instrument call and on `Context.current()` without it; the histogram is recorded with an explicit root context for the same reason). No valid parent (background workers, startup, flag off): histogram only, no span. Decision (container D13): the container does not set the flag, so container Mongo operations have the duration histogram and no parented spans. | `MongoCommandTelemetrySpec` (synthetic driver events, privacy and bounds), `RuntimeMetricsSpec` (fiber-following context), `MongoCommandTelemetryFlagOffSpec` (child JVM without the flag: real client, histogram recorded, otel4s counter works, no span, no exception), `MongoCommandTelemetryIntegrationSpec` (real driver, flag on) | Trace shape in Tempo; container run |
-| 4 Runtime metrics | `RuntimeMetrics` registered in `TelemetryRuntime.resource`: `opentelemetry-runtime-telemetry` 2.32.0-alpha (JVM) and `otel4s-instrumentation-metrics` 1.1.0 (Cats Effect). | `RuntimeMetricsSpec` | Prometheus names; overhead (item 7) |
+| 4 Runtime metrics | `RuntimeMetrics` registered in `TelemetryRuntime.resource`: `opentelemetry-runtime-telemetry` 2.32.0-alpha (JVM) and `otel4s-instrumentation-metrics` 1.1.0 (Cats Effect). | `RuntimeMetricsSpec` | Overhead of the runtime metrics alone (item 7 measured the overlay as a whole) |
 
 Dependencies added for item 4 (per [engineering quality](../engineering-quality.md)): the capability gap is JVM memory/GC/thread/CPU metrics and Cats Effect runtime and starvation metrics, which hand-written MXBean gauges would duplicate with unstable names. `io.opentelemetry.instrumentation:opentelemetry-runtime-telemetry:2.32.0-alpha` is the official OpenTelemetry Java instrumentation module (Apache-2.0), chosen as the release built against the application's OpenTelemetry API 1.66.0; `alpha` is the label of the whole instrumentation distribution, the emitted `jvm.*` names follow the stable semantic conventions, and the Java API is used in one place (`RuntimeMetrics`). The first candidate `opentelemetry-runtime-telemetry-java17` is deprecated upstream and was not used. `org.typelevel:otel4s-instrumentation-metrics:1.1.0` is the Typelevel module of the same release train as `otel4s-oteljava` (Apache-2.0). Both are isolated in `infrastructure/telemetry/RuntimeMetrics.scala` and registered once in `TelemetryRuntime.resource`.
 
@@ -220,14 +220,14 @@ The "Not verified" cells of items 2–4 for Prometheus names are thereby closed 
 
 - Why `http_route` is missing: the http4s otel4s server metrics middleware 0.19.0 has no route attribute. `OtelMetrics` labels each sample with the `classifier` string passed to `Metrics(...)`, and `TelemetryRuntime` already passes `routeLabel`, which returns only a path from the fixed public list (`HiringHttpPaths.public`) or `_unmatched`. Chosen: change the dashboard panel to the existing bounded label `classifier`; no application change (an extra `http.route` attribute would duplicate the classifier for no benefit).
 - Second defect found while verifying: every request is recorded twice, once at response headers (`http_phase="headers"`, no status code) and once at body completion (`http_phase="body"`). The old alert and dashboard expressions counted both, doubling request rates and the error-ratio denominator and mixing header-time durations into latency. All HTTP expressions now select `http_phase="body"`.
-- `HiringApiHighErrorRate` and `HiringApiSlowRequests` are evaluated only when the body request rate excluding `/health` probes (`classifier!="/health"`) over the 1 m window is at least 0.1 req/s (6 per minute). Probes are excluded from the guard and from the ratio and quantile aggregates because idle probes alone measured 0.109 req/s and would pass the floor and dilute both. Below that floor the expression returns no data, so sparse traffic neither fires nor reports healthy; the dashboard panels still draw whatever data exists. Thresholds (5% 5xx, p95 300 ms, backlog age 300 s) and the floor are provisional local values, not SLOs; calibrate after the HOR-10 baseline. `HiringBacklogUnobserved` is deliberately unguarded. **Accepted limitation:** below the guard (6 non-probe requests per minute) a total 5xx outage does not fire; this is a provisional local trade-off to avoid flapping on sparse traffic, to be revisited with a measured workload. Dashboard panels for 5xx ratio, latency and status codes also exclude `/health`; the route panel keeps all routes as the total-requests view.
+- `HiringApiHighErrorRate` and `HiringApiSlowRequests` are evaluated only when the body request rate excluding `/health` probes (`classifier!="/health"`) over the 1 m window is at least 0.1 req/s (6 per minute). Probes are excluded from the guard and from the ratio and quantile aggregates because idle probes alone measured 0.109 req/s and would pass the floor and dilute both. Below that floor the expression returns no data, so sparse traffic neither fires nor reports healthy; the dashboard panels still draw whatever data exists. Thresholds (5% 5xx, p95 300 ms, backlog age 300 s) and the floor are provisional local values, not SLOs. The [item 7 baseline](#item-7-overhead-baseline-2026-11-03) observed client-side p95 of 22–38 ms at about 7.4 req/s, far below 300 ms, but it does not calibrate the threshold: calibration needs an accepted workload and is not done. `HiringBacklogUnobserved` is deliberately unguarded. **Accepted limitation:** below the guard (6 non-probe requests per minute) a total 5xx outage does not fire; this is a provisional local trade-off to avoid flapping on sparse traffic, to be revisited with a measured workload. Dashboard panels for 5xx ratio, latency and status codes also exclude `/health`; the route panel keeps all routes as the total-requests view.
 - Dashboard `hiring-api-red.json` (version 2): per-route panel uses `classifier`; new panel "GraphQL root-field outcomes" (`sum by (hiring_graphql_outcome, hiring_graphql_root_field)` of the counter rate) and "Mongo command duration p95 by operation" (`db_operation_name`, `hiring_mongo_client="hiring"`). Both draw only closed label sets.
 - No alert on GraphQL `internal`/`denied` outcomes: this specification does not require one, and a threshold without a measured baseline would be invented.
 - Validation: the dashboard JSON parses; every alert and panel expression was parsed and run through the Prometheus HTTP query API of the running stack (all `success`; observed after the probe exclusion at idle, with only `/health` traffic: `/health` body rate 0.109 req/s, non-probe rate 0, the `>= 0.1` guard returns no data, and both guarded alert expressions return no data). `promtool check rules` was not run: no local binary, and the project hook blocks `docker exec/run` into containers.
 
 #### Sampling/bounds (local policy, item 6)
 
-Set in `compose.observability.yaml` for the `api` service through standard `OTEL_*` variables (read by the OpenTelemetry SDK autoconfiguration under otel4s). Local values; none is a production or SLO value, and none has been overhead-measured (item 7).
+Set in `compose.observability.yaml` for the `api` service through standard `OTEL_*` variables (read by the OpenTelemetry SDK autoconfiguration under otel4s). Local values; none is a production or SLO value. The overlay as a whole (these bounds included) was measured against the overlay-off configuration at one local workload ([item 7](#item-7-overhead-baseline-2026-11-03)); no individual setting was varied, so the cost of any single bound is unknown.
 
 | Setting | Value | Effect when exceeded |
 |---|---|---|
@@ -241,6 +241,77 @@ Set in `compose.observability.yaml` for the `api` service through standard `OTEL
 
 Overload policy, in order of what is dropped: (1) spans first (queue full or export timeout) - diagnostics only, hiring work unaffected; (2) a failed metric export interval - counters and histograms are cumulative, so only resolution is lost; gauges (backlog) go stale and then disappear through the collector `metric_expiration` of 45 s, which `HiringBacklogUnobserved` reports as unobserved, not as zero; (3) logs are never dropped: the container Logback `AsyncAppender` has `neverBlock=false` and a 256-entry queue, so when stdout (and the Alloy/Loki path behind it) is slower than the log rate, the logging call blocks and request handling is delayed instead of losing log lines. That is the current policy and is kept deliberately; changing it (`neverBlock=true`, loss counters) needs its own decision. Durable hiring work (outbox, embedding work) is never governed by telemetry queues. The exporter being down never fails a request: exports run on SDK background threads.
 
-Not yet verified: the overlay was changed statically; the first run after the change must confirm the API starts and traces/metrics still arrive (re-verify commands in the handoff). Dropped-span visibility needs SDK self-metrics, not scoped here.
+Observed running (2026-11-03, item 7): with these `OTEL_*` bounds the API started healthy under the overlay in runs 2 and 3 and served the measured workload with 0 failed or 5xx requests. Dropped-span visibility needs SDK self-metrics, which are not scoped, so span loss under overload is not measured.
 
-Checkpoint (superseded for items 2–4 by the table above): specification drafted; no implementation acceptance completed. Future tests/drills listed here have not run. No exporter backend/provider was provisioned. Next action: independent specification review, then finalize the instrument catalog for the first slice. Future Code Reviewer: pending. Future Security Engineer: pending. Future QA: pending. Documentation-delivery evidence and verdicts are tracked separately in the [roadmap readiness index](../development-milestones.md#specification-ownership-and-readiness).
+#### Item 7 overhead baseline (2026-11-03)
+
+Decision: the local overhead of the observability telemetry is recorded as the difference between the same seeded workload with telemetry off and on, on one workstation, in two comparisons run on 2026-11-03:
+
+- Session 1: overlay off versus overlay on. The "off" configuration still runs the OpenTelemetry SDK, so it is not instrumentation-free (see the scope note below).
+- Session 2: SDK disabled (`OTEL_SDK_DISABLED=true`) versus full telemetry. This is the instrumentation-off comparison.
+
+Result: in both sessions, no latency or CPU difference distinguishable from run-to-run variation, and 0 errors in any run. Peak container memory was higher with full telemetry in session 2 (both pairs) and not in session 1; memory is a hint, not a result. No overhead limit is set from these runs. Why: the runs are the local part of HOR-10 and give the first observed numbers for telemetry under load; a limit set from runs at this rate would be invented. Why it matters: on this workstation, telemetry shows no measurable latency or CPU cost at about 7.4 to 7.5 req/s. That result does not extend to higher rates, other hardware, or deployed traffic.
+
+Evidence and environment (git-ignored local output, not reproduced here):
+
+- Date 2026-11-03; HEAD `b4e216b` plus uncommitted measurement work (`scripts/seed-local-jobs.sh`, `scripts/seed-local-jobs.py`, `scripts/traffic-lib.sh`, and `generate-local-traffic.sh --mix search`). Code Reviewer and Security Engineer passed these scripts on re-review. Evidence directories `.local/logs/overhead/20261103T132633Z` (session 1) and `.local/logs/overhead/20261103T140057Z` (session 2, same workstation and image).
+- One developer workstation running Linux. The `api` container (`compose.yaml`, 2 CPUs, 1 GiB memory limit) and the `mongodb` replica set with persisted local data. The overlay (`compose.observability.yaml`: otel-collector, Tempo, Loki, Alloy, Prometheus, Grafana) runs on the same host. Kafka is off (`KAFKA_ENABLED=false`). A measurement-only compose override seeded the singleton Admin in session 1, because sign-up requires it. For the session 2 SDK-disabled runs, a measurement-only override of the `api` service set `OTEL_SDK_DISABLED=true`; the API started healthy with it.
+- Dataset (both sessions; `seed-local-jobs.sh`, idempotent): 1 synthetic recruiter, 8 synthetic candidates, 50 open synthetic jobs.
+- Workload (both sessions): `generate-local-traffic.sh 300 --mix search --concurrency 8` with the 8 candidate tokens. Each worker alternates an authenticated `jobs(first: 20, filter: {skills: ["perfseed"]})` and `job(id:)`, paced to 80% of the per-actor query cost budget. Each `jobs` call records a search session, so the database grows during each run. This is not the condition 2 acceptance script.
+- Procedure per run: clean restart of the configuration, seed, 60 s warm-up (not recorded), 300 s measured run, and API container CPU and memory sampled with `docker stats --no-stream` every 5 s (50 samples). Run order in both sessions: off, on, on, off (session 2: SDK disabled, full telemetry, full telemetry, SDK disabled).
+- Latency is in ms, nearest-rank, successful requests only.
+
+Session 1 (overlay off versus on):
+
+| Run | Overlay | Successful requests | Req/s | p50 | p95 | p99 | CPU mean | CPU max | Memory max |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | off | 2211 | 7.37 | 12.4 | 38.4 | 60.7 | 14.4% | 31% | 392 MiB |
+| 2 | on | 2233 | 7.41 | 11.1 | 35.8 | 69.4 | 15.1% | 38% | 338 MiB |
+| 3 | on | 2260 | 7.52 | 10.3 | 22.1 | 36.4 | 14.2% | 72% | 346 MiB |
+| 4 | off | 2260 | 7.51 | 9.8 | 21.7 | 25.7 | 11.1% | 32% | 361 MiB |
+
+Session 1 means of the two runs per configuration: overlay off p50 11.1, p95 30.0, p99 43.2 ms, CPU mean 12.8%; overlay on p50 10.7, p95 29.0, p99 52.9 ms, CPU mean 14.7%.
+
+Session 2 (SDK disabled versus full telemetry; evidence `20261103T140057Z`):
+
+| Run | Configuration | Requests | Req/s | p50 | p95 | p99 | CPU mean | CPU max | Memory max |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | SDK disabled | 2254 | 7.48 | 9.7 | 21.7 | 32.5 | 14.0% | 30% | 354 MiB |
+| 2 | full telemetry | 2256 | 7.52 | 9.4 | 19.3 | 25.2 | 13.1% | 28% | 375 MiB |
+| 3 | full telemetry | 2259 | 7.53 | 10.3 | 22.8 | 28.1 | 12.5% | 67% | 368 MiB |
+| 4 | SDK disabled | 2266 | 7.53 | 9.6 | 19.6 | 24.0 | 12.0% | 37% | 351 MiB |
+
+Session 2 means of the two runs per configuration: SDK disabled p50 9.65, p95 20.7, p99 28.3 ms, CPU mean 13.0%; full telemetry p50 9.85, p95 21.0, p99 26.7 ms, CPU mean 12.8%.
+
+CPU percentages are of one core as `docker stats` reports them, against a 2-CPU container limit.
+
+Every run in both sessions had 0 4xx, 0 429, 0 5xx, 0 failed requests and 0 GraphQL errors, and each exceeded the 1000 successful requests that the local procedure aims for before p99 is read as reliable.
+
+Reading the result (session 1):
+
+- Same-configuration p95 varied from 21.7 to 38.4 ms (overlay off) and from 22.1 to 35.8 ms (overlay on). The configurations overlap, so the p95 difference is not an overhead signal. The runs also got faster over the session regardless of configuration.
+- Overlay-on CPU mean was about 2 points higher, within the noise. Run 3 reached a 72% CPU maximum; the summary does not show how sustained that peak was, and it is not attributed to telemetry.
+- Throughput (7.37–7.52 req/s) is set by the pacing budget and is not an overhead signal.
+
+Reading the result (session 2):
+
+- Full telemetry versus SDK disabled: the means are 9.85 and 9.65 ms at p50, 21.0 and 20.7 ms at p95, 26.7 and 28.3 ms at p99, and CPU 12.8% and 13.0%. The per-run values overlap across the two configurations at p50, p95 and p99, so the differences are not an overhead signal.
+- Memory: the peak was higher with full telemetry in both pairs (368 and 375 MiB, against 351 and 354 MiB with SDK disabled). Session 1 showed the opposite direction. The memory difference has no latency or CPU counterpart, so it is a hint for a later measurement, not a result.
+- CPU max: run 3 (full telemetry) reached 67%, the highest value in session 2. The sampling does not show how long the peak lasted, and it is not attributed to telemetry.
+- Throughput (7.48–7.53 req/s) is pacing-bound and is not an overhead signal.
+
+What the runs do not measure (scope caveat): the API always starts the OpenTelemetry SDK (`OtelJava.autoConfigured` in `src/main/scala/com/example/graphQL/cats/infrastructure/telemetry/TelemetryRuntime.scala`). In session 1 the "off" configuration kept it running: spans and metrics were still recorded (parent-based, always-on sampler by default) and exports to the default localhost endpoint failed, so that comparison is overlay on versus overlay off with the SDK running, not an instrumentation-free baseline. Session 2 set `OTEL_SDK_DISABLED=true`, where the autoconfigured SDK returns no-op providers (no spans, metrics or exports); its comparison is SDK disabled versus full telemetry (instrumentation, 100% parent-based sampling, export to a live collector, backends on the same host). Neither session varied an individual setting or telemetry component, so the cost of any single bound or component is unknown.
+
+Limits: one workstation; about 7.4 to 7.5 req/s, pacing-bound; small dataset; two sessions of four 300 s runs each; local evidence only, not a deployed or production result, and not a basis for SLOs. The 300 ms alert threshold is not calibrated from these runs. No dropped-span counter was observed, so span loss is unknown. The checkpoint verdicts below do not cover the session 2 results.
+
+Remaining for HOR-10: a higher-rate workload before any limit is set, cardinality and dropped-span measurement, and deployed overhead (separate gate).
+
+Checkpoint (2026-11-03). The MVP observability slice (items 1–7, MVP condition 7) is closed with these independent verdicts:
+
+| Scope | Code Reviewer | Security Engineer | QA |
+|---|---|---|---|
+| Items 2–4 (`5193b81`) | PASS | PASS | PASS 2026-11-03 |
+| Items 1, 5, 6 (`097c236`) | PASS | PASS 2026-11-03 (local workstation scope; low notes: log privacy depends on application masking staying on; no dropped-span counter) | PASS 2026-11-03 |
+| Item 7 measurement scripts and evidence (2026-11-03) | PASS on re-review | PASS on re-review | PASS 2026-11-03 |
+
+QA evidence: the slice's unit specs 45/45 passed; `MongoCommandTelemetryIntegrationSpec` passed through `scripts/run-local-tests.sh` (all 1824 root unit tests also passed in that run); `scripts/tests/local-traffic-options.sh` 127 checks passed; both dashboards parse; compose OTEL values match the Sampling/bounds table; the item 7 numbers and means recompute. `promtool` was not run (no local binary); alert expressions rest on the live Prometheus query validation recorded under item 5. The rest of this phase (HOR acceptance rows beyond the local parts, outbox and Kafka trace links, burn-rate rules, production routing) stays post-MVP and is not covered by these verdicts.
