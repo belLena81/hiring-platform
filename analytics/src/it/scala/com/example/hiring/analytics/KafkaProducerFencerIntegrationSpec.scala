@@ -130,6 +130,7 @@ class KafkaProducerFencerIntegrationSpec extends FunSuite {
     val staleProducer = new KafkaProducer[String, String](producerSettings(kafka.getBootstrapServers, transactionalId))
     var currentProducer: KafkaProducer[String, String] = null
     var spark: SparkSession = null
+    var lakehouseDirectory: java.nio.file.Path = null
     try {
       admin
         .createTopics(List(new NewTopic(topic, 1, 1.toShort)).asJava)
@@ -190,15 +191,7 @@ class KafkaProducerFencerIntegrationSpec extends FunSuite {
         .get(30, java.util.concurrent.TimeUnit.SECONDS)
       currentProducer.commitTransaction()
 
-      spark = SparkSession
-        .builder()
-        .appName("hiring-analytics-kafka-fencing-it")
-        .master("local[2]")
-        .config("spark.ui.enabled", "false")
-        .config("spark.sql.shuffle.partitions", "1")
-        .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-        .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
-        .getOrCreate()
+      spark = AnalyticsTestSpark.builder("hiring-analytics-kafka-fencing-it").getOrCreate()
       val barrier = KafkaRetentionAdapter
         .capture[IO](connection, AnalyticsTopic.from(topic).toOption.get, AnalyticsBatchTestSupport.driverExecution)
         .unsafeRunSync()
@@ -210,10 +203,9 @@ class KafkaProducerFencerIntegrationSpec extends FunSuite {
         )
         .toEither
         .fold(errors => throw new AssertionError(errors.toString), identity)
+      lakehouseDirectory = Files.createTempDirectory("analytics-read-committed")
       val paths =
-        IntegrationAnalyticsLakehousePaths.unsafe(
-          Files.createTempDirectory("analytics-read-committed").toUri.toString.stripSuffix("/")
-        )
+        IntegrationAnalyticsLakehousePaths.unsafe(lakehouseDirectory.toUri.toString.stripSuffix("/"))
       val markers = AnalyticsSubjectPrivacy.emptyMarkers(spark.range(0L).toDF())
       val publication = AnalyticsBatchTestSupport
         .newBatch(
@@ -244,6 +236,14 @@ class KafkaProducerFencerIntegrationSpec extends FunSuite {
       staleProducer.close(Duration.ofSeconds(5))
       admin.close(Duration.ofSeconds(5))
       kafka.stop()
+      if (lakehouseDirectory != null) {
+        val walk = Files.walk(lakehouseDirectory)
+        try
+          walk
+            .sorted(java.util.Comparator.reverseOrder[java.nio.file.Path]())
+            .forEach(path => { Files.deleteIfExists(path); () })
+        finally walk.close()
+      }
     }
   }
 }
