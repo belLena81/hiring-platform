@@ -2,7 +2,7 @@ package com.example.graphQL.cats.service
 
 import cats.{Applicative, MonadThrow}
 import cats.syntax.all.*
-import com.example.graphQL.cats.domain.policy.CircuitBreakerPolicy
+import com.example.graphQL.cats.domain.policy.{CircuitBreakerPolicy, ConsumerReceiptWindowRefusal}
 import com.example.graphQL.cats.service.resilience.CircuitBreakerName
 import com.example.graphQL.cats.shared.{HiringHttpPaths, Parsing}
 import java.util.Locale
@@ -28,6 +28,13 @@ enum LogEvent(val category: String, val component: String, val message: String, 
   case RequestRejected extends LogEvent("REQUEST_REJECTED", "HTTP", "Request rejected", LogLevel.Warn)
   case StartupFailed extends LogEvent("STARTUP_FAILED", "RUNTIME", "Application startup failed", LogLevel.Error)
   case RuntimeFailed extends LogEvent("RUNTIME_FAILED", "RUNTIME", "Unhandled runtime failure", LogLevel.Error)
+  case ConsumerReceiptWindowRefused
+      extends LogEvent(
+        "CONSUMER_RECEIPT_WINDOW_REFUSED",
+        "KAFKA",
+        "Operational consumer not started: receipts may expire before Kafka stops delivering",
+        LogLevel.Error
+      )
   case Started extends LogEvent("STARTED", "RUNTIME", "Application listening for requests", LogLevel.Info)
   case Shutdown extends LogEvent("SHUTDOWN", "RUNTIME", "Application resources released", LogLevel.Info)
   case GraphQLCompleted extends LogEvent("GRAPHQL_COMPLETED", "GRAPHQL", "GraphQL operation finished", LogLevel.Info)
@@ -138,6 +145,10 @@ enum LogField(val key: String, val sensitive: Boolean = false) {
   case BreakerTransition extends LogField("breakerTransition")
   case SearchKind extends LogField("searchKind")
   case ErrorCode extends LogField("errorCode")
+  case RetentionMs extends LogField("retentionMs")
+  case SegmentMs extends LogField("segmentMs")
+  case ReceiptTtlMs extends LogField("receiptTtlMs")
+  case WindowRefusal extends LogField("windowRefusal")
   case ConflictSource extends LogField("conflictSource")
   case TransactionOperation extends LogField("transactionOperation")
 }
@@ -204,6 +215,9 @@ object LogFields {
     "history-duplicate-key",
     "transaction-exhausted"
   )
+
+  /** The closed refusal labels of the consumer receipt window. */
+  val WindowRefusalLabels: Set[String] = ConsumerReceiptWindowRefusal.values.map(_.toString).toSet
 
   val TransactionOperationLabels: Set[String] = TransactionOperation.values.map(_.label).toSet
 
@@ -292,7 +306,10 @@ object LogFields {
       case LogField.ErrorCode                   => value.matches("[A-Z][A-Z0-9_]{0,63}")
       case LogField.ConflictSource              => ConflictSourceLabels.contains(value)
       case LogField.TransactionOperation        => TransactionOperationLabels.contains(value)
-      case _                                    => false
+      case LogField.WindowRefusal               => WindowRefusalLabels.contains(value)
+      // Broker durations; -1 is meaningful (unbounded retention), anything else non-numeric stays filtered.
+      case LogField.RetentionMs | LogField.SegmentMs | LogField.ReceiptTtlMs => value.matches("-1|0|[1-9][0-9]{0,17}")
+      case _                                                                 => false
     }
 }
 

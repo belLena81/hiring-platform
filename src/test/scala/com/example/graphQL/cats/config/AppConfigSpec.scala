@@ -83,7 +83,7 @@ class AppConfigSpec extends FunSuite {
       |  }
       |  consumer {
       |    enabled = false
-      |    receipt-ttl-days = 8
+      |    receipt-ttl-days = 9
       |    quarantine-ttl-days = 7
       |    sasl-username = ${?KAFKA_READER_USERNAME}
       |    sasl-password = ${?KAFKA_READER_PASSWORD}
@@ -155,7 +155,7 @@ class AppConfigSpec extends FunSuite {
         maxAttempts = 10,
         pollIntervalMillis = 500
       ),
-      consumer = KafkaConsumerConfig(enabled = false, receiptTtlDays = 8, quarantineTtlDays = 7)
+      consumer = KafkaConsumerConfig(enabled = false, receiptTtlDays = 9, quarantineTtlDays = 7)
     )
 
   test("an absent interview configuration uses disabled local defaults") {
@@ -270,7 +270,7 @@ class AppConfigSpec extends FunSuite {
       |  }
       |  consumer {
         |    enabled = false
-        |    receipt-ttl-days = 8
+        |    receipt-ttl-days = 9
       |    quarantine-ttl-days = 7
       |    sasl-username = ${?KAFKA_READER_USERNAME}
       |    sasl-password = ${?KAFKA_READER_PASSWORD}
@@ -514,7 +514,7 @@ class AppConfigSpec extends FunSuite {
         |  }
         |  consumer {
         |    enabled = false
-        |    receipt-ttl-days = 8
+        |    receipt-ttl-days = 9
         |    quarantine-ttl-days = 7
         |  }
         |}

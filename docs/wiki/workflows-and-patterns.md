@@ -55,6 +55,32 @@ MongoDB and Kafka do not share a transaction. A crash after Kafka publication bu
 
 [OperationalEventKafkaRuntime](../../src/main/scala/com/example/graphQL/cats/infrastructure/kafka/OperationalEventKafkaRuntime.scala) claims bounded publication waves, renews active leases, serializes transactional producer access, and replaces fenced producer generations. It marks failures/retries through guarded repository operations. Stream restart jitter is capped by `kafka.restart-max-delay-seconds` (default 30), while retry attempts remain unlimited. Consumers use `read_committed`. Malformed data, including null records, must be durably quarantined before advancing offsets; an undurable record stops that partition's progress instead of allowing a later offset to skip it. See [partition processing](../../src/main/scala/com/example/graphQL/cats/infrastructure/kafka/KafkaPartitionProcessing.scala).
 
+## Duplicate delivery containment
+
+Four mechanisms are often conflated. Each guarantees one thing and no more:
+
+| Mechanism | Guarantees | Does not guarantee | Use it for |
+|---|---|---|---|
+| Lease (claim with expiry) | Work is usually held by one worker | Exclusivity: a paused or slow holder can overlap a new one | Deciding who tries the work first |
+| Fencing (token or revision compared at write) | A stale holder's store write is rejected | A Kafka send or provider call, which the store cannot reject | Store writes made under a lease |
+| Dedupe (unique key in the store) | The first insert wins and a duplicate is refused | Anything once the key has expired: the key must outlive every redelivery | Consumer receipts, idempotency keys |
+| Provider idempotency (provider key or durable send intent) | One external effect per key | Providers with neither mechanism; an unknown outcome still needs `lookup` | External notifications and calendar reservations |
+
+Receipt and effect ordering for one consumed event:
+
+| Order | Crash between the two steps | Result |
+|---|---|---|
+| Record the receipt, then apply the effect, as separate writes | The event is lost: the receipt says handled, the effect never ran | Rejected |
+| Apply the effect, then record the receipt, as separate writes | The event is applied twice on redelivery | Rejected |
+| Effect and receipt in one transaction | Both or neither | Required for any effect keyed by the event id |
+| Receipt alone (the current operational consumer) | Redelivery finds the receipt and completes | Current state; the receipt is the whole effect |
+
+A dedupe answer is correct only while the receipt outlives every message Kafka can still deliver: receipt TTL at least topic `retention.ms + segment.ms` plus one hour. The consumer checks this against the broker before it starts ([security and operations](security-and-operations.md#kafka-consumer-receipt-window)).
+
+An embedding claim keeps one provider answer in memory and reuses it, for the same model and source hash, after a transient entity-write failure or a revision conflict whose source is unchanged. It is never cached across claims or entities. The avoided cost is a second paid call. A crash or lease loss after the answer still pays once more; this is the accepted residual.
+
+A provider adapter applies each call at most once per idempotency key, and a repeated key returns the first outcome. It uses the provider's idempotency header or client-assigned id. A provider with neither gets a durable send intent recorded per key before the call; an unknown outcome is resolved with `lookup`, never by resending. The decision record states that several email providers lack an idempotency key; that claim was not checked against provider documentation here. The shared suites `InterviewNotificationProviderContract` and `InterviewCalendarProviderContract` define the contract for every adapter, and the ledger adapters run them today. The port scaladocs in [InterviewProviders](../../src/main/scala/com/example/graphQL/cats/service/port/InterviewProviders.scala) state the rule. The decision and its rationale are in the [duplicate delivery containment specification](../specs/duplicate-delivery-containment.md).
+
 ## Scheduled interviews: UC09 extension
 
 [InterviewSchedulingService](../../src/main/scala/com/example/graphQL/cats/service/application/InterviewSchedulingService.scala) accepts a future UTC interval for an Accepted application to an owned job and stores durable workflow intent. Pure [workflow policy](../../src/main/scala/com/example/graphQL/cats/domain/workflow/InterviewWorkflowPolicy.scala) selects commands and state transitions; the [worker](../../src/main/scala/com/example/graphQL/cats/service/application/InterviewWorkflowWorker.scala) interprets them using repositories and provider ports.

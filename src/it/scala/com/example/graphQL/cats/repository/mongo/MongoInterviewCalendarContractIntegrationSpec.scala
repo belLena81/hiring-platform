@@ -1,15 +1,12 @@
 package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.IO
-import cats.syntax.all.*
-import com.example.graphQL.cats.domain.model.ApplicationStatus
-import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, UserId}
+import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.domain.workflow.*
 import com.example.graphQL.cats.service.Diagnostics
 import com.example.graphQL.cats.service.port.*
 import com.mongodb.client.model.{Filters, Updates}
-import java.time.Instant
-import java.util.{Date, UUID}
+import java.util.Date
 import scala.concurrent.duration.*
 
 /** Runs the shared calendar contract against the platform's durable calendar ledger on a real replica set. */
@@ -29,37 +26,8 @@ final class MongoInterviewCalendarContractIntegrationSpec
       val subject = new InterviewCalendarContractSubject {
         override val provider: InterviewCalendarProvider[IO] = LedgerInterviewCalendarProvider.durable(repository)
 
-        override def newWorkflow(candidate: UserId, recruiter: UserId, interval: InterviewInterval) = {
-          val now = Instant.now()
-          for {
-            workflow <- IO.fromEither(
-              InterviewWorkflow
-                .create(
-                  InterviewWorkflowId(UUID.randomUUID()),
-                  ApplicationId(UUID.randomUUID()),
-                  candidate,
-                  recruiter,
-                  interval,
-                  now.plusSeconds(300),
-                  UUID.randomUUID(),
-                  ApplicationStatus.Accepted,
-                  recruiter,
-                  com.example.graphQL.cats.domain.model.UserRole.Recruiter
-                )
-                .leftMap(error => new AssertionError(s"Invalid workflow: $error"))
-            )
-            _ <- InterviewSchedulingFixtures.seed(fixture.database, List(workflow), now)
-            _ <- repository
-              .create(
-                workflow,
-                InterviewWorkflow.initialCommand(workflow),
-                now,
-                MutationWriteContext.directWrite
-              )
-              .value
-              .flatMap(_.fold(error => IO.raiseError(new AssertionError(s"create failed: $error")), _ => IO.unit))
-          } yield workflow
-        }
+        override def newWorkflow(candidate: UserId, recruiter: UserId, interval: InterviewInterval) =
+          MongoInterviewContractWorkflows.create(fixture, repository, candidate, recruiter, interval)
 
         override def requireReplacementHold(workflow: InterviewWorkflow, replacement: InterviewInterval) =
           update(

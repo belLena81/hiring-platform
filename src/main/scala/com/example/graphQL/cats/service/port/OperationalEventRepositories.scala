@@ -58,6 +58,17 @@ trait OperationalEventOutboxRepository[F[_]] {
 /** Deduplicates consumed events in the store: a unique receipt id per consumer group and event decides which delivery
   * is first. There is deliberately no existence check, because a check followed by an action races with a second
   * delivery.
+  *
+  * The receipt is the whole consumer effect today, so a duplicate key means "already handled" only while the receipt
+  * outlives every message Kafka can still deliver (`ConsumerReceiptWindow`, enforced when the consumer starts).
+  *
+  * Effect rule: an effect keyed by the event id is written in the same transaction as the receipt insert. Recording
+  * first loses the event on a crash; applying first applies it twice.
+  *
+  * Revisit trigger: the first consumer effect that is not the receipt. That change introduces, with the effect, the
+  * transaction (`MongoTransactionRunner.sessions`) and a crash/duplicate test of the atomic write. If a closed type is
+  * wanted then, it is `enum ConsumedEventEffect { case ReceiptOnly }` passed to `record` and matched without a wildcard
+  * so `-Werror` rejects an unhandled case.
   */
 trait ConsumerReceiptRepository[F[_]] {
 

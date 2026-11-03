@@ -4,7 +4,11 @@ import cats.effect.{Clock, IO, Resource}
 import cats.effect.std.UUIDGen
 import cats.syntax.all.*
 import com.example.graphQL.cats.config.KafkaConfig
-import com.example.graphQL.cats.domain.policy.CircuitBreakerPolicy
+import com.example.graphQL.cats.domain.policy.{
+  CircuitBreakerPolicy,
+  ConsumerReceiptWindow,
+  ConsumerReceiptWindowRefusal
+}
 import org.apache.kafka.common.errors.{
   AuthorizationException,
   BrokerNotAvailableException,
@@ -27,6 +31,7 @@ import com.example.graphQL.cats.service.{
   BackgroundWorker,
   Diagnostics,
   LogEvent,
+  LogField,
   LogFields,
   ReadinessComponent,
   WorkerAlive
@@ -298,7 +303,8 @@ object OperationalEventKafkaRuntime {
       quarantine: EventQuarantineRepository[IO],
       diagnostics: Diagnostics[IO],
       clock: Clock[IO] = Clock[IO],
-      alive: WorkerAlive[IO] = WorkerAlive.none[IO]
+      alive: WorkerAlive[IO] = WorkerAlive.none[IO],
+      topicRetention: KafkaConfig => IO[TopicRetention] = KafkaTopicRetentionReader.read
   ): Resource[IO, Unit] = {
     val settings = KafkaClientSettings.committedConsumer(
       config.bootstrapServers,
@@ -312,7 +318,9 @@ object OperationalEventKafkaRuntime {
       KafkaRuntimeSupport
         .resilientStream(
           diagnostics,
-          (KafkaPartitionProcessing(
+          // The gate runs on every restart and before any consumer exists, so a refusal commits no offset and records
+          // no beat; the restart policy paces the re-reads, so a corrected topic is picked up without a process restart.
+          Stream.eval(requireReceiptWindow(config, diagnostics, topicRetention(config))) >> (KafkaPartitionProcessing(
             KafkaConsumer.stream(settings).subscribeTo(config.topic).partitionedRecords,
             config.consumer.partitionConcurrency
           ) { message =>
@@ -338,13 +346,34 @@ object OperationalEventKafkaRuntime {
     )
   }
 
+  /** Refuses to consume unless the receipt outlives every message the topic can still deliver (DDC-02). */
+  private[kafka] def requireReceiptWindow(
+      config: KafkaConfig,
+      diagnostics: Diagnostics[IO],
+      topicRetention: IO[TopicRetention]
+  ): IO[Unit] =
+    topicRetention.flatMap { retention =>
+      val receiptTtl = config.consumer.receiptTtlDays.days
+      ConsumerReceiptWindow.check(receiptTtl, retention.retentionMs, retention.segmentMs) match {
+        case Right(())     => IO.unit
+        case Left(refusal) =>
+          diagnostics.emit(
+            LogEvent.ConsumerReceiptWindowRefused,
+            fields = Map(
+              LogField.RetentionMs -> retention.retentionMs.toString,
+              LogField.SegmentMs -> retention.segmentMs.toString,
+              LogField.ReceiptTtlMs -> receiptTtl.toMillis.toString,
+              LogField.WindowRefusal -> refusal.toString
+            )
+          ) *> IO.raiseError(ConsumerReceiptWindowRefused(refusal))
+      }
+    }
+
   /** Makes the record durable (receipt, or quarantine when malformed); a repository failure stays typed.
     *
     * The same event can arrive more than once: a publisher lease does not fence the Kafka send, and an offset commit
     * can be lost after the receipt is stored. Here the receipt is the whole effect, so a duplicate key is a completed
-    * delivery. Any effect added to this consumer must be keyed by the event id and written in the same store write or
-    * transaction as the receipt; recording first and applying afterwards loses the event on a crash, and applying first
-    * and recording afterwards applies it twice.
+    * delivery. The effect rule and the revisit trigger for a future effect are on [[ConsumerReceiptRepository]].
     */
   private[kafka] def recordDurably(
       config: KafkaConfig,
@@ -390,6 +419,10 @@ object OperationalEventKafkaRuntime {
       .map(_.getClass.getName)
       .mkString(" <- ")
       .take(512)
+
+  private final case class ConsumerReceiptWindowRefused(refusal: ConsumerReceiptWindowRefusal)
+      extends RuntimeException(s"consumer receipt window refused: $refusal")
+      with NoStackTrace
 
   private final case class OutboxOperationFailed(reason: String)
       extends RuntimeException(s"outbox operation failed: $reason")

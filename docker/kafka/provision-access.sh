@@ -15,7 +15,7 @@ bootstrap="kafka:9092"
 topic="${KAFKA_TOPIC:-hiring.operational-events}"
 # Keep these aligned with ANALYTICS_RETENTION_KAFKA_RETENTION and ANALYTICS_RETENTION_KAFKA_SEGMENT_ROLL (milliseconds).
 topic_retention_ms="${KAFKA_TOPIC_RETENTION_MS:-604800000}"
-topic_segment_ms="${KAFKA_TOPIC_SEGMENT_MS:-604800000}"
+topic_segment_ms="${KAFKA_TOPIC_SEGMENT_MS:-86400000}"
 bin=/opt/kafka/bin
 
 topics() { "$bin/kafka-topics.sh" --bootstrap-server "$bootstrap" --command-config "$admin_properties" "$@"; }
@@ -44,6 +44,8 @@ acls --add --allow-principal User:analytics_fencer --operation WRITE --operation
 acls --add --allow-principal User:analytics_fencer --operation IdempotentWrite --cluster
 acls --add --allow-principal User:analytics_reader --operation READ --operation DESCRIBE --topic "$topic"
 acls --add --allow-principal User:analytics_reader --operation DESCRIBE --cluster
+# The application consumer reads retention.ms and segment.ms of this one topic before it consumes (DDC-02).
+acls --add --allow-principal User:analytics_reader --operation DESCRIBE_CONFIGS --topic "$topic"
 for group in hiring-analytics-batch hiring-analytics-streaming-v1 hiring-operational-events-local hiring-operational-events-integration; do
   acls --add --allow-principal User:analytics_reader --operation READ --group "$group"
 done

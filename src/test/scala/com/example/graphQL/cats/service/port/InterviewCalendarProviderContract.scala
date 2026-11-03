@@ -1,6 +1,7 @@
 package com.example.graphQL.cats.service.port
 
 import cats.effect.IO
+import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.domain.workflow.{InterviewInterval, InterviewWorkflow}
 import java.time.Instant
@@ -150,6 +151,99 @@ trait InterviewCalendarProviderContract { self: CatsEffectSuite =>
         assertEquals(replacement.interval, slot(1, 2))
         assert(cancelled.isInstanceOf[InterviewCalendarCancellation.Cancelled])
         assertEquals(newer.map(_.releasedAt), Some(None))
+      }
+    }
+  }
+
+  test("DDC-04.4 concurrent reserve calls with one reserve key give one reservation") {
+    withSubject { subject =>
+      for {
+        workflow <- subject.newWorkflow(user(), user(), slot(0))
+        at = Instant.now().truncatedTo(ChronoUnit.MILLIS)
+        reservations <- (0 until 8).toList.parTraverse(attempt =>
+          success(
+            subject.provider.reserve(
+              workflow.id,
+              InterviewWorkflow.reservationKey(workflow.id, 0),
+              workflow.candidateId,
+              workflow.recruiterId,
+              workflow.interval,
+              at.plusSeconds(attempt.toLong),
+              None
+            )
+          )
+        )
+        found <- success(subject.provider.lookup(workflow.id, InterviewWorkflow.reservationKey(workflow.id, 0)))
+      } yield {
+        // Each caller sent a different reservation time: one distinct result means one effect won.
+        assertEquals(reservations.distinct.size, 1)
+        assertEquals(found, reservations.headOption)
+      }
+    }
+  }
+
+  test("DDC-04.4 concurrent cancel calls with one cancel key confirm one cancellation") {
+    withSubject { subject =>
+      for {
+        arranged <- subject.newWorkflow(user(), user(), slot(0))
+        _ <- success(reserve(subject, arranged, 0))
+        workflow <- subject.requireCancellation(arranged, 0)
+        key = InterviewWorkflow.cancellationKey(workflow.id, 0)
+        at = Instant.now().truncatedTo(ChronoUnit.MILLIS)
+        outcomes <- (0 until 8).toList.parTraverse(attempt =>
+          success(subject.provider.cancel(workflow.id, key, at.plusSeconds(attempt.toLong), None))
+        )
+        looked <- success(subject.provider.lookup(workflow.id, key))
+      } yield {
+        val fresh = outcomes.collect { case InterviewCalendarCancellation.Cancelled(when) => when }
+        val repeats = outcomes.collect { case InterviewCalendarCancellation.AlreadyCancelled(when) => when }
+        assertEquals(fresh.size, 1)
+        assertEquals(repeats.size, outcomes.size - 1)
+        assertEquals(repeats.distinct, fresh)
+        assertEquals(looked.flatMap(_.releasedAt), fresh.headOption)
+      }
+    }
+  }
+
+  test("DDC-04.3 lookup returns the reservation and the cancellation after outcomes the caller did not see") {
+    withSubject { subject =>
+      for {
+        arranged <- subject.newWorkflow(user(), user(), slot(0))
+        before <- success(subject.provider.lookup(arranged.id, InterviewWorkflow.reservationKey(arranged.id, 0)))
+        _ <- reserve(subject, arranged, 0).value.void
+        held <- success(subject.provider.lookup(arranged.id, InterviewWorkflow.reservationKey(arranged.id, 0)))
+        workflow <- subject.requireCancellation(arranged, 0)
+        key = InterviewWorkflow.cancellationKey(workflow.id, 0)
+        at = Instant.now().truncatedTo(ChronoUnit.MILLIS)
+        _ <- subject.provider.cancel(workflow.id, key, at, None).value.void
+        released <- success(subject.provider.lookup(workflow.id, key))
+      } yield {
+        assertEquals(before, None)
+        assertEquals(held.map(_.releasedAt), Some(None))
+        assertEquals(released.flatMap(_.releasedAt), Some(at))
+      }
+    }
+  }
+
+  test("DDC-04.4 different keys stay independent: another workflow's reserve and cancel keys do not affect this one") {
+    withSubject { subject =>
+      for {
+        first <- subject.newWorkflow(user(), user(), slot(0))
+        second <- subject.newWorkflow(user(), user(), slot(0))
+        firstReservation <- success(reserve(subject, first, 0))
+        secondReservation <- success(reserve(subject, second, 0))
+        cancellable <- subject.requireCancellation(first, 0)
+        _ <- success(
+          subject.provider.cancel(cancellable.id, InterviewWorkflow.cancellationKey(first.id, 0), Instant.now(), None)
+        )
+        stillHeld <- success(subject.provider.lookup(second.id, InterviewWorkflow.reservationKey(second.id, 0)))
+        unknown <- success(
+          subject.provider.cancel(second.id, InterviewWorkflow.cancellationKey(second.id, 1), Instant.now(), None)
+        )
+      } yield {
+        assertNotEquals(firstReservation, secondReservation)
+        assertEquals(stillHeld, Some(secondReservation))
+        assertEquals(unknown, InterviewCalendarCancellation.UnknownReservation)
       }
     }
   }

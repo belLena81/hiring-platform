@@ -35,7 +35,7 @@ Re-run the tables with measured figures before any deployment decision.
 | Fusion and rerank | `applicationRrf`; rerank disabled | No paid rerank or Atlas-native fusion dependency. |
 | Unavailable search | Fails closed with `VECTOR_SEARCH_UNAVAILABLE` | Safe; no keyword fallback if `mongot` is down. |
 | Local search | `compose.atlas-local.yaml` (`mongodb-atlas-local`, includes `mongot`) | $0; correctness only. |
-| Kafka | KRaft, 1 broker, RF=1, `min.insync.replicas=1`, 1 partition per topic, 7-day retention, transactional producers (`compose.yaml`) | Cheapest shape. Broker loss would lose data; confirm each topic is replayable from a Mongo outbox before relying on this. |
+| Kafka | KRaft, 1 broker, RF=1, `min.insync.replicas=1`, 1 partition per topic, 7-day retention and 1-day segment roll, transactional producers (`compose.yaml`; topic retention and segment roll in `docker/kafka/provision-access.sh`) | Cheapest shape. Broker loss would lose data; confirm each topic is replayable from a Mongo outbox before relying on this. |
 | Spark and Delta | Spark 4.2.0, Delta 4.4.1, Scala 3.7.4 with 2.13 artifacts, Java 17 (`analytics/build.sbt`); local one-shot batch over an explicit offset range; opt-in streaming with a 10 s trigger | Batch is idempotent via run manifest and mutex, so it suits spot or serverless compute. Streaming is always-on cost. |
 | Delta properties | `dataSkippingNumIndexedCols`, log and deleted-file retention, `checkpointInterval=100`; Bronze column statistics disabled for privacy | Sensible. No scheduled compaction or VACUUM was found by search; confirm in source. |
 
@@ -64,6 +64,8 @@ Storage beyond the default, backups and data egress are billed separately.
 | Cohere Embed v4 | about $0.12 (aggregator) | none |
 
 Embedding token cost for the assumed corpus on voyage-4-lite is about $0.60 to embed once, inside the free allowance. Even a 1M-document corpus (500M tokens) costs under $100 on any option above.
+
+Repeat provider calls: within one embedding claim, a vector the provider already returned is reused after a transient entity-write failure or a same-source revision conflict, so that retry does not pay for the same tokens again ([duplicate delivery containment](specs/duplicate-delivery-containment.md)). Not avoided: a crash or lease loss after the provider answered pays once more. Voyage has no idempotency key (assumption, not verified against provider documentation), and whether a request that times out on the client is billed is unknown (assumed billed). Cost of the residual is not measured here.
 
 ## Search: monthly totals
 
@@ -215,9 +217,13 @@ Do not partition tables at this size; the common guideline is to partition only 
 
 1. Keep partitions minimal; serverless products bill per partition-hour.
 2. Producer batching (`linger.ms`, `batch.size`) and compression (lz4 or zstd); whether a vendor bills compressed or uncompressed bytes varies.
-3. Kafka retention of 7 days is one input to the erasure completion budget, not the whole wait. The default worst case from the Delta purge is 15 days (Kafka 7 d + 7 d segment roll, Delta log 1 d + 14 d, vacuum 7 d), checked against a 21-day `erasure-completion-budget`. Shorter retention erases sooner but shortens replay; see [big-data architecture](big-data-architecture.md#erasure-and-limits).
+3. Kafka retention of 7 days is one input to the erasure completion budget, not the whole wait. The default worst case from the Delta purge is 15 days (Kafka 8 d = 7 d retention + 1 d segment roll, Delta log 1 d + 14 d, vacuum 7 d), checked against a 21-day `erasure-completion-budget`. Shorter retention erases sooner but shortens replay; see [big-data architecture](big-data-architecture.md#erasure-and-limits).
 4. Tiered storage is not worth it at this volume.
 5. RF=3 with `min.insync.replicas=2` only when broker fault tolerance is required; cost rises to about $105+.
+
+Held data: Kafka keeps a record for at most retention plus segment roll, so the bound is 8 days (7 + 1), not 14. At the assumed 1 GB a month (about 33 MB a day, before replication and overhead, RF=1) the bound holds about 0.27 GB, against about 0.47 GB at 14 days. This is arithmetic on the workload assumption, not a measurement.
+
+Consumer receipts: each consumed event adds one `consumer_receipts` document, kept 9 days (the receipt TTL; the consumer requires at least the 8-day bound plus one hour). At the assumed 1M events a month, about 33,000 documents a day, so the steady-state collection holds about 300,000 documents, about 33,000 more than an 8-day TTL would hold. Document size is not measured here. Receipts already stored keep their own expiry.
 
 ## Spark 4 status
 

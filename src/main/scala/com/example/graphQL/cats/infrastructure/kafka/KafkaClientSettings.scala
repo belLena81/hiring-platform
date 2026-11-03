@@ -79,6 +79,21 @@ object KafkaClientSettings {
     properties
   }
 
+  /** An admin client with the same security and bounded timeouts as the other blocking clients. */
+  def admin(
+      bootstrapServers: String,
+      username: Option[String],
+      password: Option[String],
+      protocol: KafkaSaslSecurityProtocol
+  ): AdminClientSettings =
+    AdminClientSettings(bootstrapServers)
+      .withProperties(
+        Map(
+          "request.timeout.ms" -> ProducerRequestTimeoutMillis.toString,
+          "default.api.timeout.ms" -> ProducerRequestTimeoutMillis.toString
+        ) ++ security(username, password, protocol)
+      )
+
   def consumer(
       bootstrapServers: String,
       username: Option[String],

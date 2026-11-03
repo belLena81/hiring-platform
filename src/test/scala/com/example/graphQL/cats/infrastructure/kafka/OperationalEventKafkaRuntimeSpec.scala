@@ -45,7 +45,7 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
     topic = OperationalEventEnvelope.Topic,
     consumerGroup = "test-consumer",
     publisher = KafkaPublisherConfig("test", 10, 30, 1, 3, 100),
-    consumer = KafkaConsumerConfig(enabled = true, receiptTtlDays = 8, quarantineTtlDays = 7)
+    consumer = KafkaConsumerConfig(enabled = true, receiptTtlDays = 9, quarantineTtlDays = 7)
   )
 
   test("publisher and reader use independent SASL principals") {
@@ -272,7 +272,7 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
     }
   }
 
-  test("duplicate delivery acknowledges once and accepts events without revision gaps") {
+  test("DDC-03.1 duplicate delivery acknowledges once and accepts events without revision gaps") {
     fakes.flatMap { values =>
       val first = event(OperationalEventType.JOB_CREATED)
       val independent = event(OperationalEventType.JOB_UPDATED)

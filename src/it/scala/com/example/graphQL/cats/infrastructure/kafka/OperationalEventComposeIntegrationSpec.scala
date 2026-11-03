@@ -50,7 +50,7 @@ class OperationalEventComposeIntegrationSpec extends KafkaIntegrationSuite {
     ),
     consumer = KafkaConsumerConfig(
       enabled = true,
-      receiptTtlDays = 8,
+      receiptTtlDays = 9,
       quarantineTtlDays = 7,
       saslUsername = Some("analytics_reader"),
       saslPassword = Some(kafkaNamespace.manifest.readerPassword)

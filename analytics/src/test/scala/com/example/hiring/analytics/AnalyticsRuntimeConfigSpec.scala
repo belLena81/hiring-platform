@@ -79,7 +79,7 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
     |      erasure-completion-budget = ${?ANALYTICS_RETENTION_ERASURE_COMPLETION_BUDGET}
     |      kafka-retention = 7 days
     |      kafka-retention = ${?ANALYTICS_RETENTION_KAFKA_RETENTION}
-    |      kafka-segment-roll = 7 days
+    |      kafka-segment-roll = 1 day
     |      kafka-segment-roll = ${?ANALYTICS_RETENTION_KAFKA_SEGMENT_ROLL}
     |    }
     |    report-reservation-ttl = 90 days

@@ -65,6 +65,15 @@ trait InterviewCalendarLedger[F[_]] {
   ): InterviewProviderF[F, InterviewCalendarCancellation]
 }
 
+/** The calendar effects of interview scheduling: reserve, cancel and compensating release, each addressed by an
+  * idempotency key (the reserve key or the cancel key of a workflow generation).
+  *
+  * Adapter rule: every call is applied at most once per `idempotencyKey`, and a repeated key returns the first outcome.
+  * An adapter uses the provider's own idempotency mechanism (an idempotency header or a client-assigned id), or, when
+  * the provider has none, records a durable send intent per key before the call and resolves an unknown outcome
+  * (timeout, crash, lost response) through `lookup`, never by resending blindly. `lookup` answers whether an effect for
+  * the key exists, whatever the caller saw. Adapters prove the rule with the shared provider contract suite.
+  */
 trait InterviewCalendarProvider[F[_]] {
   def reserve(
       workflowId: InterviewWorkflowId,
@@ -159,6 +168,14 @@ trait InterviewNotificationReceiptLedger[F[_]] {
   def find(idempotencyKey: String): InterviewProviderF[F, Option[InterviewNotificationReceipt]]
 }
 
+/** The notification effect of interview scheduling: one delivery per `idempotencyKey`, returned as a receipt.
+  *
+  * Adapter rule: every call is applied at most once per `idempotencyKey`, and a repeated key returns the first outcome.
+  * An adapter uses the provider's own idempotency mechanism (an idempotency header or a client-assigned id), or, when
+  * the provider has none, records a durable send intent per key before the call and resolves an unknown outcome
+  * (timeout, crash, lost response) through `lookup`, never by resending blindly. `lookup` answers whether an effect for
+  * the key exists, whatever the caller saw. Adapters prove the rule with the shared provider contract suite.
+  */
 trait InterviewNotificationProvider[F[_]] {
   def notify(
       workflowId: InterviewWorkflowId,

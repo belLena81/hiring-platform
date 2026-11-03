@@ -267,7 +267,7 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
             topics.commands,
             broker.config(true).workerGroup,
             KafkaPublisherConfig("test", 1, 60, 1, 5, 1000),
-            KafkaConsumerConfig(true, 8, 7, Some(broker.config(true).username), Some(broker.config(true).password)),
+            KafkaConsumerConfig(true, 9, 7, Some(broker.config(true).username), Some(broker.config(true).password)),
             KafkaSaslSecurityProtocol.Plaintext
           )
           partition = new TopicPartition(topics.commands, first.partition())
@@ -325,7 +325,7 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
       kafkaNamespace.events,
       kafkaNamespace.eventGroup,
       KafkaPublisherConfig("test", 1, 60, 1, 5, 1000),
-      KafkaConsumerConfig(true, 8, 7, Some("analytics_reader"), Some(kafkaNamespace.manifest.readerPassword)),
+      KafkaConsumerConfig(true, 9, 7, Some("analytics_reader"), Some(kafkaNamespace.manifest.readerPassword)),
       KafkaSaslSecurityProtocol.Plaintext
     )
     val jobId = UUID.randomUUID().toString

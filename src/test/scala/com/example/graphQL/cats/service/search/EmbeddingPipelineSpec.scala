@@ -278,8 +278,9 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
           finalJobs <- jobsRef.get
         } yield {
           val conflictRetry = !failFetch && failure == RepositoryError.Conflict
-          assertEquals(fetchCount, if (conflictRetry) 2 else 3)
-          assertEquals(providerCalls, if (failFetch) 0 else if (conflictRetry) 1 else 3)
+          // A lost revision re-reads and persists the held vector up to the in-lease budget; no write pays twice.
+          assertEquals(fetchCount, if (conflictRetry) 4 else 3)
+          assertEquals(providerCalls, if (failFetch) 0 else 1)
           assertEquals(snapshot.get(key.value).map(_.state), Some(if (conflictRetry) "Retry" else "Failed"))
           assertEquals(
             snapshot.get(key.value).flatMap(_.failure),
@@ -1147,7 +1148,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
     }
   }
 
-  test("more than eight revision-only conflicts preserve provider failure budget and eventually embed current source") {
+  test("more than eight text-changing conflicts preserve provider failure budget and eventually embed current source") {
     for {
       usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map(candidateId -> candidate))
       jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> openJob))
@@ -1155,13 +1156,14 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
       durableAttempts <- Ref.of[IO, List[Int]](Nil)
       work <- InMemoryEmbeddingWorkRepository.create
       key = EmbeddingWorkKeys.keyFor(EmbeddingWork.JobChanged(jobId))
+      edited = (count: Int) => openJob.copy(title = s"Edited title $count", updatedAt = now.plusSeconds(count.toLong))
       provider = new EmbeddingService[IO] {
         def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] =
           calls.updateAndGet(_ + 1).flatMap { count =>
             work.snapshot.flatMap(snapshot =>
               snapshot.get(key.value).traverse_(stored => durableAttempts.update(_ :+ stored.attempts))
             ) *>
-              (if (count <= 9) jobsRef.update(_.updated(jobId, openJob.copy(updatedAt = now.plusSeconds(count.toLong))))
+              (if (count <= 9) jobsRef.update(_.updated(jobId, edited(count)))
                else IO.unit).as(Right(EmbeddingVector(List(0.1f, 0.2f), "voyage-4-lite", 2)))
           }
       }
@@ -1193,7 +1195,10 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
       assertEquals(count, 10)
       assertEquals(observedAttempts, List.fill(10)(0))
       assertEquals(remaining, Map.empty[String, StoredWork])
-      assertEquals(stored(jobId).embedding.map(_.meta.sourceHash), Some(SourceHash.sha256(SearchableText.job(openJob))))
+      assertEquals(
+        stored(jobId).embedding.map(_.meta.sourceHash),
+        Some(SourceHash.sha256(SearchableText.job(edited(9))))
+      )
     }
   }
 
@@ -1374,6 +1379,193 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
     }
   }
 
+  /** A provider that numbers its answers, so a test can tell which call produced a stored vector. */
+  private def numberedProvider(calls: Ref[IO, Int], during: Int => IO[Unit] = _ => IO.unit): EmbeddingService[IO] =
+    new EmbeddingService[IO] {
+      def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] =
+        calls
+          .updateAndGet(_ + 1)
+          .flatTap(during)
+          .map(n => Right(EmbeddingVector(List(n.toFloat, 0.5f), "voyage-4-lite", 2)))
+    }
+
+  test("DDC-01.1 a transient entity write failure retries with the vector already paid for") {
+    for {
+      usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map.empty)
+      jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> openJob))
+      calls <- Ref.of[IO, Int](0)
+      failures <- Ref.of[IO, List[RepositoryError]](List(RepositoryError.Unavailable))
+      write <- Deferred[IO, Either[RepositoryError, Unit]]
+      completion <- Deferred[IO, Either[RepositoryError, Unit]]
+      clock <- Ref.of[IO, Instant](now)
+      work <- InMemoryEmbeddingWorkRepository.create
+      jobs = RecordingEmbeddingWrites(
+        InMemoryJobs(jobsRef),
+        write,
+        transientWriteFailure = failures.modify {
+          case head :: tail => tail -> Some(head)
+          case Nil          => Nil -> None
+        }
+      )
+      key = EmbeddingWorkKeys.keyFor(EmbeddingWork.JobChanged(jobId))
+      _ <- successful(work.enqueue(key, now))
+      _ <- controlledWorker(
+        ObservableWork(work, completion),
+        InMemoryUsers(usersRef),
+        jobs,
+        numberedProvider(calls),
+        clock,
+        retryDelay = 1.millis
+      ).use(wakeups => wakeups.offer(()) *> completion.get)
+      snapshot <- work.snapshot
+      providerCalls <- calls.get
+      stored <- jobsRef.get
+    } yield {
+      assertEquals(providerCalls, 1)
+      assertEquals(snapshot, Map.empty[String, StoredWork])
+      assertEquals(stored(jobId).embedding.map(_.values), Some(List(1f, 0.5f)))
+    }
+  }
+
+  test("DDC-01.2 a revision-only conflict persists the held vector against the new revision without a second call") {
+    for {
+      usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map.empty)
+      jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> openJob))
+      calls <- Ref.of[IO, Int](0)
+      completion <- Deferred[IO, Either[RepositoryError, Unit]]
+      clock <- Ref.of[IO, Instant](now)
+      work <- InMemoryEmbeddingWorkRepository.create
+      key = EmbeddingWorkKeys.keyFor(EmbeddingWork.JobChanged(jobId))
+      statusChanged = openJob.copy(updatedAt = now.plusSeconds(60))
+      _ <- successful(work.enqueue(key, now))
+      _ <- controlledWorker(
+        ObservableWork(work, completion),
+        InMemoryUsers(usersRef),
+        InMemoryJobs(jobsRef),
+        numberedProvider(calls, _ => jobsRef.update(_.updated(jobId, statusChanged))),
+        clock
+      ).use(wakeups => wakeups.offer(()) *> completion.get)
+      snapshot <- work.snapshot
+      providerCalls <- calls.get
+      stored <- jobsRef.get
+    } yield {
+      assertEquals(providerCalls, 1)
+      assertEquals(snapshot, Map.empty[String, StoredWork])
+      assertEquals(stored(jobId).updatedAt, statusChanged.updatedAt)
+      assertEquals(stored(jobId).embedding.map(_.values), Some(List(1f, 0.5f)))
+      assertEquals(
+        stored(jobId).embedding.map(_.meta.sourceHash),
+        Some(SourceHash.sha256(SearchableText.job(openJob)))
+      )
+    }
+  }
+
+  test("DDC-01.3 a text change during embedding discards the held vector and pays for the new text") {
+    val retitled = openJob.copy(title = "Staff Scala Developer", updatedAt = now.plusSeconds(60))
+    for {
+      usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map.empty)
+      jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> openJob))
+      calls <- Ref.of[IO, Int](0)
+      work <- InMemoryEmbeddingWorkRepository.create
+      _ <- EmbeddingPipeline
+        .resource[IO](
+          work,
+          InMemoryUsers(usersRef),
+          InMemoryJobs(jobsRef),
+          numberedProvider(calls, n => IO.whenA(n == 1)(jobsRef.update(_.updated(jobId, retitled)))),
+          "voyage-4-lite",
+          8,
+          1,
+          3,
+          10.millis,
+          1.second,
+          diagnostics = Diagnostics.noop,
+          durableRetry = new DurableRetrySettings(8, 10.millis, 20.millis)
+        )
+        .use { publisher =>
+          Offering(work, publisher).offer(EmbeddingWork.JobChanged(jobId)) *>
+            eventually(work.snapshot)(_.isEmpty, remaining = 100).void
+        }
+      providerCalls <- calls.get
+      stored <- jobsRef.get
+    } yield {
+      assertEquals(providerCalls, 2)
+      assertEquals(stored(jobId).embedding.map(_.values), Some(List(2f, 0.5f)))
+      assertEquals(
+        stored(jobId).embedding.map(_.meta.sourceHash),
+        Some(SourceHash.sha256(SearchableText.job(retitled)))
+      )
+    }
+  }
+
+  test("DDC-01.4 an unavailable provider is retried and pays for each attempt as before") {
+    for {
+      usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map.empty)
+      jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> openJob))
+      calls <- Ref.of[IO, Int](0)
+      completion <- Deferred[IO, Either[RepositoryError, Unit]]
+      clock <- Ref.of[IO, Instant](now)
+      work <- InMemoryEmbeddingWorkRepository.create
+      key = EmbeddingWorkKeys.keyFor(EmbeddingWork.JobChanged(jobId))
+      _ <- successful(work.enqueue(key, now))
+      _ <- controlledWorker(
+        ObservableWork(work, completion),
+        InMemoryUsers(usersRef),
+        InMemoryJobs(jobsRef),
+        FailOnceEmbeddingService(calls),
+        clock,
+        retryDelay = 1.millis
+      ).use(wakeups => wakeups.offer(()) *> completion.get)
+      snapshot <- work.snapshot
+      providerCalls <- calls.get
+      stored <- jobsRef.get
+    } yield {
+      assertEquals(providerCalls, 2)
+      assertEquals(snapshot, Map.empty[String, StoredWork])
+      assert(stored(jobId).embedding.nonEmpty)
+    }
+  }
+
+  test("DDC-01.5 a held vector never serves another claim, even for an entity with identical source text") {
+    val twinId = Identifiers.JobId(UUID.fromString("00000000-0000-0000-0000-00000000000a"))
+    val twin = openJob.copy(id = twinId)
+    for {
+      usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map.empty)
+      jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> openJob, twinId -> twin))
+      calls <- Ref.of[IO, Int](0)
+      work <- InMemoryEmbeddingWorkRepository.create
+      _ <- EmbeddingPipeline
+        .resource[IO](
+          work,
+          InMemoryUsers(usersRef),
+          InMemoryJobs(jobsRef),
+          numberedProvider(calls),
+          "voyage-4-lite",
+          8,
+          1,
+          3,
+          10.millis,
+          1.second,
+          diagnostics = Diagnostics.noop,
+          durableRetry = new DurableRetrySettings(attempts = 1)
+        )
+        .use { publisher =>
+          Offering(work, publisher).offer(EmbeddingWork.JobChanged(jobId)) *>
+            Offering(work, publisher).offer(EmbeddingWork.JobChanged(twinId)) *>
+            eventually(work.snapshot)(_.isEmpty, remaining = 100).void
+        }
+      providerCalls <- calls.get
+      stored <- jobsRef.get
+    } yield {
+      assertEquals(SearchableText.job(openJob), SearchableText.job(twin))
+      assertEquals(providerCalls, 2)
+      assertEquals(
+        Set(stored(jobId).embedding.map(_.values), stored(twinId).embedding.map(_.values)),
+        Set(Option(List(1f, 0.5f)), Option(List(2f, 0.5f)))
+      )
+    }
+  }
+
   private def pipelineResource(
       users: UserRepository[IO],
       jobs: JobRepository[IO],
@@ -1540,7 +1732,8 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
       fetchFailure: Option[RepositoryError] = None,
       writeFailure: Option[RepositoryError] = None,
       onFind: IO[Unit] = IO.unit,
-      rereadFailure: IO[Option[RepositoryError]] = IO.pure(None)
+      rereadFailure: IO[Option[RepositoryError]] = IO.pure(None),
+      transientWriteFailure: IO[Option[RepositoryError]] = IO.pure(None)
   ) extends JobRepository[IO] {
     override def relatedJobs(
         scope: com.example.graphQL.cats.service.read.HiringReadScope,
@@ -1614,10 +1807,13 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
         observed: Versioned[Job],
         embedding: EntityEmbedding
     ): RepositoryF[IO, Unit] = com.example.graphQL.cats.service.port.RepositoryF.fromFEither(
-      writeFailure
-        .fold(delegate.updateEmbedding(observed, embedding))(error => RepositoryF.at[IO].raise(error))
-        .value
-        .flatTap(result => writeResult.complete(result).void)
+      transientWriteFailure.flatMap(transient =>
+        transient
+          .orElse(writeFailure)
+          .fold(delegate.updateEmbedding(observed, embedding))(error => RepositoryF.at[IO].raise(error))
+          .value
+          .flatTap(result => writeResult.complete(result).void)
+      )
     )
   }
 

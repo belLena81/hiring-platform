@@ -84,19 +84,21 @@ object KafkaTestNamespace {
       grant("interview_result_publisher", TOPIC, value.results, WRITE, DESCRIBE) ++
       grant("interview_result_publisher", GROUP, value.workers, READ) ++
       grant("hiring_publisher_v2", TOPIC, value.events, WRITE, DESCRIBE) ++
-      grant("analytics_reader", TOPIC, value.events, READ, DESCRIBE) ++
+      grant("analytics_reader", TOPIC, value.events, READ, DESCRIBE, DESCRIBE_CONFIGS) ++
       grant("analytics_reader", GROUP, value.eventGroup, READ)
   }
 
   private def initialize(admin: Admin, value: Namespace): IO[Unit] = IO.blocking {
     val topics = Vector(value.commands, value.results, value.events).map { name =>
       new NewTopic(name, 1, 1.toShort).configs(
-        Map(
+        (Map(
           "cleanup.policy" -> "delete",
           "retention.ms" -> "604800000",
           "max.message.bytes" -> (if (name == value.events) "1048576" else "65536"),
           "min.insync.replicas" -> "1"
-        ).asJava
+        ) ++
+          // The operational consumer refuses to start unless receipt TTL >= retention + segment roll + margin.
+          (if (name == value.events) Map("segment.ms" -> "86400000") else Map.empty[String, String])).asJava
       )
     }
     admin.createTopics(topics.asJava).all().get(20L, java.util.concurrent.TimeUnit.SECONDS)
