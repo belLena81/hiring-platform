@@ -10,6 +10,9 @@
       "Bash(sbt scalafmtCheckAll)",
       "Bash(scripts/check-local.sh)",
       "Bash(python3 -I scripts/check-skills.py)",
+      "Bash(python3 -I scripts/check-docs-current.py)",
+      "Bash(python3 -I scripts/check-docs-current.py --staged)",
+      "Bash(python3 -I scripts/check-docs-current.py --range:*)",
       "Bash(git status:*)",
       "Bash(git diff:*)",
       "Bash(git log:*)",
@@ -89,6 +92,15 @@
           {
             "type": "command",
             "command": "python3 -I \"$CLAUDE_PROJECT_DIR\"/scripts/guard-harness.py || exit 2"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -I \"$CLAUDE_PROJECT_DIR\"/scripts/check-docs-current.py --hook"
           }
         ]
       }

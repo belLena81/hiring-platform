@@ -36,7 +36,8 @@ SHELL_KEYWORDS = {"if", "then", "else", "elif", "fi", "do", "done", "while", "un
 SEGMENT_SPLIT = re.compile(r"\|\||&&|;|\||\n|&(?!>)")
 DB_URI = re.compile(r"mongodb(?:\+srv)?://[^\s'\"]+", re.IGNORECASE)
 
-PROTECTED_PREFIXES = (".claude/", ".git/", "scripts/", "project/", "analytics/project/", ".local/config/", ".codex/")
+PROTECTED_PREFIXES = (".claude/", ".git/", ".githooks/", "scripts/", "project/", "analytics/project/", ".local/config/",
+                      ".codex/")
 PROTECTED_FILES = {"build.sbt", "analytics/build.sbt", "compose.yaml", "compose.test.yaml", "compose.cloud.yaml",
                    "compose.atlas-local.yaml", "compose.override.yaml", "CLAUDE.md", "AGENTS.md", ".sbtopts", ".jvmopts",
                    "analytics/.sbtopts", "analytics/.jvmopts", ".mcp.json", ".scalafmt.conf", "analytics/.scalafmt.conf"}

@@ -8,7 +8,7 @@ cd "$project_root"
 # shellcheck source=scripts/operator-lib.sh
 source "$project_root/scripts/operator-lib.sh"
 
-readonly total_steps=7
+readonly total_steps=8
 format_limit="${CHECK_LOCAL_FORMAT_TIMEOUT_SECONDS:-900}"
 readonly log_dir_display=".local/logs"
 current_step="starting"
@@ -21,14 +21,15 @@ Usage: scripts/check-local.sh
        scripts/check-local.sh --help
 
 Runs, in order, and stops at the first failure:
-  1/7 project skill validation        (python3 scripts/check-skills.py)
-  2/7 container script checks         (scripts/check-container-runtime.sh)
-  3/7 Java 17+ check
-  4/7 root build formatting           (sbt scalafmtCheckAll scalafmtSbtCheck, limit 15 min)
-  5/7 analytics build formatting      (same, limit 15 min)
-  6/7 root unit + integration suites under JaCoCo, 85% merged coverage gate (scripts/run-local-tests.sh test)
-  7/7 analytics unit + integration suites under JaCoCo (scripts/run-local-tests.sh analytics)
-Needs Docker for steps 6-7. Recorded total for a whole run: 1h48m-2h18m. A status line is printed at least every 10 s; the test steps log to
+  1/8 project skill validation        (python3 scripts/check-skills.py)
+  2/8 documentation currency          (python3 scripts/check-docs-current.py: uncommitted and unpushed decision changes carry docs)
+  3/8 container script checks         (scripts/check-container-runtime.sh)
+  4/8 Java 17+ check
+  5/8 root build formatting           (sbt scalafmtCheckAll scalafmtSbtCheck, limit 15 min)
+  6/8 analytics build formatting      (same, limit 15 min)
+  7/8 root unit + integration suites under JaCoCo, 85% merged coverage gate (scripts/run-local-tests.sh test)
+  8/8 analytics unit + integration suites under JaCoCo (scripts/run-local-tests.sh analytics)
+Needs Docker for steps 7-8. Recorded total for a whole run: 1h48m-2h18m. A status line is printed at least every 10 s; the test steps log to
 .local/logs/test-services/run.log and the formatting steps to .local/logs/check-local-*.log.
 
 Environment:
@@ -87,7 +88,7 @@ if (( $# > 0 )); then usage_error "unexpected argument: $1"; fi
 format_limit=$((10#$format_limit))
 readonly format_limit
 
-printf 'check-local: runs %s checks in order (skills, container scripts, Java, formatting x2, tests x2); recorded total for a whole run 1h48m-2h18m; each long step bounded (formatting %s, sbt invocations HIRING_TEST_TIMEOUT_SECONDS=%s)\n' \
+printf 'check-local: runs %s checks in order (skills, documentation currency, container scripts, Java, formatting x2, tests x2); recorded total for a whole run 1h48m-2h18m; each long step bounded (formatting %s, sbt invocations HIRING_TEST_TIMEOUT_SECONDS=%s)\n' \
   "$total_steps" "$(op_duration "$format_limit")" "${HIRING_TEST_TIMEOUT_SECONDS:-14400}"
 
 begin_step() { # description
@@ -145,6 +146,7 @@ git check-ignore -q "$project_root/.local/logs/check-local-root-format.log" || {
 mkdir -p "$project_root/.local/logs"
 
 run_foreground "project skill validation" "fix the reported skill or agent definition, then run again" python3 scripts/check-skills.py
+run_foreground "documentation currency" "update README.md, ARCHITECTURE.md or docs/ (docs/wiki/ included) for the listed decision changes, or commit with a Docs-Impact trailer first" python3 -I scripts/check-docs-current.py
 run_foreground "container script checks" "read the failure printed above, fix scripts/check-container-runtime.sh or docker/*.sh" scripts/check-container-runtime.sh
 
 begin_step "Java 17+ check"

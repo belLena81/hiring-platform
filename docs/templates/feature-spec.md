@@ -51,6 +51,14 @@ Example tags roll up under their criterion (`AC-01.1` and `AC-01.2` belong to `A
 
 Record workload size/seed, concurrency, environment, latency/throughput or freshness target, baseline, resource/cost ceiling or explicit unknowns, and measurement method. Compare a simpler approach. Do not treat targets or estimates as benchmark results.
 
+## Documentation impact
+
+Required for every decision change (see Documentation currency in `AGENTS.md`). List each canonical document to update (`README.md`, `ARCHITECTURE.md`, `docs/*.md`, `docs/wiki/*`, `docs/domain-language.md`) with the decision it must state, its reason and why it matters, or state why no canonical document is affected. The Technical Writer updates them from verified behavior before the final reviews; `scripts/check-docs-current.py` checks that they changed.
+
+| Document | Decision to state | Why it matters | Status |
+|---|---|---|---|
+| `ARCHITECTURE.md` | Example: receipts outlive the Kafka deduplication window | A duplicate older than the receipt would be applied twice | pending |
+
 ## Implementation handoff
 
 - Ordered, independently verifiable slices and relevant AC IDs:

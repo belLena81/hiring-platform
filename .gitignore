@@ -57,6 +57,7 @@ __pycache__/
 *.py
 *.py[cod]
 !/scripts/*.py
+!/scripts/tests/*.py
 
 ### Claude Code personal overrides ###
 /.claude/settings.local.json

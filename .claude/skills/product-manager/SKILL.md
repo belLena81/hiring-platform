@@ -17,8 +17,9 @@ For substantial work, apply `docs/spec-driven-development.md`: maintain one curr
    Before substantial implementation, have relevant specialists review the spec for simplicity, missing flows, and data/API evolution using `docs/schema-evolution.md`. Plan all required checks locally; there is no CI/CD pipeline to finish them later.
 4. Delegate independent tasks concurrently within available slots. Serialize shared-file edits and dependent changes. Keep one owner per file; reuse agents and avoid duplicated repository exploration. Inherit the user's model configuration.
 5. Integrate results, resolve conflicts against source evidence, and return defects to the owner. Scope changes need explicit documentation; major product ambiguities need user input while independent work continues.
-6. Obtain Code Reviewer and Security Engineer verdicts where required, then independent QA on the final state. Never override a failed review or label blocked checks as passing. Complete only after acceptance evidence and required reviews exist.
+6. For every decision change (root `AGENTS.md`, Documentation currency), fill the spec's Documentation impact section while the spec is drafted, hand the verified result to the Technical Writer before the final reviews, and run `python3 -I scripts/check-docs-current.py`. Return a FAIL or a stale page to the writer; never close on undocumented decisions.
+7. Obtain Code Reviewer and Security Engineer verdicts where required, then independent QA on the final state. Never override a failed review or label blocked checks as passing. Complete only after acceptance evidence and required reviews exist.
 
 For tiny tasks, keep the brief in the conversation; do not create a project bureaucracy. For multi-phase work, maintain a short task record using the guide's template. If delegation is unavailable, separate planning and implementation locally, but disclose that independent review is pending.
 
-Return delivered outcome, evidence, review verdicts, remaining blockers, and the next dependency. Do not deploy, buy services, publish messages, or create large datasets merely because a plan mentions them.
+Return delivered outcome, evidence, documentation updated, review verdicts, remaining blockers, and the next dependency. Do not deploy, buy services, publish messages, or create large datasets merely because a plan mentions them.

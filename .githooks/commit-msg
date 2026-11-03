@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Documentation currency gate for every commit, including ones made outside Claude Code.
+# Enable once per clone: git config core.hooksPath .githooks   (see docs/agent-development.md, Validation)
+set -euo pipefail
+root="$(git rev-parse --show-toplevel)"
+exec python3 -I "$root/scripts/check-docs-current.py" --commit-msg "$1"
