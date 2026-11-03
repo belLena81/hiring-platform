@@ -347,11 +347,11 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     )
   }
 
-  test("embedding coverage requires authentication") {
+  test("ECR-05 embedding coverage requires authentication") {
     execute(embeddingCoverageQuery, None).map(json => assertEquals(errorCode(json), Right("UNAUTHORIZED")))
   }
 
-  test("embedding coverage is denied to Candidates and Recruiters by the service") {
+  test("ECR-05 embedding coverage is denied to Candidates and Recruiters by the service") {
     List(
       ActorContext(candidateId, UserRole.Candidate),
       ActorContext(recruiterId, UserRole.Recruiter)
@@ -365,7 +365,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     }.map(_.foreach(json => assertEquals(errorCode(json), Right("UNAUTHORIZED"))))
   }
 
-  test("embedding coverage returns only aggregate fields to an active Admin") {
+  test("ECR-05 ECR-07 embedding coverage returns only aggregate fields to an active Admin") {
     executeWithUsers(
       embeddingCoverageQuery,
       Some(ActorContext(adminId, UserRole.Admin)),
@@ -386,7 +386,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     }
   }
 
-  test("embedding coverage is typed unavailable when vector search is disabled and rejects a blank model") {
+  test("ECR-08 embedding coverage is typed unavailable when vector search is disabled and rejects a blank model") {
     for {
       disabled <- executeWithUsers(
         embeddingCoverageQuery,

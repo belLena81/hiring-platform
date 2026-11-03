@@ -47,7 +47,11 @@ object EmbeddingCoverageClassifier {
       case Some(_)                                             => EmbeddingFreshness.Current
     }
 
-  /** A processing row is claimable again once its lease has strictly passed, matching the claim predicate. */
+  /** Mirrors the claim predicate's boundary: a lease is held while `leaseUntil > now` and reclaimable once
+    * `leaseUntil <= now`. The claim decides on the database clock; this report uses the application clock for `now`, so
+    * clock skew can mislabel InProgress vs LeaseExpired near the boundary. Both count as queued work, so the coverage
+    * checks are unaffected.
+    */
   def repairState(work: Option[EmbeddingQueuedWork], now: Instant): EmbeddingRepairState =
     work.fold(EmbeddingRepairState.NoQueuedWork) { row =>
       row.state match {
@@ -55,7 +59,7 @@ object EmbeddingCoverageClassifier {
         case EmbeddingWorkState.Retry      => EmbeddingRepairState.Retrying
         case EmbeddingWorkState.Failed     => EmbeddingRepairState.Failed
         case EmbeddingWorkState.Processing =>
-          if (row.leaseUntil.exists(!_.isBefore(now))) EmbeddingRepairState.InProgress
+          if (row.leaseUntil.exists(_.isAfter(now))) EmbeddingRepairState.InProgress
           else EmbeddingRepairState.LeaseExpired
       }
     }

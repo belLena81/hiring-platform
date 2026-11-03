@@ -31,10 +31,10 @@ import scala.jdk.CollectionConverters.*
   * The absence of false `NoOrphanedGap` failures rests on two invariants outside this class; breaking either one
   * reintroduces false failures:
   *   1. Enqueueing repair work is transactional with the entity write that makes the stored embedding stale
-  *      (`MongoJobRepository` create/update ~343/390, `MongoUserRepository` insert/profile update ~269/388, enforced by
+  *      (`MongoJobRepository` create/update, `MongoUserRepository` insert/profile update, enforced by
   *      `MongoEmbeddingWorkRepository.requiresTransaction`), so a snapshot never shows a stale entity without its row.
-  *   2. The worker writes the embedding before `complete` deletes the row (`EmbeddingPipeline` `updateEmbedding`
-  *      ~247/264, then `work.complete` ~150-151), so a snapshot never shows a deleted row with a still stale embedding.
+  *   2. The worker writes the embedding before `complete` deletes the row (`EmbeddingPipeline` `jobs.updateEmbedding` /
+  *      `users.updateEmbedding` before `work.complete`), so a snapshot never shows a deleted row with a still stale embedding.
   */
 final class MongoEmbeddingCoverageRepository(database: MongoDatabase[IO], diagnostics: Diagnostics[IO])
     extends EmbeddingCoverageRepository[IO] {

@@ -4,13 +4,16 @@
 
 - Capability: Admin-only, read-only report of how well the searchable Jobs and Candidates are covered by current embeddings, and whether the repair queue can explain every gap.
 - Roadmap context: supports search evaluation and embedding architecture acceptance (SEB-*) and vector optimization prerequisites (MVR-*). It produces local evidence only; it makes no Atlas performance claim.
-- Status: implemented and locally verified 2026-10-08 (unit, service, GraphQL access/contract and Mongo integration evidence below); independent Code Reviewer, Security Engineer and QA verdicts are pending. No Atlas or deployed evidence.
+- Status: implemented and locally verified 2026-10-08 (unit, service, GraphQL access/contract and Mongo integration evidence below). Review verdicts (see Checkpoint and verdicts): Code Reviewer FAIL 2026-11-03 (documentation and lease boundary), re-review PASS 2026-11-03 after fixes; Security Engineer PASS (static) 2026-11-03; QA PASS 2026-11-03. MVP condition 4 met. No Atlas or deployed evidence.
 
-## Source facts (verified 2026-10-08)
+## Source facts (verified 2026-10-08; reviewers re-read HEAD 2026-11-03)
 
 - Embedding metadata is `embeddingMeta {model, sourceHash, updatedAt}`; the vector is stored separately as `embedding`. An embedding is current when its model matches and `sourceHash == SourceHash.sha256(SearchableText.job|candidate(current))` (`SearchEligibility.scala`).
 - Production eligibility: Jobs require `status == Open`. Candidates require role Candidate, accountStatus Active and a profile. `recruiterSearchOptIn` is **not** an eligibility requirement; it only matters when a country, city or availability filter is supplied. The report population therefore follows production and does not filter on opt-in.
 - Queue: collection `embedding_work`, one row per `Job:<id>` / `CandidateProfile:<id>`. States `Ready`, `Retry`, `Processing`, `Failed`; completed rows are deleted. A `Processing` row whose `leaseUntil` is past is claimable again. Failures: `RetryExhausted`, `DocumentTooLarge`, `InvalidWorkKey`, `InvalidResponse`.
+- Lease rule: a lease is held while `leaseUntil > now` and is reclaimable once `leaseUntil <= now`. The claim decides this on the database clock (`$$NOW`, commit a3645e0, `MongoRepositorySupport`). The report's `now` is the application clock, so near the boundary clock skew between the application and MongoDB can label a row `InProgress` that the database has already reclaimed, or `LeaseExpired` that it still holds. Accepted: both values are queued work, so neither `NoOrphanedGap` nor the cross-tab total changes.
+- Lease rule in source (2026-11-03): `service/search/EmbeddingCoverage.scala` classifies a `Processing` row as `InProgress` only when `leaseUntil.exists(_.isAfter(now))`; `leaseUntil == now` is `LeaseExpired`. Boundary test: `EmbeddingCoverageClassificationSpec` "ECR-01 lease boundary mirrors the claim predicate" (`sbt test` 1824 passed, 0 failed).
+- Commit 7ac0bf1 added an in-claim held vector (`EmbeddingPipeline`, `HeldVector`, keyed by model and source hash). It is reused only after a transient entity-write failure or revision conflict whose source hash is unchanged, and it is still written before `complete`, so it cannot make a stale hash look Current.
 - When vector search is disabled there is no work repository, no configured model and no work rows.
 - Existing reusable pieces: projection-based eligibility decoding (`MongoSearchEligibilityCodecs`), `SourceHash`, `SearchableText`, the `analyticsReport` Admin query pattern, `EmbeddingWorkInspection`.
 
@@ -28,8 +31,8 @@ Freshness and repair state are separate dimensions. Their names never overlap, a
 - `NoQueuedWork`: no `embedding_work` row.
 - `Waiting`: row in `Ready`.
 - `Retrying`: row in `Retry`.
-- `InProgress`: row in `Processing` with a live lease.
-- `LeaseExpired`: row in `Processing` whose lease has passed (claimable again).
+- `InProgress`: row in `Processing` with `leaseUntil > now`.
+- `LeaseExpired`: row in `Processing` with `leaseUntil <= now` (claimable again). The boundary is the claim predicate; see the lease rule under Source facts.
 - `Failed`: row in `Failed`, with a separate failure reason.
 
 ## Contract
@@ -38,7 +41,7 @@ Query `embeddingCoverage(expectedModel: String): EmbeddingCoverageReport!`, Admi
 
 The report contains:
 - `cells`: one count per (entity kind `JOB` | `CANDIDATE_PROFILE`, freshness, repair state, failure reason when `Failed`).
-- `observedModels`: count of embeddings per distinct model, per entity kind.
+- `observedModels`: count of embeddings per distinct model, per entity kind. Without `expectedModel` no model is treated as the expected one; see the model blind spot under Remaining risks.
 - `searchableCount` per kind, `scannedCount` per kind, `truncated` per kind.
 - `oldestQueuedWorkAgeSeconds` and `oldestNotCurrentAgeSeconds` (nullable when none).
 - `lagSeconds` p50/p95/p99 from entity update to embedding update for `Current` entities, when the entity has an update timestamp (see unknowns). Informational.
@@ -95,15 +98,15 @@ When vector search is disabled the query fails with a typed unavailable error; i
 - Scan cap: `EmbeddingCoverageLimits.default` is a named constant of 50,000 entities per kind, page size 500, `maxTime` 10 s per Mongo command (not a total deadline). It is not yet configuration; promoting it to configuration needs a measured need. Measured cost is under ECR-10.
 - Ordering race: a queue read before the entity read creates false gaps (an entity changed and enqueued after the queue read), and an entity read before the queue read creates false gaps when the worker finishes in between. Decision: every entity page is one aggregation under `readConcern: snapshot` that reads the entities and looks up their queue rows by `_id` (`$lookup`) at a single point in time, so the combination cannot occur. This was verified to work with `$lookup` on the local MongoDB 8.0 replica set, so the earlier suspect re-read was deleted; only one mechanism exists. Snapshot reads need a replica set or sharded cluster and are subject to the server snapshot history window (`minSnapshotHistoryWindowInSeconds`, 300 s on the local MongoDB 8.0 stack, read with `db.adminCommand({getParameter:1, minSnapshotHistoryWindowInSeconds:1})`), which bounds the time of one page (500 entities, tens of milliseconds), not of the whole scan. A deployment without snapshot support (a standalone server) fails the page read, so the query fails with the repository-unavailable error instead of returning an unguarded report.
 
-The no-false-gap argument rests on two invariants outside the report code; breaking either reintroduces false `NoOrphanedGap` failures: (1) enqueueing repair work is transactional with the entity write that makes the embedding stale (`MongoJobRepository` create/update ~343/390, `MongoUserRepository` insert/profile update ~269/388, `MongoEmbeddingWorkRepository.requiresTransaction`); (2) the worker writes the embedding before `complete` deletes the row (`EmbeddingPipeline` `updateEmbedding` ~247/264, `work.complete` ~150-151). The same notes are in the class comment of `MongoEmbeddingCoverageRepository`. The queue-wide aggregation for `NoStuckWork` is a separate, non-snapshot read and is independent of the cross-tab.
+The no-false-gap argument rests on two invariants outside the report code; breaking either reintroduces false `NoOrphanedGap` failures: (1) enqueueing repair work is transactional with the entity write that makes the embedding stale (`MongoJobRepository` create and update, `MongoUserRepository` insert and profile update, `MongoEmbeddingWorkRepository.requiresTransaction`); (2) the worker persists the vector before `complete` deletes the row (`EmbeddingPipeline` persists through `jobs.updateEmbedding` / `users.updateEmbedding`, then `work.complete`). Symbol names are used instead of line numbers, which drift. The same notes are in the class comment of `MongoEmbeddingCoverageRepository`. The queue-wide aggregation for `NoStuckWork` is a separate, non-snapshot read and is independent of the cross-tab.
 
 ## Implementation and evidence
 
-Production code: `service/search/EmbeddingCoverage.scala` (pure classification, tally, report assembly), `service/EmbeddingCoverageService.scala` (Admin check, validation, clock), `service/port/EmbeddingCoverageRepository.scala` (read-only port), `repository/mongo/MongoEmbeddingCoverageRepository.scala` (primary-read, projected, `_id`-keyset scan with snapshot-read queue lookup, and queue aggregation), `api/graphql/HiringGraphQLEmbeddingCoverageResolvers.scala`, plus schema, input, type and request-context wiring (expensive-root budget and fixed complexity) and the runtime composition (enabled: live service with `3 x durableRetryCapMillis`; disabled: Admin-checked unavailable service). `EmbeddingWorkState` moved to the port next to `EmbeddingWorkFailure` so the service layer does not depend on the Mongo package.
+Production code: `service/search/EmbeddingCoverage.scala` (pure classification, tally, report assembly), `service/EmbeddingCoverageService.scala` (Admin check, validation, clock), `service/port/EmbeddingCoverageRepository.scala` (read-only port), `repository/mongo/MongoEmbeddingCoverageRepository.scala` (primary-read, projected, `_id`-keyset scan with snapshot-read queue lookup, and queue aggregation), the `embeddingCoverage` resolver in `api/graphql/HiringGraphQLReportingResolvers.scala` with its types in `api/graphql/HiringGraphQLReportingTypes.scala`, plus schema, input, type and request-context wiring (expensive-root budget and fixed complexity) and the runtime composition (enabled: live service with `3 x durableRetryCapMillis`; disabled: Admin-checked unavailable service). `EmbeddingWorkState` moved to the port next to `EmbeddingWorkFailure` so the service layer does not depend on the Mongo package.
 
 | ID | Evidence (2026-10-08) |
 |---|---|
-| ECR-01 | `EmbeddingCoverageClassificationSpec` freshness and repair state tests: every value, absent expected model, lease boundary (strictly past is `LeaseExpired`). |
+| ECR-01 | `EmbeddingCoverageClassificationSpec` freshness and repair state tests: every value, absent expected model, lease boundary (`leaseUntil <= now` is `LeaseExpired`, matching the claim predicate). Boundary test `ECR-01 lease boundary mirrors the claim predicate`; classification spec 9/9 and `sbt test` 1824/1824 passed 2026-11-03. |
 | ECR-02 | `EmbeddingCoverageClassificationSpec` cross-tab test; `MongoEmbeddingCoverageIntegrationSpec` "cross-tab" test (reads run under snapshot read concern) on a seeded database covering Current/ContentChanged/ModelMismatch/NotEmbedded against NoQueuedWork/Waiting/Retrying/InProgress/LeaseExpired/Failed(both failure reasons) for jobs and candidates, a closed job and a Recruiter excluded, with and without `expectedModel`. |
 | ECR-03 | Classification spec and the integration test (one orphan job gives `FAILED` with offending count 1); the paging test (7 orphans over 4 pages of 2). |
 | ECR-04 | Classification spec (stuck count, oldest age) and `EmbeddingCoverageServiceSpec` (fixed clock: `stuckBefore` is now minus three retry caps); integration test seeds an old ready row for a closed job and gets `NO_STUCK_WORK` `FAILED` 1 with offending count 2 (a stray row 2 h old and a row 1 ms older than `stuckBefore`); a row exactly at `stuckBefore` (strict comparison), recent waiting rows and failed rows 3 h old are not counted, and the oldest queued work age stays 7200 s (failed rows excluded). A Processing row (live or expired lease) IS counted as stuck work when its `availableAt` is older than the bound: the integration test seeds a Processing row 2 h old (counted, offending total 3) next to recent processing rows (not counted). |
@@ -135,6 +138,35 @@ Open sizing decision for the product owner: a full 36,000-entity scan took 3.8 t
 
 Additional evidence: `MongoEmbeddingCoverageIntegrationSpec` asserts via the profiler that the entity pages (the `$lookup` aggregations) carry read concern snapshot and the count and queue aggregations do not, and that a server error inside the scan yields `Left(RepositoryError.Unavailable)`.
 
-Remaining risks: the entity page scan depends on snapshot read concern (not available on a standalone server) and on the server snapshot window; the cap is a constant, not configuration; client-side decoding dominates the 36,000-entity scan; `NoStuckWork` counts a long-held live claim whose `availableAt` is old; candidate lag and age are unavailable until users carry a change timestamp; no recruiter-consent dimension and no Atlas or deployed evidence.
+Remaining risks (decisions recorded 2026-11-03; none changes the code in this revision):
+- Model blind spot (decision recorded, not changed). With no `expectedModel`, any stored model counts as `Current`, while semantic search retrieves only embeddings whose `meta.model` equals the configured model (`MongoSemanticSearchRepository`). After a model switch the default report can show 100% `Current` while search excludes the old embeddings. Operators must pass `expectedModel` set to the configured model. The code does not enforce this. The API reference and the wiki security and operations page state the same advice.
+- Snapshot dependency: the entity page scan depends on snapshot read concern (not available on a standalone server) and on the server snapshot window. A deployment without it fails the query with the repository-unavailable error.
+- Malformed stored data: one malformed document fails the whole report with `RepositoryError.InvalidStoredData`. This fails closed; no partial report is returned.
+- Scan bounds: only the per-command `maxTime` bounds the scan (10 s per Mongo command, not a total deadline), together with the per-kind cap. A full local scan of 36,000 searchable entities took 3.8 to 10.8 s, while the HTTP `request-timeout-ms` default is 5000. At that scale the query can time out and fails closed. The sizing decision (cap, page size or timeout for a cloud deployment) is open and is not decided here. The cap is a constant, not configuration.
+- Client-side work dominates the scan: decoding and hashing, not server time (see ECR-10). Raise the cap only after measuring this.
+- Candidate name projection (Security L2, accepted, see below): the candidate scan projects `name`. It is decoded in process and never returned, stored in the tally, or logged.
+- Database access (deployment gap): the repository uses the shared application MongoDB connection and there is no dedicated read-only database role. Least privilege is enforced by code (projections, a read-only port), not by database grants.
+- `NoStuckWork` counts a long-held live claim whose `availableAt` is old.
+- Candidate lag and age are unavailable until users carry a change timestamp; `lagEntityKinds` is `[JOB]`.
+- No recruiter-consent dimension in the first slice.
+- No Atlas or deployed evidence. The ECR-10 measurement (2026-10-08) predates float32 binary vectors, migration `032_embedding_work_key_from_identity` and database-clock leases. It has not been re-measured since.
 
 Accepted limitation (Security L2): the candidate scan reuses `MongoSearchEligibilityCodecs.candidateFields`, which projects `name` because that decoder validates it for active candidates. `SearchableText.candidate` needs only skills and the experience summary; a coverage-specific decoder was judged sizeable and was not added. The name is decoded in process and never stored in the tally, returned, or logged.
+
+## Checkpoint and verdicts
+
+- 2026-10-08: implemented and locally verified (ECR-01 to ECR-10, evidence above). Scope of that evidence: local disposable MongoDB 8.0 replica set; no Atlas or deployed run.
+- 2026-11-03 Code Reviewer: FAIL (docs-driven, plus the lease boundary). Findings: stale resolver path and drifted line references; lease wording in ECR-01; glossary terms missing; model blind spot not documented; remaining risks incomplete. Documentation findings are fixed in this revision. The lease boundary was then fixed in source (see Source facts). Re-review 2026-11-03: PASS (code, docs and boundary test checked against the working tree).
+- 2026-11-03 Security Engineer: PASS (static). Low findings, recorded above and accepted: the candidate `name` projection (Security L2), and the shared application database connection with no read-only role (deployment gap). No code change was required.
+- 2026-11-03 QA: PASS on the final working tree (HEAD `b4e216b` plus the fixes). Each ECR criterion was mapped to a test that asserts it. Focused units `*EmbeddingCoverage* *HiringGraphQLAccessSpec *HiringGraphQLContractSpec` 119/119 passed. `scripts/run-local-tests.sh test '*MongoEmbeddingCoverageIntegrationSpec'` returned `RESULT: PASS tests_total=1830 passed=1829 failed=0 skipped=1`; the skipped case is the opt-in ECR-10 measurement (not run, not passed). Follow-ups applied after QA: the `HiringGraphQLAccessSpec` coverage cases now carry their ECR-05/07/08 tags (D2). Accepted (D3): deleted-Admin denial is tested at the service boundary only, not through GraphQL.
+- Open, not gating: ECR-10 re-measurement after float32 vectors, migration 032 and database-clock leases; the request-timeout sizing decision.
+
+## Documentation impact
+
+Updated with this revision (2026-11-03):
+- `docs/domain-language.md`: `EmbeddingFreshness`, `EmbeddingRepairState`, orphaned gap and stuck work, with the statement that freshness and repair state are separate dimensions.
+- `docs/api.md` (embedding coverage section): `expectedModel` operator advice next to `observedModels`, because the model blind spot changes how the default report reads after a model switch.
+- `docs/wiki/security-and-operations.md`: operator entry for the report (Admin-only, read-only, counts only, bounded scan, `expectedModel` advice, fail-closed behavior).
+- This specification: status, source facts, lease rule and its boundary test, symbol references, remaining risks, verdicts.
+
+Checked and not changed: `README.md` and `ARCHITECTURE.md` do not name the query; `docs/schema-evolution.md` (the Embedding coverage paragraph) is consistent with the snapshot and no-index facts; `docs/wiki/workflows-and-patterns.md` is not changed because the report is an operations surface, not a reusable pattern here. `docs/development-milestones.md` is excluded by the coordinator, who updates the MVP table.

@@ -70,6 +70,19 @@ Residuals (see the specification): for 14 days after the topic change, records p
 
 Durable failure states, quarantines, revision conflicts and repair states expose recovery needs. Repair should follow the owning workflow contract rather than arbitrary document edits. Analytics persistent writer/maintenance ownership can intentionally require operator reconciliation instead of automatic takeover.
 
+## Embedding coverage report
+
+`embeddingCoverage(expectedModel)` is the Admin's read of embedding health for searchable Jobs and Candidates. It is Admin-only and read-only: the service checks the live Admin record, and the query writes, enqueues and repairs nothing. The response holds counts, ages, lag percentiles and two named checks (`NO_ORPHANED_GAP`, `NO_STUCK_WORK`). It holds no ids, names, text, vectors or provider payloads. Non-Admin callers receive `UNAUTHORIZED`; with vector search disabled the caller receives `VECTOR_SEARCH_UNAVAILABLE`, not zero counts.
+
+How to read it:
+- Freshness (`freshness`) and repair state (`repairState`) are separate dimensions. Read them together: an entity can be non-current with work queued, which is expected while repair runs. Only a non-current entity with no queued work (orphaned gap) can never be repaired.
+- A check is `PASSED` only when its scan was complete. If the bounded scan reached its cap (`truncated`, `queueTruncated`), the check is `INCONCLUSIVE` and its offending count is a lower bound.
+- The entity pages read each entity with its queue row at one point in time under snapshot read concern. The database must be a replica set or sharded cluster. A standalone server fails the query, which is the intended fail-closed result.
+
+Pass `expectedModel` set to the configured embedding model. Without it, an embedding from a previous model counts as `Current`, while semantic search returns only the configured model's embeddings. After a model switch, the default report can therefore show full coverage that search does not deliver. The code does not enforce this advice.
+
+Sizing is measured locally only: a full scan of 36,000 searchable entities (18,000 Jobs and 18,000 Candidates) took 3.8 to 10.8 s on a disposable MongoDB 8.0 replica set. The HTTP `request-timeout-ms` default is 5000, so a scan at that size can time out. The cap, page size and timeout for a cloud deployment are an open decision. See the [specification](../specs/embedding-coverage-report.md) and the [API reference](../api.md#embedding-coverage-report).
+
 ## Validation and readiness
 
 The [root build](../../build.sbt) separates unit `test` from live HTTP/disposable MongoDB `IntegrationTest / test`; analytics has its own build. Local checks establish only exercised behavior on that source/environment. Atlas fusion/reranking, real providers, genuine Kafka/Delta retention, external-writer exclusion, key retirement and deployed SLOs have additional [roadmap gates](../development-milestones.md).

@@ -38,11 +38,24 @@ final class EmbeddingCoverageClassificationSpec extends FunSuite {
     assertEquals(classify(Some(row(EmbeddingWorkState.Ready)), now), Waiting)
     assertEquals(classify(Some(row(EmbeddingWorkState.Retry)), now), Retrying)
     assertEquals(classify(Some(row(EmbeddingWorkState.Processing, Some(now.plusSeconds(1)))), now), InProgress)
-    assertEquals(classify(Some(row(EmbeddingWorkState.Processing, Some(now))), now), InProgress)
+    assertEquals(classify(Some(row(EmbeddingWorkState.Processing, Some(now))), now), LeaseExpired)
+    assertEquals(classify(Some(row(EmbeddingWorkState.Processing, Some(now.plusMillis(1)))), now), InProgress)
     assertEquals(classify(Some(row(EmbeddingWorkState.Processing, Some(now.minusMillis(1)))), now), LeaseExpired)
     assertEquals(
       classify(Some(row(EmbeddingWorkState.Failed, failure = Some(EmbeddingWorkFailure.RetryExhausted))), now),
       Failed
+    )
+  }
+
+  test("ECR-01 lease boundary mirrors the claim predicate: leaseUntil == now is LeaseExpired, now + 1ms is InProgress") {
+    val classify = EmbeddingCoverageClassifier.repairState
+    assertEquals(
+      classify(Some(row(EmbeddingWorkState.Processing, Some(now))), now),
+      EmbeddingRepairState.LeaseExpired
+    )
+    assertEquals(
+      classify(Some(row(EmbeddingWorkState.Processing, Some(now.plusMillis(1)))), now),
+      EmbeddingRepairState.InProgress
     )
   }
 
