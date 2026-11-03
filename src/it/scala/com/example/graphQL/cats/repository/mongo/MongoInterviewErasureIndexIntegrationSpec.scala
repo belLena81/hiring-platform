@@ -555,12 +555,16 @@ final class MongoInterviewErasureIndexIntegrationSpec extends MongoIntegrationSu
         _ <- setup(database)
         first <- receipts.record("g", event, now, now.plusSeconds(60)).value
         second <- receipts.record("g", event, now, now.plusSeconds(60)).value
-        seen <- receipts.exists("g", event.eventId).value
+        seen <- MongoRepositoryTestSupport.count(
+          database,
+          MongoCollections.ConsumerReceipts,
+          Filters.eq(MongoFields.Id, s"g:${event.eventId}")
+        )
         names <- consumerIndexNames(database)
       } yield {
         assertEquals(first, Right(true))
         assertEquals(second, Right(false))
-        assertEquals(seen, Right(true))
+        assertEquals(seen, 1L)
         assertEquals(names, Set("_id_", MongoIndexNames.ConsumerReceiptsExpiry))
       }
     }

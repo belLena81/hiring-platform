@@ -55,8 +55,13 @@ trait OperationalEventOutboxRepository[F[_]] {
   ): RepositoryF[F, Unit]
 }
 
+/** Deduplicates consumed events in the store: a unique receipt id per consumer group and event decides which delivery
+  * is first. There is deliberately no existence check, because a check followed by an action races with a second
+  * delivery.
+  */
 trait ConsumerReceiptRepository[F[_]] {
-  def exists(consumerGroup: String, eventId: java.util.UUID): RepositoryF[F, Boolean]
+
+  /** Inserts the receipt; `false` means another delivery of the same event already recorded it. */
   def record(
       consumerGroup: String,
       event: OperationalEventEnvelope,

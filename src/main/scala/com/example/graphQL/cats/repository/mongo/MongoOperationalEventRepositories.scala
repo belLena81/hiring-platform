@@ -894,17 +894,6 @@ final class MongoConsumerReceiptRepository(database: MongoDatabase[IO], diagnost
     extends ConsumerReceiptRepository[IO] {
   private val receipts = Mongo4catsCollections.documents(database, MongoCollections.ConsumerReceipts)
 
-  override def exists(consumerGroup: String, eventId: UUID): RepositoryF[IO, Boolean] =
-    MongoRepositorySupport
-      .repositoryGuard(diagnostics, "consumerReceipt.exists")(
-        RepositoryF
-          .lift(
-            MongoSessionOperations
-              .findOne(receipts, None, MongoFilter.eq(MongoFields.Id, s"$consumerGroup:${eventId.toString}"))
-          )
-          .map(_.nonEmpty)
-      )
-
   override def record(
       consumerGroup: String,
       event: OperationalEventEnvelope,

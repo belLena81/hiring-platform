@@ -122,9 +122,6 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
       quarantineState <- Ref.of[IO, Vector[EventQuarantineRecord]](Vector.empty)
     } yield {
       val receipts = new ConsumerReceiptRepository[IO] {
-        override def exists(group: String, id: UUID): RepositoryF[IO, Boolean] =
-          com.example.graphQL.cats.service.port.RepositoryF
-            .lift(IO.raiseError(new AssertionError("receipt deduplication must use the atomic insert")))
         override def record(
             group: String,
             value: OperationalEventEnvelope,
@@ -321,8 +318,6 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
     fakes.flatMap { values =>
       List(RepositoryError.Unavailable, RepositoryError.Conflict).traverse_ { error =>
         val receipts = new ConsumerReceiptRepository[IO] {
-          def exists(group: String, id: UUID): RepositoryF[IO, Boolean] =
-            RepositoryF.lift(IO.raiseError(new AssertionError("Unexpected preflight read")))
           def record(
               group: String,
               value: OperationalEventEnvelope,

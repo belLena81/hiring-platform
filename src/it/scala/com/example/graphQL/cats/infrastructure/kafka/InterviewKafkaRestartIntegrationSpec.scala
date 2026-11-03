@@ -384,7 +384,6 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
           Filters.eq("offset", first.offset())
         )
         receipts = new ConsumerReceiptRepository[IO] {
-          def exists(group: String, id: UUID) = storedReceipts.exists(group, id)
           def record(group: String, event: OperationalEventEnvelope, at: Instant, expiresAt: Instant) =
             storedReceipts.record(group, event, at, expiresAt).flatMap { saved =>
               if (event.eventId == value.eventId) RepositoryF.lift(received.complete(()).void).as(saved)
@@ -406,10 +405,14 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
           for {
             _ <- failedAttempt.get.timeout(30.seconds)
             before <- committed(kafka, partition)
-            receiptBefore <- storedReceipts.exists(kafka.consumerGroup, value.eventId).value
+            receiptBefore <- count(
+              database,
+              "consumer_receipts",
+              Filters.eq("_id", s"${kafka.consumerGroup}:${value.eventId}")
+            )
             rowsBefore <- count(database, "event_quarantine", target)
             _ = assert(before.forall(_ <= first.offset()), clues(before, first.offset()))
-            _ = assertEquals(receiptBefore, Right(false))
+            _ = assertEquals(receiptBefore, 0L)
             _ = assertEquals(rowsBefore, 0L)
             _ <- restore.complete(())
             _ <- received.get.timeout(30.seconds)

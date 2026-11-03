@@ -338,7 +338,14 @@ object OperationalEventKafkaRuntime {
     )
   }
 
-  /** Makes the record durable (receipt, or quarantine when malformed); a repository failure stays typed. */
+  /** Makes the record durable (receipt, or quarantine when malformed); a repository failure stays typed.
+    *
+    * The same event can arrive more than once: a publisher lease does not fence the Kafka send, and an offset commit
+    * can be lost after the receipt is stored. Here the receipt is the whole effect, so a duplicate key is a completed
+    * delivery. Any effect added to this consumer must be keyed by the event id and written in the same store write or
+    * transaction as the receipt; recording first and applying afterwards loses the event on a crash, and applying first
+    * and recording afterwards applies it twice.
+    */
   private[kafka] def recordDurably(
       config: KafkaConfig,
       receipts: ConsumerReceiptRepository[IO],
