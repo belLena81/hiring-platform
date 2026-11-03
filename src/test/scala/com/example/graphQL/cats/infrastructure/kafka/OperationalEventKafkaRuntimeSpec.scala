@@ -113,7 +113,8 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
   private final case class Fakes(
       receipts: ConsumerReceiptRepository[IO],
       quarantines: EventQuarantineRepository[IO],
-      quarantined: Ref[IO, Vector[EventQuarantineRecord]]
+      quarantined: Ref[IO, Vector[EventQuarantineRecord]],
+      stored: Ref[IO, Map[(String, UUID), OperationalEventEnvelope]]
   )
 
   private def fakes: IO[Fakes] =
@@ -139,7 +140,7 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
           com.example.graphQL.cats.service.port.RepositoryF
             .fromFEither(quarantineState.update(_ :+ record).as(Right(())))
       }
-      Fakes(receipts, quarantines, quarantineState)
+      Fakes(receipts, quarantines, quarantineState, receiptState)
     }
 
   private def durable(
@@ -309,6 +310,52 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
         assert(firstCommit)
         assert(duplicateCommit)
         assert(independentCommit)
+        assertEquals(records, Vector.empty)
+      }
+    }
+  }
+
+  test("DDC-03.3 redelivering a received event stores no second receipt and applies no second effect") {
+    fakes.flatMap { values =>
+      val received = event(OperationalEventType.JOB_CREATED)
+      for {
+        firstApplied <- Ref.of[IO, Int](0)
+        attempts <- Ref.of[IO, Int](0)
+        // The receipt is the whole consumer effect; count how often the store reports it newly recorded.
+        counting = new ConsumerReceiptRepository[IO] {
+          override def record(
+              group: String,
+              value: OperationalEventEnvelope,
+              createdAt: Instant,
+              expiresAt: Instant
+          ): RepositoryF[IO, Boolean] =
+            RepositoryF.fromFEither(attempts.update(_ + 1).as(Right(()))).flatMap(_ =>
+              values.receipts.record(group, value, createdAt, expiresAt).semiflatTap(fresh =>
+                if (fresh) firstApplied.update(_ + 1) else IO.unit
+              )
+            )
+        }
+        redeliveries = List(4L, 5L, 6L)
+        commits <- redeliveries.traverse(offset =>
+          durable(
+            config,
+            counting,
+            values.quarantines,
+            config.topic,
+            0,
+            offset,
+            Some(OperationalEventWireCodec.bytes(received))
+          )
+        )
+        receipts <- values.stored.get
+        applied <- firstApplied.get
+        tried <- attempts.get
+        records <- values.quarantined.get
+      } yield {
+        assertEquals(commits, List(true, true, true))
+        assertEquals(tried, 3)
+        assertEquals(receipts.keySet, Set(config.consumerGroup -> received.eventId))
+        assertEquals(applied, 1)
         assertEquals(records, Vector.empty)
       }
     }
