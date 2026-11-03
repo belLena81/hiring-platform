@@ -41,6 +41,13 @@ enum LogEvent(val category: String, val component: String, val message: String, 
   case MongoProbeFailed extends LogEvent("MONGO_PROBE_FAILED", "MONGO", "MongoDB ping failed", LogLevel.Warn)
   case MongoRepositoryFailed
       extends LogEvent("MONGO_REPOSITORY_FAILED", "MONGO", "Mongo repository operation failed", LogLevel.Error)
+  case MongoTransactionExhaustedRetried
+      extends LogEvent(
+        "MONGO_TRANSACTION_EXHAUSTED_RETRIED",
+        "MONGO",
+        "A Mongo transaction ran out of retries; its caller retries on its own next cycle",
+        LogLevel.Warn
+      )
   case MongoSetupFailed extends LogEvent("MONGO_SETUP_FAILED", "MONGO", "MongoDB setup failed", LogLevel.Error)
   case AccessTokenIssuanceFailed
       extends LogEvent("ACCESS_TOKEN_ISSUANCE_FAILED", "AUTH", "Access token issuance failed", LogLevel.Error)
@@ -156,12 +163,19 @@ enum LogField(val key: String, val sensitive: Boolean = false) {
 /** Names the repository transaction that ran out of retries. A closed set: the log sink allow-lists exactly these
   * labels, so a new transaction caller must add a case here and cannot log an unlisted name. Names are stable
   * `<store>.<operation>` business names. `reportsApplicationWriteConflict` marks the two operations whose exhaustion
-  * also emits `APPLICATION_WRITE_CONFLICT`.
+  * also emits `APPLICATION_WRITE_CONFLICT`. `exhaustionRetriedByCaller` marks an operation whose exhaustion loses
+  * nothing because its caller runs the same transaction again on its next scheduled cycle with no user waiting; its
+  * exhaustion is logged as WARN instead of ERROR. Set it only for such a polling caller, never for a user-facing
+  * operation (which answers `Conflict`) and never where a missed cycle leaves state unsafe.
   */
-enum TransactionOperation(val label: String, val reportsApplicationWriteConflict: Boolean = false) {
+enum TransactionOperation(
+    val label: String,
+    val reportsApplicationWriteConflict: Boolean = false,
+    val exhaustionRetriedByCaller: Boolean = false
+) {
   case ApplicationWrite extends TransactionOperation("applications.writeTransaction", true)
   case MutationReceiptWrite extends TransactionOperation("mutationReceipt.writeTransaction", true)
-  case OutboxClaimBatch extends TransactionOperation("outbox.claimBatch")
+  case OutboxClaimBatch extends TransactionOperation("outbox.claimBatch", exhaustionRetriedByCaller = true)
   case OutboxRenewLease extends TransactionOperation("outbox.renewLease")
   case SearchSessionWorkComplete extends TransactionOperation("searchSessionWork.complete")
   case InterviewWorkflowCreate extends TransactionOperation("interviewWorkflow.create")

@@ -470,12 +470,16 @@ private[mongo] object MongoRepositorySupport {
   ): Either[RepositoryError, Unit] =
     Either.cond(result.getDeletedCount == 1L, (), mismatch)
 
-  /** A transaction that ran out of retries: the failure metadata plus the conflict source `transaction-exhausted`. */
+  /** A transaction that ran out of retries: the failure metadata plus the conflict source `transaction-exhausted`.
+    * Logged as ERROR, except for an operation its caller retries on its next cycle (`exhaustionRetriedByCaller`),
+    * logged as WARN with the same fields.
+    */
   def reportExhausted(diagnostics: Diagnostics[IO], error: Throwable, operation: TransactionOperation): IO[Unit] =
     ApplicationWriteConflict
       .report(diagnostics, ConflictSource.TransactionExhausted, operation.label)
       .whenA(operation.reportsApplicationWriteConflict) *> diagnostics.emit(
-      LogEvent.MongoRepositoryFailed,
+      if (operation.exhaustionRetriedByCaller) LogEvent.MongoTransactionExhaustedRetried
+      else LogEvent.MongoRepositoryFailed,
       fields = LogFields.failure(error) + (LogField.SpanName -> "transaction.exhausted") +
         (LogField.ConflictSource -> ConflictSource.TransactionExhausted.label) +
         (LogField.TransactionOperation -> operation.label)

@@ -1,8 +1,10 @@
 package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.{IO, Ref}
+import com.example.graphQL.cats.infrastructure.logging.RecordingDiagnostics
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, TransactionOperation}
 import com.mongodb.{MongoCommandException, ServerAddress}
+import io.circe.parser.parse
 import munit.CatsEffectSuite
 import org.bson.BsonDocument
 
@@ -25,7 +27,7 @@ final class TransactionExhaustionReportSpec extends CatsEffectSuite {
 
   test("an exhausted transaction line names its operation and emits no application write conflict line") {
     emitted(TransactionOperation.OutboxClaimBatch).map { events =>
-      assertEquals(events.map(_._1), Vector(LogEvent.MongoRepositoryFailed))
+      assertEquals(events.map(_._1), Vector(LogEvent.MongoTransactionExhaustedRetried))
       val fields = events.head._2
       assertEquals(fields.get(LogField.SpanName), Some("transaction.exhausted"))
       assertEquals(fields.get(LogField.ConflictSource), Some("transaction-exhausted"))
@@ -42,6 +44,31 @@ final class TransactionExhaustionReportSpec extends CatsEffectSuite {
         assertEquals(events.last._2.get(LogField.TransactionOperation), Some(operation.label))
         if (applicationWrite) assertEquals(events.head._2.get(LogField.SpanName), Some(operation.label))
       }
+    }
+  }
+
+  test("only outbox.claimBatch, which the relay re-polls, is registered as retried by its caller") {
+    val retried = TransactionOperation.values.filter(_.exhaustionRetriedByCaller).toList
+    assertEquals(retried, List(TransactionOperation.OutboxClaimBatch))
+  }
+
+  test("through the real sink, exhaustion is WARN for a caller-retried operation and ERROR for every other one") {
+    TransactionOperation.values.toList.foldLeft(IO.unit) { (done, operation) =>
+      done *> (for {
+        lines <- Ref.of[IO, Vector[String]](Vector.empty)
+        real = RecordingDiagnostics(line => lines.update(_ :+ line))
+        _ <- MongoRepositorySupport.reportExhausted(real, exhausted, operation)
+        out <- lines.get
+      } yield {
+        val exhaustionLine = out.last
+        val json = parse(exhaustionLine).toOption.get.hcursor
+        val expected = if (operation.exhaustionRetriedByCaller) "WARN" else "ERROR"
+        assertEquals(json.get[String]("severity"), Right(expected), clue(operation))
+        val details = json.downField("details")
+        assertEquals(details.get[String]("spanName"), Right("transaction.exhausted"), clue(operation))
+        assertEquals(details.get[String]("conflictSource"), Right("transaction-exhausted"), clue(operation))
+        assertEquals(details.get[String]("transactionOperation"), Right(operation.label), clue(operation))
+      })
     }
   }
 }
