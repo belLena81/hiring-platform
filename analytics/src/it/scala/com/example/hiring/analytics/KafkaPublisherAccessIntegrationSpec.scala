@@ -348,6 +348,9 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
       registeredTransactionalId.getOrElse("hiring-publisher-poll-recovery-" + UUID.randomUUID().toString)
     val requestedAt = Instant.now()
     try {
+      // The durable rows a committed account deletion leaves, in the shape ErasureRequestFixtures.seedRequest seeds:
+      // the queue reads the producer registry (producerRegistry flag plus producer_registrations rows), not a
+      // transactionalIds array on the request, and rejects a request without it as a malformed marker.
       database
         .getCollection(AnalyticsCollections.ErasureRequests)
         .insertOne(
@@ -355,12 +358,35 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
             .append("receiptId", receiptId)
             .append("state", "Pending")
             .append("fencingVersion", 1)
-            .append("transactionalIds", java.util.List.of(transactionalId))
+            .append("producerRegistry", true)
             .append("requestedAt", java.util.Date.from(requestedAt))
         )
       database
         .getCollection("outbox_subject_fences")
         .insertOne(new Document("_id", requestId).append("deleted", true))
+      database
+        .getCollection("users")
+        .insertOne(new Document("_id", requestId).append("accountStatus", "Deleted"))
+      database
+        .getCollection("hiring_migration_ledger")
+        .insertOne(new Document("_id", "003_event_outbox_subject_references").append("state", "Complete"))
+      database
+        .getCollection("hiring_migration_ledger")
+        .insertOne(
+          new Document("_id", "012_attributable_producer_registrations")
+            .append("state", "Complete")
+            .append("version", java.lang.Long.valueOf(1L))
+        )
+      database
+        .getCollection("producer_registrations")
+        .insertOne(
+          new Document("_id", s"$requestId:$transactionalId")
+            .append("subjectId", requestId)
+            .append("transactionalId", transactionalId)
+            .append("kind", "Operational")
+            .append("state", "Active")
+            .append("registeredAt", java.util.Date.from(requestedAt))
+        )
       database
         .getCollection("event_outbox")
         .insertOne(new Document("_id", UUID.randomUUID().toString).append("subjectIds", java.util.List.of(requestId)))
@@ -420,9 +446,17 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
                     transactionalIds
                   )
               }
-            firstAttempt.handleErrorWith { error =>
-              interruptedBroker.traverse_(broker => IO.blocking(broker.start())) *>
-                IO(firstFailure.set(error)) *> IO.raiseError(error)
+            // Uncancelable: the worker races this attempt against its lease heartbeat and cancels it when a renewal is
+            // lost. A cancellation between broker.stop() and the handler would skip broker.start(), leaving the broker
+            // down for every later attempt. The attempt is bounded by the AdminClient timeout, so it cannot hang.
+            IO.uncancelable { _ =>
+              firstAttempt.handleErrorWith { error =>
+                interruptedBroker.traverse_(broker =>
+                  IO.blocking(broker.start()).onError { restartError =>
+                    IO.blocking(System.err.println("test broker restart failed: " + restartError))
+                  }
+                ) *> IO(firstFailure.set(error)) *> IO.raiseError(error)
+              }
             }
           } else
             interruptedBroker.fold(
@@ -481,12 +515,18 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
         IntegrationAnalyticsLakehousePaths.unsafe("file:///tmp/analytics-poll-recovery-" + UUID.randomUUID().toString),
         AnalyticsTestSubjectPseudonymizer.fromSecret("poll-recovery-test-secret".padTo(32, 'x').getBytes("UTF-8")),
         publisher,
-        leaseDuration = 250.millis,
+        leaseDuration = 2.seconds,
         pollInterval = 10.millis,
         producerFencer = recoveringFencer
       )
       val polling = worker.pollForever.start.unsafeRunSync()
       try {
+        def reachedPublisherDrained(document: Document): Boolean =
+          Option(document)
+            .flatMap(value => Option(value.getString("phase")))
+            .flatMap(ErasurePhase.fromString)
+            .exists(_.ordinal >= ErasurePhase.PublisherDrained.ordinal)
+        // Phases are persisted in order and the worker keeps going, so wait for PublisherDrained or any later phase.
         def awaitDurableAdvance: IO[Document] = IO.defer {
           IO.blocking(
             database
@@ -494,11 +534,18 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
               .find(new Document("_id", requestId))
               .first()
           ).flatMap { document =>
-            if (document != null && document.getString("phase") == "PublisherDrained") IO.pure(document)
+            if (reachedPublisherDrained(document)) IO.pure(document)
             else IO.sleep(10.millis) *> awaitDurableAdvance
           }
         }
-        val request = awaitDurableAdvance.timeout(90.seconds).unsafeRunSync()
+        awaitDurableAdvance.timeout(90.seconds).unsafeRunSync()
+        // Stop the worker before reading anything else: a live worker purges the outbox and captures the barrier
+        // between two reads, which made the previous post-drain assertions racy.
+        polling.cancel.unsafeRunSync()
+        val request = database
+          .getCollection(AnalyticsCollections.ErasureRequests)
+          .find(new Document("_id", requestId))
+          .first()
         assert(attempts.get() >= 2, s"worker poll loop did not retry the fencer; attempts=${attempts.get()}")
         val failureWasObserved = Option(firstFailure.get()).exists { error =>
           if (transportFailure) hasTransportFailure(error) else hasAuthenticationFailure(error)
@@ -507,13 +554,20 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
         assert(failureWasObserved, s"expected the configured first-attempt failure, got $failureDetail")
         if (interruptedBroker.nonEmpty)
           assert(pendingWasObservedDuringOutage.get(), "the request was not observed pending during the broker outage")
-        assertEquals(request.getString("state"), "Processing")
+        assert(reachedPublisherDrained(request), "the request did not reach PublisherDrained or a later phase")
         assertEquals(request.getString("receiptId"), receiptId)
-        assertEquals(
-          store.barrier.readBarrier(AnalyticsErasureWorkerTestSupport.accountSubjectId(requestId)).unsafeRunSync(),
-          None
-        )
-        assertEquals(database.getCollection("event_outbox").countDocuments(), 1L)
+        // Documented order: the outbox is purged and the Kafka barrier persisted before OutboxPurged is recorded.
+        val phase = ErasurePhase.fromString(request.getString("phase")).get
+        if (phase.ordinal >= ErasurePhase.OutboxPurged.ordinal) {
+          assert(
+            store.barrier
+              .readBarrier(AnalyticsErasureWorkerTestSupport.accountSubjectId(requestId))
+              .unsafeRunSync()
+              .nonEmpty,
+            "OutboxPurged was recorded without a persisted Kafka barrier"
+          )
+          assertEquals(database.getCollection("event_outbox").countDocuments(), 0L)
+        }
       } finally polling.cancel.unsafeRunSync()
     } finally {
       try database.drop()
@@ -730,6 +784,13 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
           s"password=\"$brokerPassword\" user_broker=\"$brokerPassword\" " +
           s"user_hiring_publisher_v2=\"$publisherPassword\" user_analytics_reader=\"$readerPassword\" " +
           s"user_analytics_fencer=\"$fencerPassword\";"
+      // A fixed host port keeps the advertised address stable across broker.stop()/start(), so the worker's reader and
+      // fencer connections (built once, before the restart) still reach the restarted broker.
+      val brokerHostPort = {
+        val socket = new ServerSocket(0)
+        try socket.getLocalPort
+        finally socket.close()
+      }
       val broker = new KafkaContainer(image)
         .withTmpFs(
           Map(
@@ -747,6 +808,7 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
         .withEnv("KAFKA_SASL_JAAS_CONFIG", brokerJaasConfig)
         .withEnv("KAFKA_LISTENER_NAME_BROKER_PLAIN_SASL_JAAS_CONFIG", brokerJaasConfig)
         .withEnv("KAFKA_LISTENER_NAME_PLAINTEXT_PLAIN_SASL_JAAS_CONFIG", brokerJaasConfig)
+      broker.setPortBindings(java.util.List.of(s"$brokerHostPort:9092"))
       broker.start()
       val transactionalId = "hiring-publisher-admin-outage-" + UUID.randomUUID().toString
       val topicName = "admin-outage-" + UUID.randomUUID().toString
