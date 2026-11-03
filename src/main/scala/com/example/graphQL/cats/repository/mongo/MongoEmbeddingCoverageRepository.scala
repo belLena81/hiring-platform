@@ -34,7 +34,8 @@ import scala.jdk.CollectionConverters.*
   *      (`MongoJobRepository` create/update, `MongoUserRepository` insert/profile update, enforced by
   *      `MongoEmbeddingWorkRepository.requiresTransaction`), so a snapshot never shows a stale entity without its row.
   *   2. The worker writes the embedding before `complete` deletes the row (`EmbeddingPipeline` `jobs.updateEmbedding` /
-  *      `users.updateEmbedding` before `work.complete`), so a snapshot never shows a deleted row with a still stale embedding.
+  *      `users.updateEmbedding` before `work.complete`), so a snapshot never shows a deleted row with a still stale
+  *      embedding.
   */
 final class MongoEmbeddingCoverageRepository(database: MongoDatabase[IO], diagnostics: Diagnostics[IO])
     extends EmbeddingCoverageRepository[IO] {

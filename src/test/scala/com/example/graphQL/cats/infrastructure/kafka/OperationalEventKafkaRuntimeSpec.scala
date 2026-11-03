@@ -329,11 +329,13 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
               createdAt: Instant,
               expiresAt: Instant
           ): RepositoryF[IO, Boolean] =
-            RepositoryF.fromFEither(attempts.update(_ + 1).as(Right(()))).flatMap(_ =>
-              values.receipts.record(group, value, createdAt, expiresAt).semiflatTap(fresh =>
-                if (fresh) firstApplied.update(_ + 1) else IO.unit
+            RepositoryF
+              .fromFEither(attempts.update(_ + 1).as(Right(())))
+              .flatMap(_ =>
+                values.receipts
+                  .record(group, value, createdAt, expiresAt)
+                  .semiflatTap(fresh => if (fresh) firstApplied.update(_ + 1) else IO.unit)
               )
-            )
         }
         redeliveries = List(4L, 5L, 6L)
         commits <- redeliveries.traverse(offset =>
