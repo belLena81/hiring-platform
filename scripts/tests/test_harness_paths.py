@@ -65,14 +65,173 @@ class WorkflowFilesAreCoveredEverywhere(unittest.TestCase):
             outcome = guard.check_bash(command, root)
             self.assertNotIn("project root", (outcome or ("", ""))[1], command)
 
+    def test_ARE_09_7_a_redirect_does_not_hide_a_command_from_the_root_check(self):
+        for command in ("2>&1 scripts/run-local-tests.sh status",
+                        "scripts/run-local-tests.sh>/dev/null status",
+                        "2>/dev/null scripts/check-local.sh",
+                        "> /dev/null scripts/check-local.sh",
+                        "2>&1 git commit -m x",
+                        "git 2>&1 commit -m x",
+                        "git >/dev/null commit -m x",
+                        ">|/dev/null git commit -m x",
+                        "<> /dev/null git commit -m x",
+                        "{fd}>/dev/null git commit -m x",
+                        "\"git\" commit -m x",
+                        "g\\it commit -m x"):
+            outcome = guard.check_bash(command, harness_paths_root() / "analytics")
+            self.assertEqual("deny", outcome and outcome[0], command)
+            self.assertIn("project root", outcome[1], command)
+
+    def test_ARE_09_7_a_directory_change_anywhere_in_the_call_is_denied_at_the_root(self):
+        for command in ("2>&1 cd analytics && git commit -m x",
+                        "FOO=1 cd analytics && git commit -m x",
+                        "builtin cd analytics && git commit -m x",
+                        "cd analytics; scripts/check-local.sh",
+                        "true; cd docs; scripts/run-local-tests.sh status",
+                        "pushd analytics; git push",
+                        "popd; git push",
+                        "pushd;git push",
+                        "cd>/dev/null analytics && git commit -m x",
+                        "cd</dev/null analytics && git commit -m x",
+                        "pushd>/dev/null analytics; git commit -m x",
+                        "\"cd\" analytics && git commit -m x",
+                        "  \"cd\" analytics && git commit -m x",
+                        "true\n\"cd\" analytics\ngit commit -m x",
+                        "{ \"cd\" analytics; git commit -m x; }",
+                        "A=1 \"cd\" analytics && git commit -m x",
+                        " \\cd analytics && git commit -m x",
+                        "if \"cd\" analytics; then git commit -m x; fi",
+                        "echo \\' ; cd>/dev/null analytics ; git commit -m x ; echo \\'",
+                        "scripts/run-local-tests.sh status # it's\ncd sub\nscripts/run-local-tests.sh status # it's",
+                        "git commit -m a # it's\ncd sub\ngit commit -m b # it's",
+                        "true # it's\ncd analytics # it's\ngit commit -m x",
+                        "! case x in x)cd analytics;;y)esac; git commit -m m",
+                        "shopt -s expand_aliases\nalias x=cd\nx analytics\ngit commit -m m",
+                        "alias x=cd; git commit -m m",
+                        "c[d] analytics; git commit -m m",
+                        "cd analytics && git commit -m x <(true)",
+                        "cd analytics && git commit -m x # >(",
+                        "git commit -m x # >(",
+                        "$(true)cd analytics; git commit -m x",
+                        "${x}cd analytics; git commit -m x",
+                        "{cd,analytics}; git commit -m x",
+                        "$'\\143d' analytics; git commit -m x",
+                        "cd$IFS\"analytics\"; git commit -m x",
+                        "2>&1 scripts/run-local-tests.sh stop",
+                        "scripts/run-local-tests.sh>/dev/null status",
+                        "git 2>&1 commit -m x"):
+            outcome = guard.check_bash(command, harness_paths_root())
+            self.assertEqual("deny", outcome and outcome[0], command)
+            self.assertIn("project root", outcome[1], command)
+
+    def test_ARE_09_7_a_line_continuation_inside_a_comment_does_not_hide_a_command(self):
+        root = harness_paths_root()
+        for command, cwd in (("# x\\\ngit commit -m m", root / "analytics"),
+                             ("# a\\\ncd analytics # b\\\ngit commit -m m", root),
+                             ("git \\\ncommit -m x", root)):
+            outcome = guard.check_bash(command, cwd)
+            self.assertEqual("deny", outcome and outcome[0], command)
+
+    def test_ARE_09_7_a_hash_inside_a_word_hides_nothing_from_the_other_rules(self):
+        root = harness_paths_root()
+        for command in ("echo \\)#; sudo ls", "echo \\)#x; sudo id", "echo \\)#; cp a /outside/dir", "echo $(true)#; sudo ls",
+                        "echo $(true)#x; sudo id", "echo \\;#; sudo ls"):
+            outcome = guard.check_bash(command, root)
+            self.assertEqual("deny", outcome and outcome[0], command)
+        outcome = guard.check_bash("echo \\)#x; 2>/dev/null git status", root)
+        self.assertEqual("ask", outcome and outcome[0])
+
+    def test_ARE_09_7_a_message_may_hold_any_text_because_quoted_text_is_not_examined(self):
+        for command in ("git commit -m \"fix cd handling\"", "git commit -m \"fix; cd handling\"",
+                        "git commit -m \"fix (cd handling)\"", "git commit -m 'a > b; cd c'",
+                        "git commit -m \"subject\" -m \"body\nCo-Authored-By: A <a@example.invalid>\""):
+            outcome = guard.check_bash(command, harness_paths_root())
+            self.assertNotIn("project root", (outcome or ("", ""))[1], command)
+
+    def test_ARE_09_7_expansion_in_a_double_quoted_message_is_not_one_simple_command(self):
+        for command in ("git commit -m \"$(touch x)\"", "git commit -m \"`touch x`\"", "git commit -m \"a\\\"; touch x; \\\"\""):
+            outcome = guard.check_bash(command, harness_paths_root())
+            self.assertEqual("deny", outcome and outcome[0], command)
+
+    def test_ARE_09_7_one_simple_command_is_an_allowlist(self):
+        for command in ("git commit -m x", "scripts/run-local-tests.sh status", "git add a/b.md c.txt", "git commit -m 'a; b' -m \"c\""):
+            self.assertTrue(guard.is_one_simple_command(command), command)
+        for command in ("a; b", "a && b", "a | b", "a & b", "a > b", "a < b", "(a)", "{ a; }", "a $b", "a `b`", "a *", "a ?", "a [b]",
+                        "a # b", "a\\ b", "a\nb", "!a", "a 'b", "a \"b", "a \"$b\""):
+            self.assertFalse(guard.is_one_simple_command(command), command)
+
+    def test_ARE_09_7_an_escaped_or_commented_quote_does_not_hide_a_redirect(self):
+        for command in ("echo \\' ; 2>/dev/null git status ; echo \\'",
+                        "true # it's\n2>/dev/null git status # it's",
+                        "(true)# it's\n2>/dev/null git status # it's",
+                        "(true)#'\n2>/dev/null git status\n#'",
+                        "A=\\' >/dev/null true \\'"):
+            outcome = guard.check_bash(command, harness_paths_root())
+            self.assertEqual("ask", outcome and outcome[0], command)
+
+    def test_ARE_09_7_shell_quoting_that_survives_the_text_scan_needs_approval(self):
+        for command in ("git com$\"m\"it -m x", "git com$'m'it -m x", "g$\"i\"t commit", "git com$1mit -m x", "git com$@mit -m x"):
+            for cwd in (harness_paths_root(), harness_paths_root() / "analytics"):
+                outcome = guard.check_bash(command, cwd)
+                self.assertIn(outcome and outcome[0], ("deny", "ask"), command)
+
+    def test_ARE_09_7_a_long_redirect_chain_does_not_stall_the_guard(self):
+        for link in (">a", ">&a", ">11"):
+            for command in ("git status " + link * 2000 + " x", "git status " + (link + " ") * 2000 + "x"):
+                outcome = guard.check_bash(command, harness_paths_root())
+                self.assertEqual("ask", outcome and outcome[0], link)
+        # Here & separates commands, so each part is a redirect alone, not one before the end of a command. It must only finish.
+        guard.check_bash("git status " + ">a&" * 2000 + " x", harness_paths_root())
+
+    def test_ARE_09_7_a_redirect_before_the_end_of_a_command_needs_approval(self):
+        for command in ("2>/dev/null git status",
+                        ">|/dev/null git status",
+                        "<> /dev/null git status",
+                        "{fd}>/dev/null git status"):
+            outcome = guard.check_bash(command, harness_paths_root())
+            self.assertEqual("ask", outcome and outcome[0], command)
+
+    def test_ARE_09_7_a_redirect_at_the_end_and_quoted_text_stay_as_they_were(self):
+        root = harness_paths_root()
+        for command in ("git status 2>&1",
+                        "git status >/dev/null 2>&1",
+                        "git log --grep='>' -5",
+                        "git log --grep=\"a > b\" -5",
+                        "git log --format='%h' -5",
+                        "git status 2>/dev/null | head -5",
+                        "grep -n '=>' src/A.scala",
+                        "sbt test 2>&1",
+                        "cat a b > /dev/null"):
+            self.assertIsNone(guard.check_bash(command, root), command)
+
+    def test_ARE_09_7_a_quoted_redirect_character_does_not_hide_an_argument_from_any_rule(self):
+        root = harness_paths_root()
+        for command, kind in (("git log --grep='>' --output=notes.txt", "deny"),
+                              ("git log --grep='<' --output=notes.txt", "deny"),
+                              ("git diff '>' --ext-diff", "ask"),
+                              ("find . ! -name '>' -exec true ;", "ask"),
+                              ("cp a '>' /outside/dir", "deny")):
+            outcome = guard.check_bash(command, root)
+            self.assertEqual(kind, outcome and outcome[0], command)
+
+    def test_ARE_09_7_a_cd_earlier_in_the_call_counts(self):
+        outcome = guard.check_bash("cd analytics && git commit -m x", harness_paths_root())
+        self.assertEqual("deny", outcome and outcome[0])
+        self.assertIn("project root", outcome[1])
+
+    def test_ARE_09_7_a_command_wrapper_needs_approval(self):
+        for command in ("stdbuf -oL scripts/run-local-tests.sh status", "timeout 5 scripts/run-local-tests.sh status"):
+            outcome = guard.check_bash(command, harness_paths_root())
+            self.assertEqual("ask", outcome and outcome[0], command)
+
     def test_ARE_09_7_read_only_git_stays_allowed_from_a_subdirectory(self):
         self.assertIsNone(guard.check_bash("git status", harness_paths_root() / "analytics"))
 
-    def test_ARE_09_7_the_guard_knows_every_exclusion_in_the_settings(self):
+    def test_ARE_09_7_the_guard_and_the_settings_name_the_same_exclusions(self):
         settings = json.loads((harness_paths_root() / ".claude/settings.json").read_text())
-        for pattern in settings["sandbox"]["excludedCommands"]:
-            words = pattern.removesuffix(" *").split()
-            self.assertTrue(guard.runs_outside_sandbox(words[0], words[1:]), pattern)
+        patterns = [pattern.removesuffix(" *").split() for pattern in settings["sandbox"]["excludedCommands"]]
+        self.assertEqual({words[0] for words in patterns if words[0] != "git"}, guard.SANDBOX_EXCLUDED_SCRIPTS)
+        self.assertEqual({words[1] for words in patterns if words[0] == "git"}, guard.SANDBOX_EXCLUDED_GIT)
 
     def test_the_docs_gate_requires_documentation_for_every_shared_path(self):
         for path in ALL_WORKFLOW_PATHS:

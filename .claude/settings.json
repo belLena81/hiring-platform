@@ -65,7 +65,8 @@
         "./analytics/spark-jvm.args",
         "./project/project/build.properties",
         "./.local/logs",
-        "./.local/config"
+        "./.local/config",
+        "./.local/data/test-builds"
       ],
       "denyRead": [
         "~/.sbt", "~/.ivy2", "~/.cache/coursier",

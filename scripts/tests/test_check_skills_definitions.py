@@ -3,6 +3,7 @@ Run: python3 -I -m unittest discover -s scripts/tests -p 'test_*.py'"""
 
 import importlib.util
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -107,7 +108,7 @@ class ProjectSettings(unittest.TestCase):
         for path in ("./scripts", "./.githooks", "./build.sbt", "./analytics/build.sbt", "./project/plugins.sbt",
                      "./analytics/project/plugins.sbt", "./.claude/rules", "./.sbtopts", "./compose.test.yaml",
                      "./.git", "./analytics/.sbtopts", "./analytics/.jvmopts",
-                     "./.local/logs", "./.local/config"):
+                     "./.local/logs", "./.local/config", "./.local/data/test-builds"):
             self.assertIn(path, denied)
 
     def test_ARE_09_4_sessions_keep_sbt_state_in_the_project_and_cannot_write_the_shared_home(self):
@@ -150,14 +151,26 @@ class ProjectSettings(unittest.TestCase):
         for script in ("scripts/run-local-tests.sh", "scripts/check-local.sh", "scripts/check-done.sh", "scripts/format-staged.sh",
                        "scripts/operator-lib.sh", "scripts/check-agent-hooks-live.sh", ".githooks/commit-msg", ".githooks/pre-commit"):
             for number, line in enumerate((ROOT / script).read_text().splitlines(), 1):
-                self.assertNotRegex(line, r"python3? +(-c( |$)|-( |$)|scripts/)", f"{script}:{number}")
+                # Every real python3 call has -I as its first argument. The tool lists name it among other words.
+                if re.search(r"\bpython3?\b", line) and not re.match(r"\s*(#|for tool in)", line):
+                    self.assertRegex(line, r"\bpython3? -I\b", f"{script}:{number}")
 
-    def test_ARE_09_6_git_commands_that_write_git_state_run_outside_the_sandbox(self):
+    def test_ARE_09_5_hook_commands_in_settings_and_agents_start_python_with_isolation(self):
+        commands = [h["command"] for groups in self.settings["hooks"].values() for g in groups for h in g["hooks"]]
+        for agent in (ROOT / ".claude/agents").glob("*.md"):
+            commands += [line for line in agent.read_text().splitlines() if "command:" in line]
+        for command in commands:
+            if "python3" in command:
+                self.assertIn("python3 -I", command)
+
+    def test_ARE_09_6_the_16_listed_git_commands_run_outside_the_sandbox(self):
         excluded = self.settings["sandbox"]["excludedCommands"]
-        for command in ("add", "commit", "reset", "checkout", "restore", "switch", "stash", "merge", "rebase"):
+        for command in ("add", "commit", "reset", "checkout", "restore", "switch", "stash", "merge", "rebase", "rm", "mv",
+                        "tag", "branch", "push", "fetch", "pull"):
             self.assertIn(f"git {command} *", excluded)
+        self.assertEqual(16, sum(1 for pattern in excluded if pattern.startswith("git ")))
 
-    def test_ARE_09_6_every_excluded_command_needs_approval_except_the_two_read_only_wrapper_verbs(self):
+    def test_ARE_09_6_every_excluded_command_except_the_wrapper_needs_approval(self):
         ask = self.settings["permissions"]["ask"]
         allow = self.settings["permissions"]["allow"]
         for pattern in self.settings["sandbox"]["excludedCommands"]:

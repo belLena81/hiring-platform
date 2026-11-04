@@ -36,8 +36,16 @@ DOCKER_CLEANUP = {"rm", "rmi", "kill", "stop", "down", "prune", "volume", "syste
 DIRECT_DB_TOOLS = {"mongosh", "mongo", "mongodump", "mongorestore", "mongoexport", "mongoimport", "mongod", "redis-cli",
                    "psql", "kafka-topics.sh", "kafka-acls.sh", "kafka-consumer-groups.sh", "kafka-configs.sh",
                    "nc", "ncat", "netcat", "socat", "telnet", "kcat", "kafkacat", "busybox", "podman", "nerdctl"}
+EXCLUDED_SCRIPT_TEXT = re.compile("|".join(re.escape(os.path.basename(script)) for script in sorted(SANDBOX_EXCLUDED_SCRIPTS)))
+# Runs past & on purpose: `git 2>&1 commit` is git commit. Reading too far only applies this rule to a harmless call.
+EXCLUDED_GIT_TEXT = re.compile(r"\bgit\b[^;|\n]*\b(" + "|".join(sorted(SANDBOX_EXCLUDED_GIT)) + r")\b")
+PLAIN_WORD_CHARACTER = re.compile(r"[\w ./:=@%+,~^-]")
+QUOTED_TEXT = re.compile(r"\\.|'[^']*'|\"(?:[^\"\\]|\\.)*\"", re.DOTALL)
+UNUSUAL_REDIRECT = re.compile(r">\||<>|\{\w+\}[<>]")
+REDIRECT_OPERATOR = re.compile(r"\d*(?:&>>?|>>?|<<?)&?")
+REDIRECT_WITH_TARGET = re.compile(r"[^\s<>]*(?:&>>?|>>?|<<?)&?[^\s<>]+")
 SHELL_WRAPPERS = {"bash", "sh", "zsh", "dash", "eval", "env", "command", "xargs", "exec", "nohup", "time", "timeout",
-                  "nice", "setsid", "script", "watch", "python", "python3", "perl", "ruby", "node", "npx", "npm",
+                  "nice", "stdbuf", "setsid", "script", "watch", "python", "python3", "perl", "ruby", "node", "npx", "npm",
                   "awk", "gawk", "source", "."}
 SHELL_KEYWORDS = {"if", "then", "else", "elif", "fi", "do", "done", "while", "until", "for", "!", "{", "}", "(", ")"}
 SEGMENT_SPLIT = re.compile(r"\|\||&&|;|\||\n|&(?!>)")
@@ -142,12 +150,71 @@ def candidate_paths(arg):
     return values
 
 
-def runs_outside_sandbox(name, args):
-    """Pure: is this command one of sandbox.excludedCommands in .claude/settings.json? Those match the command text, so a
-    relative script or git itself would resolve inside whatever directory the shell is in."""
-    if name in SANDBOX_EXCLUDED_SCRIPTS:
-        return True
-    return name == "git" and bool(args) and args[0] in SANDBOX_EXCLUDED_GIT
+def is_one_simple_command(command):
+    """Pure: is this text only plain words and complete quotes, read in one left-to-right pass?
+
+    An allowlist, so a separator, redirect, variable, substitution, glob, comment, escape or newline outside quotes all fail, in any
+    spelling. A tilde passes: it can change a path but cannot add a command. Double quotes may not hold an expansion or a backslash.
+    This function does not otherwise examine quoted text."""
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if char in "'\"":
+            closing = command.find(char, index + 1)
+            if closing < 0 or (char == '"' and re.search(r"[\\$`]", command[index + 1:closing])):
+                return False
+            index = closing + 1
+        elif PLAIN_WORD_CHARACTER.fullmatch(char):
+            index += 1
+        else:
+            return False
+    return True
+
+
+def outside_sandbox_problem(command, cwd):
+    """A call that names one of sandbox.excludedCommands must be one simple command, started at the project root.
+
+    Exclusions match the command text, so after a cd the same text would run a copy of a script, or use a .git, planted in that
+    directory. These commands already have to run standalone, so requiring it costs nothing, and it needs no parser: earlier rules
+    that looked for a cd or a redirect kept missing spellings. It reads the name with quotes and backslashes removed, so a call that
+    merely mentions such a command in a pipeline or from a subdirectory is refused too. A guardrail, not a shell analysis: a name
+    spelled with an expansion is not seen here, but it fails to match an exclusion's text as well."""
+    # The text as sent, and with line continuations joined: bash does not continue a line inside a comment, so either can be the
+    # one that shows the name. The allowlist reads the text as sent, so a continuation is never one simple command.
+    names = [re.sub(r"\$?[\"']|\\", "", text) for text in (command, command.replace("\\\n", ""))]
+    if not any(EXCLUDED_SCRIPT_TEXT.search(plain) or EXCLUDED_GIT_TEXT.search(plain) for plain in names):
+        return None
+    if os.path.realpath(cwd) != os.path.realpath(PROJECT) or not is_one_simple_command(command):
+        return "deny", ("This call names a command that runs outside the Bash sandbox, so it must be one simple command started "
+                        "from the project root, with no cd, chaining, pipe or redirect: another directory could hold a planted "
+                        "copy of the script or a planted .git.")
+    return None
+
+
+def hidden_redirect_problem(command):
+    """A redirect anywhere but the end of a simple command can hide the command name from the guard. Quoted text does not count."""
+    if ")#" in command:
+        # Bash starts a comment here after a subshell but not after an escaped or $( ) close; telling them apart needs parsing.
+        return "ask", "A # right after ) can hide later lines from the guard: human approval required."
+    for segment in split_segments(command):
+        bare = QUOTED_TEXT.sub("''", segment)
+        if UNUSUAL_REDIRECT.search(bare) or any(re.search(r"[<>]", word) for word in words_before_trailing_redirects(bare)):
+            return "ask", "A redirect before the end of a command can hide what runs from the guard: human approval required."
+    return None
+
+
+def words_before_trailing_redirects(segment):
+    """Pure: the words of a segment without the redirections that end it. A walk, not a regex, so its cost is linear."""
+    words = segment.split()
+    end = len(words)
+    while end > 0:
+        if end > 1 and REDIRECT_OPERATOR.fullmatch(words[end - 2]):
+            end -= 2
+        elif REDIRECT_WITH_TARGET.fullmatch(words[end - 1]):
+            end -= 1
+        else:
+            break
+    return words[:end]
 
 
 def check_segment(tokens, cwd):
@@ -174,9 +241,6 @@ def check_segment(tokens, cwd):
         return "ask", "Command name is built dynamically: human approval required."
     command = os.path.basename(tokens[0])
     args = [a.rstrip(")}") if a.endswith((")", "}")) and not a.startswith(("'", '"')) else a for a in tokens[1:]]
-    if runs_outside_sandbox(tokens[0], args) and os.path.realpath(cwd) != os.path.realpath(PROJECT):
-        return "deny", (f"'{tokens[0]}' runs outside the Bash sandbox, so it must start from the project root: "
-                        "another directory could hold a planted copy of the script or a planted .git.")
 
     if command in {"sudo", "su", "doas"}:
         return "deny", "Privilege escalation is not allowed in this project."
@@ -347,6 +411,7 @@ def check_git(args, cwd):
 
 
 def check_bash(command, cwd):
+    as_sent = command
     command = re.sub(r"(?<!\\)((?:\\\\)*)\\\n", r"\1", command)
     for uri in DB_URI.findall(command):
         authority = re.sub(r"^mongodb(?:\+srv)?://", "", uri, flags=re.IGNORECASE).split("/", 1)[0].split("?", 1)[0]
@@ -357,6 +422,9 @@ def check_bash(command, cwd):
     stripped = command.strip()
     if SECRET_TEXT.search(command) and not (stripped.startswith(("git check-ignore", "ls ")) or first in SECRET_SAFE_COMMANDS):
         return "deny", "Secret/credential locations must not be referenced in shell commands."
+    outside = outside_sandbox_problem(as_sent, cwd)  # Before the asks below, which would turn this deny into a prompt.
+    if outside:
+        return outside
     if "<<" in command:
         result_heredoc = ("ask", "Heredocs hide following lines from the guard: human approval required.")
     else:
@@ -364,14 +432,15 @@ def check_bash(command, cwd):
     if ">(" in command or "<(" in command:
         return "ask", "Process substitution can hide writes: human approval required."
     result = result_heredoc
-    if re.search(r"\$[A-Za-z_]", command):
+    if re.search(r"\$[A-Za-z_0-9@*#?$!-]", command):
         result = ("ask", "Shell variables can build paths the guard cannot see: human approval required.")
-    if re.search(r"\$\(|\$\{|`|\$'|\{[^{}\s]*,[^{}\s]*\}", command):
+    if re.search(r"\$\(|\$\{|`|\$['\"]|\{[^{}\s]*,[^{}\s]*\}", command):
         result = ("ask", "Command substitution or brace expansion hides what will run: human approval required.")
     for match in re.finditer(r"<\s*([\"']?[^\s&|;<>\"']+)", command):
         target = clean(match.group(1))
         if SECRET_PATH.search(target):
             return "deny", "Secret/credential files must not be read through input redirection."
+    result = worst(result, hidden_redirect_problem(command))
     current = cwd
     for segment in split_segments(command):
         try:
@@ -414,7 +483,7 @@ def split_segments(command):
         elif ch == "\\" and i + 1 < len(command):
             current.append(ch + command[i + 1])
             i += 1
-        elif ch == "#" and (i == 0 or command[i - 1] in " \t\n;|&("):
+        elif ch == "#" and (i == 0 or command[i - 1] in " \t\n;|&(") and not (i >= 2 and command[i - 2] == "\\"):
             while i < len(command) and command[i] != "\n":
                 i += 1
             continue
