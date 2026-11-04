@@ -5,7 +5,7 @@ The October 6 functional refactoring is tracked in [Hiring Workflow Recovery and
 ## Identity and scope
 
 - Roadmap owner: Phase 11, Kafka workflow contracts, Saga and State.
-- Status: **Phase 11 is closed as locally complete for DHW-01 through DHW-13** (decision 2026-10-08; closure is local only and does not establish deployed retention, production redundancy or real-provider behavior). **DHW-14 and later, in "Interview cancellation, rescheduling and real-provider preparation" below, are the approved follow-up scope**; the local implementation is recorded with author-run local evidence in the [Local closure checkpoint (2026-10-13)](#local-closure-checkpoint-2026-10-13). Independent Code Reviewer, Security Engineer and QA PASS (2026-10-13) for the local ledger/fake-provider scope. The SES part of DHW-24, DHW-26 and DHW-32 are DEFERRED to the real-provider slice (not implemented; user decision 2026-10-13).
+- Status: done (local) for DHW-01 to DHW-34 on the ledger and fake-provider path; the SES parts are deferred. **Phase 11 is closed as locally complete for DHW-01 through DHW-13** (decision 2026-10-08; closure is local only and does not establish deployed retention, production redundancy or real-provider behavior). **DHW-14 and later, in "Interview cancellation, rescheduling and real-provider preparation" below, are the approved follow-up scope**; the local implementation is recorded with author-run local evidence in the [Local closure checkpoint (2026-10-13)](#local-closure-checkpoint-2026-10-13). Independent Code Reviewer, Security Engineer and QA PASS (2026-10-13) for the local ledger/fake-provider scope. The SES part of DHW-24, DHW-26 and DHW-32 are DEFERRED to the real-provider slice (not implemented; user decision 2026-10-13).
 - Coordinator: Product Manager. Implementation owners: Scala Developer and Data Engineer; Architect and Big Data Engineer own boundary/catalog review; Security Engineer and QA provide independent verdicts.
 - Outcome: accepted hiring work survives process failure and duplicate delivery, with explicit progress and authorized repair when it cannot complete automatically.
 - Authorized present task: local implementation of durable interview scheduling with fake calendar/notification adapters and correction of the existing undurable-consumer acknowledgment gap.
@@ -649,3 +649,11 @@ Remaining external gates (none closed by this checkpoint):
 - `skippedGenerations` stored shape: exercised on disposable databases only; no production migration or cutover has been rehearsed.
 - Real-provider slice gate: the unknown-reservation revisit above must be settled before a real calendar adapter is activated.
 - Independent QA (2026-10-13): PASS for DHW-14 to DHW-34 on the local ledger/fake-provider path. `bash scripts/check-local.sh` exit 0 (root 1083 units; integration 304 total, 290 passed, 14 skipped; analytics 458 units, 102 integrations, 4 ignored) and `scripts/run-local-tests.sh interview` 10/10. Logs: ignored `.local/logs/qa-local-closure-{check,interview}.log`. Remaining external gates are unchanged.
+
+## Review verdicts
+
+Collected from the Status line and the 2026-10-13 "Independent verdicts" entries so the verdict gate (`scripts/check-spec-verdicts.py`) can read them. The Status line is `done (local)`; the real-provider slice, the SES parts and deployed behavior are not covered.
+
+- Code Reviewer verdict (2026-10-13, local ledger and fake-provider scope, DHW-14 to DHW-34): PASS.
+- Security Engineer verdict (2026-10-13, the seven mutations' authorization, DHW-34 rate limiting, SECURITY-M1 to M3 and L1 to L3 fixes; DHW-32 was BLOCKED only for the missing SES code and is deferred; the DHW-01 to 13 Security PASS is recorded earlier in this spec): PASS.
+- Final independent QA verdict (2026-10-13, DHW-14 to DHW-34 on the local ledger and fake-provider path): PASS.

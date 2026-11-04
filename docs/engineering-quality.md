@@ -76,7 +76,7 @@ Scala compiler warnings are checked by the build. Scalafmt is configured with st
 
 ## Operator scripts
 
-Every script in `scripts/` that an operator runs (`generate-local-traffic.sh`, `seed-local-jobs.sh`, `run-local-tests.sh`, `check-local.sh`, `check-container-runtime.sh`, `scan-container-images.sh`, `verify-account-deletion-recovery.sh`, `run-acceptance.sh`, `check-skills.py`, `check-docs-current.py`, `check-spec-verdicts.py`, `check-done.sh`) follows one contract, so nobody has to guess whether a run is stuck. Container entrypoints under `docker/` and the `guard-harness.py` hook are outside it, as is the `--hook` mode of `check-docs-current.py`, which answers with a hook decision instead of a RESULT line.
+Every script in `scripts/` that an operator runs (`generate-local-traffic.sh`, `seed-local-jobs.sh`, `run-local-tests.sh`, `check-local.sh`, `check-container-runtime.sh`, `scan-container-images.sh`, `verify-account-deletion-recovery.sh`, `run-acceptance.sh`, `check-skills.py`, `check-docs-current.py`, `check-spec-verdicts.py`, `check-done.sh`) follows one contract, so nobody has to guess whether a run is stuck. Container entrypoints under `docker/` and the `guard-harness.py` hook are outside it, as are the `--hook` modes of `check-docs-current.py`, which answers with a hook decision instead of a RESULT line, and `check-skills.py`, which prints nothing on success and exits 2 with the problems on stderr on failure.
 
 1. **Start line:** what the script does, its parameters with defaults, and the expected duration or bound.
 2. **Progress:** any wait or loop longer than about 10 s prints a status line at least every 10 s (traffic: elapsed/total and request counts by result; test wrapper: phase, elapsed time, last log line).

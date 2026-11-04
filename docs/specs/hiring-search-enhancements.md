@@ -8,7 +8,7 @@ The remaining task evidence is retained as a historical record unless explicitly
 
 ## Status and outcome
 
-- Status: local embedding/evaluation tooling is complete for the reviewed scope; Phase 9 remains partial pending human judgment review and live Atlas evidence. The historic HSE feature review and its criterion-specific gates remain distinct from the later local tooling review.
+- Status: in progress. Local embedding/evaluation tooling is complete for the reviewed scope; Phase 9 remains partial pending human judgment review and live Atlas evidence. The historic HSE feature review and its criterion-specific gates remain distinct from the later local tooling review.
 - Actor: candidates searching open jobs; recruiters matching candidates against jobs they own
 - Outcome: expose deterministic match evidence, support recruiter-entered natural language plus structured candidate filters, and provide selectable MongoDB hybrid-ranking and embedding-evaluation paths without changing the default search behavior.
 - Authorized scope: additive candidate search-profile fields and GraphQL inputs/outputs, Mongo persistence and setup, semantic search adapters/services, local search evaluation, docs, and focused tests.

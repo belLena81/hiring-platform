@@ -2,7 +2,7 @@
 
 ## Identity and scope
 
-- Status: typed persistence is implemented; the historical integration failures below were followed by accepted local Phase 6 evidence. Current streaming/source qualification is tracked separately.
+- Status: in progress (no final QA PASS is recorded after the integration regressions were remediated). Typed persistence is implemented; the historical integration failures below were followed by accepted local Phase 6 evidence. Current streaming/source qualification is tracked separately.
 - User outcome: analytics Mongo adapters use typed mongo4cats collections with mongo4cats-circe codecs instead of mixing case-class collections, raw `Document`, and generic `Json` collections.
 - Scope: analytics production Mongo repositories and their codec tests/fixtures. Keep the operational schema and analytics workflow behavior unchanged.
 - Non-goals: root application Mongo persistence, data migration, query/index changes, retention policy changes, or edits to unrelated working tree changes.

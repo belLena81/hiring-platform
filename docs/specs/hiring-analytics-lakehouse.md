@@ -7,7 +7,7 @@
 
 ## Identity and scope
 
-- Status: Phase 6 local evidence is re-established by criterion-tagged tests (see [Current criterion evidence](#current-criterion-evidence-verification-specification-2026-10-13)); independent Code, Security and final QA verdicts on that re-established evidence PASS on HEAD `1834236` (October 13), with `scripts/check-local.sh` passing. Historical status (October 3, removed proof programs): Phase 6 local implementation complete; independent final QA passed HAL-01–HAL-14 on source `bd342489a784e5e76a42857d3a2582278e360304129a9509691f7cd3302bc53f`. Production activation remains gated by genuine deployed retention, writer exclusion, guarded key retirement and operational signoff. Phase 7 runtime acceptance is tracked separately in the continuous analytics specification.
+- Status: done (local, Phase 6). Phase 6 local evidence is re-established by criterion-tagged tests (see [Current criterion evidence](#current-criterion-evidence-verification-specification-2026-10-13)); independent Code, Security and final QA verdicts on that re-established evidence PASS on HEAD `1834236` (October 13), with `scripts/check-local.sh` passing. Historical status (October 3, removed proof programs): Phase 6 local implementation complete; independent final QA passed HAL-01–HAL-14 on source `bd342489a784e5e76a42857d3a2582278e360304129a9509691f7cd3302bc53f`. Production activation remains gated by genuine deployed retention, writer exclusion, guarded key retirement and operational signoff. Phase 7 runtime acceptance is tracked separately in the continuous analytics specification.
 - Current safety review: [Analytics erasure safety](analytics-erasure-safety.md) tracks cancellation ownership, reusable driver effects, abandoned rewrite recovery, malformed marker rejection, and final-source verification. Historical checkpoints below retain their original scope; they do not certify later source changes.
 - User outcome: Admin can query bounded, aggregate hiring analytics produced from local Kafka events without coupling request handling to Spark.
 - Authorized scope: a local Scala 3.7.4 Spark/Delta analytics module using Spark/Delta's Scala 2.13 artifacts, Compose integration, Bronze/Silver/Gold datasets, an Admin GraphQL read model, account-deletion erasure requests, tests, and canonical documentation.
@@ -326,3 +326,11 @@ Historical supplemental native replay diagnosis, nonce0f8d/source563e: owning376
 ### Bounded scenarios qualification (historical)
 
 Nonce4916 / source6c79 retains component evidence above and an overall partial FAIL, not HAL/HCS completion. The unexpected replay/deletion result is hidden by the existing sanitized wildcard; no production privacy or publication defect is inferred from that log. A narrowly allowlisted result-category diagnostic is planned before supplemental native investigation. Maintenance composition and abrupt-loss probes remain draft/unexecuted; synthetic aged timestamps will not establish real elapsed horizons.
+
+## Review verdicts
+
+Collected from the Status line so the verdict gate (`scripts/check-spec-verdicts.py`) can read them. They cover the Phase 6 local evidence re-established on HEAD `1834236` (2026-10-13), not the earlier (October 1) supplemental investigation described just above, which retains component evidence and an overall partial FAIL (the 2026-10-13 re-established evidence supersedes it), and not production activation.
+
+- Code Reviewer verdict (2026-10-13, re-established Phase 6 evidence, HEAD `1834236`): PASS.
+- Security Engineer verdict (2026-10-13, re-established Phase 6 evidence, HEAD `1834236`): PASS.
+- Final independent QA verdict (2026-10-13, re-established Phase 6 evidence, HEAD `1834236`, with `scripts/check-local.sh` passing): PASS.

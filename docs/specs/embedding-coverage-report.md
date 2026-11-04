@@ -4,7 +4,7 @@
 
 - Capability: Admin-only, read-only report of how well the searchable Jobs and Candidates are covered by current embeddings, and whether the repair queue can explain every gap.
 - Roadmap context: supports search evaluation and embedding architecture acceptance (SEB-*) and vector optimization prerequisites (MVR-*). It produces local evidence only; it makes no Atlas performance claim.
-- Status: implemented and locally verified 2026-10-08 (unit, service, GraphQL access/contract and Mongo integration evidence below). Review verdicts (see Checkpoint and verdicts): Code Reviewer FAIL 2026-11-03 (documentation and lease boundary), re-review PASS 2026-11-03 after fixes; Security Engineer PASS (static) 2026-11-03; QA PASS 2026-11-03. MVP condition 4 met. No Atlas or deployed evidence.
+- Status: done (local). Implemented and locally verified 2026-10-08 (unit, service, GraphQL access/contract and Mongo integration evidence below). Review verdicts (see Checkpoint and verdicts): Code Reviewer FAIL 2026-11-03 (documentation and lease boundary), re-review PASS 2026-11-03 after fixes; Security Engineer PASS (static) 2026-11-03; QA PASS 2026-11-03. MVP condition 4 met. No Atlas or deployed evidence.
 
 ## Source facts (verified 2026-10-08; reviewers re-read HEAD 2026-11-03)
 
@@ -170,3 +170,11 @@ Updated with this revision (2026-11-03):
 - This specification: status, source facts, lease rule and its boundary test, symbol references, remaining risks, verdicts.
 
 Checked and not changed: `README.md` and `ARCHITECTURE.md` do not name the query; `docs/schema-evolution.md` (the Embedding coverage paragraph) is consistent with the snapshot and no-index facts; `docs/wiki/workflows-and-patterns.md` is not changed because the report is an operations surface, not a reusable pattern here. `docs/development-milestones.md` is excluded by the coordinator, who updates the MVP table.
+
+## Review verdicts
+
+Collected from the 2026-11-03 checkpoint entries so the verdict gate (`scripts/check-spec-verdicts.py`) can read them. No Atlas or deployed evidence.
+
+- Code Reviewer verdict (2026-11-03, re-review after the documentation and lease-boundary fixes): PASS; the first review on the same day was a FAIL.
+- Security Engineer verdict (2026-11-03, static): PASS; the low findings are recorded above and accepted.
+- Final independent QA verdict (2026-11-03, final working tree at HEAD `b4e216b` plus the fixes): PASS.

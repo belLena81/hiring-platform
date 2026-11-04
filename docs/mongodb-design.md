@@ -30,7 +30,7 @@ The standard is derived from the MongoDB manual's [data-modeling guidance](https
 - **`version` is the content revision.** It advances only when user-visible content of a user or job changes, and optimistic edits compare against it.
 - **Conflict fences are separate.** Fields or documents that exist only to make concurrent transactions conflict are kept apart from `version`: for example `outbox_subject_fences.fencingVersion`, or a per-aggregate admission fence.
 - **Derived data never advances the revision.** Embeddings and other derived values may be guarded by the revision but must not advance it. Otherwise background work makes user edits fail.
-- **Coordination counters are not schema versions.** Workflow revisions, claim tokens and generations coordinate concurrency and say nothing about the schema.
+- **Coordination counters are not schema versions.** Workflow revisions, claim tokens and generations coordinate concurrency and say nothing about the schema. Do not reuse an existing counter for a new purpose; give a new meaning its own field.
 
 ### 3. Types and encoding
 
@@ -50,7 +50,8 @@ The standard is derived from the MongoDB manual's [data-modeling guidance](https
 
 ### 4. Indexes
 
-- **Every query has an index or a documented bound.** Each read or delete the code issues is either backed by an index (explain shows `IXSCAN`; keys ≈ documents ≈ returned), or listed with its bound and revisit trigger.
+- **Every query has an index or a documented bound.** Each read or delete the code issues is either backed by an index (explain shows `IXSCAN`; keys ≈ documents ≈ returned, and no in-memory `SORT` stage on a paged or sorted read), or listed with its bound and revisit trigger.
+- **Do not lead with a low-selectivity key.** Reject an index whose first key is a status, a boolean or a role unless the owning or authorization predicate (owner id, candidate id, job id) is also in the key, the query bound is documented, or the leading status is itself the visibility predicate of the query (open jobs) and the key continues with the filter and paging keys, recorded in the access pattern table.
 - **Each `$or` branch needs its own index;** otherwise the whole query falls back to a collection scan (MiA p174). Prefer one indexed predicate per collection over a generic `$or`.
 - **Order compound keys by the ESR rule:** equality, then sort, then range (MiA p154-156). Paged lists end with `(createdAt, _id)` for deterministic keyset paging.
 - **Avoid redundant indexes.** Do not add an index whose key is already guaranteed by `_id`, or that is a prefix of another index. Drop indexes nothing uses, and record the evidence.

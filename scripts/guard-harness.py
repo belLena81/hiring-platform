@@ -5,7 +5,8 @@ Policy (a guardrail on top of permission rules, not an OS sandbox):
   * ask   - every cleanup/destructive action and every change to harness/build files, so a human approves it;
   * allow - fall through to the permission rules in .claude/settings.json.
 Reads JSON from stdin (Claude Code hook protocol); prints a decision object when it has one.
-Any internal error exits 2, which blocks the tool call (fail closed).
+A runtime error exits 2, which blocks the tool call (fail closed). An import error at module level exits 1; the PreToolUse
+command in .claude/settings.json turns any non-zero exit into 2 (`|| exit 2`), so keep that wrapper.
 """
 
 import glob
@@ -15,6 +16,9 @@ import re
 import shlex
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # -I drops the script directory; harness_paths lives next to us
+import harness_paths  # noqa: E402
 
 PROJECT = Path(__file__).resolve().parent.parent
 MANIFEST = PROJECT / ".local" / "config" / "test-services" / "manifest.json"
@@ -36,11 +40,9 @@ SHELL_KEYWORDS = {"if", "then", "else", "elif", "fi", "do", "done", "while", "un
 SEGMENT_SPLIT = re.compile(r"\|\||&&|;|\||\n|&(?!>)")
 DB_URI = re.compile(r"mongodb(?:\+srv)?://[^\s'\"]+", re.IGNORECASE)
 
-PROTECTED_PREFIXES = (".claude/", ".git/", ".githooks/", "scripts/", "project/", "analytics/project/", ".local/config/",
-                      ".codex/")
-PROTECTED_FILES = {"build.sbt", "analytics/build.sbt", "compose.yaml", "compose.test.yaml", "compose.cloud.yaml",
-                   "compose.atlas-local.yaml", "compose.override.yaml", "CLAUDE.md", "AGENTS.md", ".sbtopts", ".jvmopts",
-                   "analytics/.sbtopts", "analytics/.jvmopts", ".mcp.json", ".scalafmt.conf", "analytics/.scalafmt.conf"}
+# The workflow files come from scripts/harness_paths.py (shared with check-docs-current.py); these are the guard's extras.
+PROTECTED_PREFIXES = harness_paths.WORKFLOW_PREFIXES + (".git/", ".local/config/", ".codex/")
+PROTECTED_FILES = set(harness_paths.WORKFLOW_FILES)
 SECRET_TEXT = re.compile(
     r"(^|[\s/='\"<>@:])\.env(?!\.(example|sample|template)(\s|$|'|\"))(\.[\w.-]+)?($|[\s/'\")};`])|\.local/config|(^|[\s/='\"<>@])\.(aws|ssh|codex|gnupg)(/|$|\s)|"
     r"\.docker/config|\.config/gh|/proc/[^\s]*/environ|(^|[\s;&|])(printenv|compgen)\b|test-services|compose\.env|\.netrc|\.kube|\.npmrc|\.git-credentials|\.sbt/credentials|\.m2/settings|gcloud",
@@ -85,7 +87,8 @@ def inside_allowed(path_text, cwd):
 
 def is_protected(rel):
     base = os.path.basename(rel)
-    return (rel in PROTECTED_FILES or rel in {"scripts", ".claude", ".git", "project", ".codex"} or rel.startswith(PROTECTED_PREFIXES) or base.endswith(".sbt")
+    return (rel in PROTECTED_FILES or rel in {"scripts", ".claude", ".git", "project", ".codex"} or rel.startswith(PROTECTED_PREFIXES)
+            or harness_paths.COMPOSE_FILE.match(rel) is not None or base.endswith(".sbt")
             or base.startswith(".env") or base in {".sbtopts", ".jvmopts"})
 
 

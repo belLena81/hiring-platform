@@ -36,15 +36,18 @@ def is_done(text):
     """Pure: a spec is done when its first '- Status:' line (the Identity section) begins with 'done'."""
     first = STATUS_LINE.search(text)
     return first is not None and STATUS_DONE.match(first.group(0)) is not None
+# "<role> verdict", then an optional label and an optional parenthesised scope (which may itself contain colons), then
+# the verdict after the first colon that follows the scope.
 VERDICT_LINES = (
-    ("Code Reviewer", re.compile(r"^- Code Reviewer verdict\b[^:\n]*:\s*(.*)$", re.MULTILINE)),
-    ("Security Engineer", re.compile(r"^- Security Engineer verdict\b[^:\n]*:\s*(.*)$", re.MULTILINE)),
-    ("Final independent QA", re.compile(r"^- Final independent QA verdict\b[^:\n]*:\s*(.*)$", re.MULTILINE)),
+    ("Code Reviewer", re.compile(r"^- Code Reviewer verdict\b[^:(\n]*(?:\([^)\n]*\)[^:(\n]*)?:\s*(.*)$", re.MULTILINE)),
+    ("Security Engineer", re.compile(r"^- Security Engineer verdict\b[^:(\n]*(?:\([^)\n]*\)[^:(\n]*)?:\s*(.*)$", re.MULTILINE)),
+    ("Final independent QA", re.compile(r"^- Final independent QA verdict\b[^:(\n]*(?:\([^)\n]*\)[^:(\n]*)?:\s*(.*)$", re.MULTILINE)),
 )
 # PASS must stand alone as the verdict word: end of text or a separator such as ";", ",", ":", "(" or a space, so
 # "PASS-with-FAIL" and "PASSED" are rejected.
 PASS = re.compile(r"^\**PASS\**(?:$|[\s;:,.(])", re.IGNORECASE)
-NOT_APPLICABLE = re.compile(r"^not applicable\s+-\s+(.{10,})$", re.IGNORECASE)
+# The reason must be real text: an unedited "<tier reason>" placeholder from the report template does not count.
+NOT_APPLICABLE = re.compile(r"^not applicable\s+-\s+(?!.*<[^>]*>)(.{10,})$", re.IGNORECASE)
 
 
 def problems_in(text):

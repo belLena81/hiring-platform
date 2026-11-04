@@ -31,6 +31,16 @@ class VerdictLines(unittest.TestCase):
         bare = COMPLETE.replace("not applicable - tests only, no data access or authorization path.", "not applicable")
         self.assertEqual(1, len(gate.problems_in(bare)))
 
+    def test_a_scope_with_colons_in_parentheses_is_read_to_its_verdict(self):
+        scoped = COMPLETE.replace("(2026-10-16, S1)", "(2026-10-16, S1: harness scripts, tests: all)")
+        self.assertEqual([], gate.problems_in(scoped))
+        failing = scoped.replace("all): PASS; findings fixed.", "all): FAIL; findings open.")
+        self.assertEqual(1, len(gate.problems_in(failing)))
+
+    def test_an_unedited_placeholder_reason_is_rejected(self):
+        placeholder = COMPLETE.replace("tests only, no data access or authorization path.", "<tier reason>")
+        self.assertEqual(1, len(gate.problems_in(placeholder)))
+
     def test_each_missing_role_line_is_reported_by_name(self):
         problems = gate.problems_in("- Code Reviewer verdict: PASS\n")
         self.assertEqual(2, len(problems))

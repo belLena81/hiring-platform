@@ -13,6 +13,8 @@ format_limit="${CHECK_LOCAL_FORMAT_TIMEOUT_SECONDS:-900}"
 readonly log_dir_display=".local/logs"
 current_step="starting"
 step_number=0
+step_started=$SECONDS
+step_times=()
 result_done=0
 
 help_text() {
@@ -30,7 +32,8 @@ Runs, in order, and stops at the first failure:
   6/8 analytics build formatting      (same, limit 15 min)
   7/8 root unit + integration suites under JaCoCo, 85% merged coverage gate (scripts/run-local-tests.sh test)
   8/8 analytics unit + integration suites under JaCoCo (scripts/run-local-tests.sh analytics)
-Needs Docker for steps 7-8. Recorded total for a whole run: 1h48m-2h18m. A status line is printed at least every 10 s; the test steps log to
+Needs Docker for steps 7-8. Recorded total for a whole run: 1h48m-2h18m. Each step's duration is printed when it ends, and a summary of
+all step durations (including the step that failed or was blocked) is printed at the end of a PASS, FAIL or BLOCKED run, not after an interrupt. A status line is printed at least every 10 s; the test steps log to
 .local/logs/test-services/run.log and the formatting steps to .local/logs/check-local-*.log.
 
 Environment:
@@ -52,6 +55,10 @@ HELP
 finish() { # RESULT code detail
   local line="RESULT: $1 steps_completed=$step_number/$total_steps $3 duration=$(op_elapsed)"
   result_done=1
+  if ((${#step_times[@]} > 0)); then
+    printf 'check-local: step durations:\n' >&2
+    printf '  %s\n' "${step_times[@]}" >&2
+  fi
   if [[ "$1" == PASS ]]; then printf '%s\n' "$line"; else printf '%s\n' "$line" >&2; fi
   exit "$2"
 }
@@ -95,12 +102,14 @@ printf 'check-local: runs %s checks in order (skills, documentation currency, co
 begin_step() { # description
   step_number=$((step_number + 1))
   current_step="$step_number/$total_steps $1"
+  step_started=$SECONDS
   op_say "step $current_step"
 }
 
 # step_failed EXIT_CODE ADVICE [LOG]: reports what failed and what to do, then ends the run.
 step_failed() {
   local code="$1" advice="$2" log="${3:-}"
+  step_times+=("$current_step: $(op_duration $((SECONDS - step_started))) (failed)")
   step_number=$((step_number - 1))
   if [[ -n "$log" ]]; then op_show_failure_tail "$log" 30; fi
   printf 'check-local: step "%s" failed (exit %s)\n' "$current_step" "$code" >&2
@@ -112,7 +121,13 @@ step_failed() {
   esac
 }
 
-completed() { op_say "step ok: $current_step"; }
+# Each step's own duration is printed and kept for the summary, so the slow phase is visible without log archaeology.
+completed() {
+  local took
+  took="$(op_duration $((SECONDS - step_started)))"
+  step_times+=("$current_step: $took")
+  op_say "step ok: $current_step (took $took)"
+}
 
 # run_foreground DESCRIPTION ADVICE COMMAND...: output goes to the terminal; each of these steps is short and bounded.
 run_foreground() {

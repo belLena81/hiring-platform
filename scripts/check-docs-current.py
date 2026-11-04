@@ -12,6 +12,9 @@ import sys
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # -I drops the script directory; harness_paths lives next to us
+import harness_paths  # noqa: E402
+
 HELP = """Usage: python3 -I scripts/check-docs-current.py                  check uncommitted changes and unpushed gated commits
        python3 -I scripts/check-docs-current.py --staged         check only what the next commit would contain
        python3 -I scripts/check-docs-current.py --range A..B     check every commit in a range, one by one
@@ -49,10 +52,11 @@ PROJECT = Path(__file__).resolve().parent.parent
 GIT_TIMEOUT_SECONDS = 30
 MIN_REASON_CHARS = 10
 
-DECISION_PREFIXES = ("src/main/", "analytics/src/main/", "docker/", ".claude/", ".githooks/", "scripts/", "project/",
-                     "analytics/project/")
-DECISION_FILES = {"build.sbt", "analytics/build.sbt", "Dockerfile", "AGENTS.md", "CLAUDE.md"}
-DECISION_PATTERNS = (re.compile(r"^compose[\w.-]*\.ya?ml$"),)
+# The workflow files come from scripts/harness_paths.py (shared with guard-harness.py); production source and provisioning
+# are this gate's own additions.
+DECISION_PREFIXES = harness_paths.WORKFLOW_PREFIXES + ("src/main/", "analytics/src/main/", "docker/")
+DECISION_FILES = set(harness_paths.WORKFLOW_FILES)
+DECISION_PATTERNS = (harness_paths.COMPOSE_FILE,)
 NOT_DECISION_PREFIXES = ("scripts/tests/", "scripts/__pycache__/", ".claude/settings.local.json")
 CANONICAL_DOC_FILES = {"README.md", "ARCHITECTURE.md"}
 NON_CANONICAL_DOC_PREFIXES = ("docs/specs/", "docs/templates/")

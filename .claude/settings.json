@@ -11,6 +11,7 @@
       "Bash(scripts/check-local.sh)",
       "Bash(python3 -I scripts/check-skills.py)",
       "Bash(python3 -I scripts/check-spec-verdicts.py)",
+      "Bash(python3 -I -m unittest discover -s scripts/tests -p 'test_*.py')",
       "Bash(scripts/check-done.sh)",
       "Bash(scripts/check-done.sh --subagent)",
       "Bash(python3 -I scripts/check-docs-current.py)",
@@ -103,7 +104,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 -I \"$CLAUDE_PROJECT_DIR\"/scripts/check-skills.py"
+            "command": "python3 -I \"$CLAUDE_PROJECT_DIR\"/scripts/check-skills.py --hook"
           }
         ]
       }
