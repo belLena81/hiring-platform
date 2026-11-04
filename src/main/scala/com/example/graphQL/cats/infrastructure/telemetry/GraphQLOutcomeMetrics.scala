@@ -38,7 +38,7 @@ object GraphQLOutcomeMetrics {
           )
           .create
       )
-      .map { counter =>
-        (outcomes: List[GraphQLRootFieldOutcome]) => outcomes.traverse_(outcome => counter.inc(attributes(outcome))).handleError(_ => ())
+      .map { counter => (outcomes: List[GraphQLRootFieldOutcome]) =>
+        outcomes.traverse_(outcome => counter.inc(attributes(outcome))).handleError(_ => ())
       }
 }
