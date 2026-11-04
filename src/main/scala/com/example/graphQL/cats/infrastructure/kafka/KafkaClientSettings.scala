@@ -6,6 +6,8 @@ import fs2.kafka.*
 import org.apache.kafka.clients.consumer.ConsumerConfig
 import org.apache.kafka.clients.producer.ProducerConfig
 
+import java.util.Properties
+
 /** The single builder of Kafka client transport, SASL and producer reliability settings for the application build. */
 object KafkaClientSettings {
   val ProducerAcks: String = "all"
@@ -70,7 +72,7 @@ object KafkaClientSettings {
       password: Option[String],
       protocol: KafkaSaslSecurityProtocol
   ): java.util.Properties = {
-    val properties = new java.util.Properties()
+    val properties = new Properties()
     (Map(
       "bootstrap.servers" -> bootstrapServers,
       "request.timeout.ms" -> ProducerRequestTimeoutMillis.toString,

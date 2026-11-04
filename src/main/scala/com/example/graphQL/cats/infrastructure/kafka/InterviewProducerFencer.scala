@@ -26,34 +26,32 @@ object InterviewProducerFencer {
     val acquire = IO.blocking(
       Admin.create(KafkaClientSettings.clientProperties(bootstrapServers, Some(username), Some(password), protocol))
     )
-    Resource.make(acquire)(admin => IO.blocking(admin.close(Duration.ofSeconds(CloseTimeoutSeconds)))).map { admin =>
-      new InterviewPublisherFencer[IO] {
-        override def fence(transactionalIds: Vector[String]): RepositoryF[IO, Unit] =
-          EitherT
-            .fromEither[IO](
-              InterviewSubjectCleanup
-                .validateProducerIds(transactionalIds)
-                .leftMap(_ => RepositoryError.InvalidStoredData)
-            )
-            .flatMap { ids =>
-              if (ids.isEmpty) RepositoryF.pure[IO, Unit](())
-              else
-                RepositoryF.fromFEither(
-                  IO.uncancelable { _ =>
-                    IO.fromCompletableFuture(
-                      IO.blocking(admin.fenceProducers(ids.asJava).all().toCompletionStage.toCompletableFuture)
-                    ).void
-                  }.attempt
-                    .flatMap {
-                      case Right(_)    => IO.pure(Right(()))
-                      case Left(error) =>
-                        diagnostics
-                          .emit(LogEvent.RuntimeFailed, fields = LogFields.failure(error))
-                          .as(Left(RepositoryError.Unavailable))
-                    }
-                )
-            }
-      }
+    Resource.make(acquire)(admin => IO.blocking(admin.close(Duration.ofSeconds(CloseTimeoutSeconds)))).map {
+      admin => (transactionalIds: Vector[String]) =>
+        EitherT
+          .fromEither[IO](
+            InterviewSubjectCleanup
+              .validateProducerIds(transactionalIds)
+              .leftMap(_ => RepositoryError.InvalidStoredData)
+          )
+          .flatMap { ids =>
+            if (ids.isEmpty) RepositoryF.pure[IO, Unit](())
+            else
+              RepositoryF.fromFEither(
+                IO.uncancelable { _ =>
+                  IO.fromCompletableFuture(
+                    IO.blocking(admin.fenceProducers(ids.asJava).all().toCompletionStage.toCompletableFuture)
+                  ).void
+                }.attempt
+                  .flatMap {
+                    case Right(_)    => IO.pure(Right(()))
+                    case Left(error) =>
+                      diagnostics
+                        .emit(LogEvent.RuntimeFailed, fields = LogFields.failure(error))
+                        .as(Left(RepositoryError.Unavailable))
+                  }
+              )
+          }
     }
   }
 }

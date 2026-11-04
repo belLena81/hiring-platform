@@ -4,17 +4,19 @@ import cats.effect.{IO, Resource}
 import cats.effect.std.UUIDGen
 import cats.syntax.all.*
 import com.example.graphQL.cats.config.{InterviewRuntimeConfig, KafkaConfig, KafkaSaslSecurityProtocol}
+import com.example.graphQL.cats.domain.workflow.InterviewTopicPair
 import com.example.graphQL.cats.service.{BackgroundWorker, Diagnostics, WorkerAlive}
 import com.example.graphQL.cats.service.port.{
   InterviewMessage,
-  InterviewStep,
-  InterviewResult,
-  InterviewTransport,
-  InterviewPublisherRole,
-  InterviewPublisherGeneration,
   InterviewProducerGenerationFenced,
+  InterviewPublisherGeneration,
+  InterviewPublisherRole,
+  InterviewResult,
+  InterviewStep,
+  InterviewTransport,
   RepositoryF
 }
+import com.example.graphQL.cats.shared.crypto.SourceHash
 import fs2.kafka.*
 import fs2.kafka.producer.MkProducer
 import io.circe.{Decoder, Encoder}
@@ -23,6 +25,8 @@ import io.circe.parser.decode
 import io.circe.syntax.*
 
 import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
+import java.util.HexFormat
 import scala.concurrent.duration.*
 import scala.util.control.NoStackTrace
 
@@ -70,7 +74,7 @@ final case class InterviewKafkaConfig(
     protocol: KafkaSaslSecurityProtocol,
     worker: Boolean,
     partitionConcurrency: Int = InterviewKafkaConfig.Defaults.partitionConcurrency,
-    topics: com.example.graphQL.cats.domain.workflow.InterviewTopicPair = InterviewKafkaConfig.Defaults.topics,
+    topics: InterviewTopicPair = InterviewKafkaConfig.Defaults.topics,
     workerGroup: String = InterviewKafkaConfig.Defaults.workerGroup,
     orchestratorGroup: String = InterviewKafkaConfig.Defaults.orchestratorGroup,
     restartMaxDelaySeconds: Int = KafkaConfig.DefaultRestartMaxDelaySeconds
@@ -89,13 +93,12 @@ object InterviewKafkaRuntime {
       payload: Option[Array[Byte]],
       reason: String
   ): String = {
-    val digest = java.util.HexFormat
+    val digest = HexFormat
       .of()
       .formatHex(
-        java.security.MessageDigest.getInstance("SHA-256").digest(payload.getOrElse(Array.emptyByteArray))
+        MessageDigest.getInstance("SHA-256").digest(payload.getOrElse(Array.emptyByteArray))
       )
-    "transport:" + com.example.graphQL.cats.shared.crypto.SourceHash
-      .sha256(s"$topic:$partition:$offset:$digest:$reason")
+    "transport:" + SourceHash.sha256(s"$topic:$partition:$offset:$digest:$reason")
   }
 
   /** The callback succeeds once the inbox, state, outgoing intent or bounded quarantine has committed durably. A

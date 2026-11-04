@@ -5,6 +5,8 @@ import cats.syntax.all.*
 import fs2.kafka.*
 import fs2.kafka.producer.MkProducer
 
+import java.time.Duration
+
 private[kafka] object GuardedTransactionalProducer {
 
   /** fs2-kafka installs its close finalizer after initTransactions; retain ownership until that succeeds. */
@@ -19,7 +21,7 @@ private[kafka] object GuardedTransactionalProducer {
           .flatMap(
             _.traverse_(producer =>
               IO.blocking(
-                producer.close(java.time.Duration.ofMillis(settings.producerSettings.closeTimeout.toMillis))
+                producer.close(Duration.ofMillis(settings.producerSettings.closeTimeout.toMillis))
               )
             )
           )

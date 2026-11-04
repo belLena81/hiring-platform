@@ -6,11 +6,14 @@ import com.example.graphQL.cats.service.Diagnostics.*
 import ch.qos.logback.core.{Appender, FileAppender}
 import ch.qos.logback.core.spi.AppenderAttachable
 import io.circe.Json
+
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path, Paths}
 import java.nio.file.attribute.PosixFilePermission
 import org.slf4j.LoggerFactory
+import org.typelevel.log4cats.SelfAwareStructuredLogger
 import org.typelevel.log4cats.slf4j.Slf4jLogger
+
 import scala.jdk.CollectionConverters.*
 
 /** The application classifies records; Logback is the sole severity policy. */
@@ -72,7 +75,7 @@ object SafeDiagnostics {
   ): Diagnostics[IO] =
     withEventSink(maskSensitive, allowed, _ => IO.pure(true), (_, message) => sink(message))
 
-  private def levelEnabled(logger: org.typelevel.log4cats.SelfAwareStructuredLogger[IO], level: LogLevel): IO[Boolean] =
+  private def levelEnabled(logger: SelfAwareStructuredLogger[IO], level: LogLevel): IO[Boolean] =
     level match {
       case LogLevel.Trace => logger.isTraceEnabled
       case LogLevel.Debug => logger.isDebugEnabled
@@ -164,8 +167,8 @@ object SafeDiagnostics {
       allowed: PublicLogValues,
       isEnabled: LogLevel => IO[Boolean],
       sink: (LogEvent, String) => IO[Unit]
-  ): Diagnostics[IO] = new Diagnostics[IO] {
-    def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]): IO[Unit] = IO
+  ): Diagnostics[IO] = (event: LogEvent, requestId: Option[String], fields: Map[LogField, String]) =>
+    IO
       .defer {
         isEnabled(event.level).flatMap { enabled =>
           if (!enabled) IO.unit
@@ -201,7 +204,6 @@ object SafeDiagnostics {
       }
       // Logging must never fail the caller: a diagnostics failure is dropped, since there is nowhere safer to report it.
       .handleError(_ => ())
-  }
 
   private def isCorrelationId(value: String): Boolean =
     value.matches("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}") ||

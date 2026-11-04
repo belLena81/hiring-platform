@@ -43,6 +43,7 @@ import fs2.Stream
 import fs2.kafka.*
 import fs2.kafka.producer.MkProducer
 
+import java.util.concurrent.TimeoutException
 import scala.concurrent.duration.*
 import scala.util.control.NoStackTrace
 
@@ -200,8 +201,7 @@ object OperationalEventKafkaRuntime {
       case _ => false
     }
     val transport = chain.exists {
-      case _: RetriableException | _: BrokerNotAvailableException | _: java.util.concurrent.TimeoutException |
-          _: java.io.IOException =>
+      case _: RetriableException | _: BrokerNotAvailableException | _: TimeoutException | _: java.io.IOException =>
         true
       case _ => false
     }
