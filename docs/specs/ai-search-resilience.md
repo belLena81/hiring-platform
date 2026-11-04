@@ -88,3 +88,11 @@ Order: S1 → S2 → S3; S4 after S1 (shared schema files); regenerate the SDL s
 - 2026-10-16 Security Engineer confirmation of the fix round: PASS (39 targeted tests green). No fallback after time-budget expiry, open breaker or whole-store outage; authorization precedes fallback; `Client(None)` and overflow keys get `Shared` with no numbers; authentication failures stay top-level. Gap: breaker and `maxTime` behaviour verified by unit tests and static review only.
 - 2026-10-16 QA: PASS for AIR-01..09 except AIR-07.1 (unverified: Atlas Local not started). Every example maps to a tagged test.
 - 2026-10-16 review finding fixes (developer, `sbt test` 1505 passed; `IntegrationTest/compile` ok; IT not run): driver operation timeouts and `maxTimeMS` expiry map to `Overloaded` before the breaker check (AIR-05.4); `RepositoryError.VectorSearchUnavailable` is produced only by the hybrid fuse when a vector branch failed next to an answering lexical branch, and a plain `Unavailable` fails fast (native `$rankFusion` is one pipeline, so its failures never degrade); candidate lexical retrieval applies a live `$match` between `$search` and `$limit` (AIR-05; Atlas IT case added, unrun); authentication failures including the deleted-account `UNAUTHORIZED` stay top-level on every root; a rate-limited search root returns `DomainError` with `retryAfterSeconds`; embedding, provider and vector failures are exceptional again for mutations while search roots keep deciding data versus top-level from the failure's search kind first. Not done: recording-failure telemetry event (`OperationalTelemetryService` only records job views and clicks and the operational event envelope has no such event; adding one is an event-contract decision).
+
+## Review verdicts
+
+Collected from the checkpoints above so the verdict gate (`scripts/check-spec-verdicts.py`) can read them; the checkpoints keep the evidence.
+
+- Code Reviewer verdict (2026-10-16, S1-S4): PASS; findings M1, M2, L3 and L4 were handled in the fix round (see Checkpoint).
+- Security Engineer verdict (2026-10-16, S1-S4 and the fix round): PASS (see Checkpoint).
+- Final independent QA verdict (2026-10-16): PASS for AIR-01..09 except AIR-07.1, which stays unverified until run on Atlas Local.

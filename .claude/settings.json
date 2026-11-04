@@ -10,6 +10,9 @@
       "Bash(sbt scalafmtCheckAll)",
       "Bash(scripts/check-local.sh)",
       "Bash(python3 -I scripts/check-skills.py)",
+      "Bash(python3 -I scripts/check-spec-verdicts.py)",
+      "Bash(scripts/check-done.sh)",
+      "Bash(scripts/check-done.sh --subagent)",
       "Bash(python3 -I scripts/check-docs-current.py)",
       "Bash(python3 -I scripts/check-docs-current.py --staged)",
       "Bash(python3 -I scripts/check-docs-current.py --range:*)",
@@ -74,6 +77,26 @@
     ]
   },
   "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/scripts/check-done.sh || exit 2"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/scripts/check-done.sh --subagent || exit 2"
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "Edit|Write",

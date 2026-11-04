@@ -46,8 +46,19 @@ Product Manager coordinates delivery. Load `.claude/skills/product-manager/SKILL
 4. Parallelize independent work within available slots; serialize overlapping edits/dependencies. Preserve unrelated changes; do not reset, commit, branch, deploy, or buy services without task authorization.
 5. Implement, validate, and fix in scope. Include schema/API/service/validation/tests changes where applicable to the feature.
 6. Update documentation for every decision change (see Documentation currency) once behavior is verified, so the reviews below cover code and docs together.
-7. Obtain independent Code Reviewer and Security Engineer verdicts where required. Return defects to authors and rerun affected checks after fixes. End implementation with independent QA on the final state.
+7. Obtain the independent verdicts the review tier below requires. Return defects to authors and rerun affected checks after fixes. End implementation with independent QA on the final state.
 8. Product Manager closes only after acceptance, documentation currency and required review gates pass. Summarize files, behavior, tests/evidence, documentation updated, reviews, blockers, and remaining risks.
+
+Review tiers (the cost of a review is spent where the risk is; when unsure, run the review, and no tier lowers a rule in the Security section):
+
+| Change | Code Reviewer | Security Engineer | QA |
+|---|---|---|---|
+| Documentation or spec only (not the workflow files in the last row, and not text that changes a Security rule or permission policy) | not required | not required | not required (`check-docs-current.py` and the Technical Writer's source check) |
+| Tests or fixtures only | required | only if they touch authorization, forbidden-access or data-access fixtures | required |
+| Production code, schema, API or event contract | required | required if the change is one the Security section marks security-sensitive: auth/RBAC, mutations, user data, retention or deletion, DB access, configuration, secrets or logging, error sanitization, resource limits, personal data in event/search/embedding payloads, container or compose hardening, a dependency, or an integration | required |
+| Workflow files: `AGENTS.md`, `CLAUDE.md`, `.claude/`, `.githooks/`, `scripts/`, `build.sbt`, `project/`, `compose*.yaml`, `Dockerfile`; hooks and permission rules | required | always; `not applicable` is never accepted here | required |
+
+A skipped gate is recorded in the spec as `not applicable - <tier reason>`. `scripts/check-spec-verdicts.py` requires every `done` spec to carry its three verdict lines as `PASS` or `not applicable - <reason>`; the Stop hook and `scripts/check-local.sh` run it. It is a reminder gate, not proof of review: it cannot tell whether a review happened or whether a tier was applied correctly, and the authoring agent can write the lines. Reviewers challenge a weak reason and any `not applicable` on a workflow-file change, and the Code Reviewer opens each `## Review verdicts` section against the spec's own records.
 
 No author approves their own work. Security and QA require separate verdicts even if one independent agent performs both reviews. If delegation is unavailable, report independent review pending; switching personas is not independent approval. Review outcomes are PASS, FAIL, or BLOCKED. Planning completion is not implementation completion.
 

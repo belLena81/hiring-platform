@@ -35,7 +35,15 @@ Use the qa-engineer subagent to validate the final changes against the task crit
 
 Canonical Claude Code layout: role skills are real files at `.claude/skills/<role>/SKILL.md` (invoke with the Skill tool or `/<role>`). Delegated roles are subagent definitions at `.claude/agents/<role>.md`; reviewers and QA are read-only by tool list. Root rules live in `AGENTS.md`, imported by `CLAUDE.md`. Shared settings and the skill-layout hook are in `.claude/settings.json`; personal overrides belong in the ignored `.claude/settings.local.json`. Run `python3 -I scripts/check-skills.py` after changing skills or agents. A second PreToolUse hook runs `scripts/check-docs-current.py --hook` on every `git commit` and denies a commit that changes decision-bearing paths without canonical documentation (see Validation).
 
-Model policy: the session and every subagent use Sonnet at medium effort (`model: sonnet`, `effort: medium` in each agent, `model`/`effortLevel` in `.claude/settings.json`), including after plan mode; do not use `opusplan`. Documentation-only work goes to the `technical-writer` agent on Haiku. Do not pass a per-call `model` override to the Agent tool.
+Model policy: the main session uses Sonnet at medium effort (`model`/`effortLevel` in `.claude/settings.json`, the only place the session model is set; a personal `settings.local.json` must not override it), including after plan mode; do not use `opusplan`. Each subagent sets its own model and effort in its frontmatter, and that frontmatter is the policy:
+
+| Agents | Model, effort | Reason |
+|---|---|---|
+| `scala-developer`, `data-engineer`, `big-data-engineer` | Sonnet, medium | Author work is bounded by a spec and checked by the reviewers |
+| `code-reviewer`, `security-engineer`, `qa-engineer`, `software-architect` | Opus, high | A missed defect in review, or a wrong structural decision, costs more than the extra tokens; these roles run once per task, not per edit |
+| `technical-writer` | Haiku, medium | Documentation from verified facts |
+
+Do not pass a per-call `model` override to the Agent tool; change the frontmatter instead so the policy stays in one place. `scripts/check-skills.py` requires every subagent to declare tools and a model.
 
 Use these project skills and agents only; do not fall back to a global installation or substitute a same-named global role. Existing `.codex/config.toml` model/permission preferences remain local and separate.
 
@@ -86,6 +94,8 @@ Documentation currency (root `AGENTS.md`) is a gate, not a courtesy. Every task 
 - A commit that genuinely needs no canonical change carries `Docs-Impact: none - <reason>` or `Docs-Impact: spec-only - <reason>` (a reason of at least ten characters). Reviewers check that the reason is true.
 
 Why it matters: documentation that lags a decision is how the next agent or operator re-introduces a fixed defect, misconfigures a limit, or keeps paying for capacity the system no longer needs.
+
+Review verdicts are checked too, not only written down. `python3 -I scripts/check-spec-verdicts.py` requires every spec whose `Status:` begins with `done` to carry the three verdict lines of the [feature spec template](templates/feature-spec.md) as `PASS` or `not applicable - <reason>`; which reviews a change needs is the review tier table in `AGENTS.md`. The script runs in step 2 of `scripts/check-local.sh` and from the Claude Code `Stop` and `SubagentStop` hooks, which call `scripts/check-done.sh`. At `Stop` that runs the skills, documentation-currency and verdict checks (seconds, no Docker) and returns exit 2 with the failures so the agent sees them before it finishes; the harness then sets `stop_hook_active`, and the next stop is not re-checked (so a failing gate cannot loop), which makes this a one-time block and a strong reminder, not a lock; at `SubagentStop` it runs the skills and verdict checks only, because a subagent works inside an unfinished task. It exits 0 at once when the hook input has `stop_hook_active`, so a failing gate cannot trap a session in a loop. It does not run `scripts/check-local.sh`, which takes about two hours and needs Docker: on success it only reminds the agent that the local check and independent QA evidence are required when code changed. Why it matters: a verdict that exists only in prose is how a task closes with a review skipped. The check proves the lines exist and say PASS or give a reason, not that the review was good; reviewers challenge a weak reason.
 
 For skill edits, run the project-owned `python3 scripts/check-skills.py`, check local references, and request independent scenario review. Frontmatter validation alone does not prove orchestration behavior or native discovery. No database migration or runtime deployment is needed for documentation-only changes.
 

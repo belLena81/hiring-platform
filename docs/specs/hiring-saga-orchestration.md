@@ -212,3 +212,11 @@ Port 2 is conditional on the lifecycle go/no-go gate described under Scope.
   - Evidence integrity: the golden files and the characterization specs are untracked in git (nothing is committed yet by the user's one-commit decision). Their integrity is pinned only by the SHA-256 values in the slice 1 entry, re-verified unchanged at slices 2 and 3 and again on 2026-10-15.
   - Code note: the `:commit` and `:notify` keys of the catalogue steps in `InterviewSchedulingSaga` are catalogue-only, never emitted, and must not be used as idempotency keys (commented in the source).
 - 2026-10-15: closed. Security Engineer PASS. Final QA PASS (local gates; Kafka/Compose, Atlas production and benchmark gates unverified). Golden integrity re-verified by SHA-256.
+
+## Review verdicts
+
+Collected from the closing entry and the SAG-11 gate row so the verdict gate (`scripts/check-spec-verdicts.py`) can read them. The scopes below are exactly what this spec records; where a scope is missing, the line says so instead of assuming it.
+
+- Code Reviewer verdict (2026-10-15, slices 2 and 3 only, per the SAG-11 row; the slice 2 FAIL was fixed and re-reviewed): PASS. No Code Reviewer verdict is recorded for slices 4 to 6 or for the final state.
+- Security Engineer verdict (2026-10-15, scope not recorded at close; the plan assigned slices 3 to 6 and the final state): PASS.
+- Final independent QA verdict (2026-10-15): PASS for the local gates; Kafka/Compose, Atlas production and benchmark gates stay unverified.

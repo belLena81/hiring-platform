@@ -100,4 +100,12 @@
 
 - 2026-10-14: spec ready; implementation started.
 - 2026-10-14: CBR-01 to CBR-07 implemented (first pass). Pure core `domain/policy/CircuitBreakerPolicy.scala`, `F[_]: Temporal` wrapper `service/resilience/CircuitBreaker.scala`, wiring in `runtime/DependencyBreakers.scala` and `MongoHiringRuntime`. `cats-effect-testkit` added as a Test dependency for `TestControl`. Decisions: readiness uses `admits` (not "is open") so it recovers once the open period ends; discovery repositories re-raise only dependency-unavailability errors to the policy boundary (`MongoRepositorySupport.discoveryGuard`); a send rejected by the Kafka breaker is released without counting as a delivery attempt. Open: CBR-05.3 Kafka integration unverified; reviews (Data Engineer, Security, Code, QA) pending.
-- 2026-10-14: review fixes applied. Mongo network-class errors are classified by type regardless of the transient label and map to `Unavailable`; cancelled writes that saw an unreachable attempt count (effectful classifier); discovery counts only unreachable deployments (maxTime dropped) and eligibility queries now share its admission; Kafka counts broker-availability errors only and reads breaker state once; `EmbeddingError.CircuitOpen` defers durable work without charging; probes carry a cycle token; listener failures are swallowed; typed rejections cannot close the breaker; disabled breakers are logged; `CircuitBreakerName` enum replaces the string constants. Open: CBR-05 Kafka integration unverified, independent re-review pending.
+- 2026-10-14: review fixes applied. Mongo network-class errors are classified by type regardless of the transient label and map to `Unavailable`; cancelled writes that saw an unreachable attempt count (effectful classifier); discovery counts only unreachable deployments (maxTime dropped) and eligibility queries now share its admission; Kafka counts broker-availability errors only and reads breaker state once; `EmbeddingError.CircuitOpen` defers durable work without charging; probes carry a cycle token; listener failures are swallowed; typed rejections cannot close the breaker; disabled breakers are logged; `CircuitBreakerName` enum replaces the string constants. Open: CBR-05 Kafka integration unverified. The re-review of these fixes passed on the same day (see "Re-review verdicts (2026-10-14)" above).
+
+## Review verdicts
+
+Collected from the "Re-review verdicts (2026-10-14)" entry and the CBR-08 row above so the verdict gate (`scripts/check-spec-verdicts.py`) can read them.
+
+- Code Reviewer verdict (re-review 2026-10-14): PASS.
+- Security Engineer verdict (re-review 2026-10-14): PASS.
+- Final independent QA verdict (re-checked after the eligibility fix): PASS; CBR-05 Kafka integration stays blocked and unverified.

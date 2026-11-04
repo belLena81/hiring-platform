@@ -181,3 +181,11 @@ type UseCaseF[F[_], A]    = EitherT[F, UseCaseError, A]
   - Verification: `sbt -batch test` 1171 passed, 0 failed; `scalafmtCheckAll` and `scalafmtSbtCheck` clean; EPS-01 assertion-diff: the hits are the circuit-breaker spec changes of earlier reports, `AssertionError` strings and type renames in fixtures (`TestInterviewWorkflowRepository`, `InterviewWorkflowWorkerSpec`, `IdempotentSpec`), and one test title `"RepositoryIO wraps..."` -> `"RepositoryF wraps..."` in `MongoRepositorySupportSpec`; no expected value changed.
   - Open: Security Engineer (slice 4 and final), QA, Code Reviewer for slices 4, 5 and 8; Kafka-broker integration parts are unverified (see EPS-06). The saga spec may start after the reviews.
 - 2026-10-14: closed. Verdicts: Code Reviewer PASS for slices 1-8; Security Engineer PASS for slice 4 and the final state; QA PASS for the final state. QA results (own runs): `sbt -batch test` 1171 passed, 0 failed, and 1181 passed, 0 failed on rerun (the +10 are the saga characterization specs from `docs/specs/hiring-saga-orchestration.md` slice 1, not EPS tests); `scalafmtCheckAll scalafmtSbtCheck` clean; `IntegrationTest/test` 305 total, 280 passed, 0 failed, 25 skipped; SDL golden file unmodified and `HiringGraphQLContractSpec` passes; EPS-08 `rg` checks confirmed; the only unsafe site is `HiringGraphQLSangriaAdapter.scala:18`; EPS-07 not re-measured by QA (static review of recorded numbers). Unverified (skipped, not passed): Atlas production gates 9, Kafka/Compose 11, opt-in measurements 5; Kafka broker paths, Atlas production gates and deployment readiness. Next: `docs/specs/hiring-saga-orchestration.md` may start.
+
+## Review verdicts
+
+Collected from the closing entry above so the verdict gate (`scripts/check-spec-verdicts.py`) can read them.
+
+- Code Reviewer verdict (2026-10-14, slices 1-8): PASS.
+- Security Engineer verdict (2026-10-14, slice 4 and the final state): PASS.
+- Final independent QA verdict (2026-10-14, final state): PASS; Kafka broker and Compose paths remain unverified.

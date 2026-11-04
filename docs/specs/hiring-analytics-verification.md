@@ -178,3 +178,11 @@ Risks: `AvailableNow` with `read_committed` across transaction-marker gaps (A1 g
   - Not root-caused: with the former 250 ms test lease the worker lost ownership mid-fence and cancelled the first attempt. The test lease is now 2 s; the production lease is 90 s (analytics `application.conf`). Cancelling an in-flight fence is product-safe: fencing is idempotent, and producers are marked fenced only after a confirmed fence.
   - HAL-05.4 transport recovery: NOT RUN, accepted for MVP (owner decision 2026-11-03). Reason: needs this project's Compose Kafka on 127.0.0.1:9092 with `KAFKA_FENCER_PASSWORD`; port 9092 is held on this workstation by another project's broker. It shares the corrected fixture.
   - Stale, NOT RUN, covered by the HAL-05-FENCE-06.3 acceptance (it is a step called only from that test): the ACL-evidence-gated invalid-fencer case (`verifyWorkerKeepsRequestPendingAfterBadFencerPassword`, `KafkaPublisherAccessIntegrationSpec.scala` ~117-148) still seeds the old fixture shape and would fail with `MalformedMarker`. It needs the same fixture change via a shared seeding helper and its own ACL-evidence run. Until then it is not claimed as passing.
+
+## Review verdicts
+
+Collected from the 2026-10-13 checkpoint entries so the verdict gate (`scripts/check-spec-verdicts.py`) can read them.
+
+- Code Reviewer verdict (2026-10-13, `358aa30..93b3490`): PASS; the test-only fixes it asked for are recorded in the Checkpoint, and no separate re-review of them is recorded (the Status line records the final PASS).
+- Security Engineer verdict (2026-10-13, `358aa30..93b3490`, static): PASS.
+- Final independent QA verdict (2026-10-13, `1834236`, clean tree): PASS.

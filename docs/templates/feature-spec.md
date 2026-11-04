@@ -77,4 +77,4 @@ Keep this section focused on delivery sequencing and temporary implementation de
 - Security Engineer verdict and scope, when required: pending
 - Final independent QA verdict: pending
 
-Mark a gate not applicable with a reason rather than claiming it passed. Update this section on meaningful handoffs and reconcile it with current source on resume. No criterion is complete solely because this document describes it.
+Mark a gate not applicable with a reason rather than claiming it passed. Before `Status: done`, each of the three lines must read `PASS ...` or `not applicable - <tier reason>` (review tiers in `AGENTS.md`); `scripts/check-spec-verdicts.py` rejects `pending`, FAIL, BLOCKED and a missing line. Update this section on meaningful handoffs and reconcile it with current source on resume. No criterion is complete solely because this document describes it.
