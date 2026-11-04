@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Formats the staged Scala and sbt files with the pinned scalafmt and re-stages them before every commit,
+# including commits made outside Claude Code (scripts/format-staged.sh).
+# Enable once per clone: git config core.hooksPath .githooks   (see docs/engineering-quality.md, Operator scripts)
+set -euo pipefail
+root="$(git rev-parse --show-toplevel)"
+exec bash "$root/scripts/format-staged.sh"

@@ -121,7 +121,7 @@ A decision change is any change to behavior, a public or event contract, an inva
 
 ## Quality, performance, and cost
 
-- Run `python3 -I scripts/check-docs-current.py` and `sbt test` for every completed task. Run integration tests if DB/resolver behavior changes, adding meaningful RBAC, transition, duplicate/closed-job race, nested query, and pagination coverage with each slice. Run configured formatting/linting; do not invent unavailable tasks.
+- Run `python3 -I scripts/check-docs-current.py` and `sbt test` for every completed task. Run integration tests if DB/resolver behavior changes, adding meaningful RBAC, transition, duplicate/closed-job race, nested query, and pagination coverage with each slice. Run configured formatting/linting; do not invent unavailable tasks. The `.githooks/pre-commit` hook formats staged Scala/sbt files on every commit (`scripts/format-staged.sh`); it does not replace the formatting steps of `scripts/check-local.sh`.
 - Missing/blocked integration infrastructure is unverified, not a pass. Distinguish pre-existing failures, regressions, static review, runtime validation, and deployment readiness.
 - Skill changes need frontmatter/reference checks and independent realistic task walkthroughs; verify discovery where possible.
 - Performance claims require workload/environment, seeded dataset size, concurrency, baseline, latency percentiles, throughput, errors, and resource measurements. Use-case SLOs remain targets until measured.

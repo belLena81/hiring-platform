@@ -42,6 +42,10 @@ class WorkflowFilesAreCoveredEverywhere(unittest.TestCase):
         for path in ALL_WORKFLOW_PATHS:
             self.assertTrue(guard.is_protected(path), path)
 
+    def test_the_guard_asks_before_moving_or_replacing_a_workflow_directory(self):
+        for path in ("scripts", ".claude", ".githooks", "project"):
+            self.assertTrue(guard.is_protected(path), path)
+
     def test_the_docs_gate_requires_documentation_for_every_shared_path(self):
         for path in ALL_WORKFLOW_PATHS:
             self.assertTrue(docs_gate.is_decision(path), path)

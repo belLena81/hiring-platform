@@ -87,7 +87,7 @@ def inside_allowed(path_text, cwd):
 
 def is_protected(rel):
     base = os.path.basename(rel)
-    return (rel in PROTECTED_FILES or rel in {"scripts", ".claude", ".git", "project", ".codex"} or rel.startswith(PROTECTED_PREFIXES)
+    return (rel in PROTECTED_FILES or rel in {"scripts", ".claude", ".git", ".githooks", "project", ".codex"} or rel.startswith(PROTECTED_PREFIXES)
             or harness_paths.COMPOSE_FILE.match(rel) is not None or base.endswith(".sbt")
             or base.startswith(".env") or base in {".sbtopts", ".jvmopts"})
 
