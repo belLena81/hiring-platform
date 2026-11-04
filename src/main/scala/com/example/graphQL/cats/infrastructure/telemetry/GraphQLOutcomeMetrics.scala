@@ -39,10 +39,6 @@ object GraphQLOutcomeMetrics {
           .create
       )
       .map { counter =>
-        new GraphQLOutcomeRecorder {
-          // A metrics failure must never replace the GraphQL response.
-          override def record(outcomes: List[GraphQLRootFieldOutcome]): IO[Unit] =
-            outcomes.traverse_(outcome => counter.inc(attributes(outcome))).handleError(_ => ())
-        }
+        (outcomes: List[GraphQLRootFieldOutcome]) => outcomes.traverse_(outcome => counter.inc(attributes(outcome))).handleError(_ => ())
       }
 }

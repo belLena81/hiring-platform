@@ -1,8 +1,9 @@
 package com.example.graphQL.cats.infrastructure.telemetry
 
-import cats.effect.{IO, Resource}
+import cats.effect.unsafe.metrics.IORuntimeMetrics
+import cats.effect.{IO, IOLocal, Resource}
 import com.example.graphQL.cats.shared.HiringHttpPaths
-import org.http4s.{HttpApp, HttpRoutes, Request, Uri}
+import org.http4s.{HttpApp, HttpRoutes, Query, Request, Uri}
 import org.http4s.otel4s.middleware.metrics.OtelMetrics
 import org.http4s.otel4s.middleware.server.RouteClassifier
 import org.http4s.otel4s.middleware.trace.PerRequestFilter
@@ -34,7 +35,7 @@ final case class TelemetryRuntime(
     val pathRedactor = new PathRedactor with QueryRedactor {
       def redactPath(path: Uri.Path): Uri.Path =
         if (TelemetryRuntime.isSafe(path)) path else Uri.Path.Root
-      def redactQuery(query: org.http4s.Query): org.http4s.Query = org.http4s.Query.empty
+      def redactQuery(query: Query): Query = Query.empty
     }
     val routeClassifier = RouteClassifier.of[IO] { case request => TelemetryRuntime.routeLabel(request) }
     val spanDataProvider = ServerSpanDataProvider
@@ -73,7 +74,7 @@ object TelemetryRuntime {
     */
   def selectContextStorage: IO[Unit] =
     IO.delay {
-      if (!cats.effect.IOLocal.isPropagating && Option(System.getProperty(ContextStorageProperty)).isEmpty)
+      if (!IOLocal.isPropagating && Option(System.getProperty(ContextStorageProperty)).isEmpty)
         System.setProperty(ContextStorageProperty, "default"): Unit
     }
 
@@ -87,7 +88,7 @@ object TelemetryRuntime {
     following.local.as(following).handleError(_ => LocalProvider[IO, Context])
   }
 
-  def resource(runtimeMetrics: cats.effect.unsafe.metrics.IORuntimeMetrics): Resource[IO, TelemetryRuntime] =
+  def resource(runtimeMetrics: IORuntimeMetrics): Resource[IO, TelemetryRuntime] =
     Resource.eval(contextProvider).flatMap { provider =>
       OtelJava.autoConfigured[IO]()(using summon, provider).flatMap { otel =>
         for {
