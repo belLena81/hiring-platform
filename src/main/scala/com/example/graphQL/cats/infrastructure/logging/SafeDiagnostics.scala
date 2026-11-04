@@ -167,8 +167,10 @@ object SafeDiagnostics {
       allowed: PublicLogValues,
       isEnabled: LogLevel => IO[Boolean],
       sink: (LogEvent, String) => IO[Unit]
-  ): Diagnostics[IO] = (event: LogEvent, requestId: Option[String], fields: Map[LogField, String]) =>
-    IO
+  ): Diagnostics[IO] = new Diagnostics[IO] {
+    // An anonymous class, not a lambda: `fields` is by-name in Diagnostics, and a lambda with a strict parameter
+    // compiles but fails to link at runtime (LambdaConversionException: Map is not a subtype of Function0).
+    def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]): IO[Unit] = IO
       .defer {
         isEnabled(event.level).flatMap { enabled =>
           if (!enabled) IO.unit
@@ -204,6 +206,7 @@ object SafeDiagnostics {
       }
       // Logging must never fail the caller: a diagnostics failure is dropped, since there is nowhere safer to report it.
       .handleError(_ => ())
+  }
 
   private def isCorrelationId(value: String): Boolean =
     value.matches("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}") ||

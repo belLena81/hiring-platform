@@ -1,9 +1,14 @@
 package com.example.graphQL.cats
 
 import com.example.hiring.testing.DisposableAtlas
+import com.mongodb.spi.dns.DnsClient
 import munit.FunSuite
 
 final class DisposableAtlasSpec extends FunSuite {
+
+  /** Parsing a `mongodb+srv` URI looks up its TXT record; this stub answers "none" so the test needs no network DNS. */
+  private val noTxtRecords: DnsClient = (_: String, _: String) => java.util.List.of[String]()
+
   private val uri = "mongodb://test-user:synthetic-secret@test.example:27017/?authSource=admin"
   private val environment =
     Map("ATLAS_TEST_URI" -> uri, "ATLAS_TEST_DISPOSABLE" -> "true", "ATLAS_TEST_ALLOWED_HOSTS" -> "test.example:27017")
@@ -13,7 +18,8 @@ final class DisposableAtlasSpec extends FunSuite {
       DisposableAtlas.authorizedUri(
         environment
           .updated("ATLAS_TEST_URI", "mongodb+srv://test.example/")
-          .updated("ATLAS_TEST_ALLOWED_HOSTS", "test.example")
+          .updated("ATLAS_TEST_ALLOWED_HOSTS", "test.example"),
+        Some(noTxtRecords)
       ),
       Right("mongodb+srv://test.example/")
     )

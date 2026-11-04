@@ -1,6 +1,7 @@
 package com.example.hiring.testing
 
 import com.mongodb.ConnectionString
+import com.mongodb.spi.dns.DnsClient
 import scala.jdk.CollectionConverters.*
 
 /** Explicit authorization for synthetic writes to an exact, operator-selected test deployment. */
@@ -25,7 +26,13 @@ object DisposableAtlas {
       "MVR-04.C cloud-only: native $rerank is unavailable on Atlas Local"
     )
 
-  def authorizedUri(environment: Map[String, String]): Either[String, String] = {
+  /** `dnsClient` resolves the TXT record that a `mongodb+srv` URI implies when it is parsed; `None` uses the driver's
+    * own resolver. Unit tests pass a stub so they do not depend on network DNS.
+    */
+  def authorizedUri(
+      environment: Map[String, String],
+      dnsClient: Option[DnsClient] = None
+  ): Either[String, String] = {
     val failure =
       "Disposable Atlas requires ATLAS_TEST_URI, ATLAS_TEST_DISPOSABLE=true and exact ATLAS_TEST_ALLOWED_HOSTS"
     for {
@@ -37,7 +44,7 @@ object DisposableAtlas {
         (),
         failure
       )
-      connection <- scala.util.Try(new ConnectionString(uri)).toEither.left.map(_ => failure)
+      connection <- scala.util.Try(new ConnectionString(uri, dnsClient.orNull)).toEither.left.map(_ => failure)
       _ <- Either.cond(Option(connection.getDatabase).isEmpty, (), failure)
       hosts = connection.getHosts.asScala.toSet
       _ <- Either.cond(hosts.nonEmpty && hosts == allowed.split(",", -1).toSet, (), failure)

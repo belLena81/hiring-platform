@@ -6,6 +6,7 @@ import io.circe.Json
 import io.circe.syntax.*
 import java.util.UUID
 import scala.collection.concurrent.TrieMap
+import scala.concurrent.duration.*
 
 /** HEA-14: every query and mutation of the checked contract tried as each role against the real `Main` over HTTP.
   *
@@ -39,17 +40,34 @@ class HiringRoleMatrixAcceptanceIntegrationSpec extends HiringStoryStackSuite {
       operations.createJob(actors(Role.RecruiterOwner), s"Matrix draft ${UUID.randomUUID()}", "Berlin", List("Scala"))
     )
 
+  /** Fixture writes follow the client contract in `docs/api.md`: a lost concurrent write answers CONFLICT, and the
+    * client retries with the same idempotency key after a short backoff (accepted limitation F2 in the acceptance
+    * spec). Only the fixture retries; the matrix cells themselves are sent once, as the contract under test.
+    */
+  private def fixtureWrite(name: String, input: Json, actor: StoryActor): IO[StoryOutcome] = {
+    val key = operations.key
+    def attempt(remaining: Int): IO[StoryOutcome] =
+      operations.sendWithKey(name, input, Some(actor), key).map(StoryOutcome.of(_, name)).flatMap {
+        case StoryOutcome.Refused("CONFLICT", _, _) if remaining > 0 =>
+          IO(println(s"HEA-14 fixture CONFLICT retry: $name attempt ${6 - remaining} of 5")) *>
+            IO.sleep(200.millis) *> attempt(remaining - 1)
+        case other => IO.pure(other)
+      }
+    attempt(5)
+  }
+
   /** A fresh application on a fresh job of the owning recruiter, advanced to `stage` by the owner. */
   private def freshApplication(stage: Stage): IO[String] =
     IO.defer(for {
       job <- freshJob
-      application <- operations.submit(actors(Role.CandidateOwner), job).map {
-        case StoryOutcome.Succeeded(value) => operations.idOf(value)
-        case other                         => fail(s"fixture submission failed: $other")
-      }
+      application <- fixtureWrite("submitApplication", Json.obj("jobId" -> job.asJson), actors(Role.CandidateOwner))
+        .map {
+          case StoryOutcome.Succeeded(value) => operations.idOf(value)
+          case other                         => fail(s"fixture submission failed: $other")
+        }
       owner = actors(Role.RecruiterOwner)
       _ <- stage.steps.traverse_ { step =>
-        operations.applicationAction(step, owner, application).flatMap {
+        fixtureWrite(step, Json.obj("applicationId" -> application.asJson), owner).flatMap {
           case StoryOutcome.Succeeded(_) => IO.unit
           case other                     => IO.raiseError(new AssertionError(s"fixture $step failed: $other"))
         }
