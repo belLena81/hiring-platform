@@ -167,14 +167,7 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
       )
       api <- apiProcess(manifest, database.name, root)
       spark <- Resource.make(IO.blocking {
-        SparkSession
-          .builder()
-          .master("local[1]")
-          .appName("AccountDeletionRecoveryIntegrationSpec")
-          .config("spark.ui.enabled", "false")
-          .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-          .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
-          .getOrCreate()
+        AnalyticsTestSpark.builder("AccountDeletionRecoveryIntegrationSpec", "local[1]").getOrCreate()
       })(session => IO.blocking(session.stop()))
     } yield (client, reactiveClient, spark, root, database, namespace, api, nonce)
 

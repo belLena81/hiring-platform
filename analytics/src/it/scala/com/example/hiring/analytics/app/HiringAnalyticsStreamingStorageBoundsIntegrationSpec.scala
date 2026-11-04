@@ -3,6 +3,7 @@ package com.example.hiring.analytics.app
 import cats.effect.IO
 import cats.syntax.all.*
 import com.example.hiring.analytics.AnalyticsBatchTestSupport
+import com.example.hiring.analytics.AnalyticsTestSpark
 import com.example.hiring.analytics.IntegrationAnalyticsLakehousePaths
 import com.example.hiring.analytics.StreamingIngestionFixtures.*
 import com.example.hiring.analytics.adapter.kafka.KafkaRetentionAdapter
@@ -165,6 +166,7 @@ final class HiringAnalyticsStreamingStorageBoundsIntegrationSpec extends CatsEff
           )
           .use { case (spark, client, blocking) =>
             for {
+              _ <- blocking.blocking(AnalyticsTestSpark.applyRuntimeSettings(spark))
               database <- client.getDatabase(fixture.databaseName)
               maintenance = StreamingMaintenanceFixtures.maintenance(
                 spark,

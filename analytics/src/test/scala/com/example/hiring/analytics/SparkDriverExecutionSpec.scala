@@ -20,6 +20,7 @@ class SparkDriverExecutionSpec extends CatsEffectSuite {
     SparkBlockingExecution.resource[IO].use { execution =>
       Resource
         .make(execution {
+          // Builds its own session because session lifecycle is the subject of this spec.
           SparkSession
             .builder()
             .master("local[1]")

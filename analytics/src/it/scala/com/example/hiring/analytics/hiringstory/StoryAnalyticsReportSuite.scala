@@ -1,5 +1,6 @@
 package com.example.hiring.analytics.hiringstory
 
+import com.example.hiring.analytics.AnalyticsTestSpark
 import cats.effect.{IO, Resource}
 import com.example.hiring.analytics.{IntegrationAnalyticsLakehousePaths, StreamingIngestionFixtures}
 import com.example.hiring.analytics.adapter.spark.SparkRuntime
@@ -228,7 +229,8 @@ abstract class StoryAnalyticsReportSuite(eventsFile: String, reportFile: String,
         fixture.root.resolve("story-read-temp").toString
       )
       .use { case (spark, _, blocking) =>
-        blocking.blocking(
+        blocking.blocking {
+          AnalyticsTestSpark.applyRuntimeSettings(spark)
           spark.read
             .format("delta")
             .load(paths.applicationStageTimes)
@@ -241,7 +243,7 @@ abstract class StoryAnalyticsReportSuite(eventsFile: String, reportFile: String,
               )
             }
             .sortBy(_.applicationId)
-        )
+        }
       }
   }
 

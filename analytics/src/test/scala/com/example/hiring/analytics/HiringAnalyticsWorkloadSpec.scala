@@ -56,14 +56,11 @@ class HiringAnalyticsWorkloadSpec extends FunSuite {
 
   private def sparkResource: Resource[IO, SparkSession] =
     Resource.make(IO.blocking {
-      org.apache.spark.sql.classic.SparkSession
-        .builder()
-        .master("local[4]")
-        .appName("HiringAnalyticsWorkloadSpec")
-        .config("spark.ui.enabled", "false")
+      // Parallelism is the measured subject (reported as cores and shuffle partitions), so only the shuffle count differs
+      // from the shared test configuration.
+      com.example.hiring.analytics.AnalyticsTestSpark
+        .builder("HiringAnalyticsWorkloadSpec", "local[4]")
         .config("spark.sql.shuffle.partitions", "4")
-        .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-        .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
         .getOrCreate()
     })(spark => IO.blocking(spark.stop()))
 

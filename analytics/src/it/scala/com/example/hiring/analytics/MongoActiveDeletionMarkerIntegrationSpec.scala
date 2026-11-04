@@ -39,15 +39,7 @@ class MongoActiveDeletionMarkerIntegrationSpec extends AnalyticsMongoIntegration
     "analytics-marker-spark",
     Resource.make(
       IO.blocking(
-        org.apache.spark.sql.classic.SparkSession
-          .builder()
-          .master("local[2]")
-          .appName("HiringDeletionMarkers")
-          .config("spark.ui.enabled", "false")
-          .config("spark.sql.shuffle.partitions", "2")
-          .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-          .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
-          .getOrCreate()
+        AnalyticsTestSpark.session("HiringDeletionMarkers")
       )
     )(spark => IO.blocking(spark.stop()))
   )

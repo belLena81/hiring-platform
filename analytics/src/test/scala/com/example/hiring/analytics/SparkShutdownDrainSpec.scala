@@ -156,6 +156,7 @@ final class SparkShutdownDrainSpec extends CatsEffectSuite {
         IO.unit,
         execution =>
           execution {
+            // Builds its own session because session lifecycle is the subject of this spec.
             org.apache.spark.sql.classic.SparkSession
               .builder()
               .master("local[1]")

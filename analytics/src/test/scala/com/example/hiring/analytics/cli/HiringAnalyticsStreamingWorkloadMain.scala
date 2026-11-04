@@ -1,5 +1,6 @@
 package com.example.hiring.analytics.cli
 
+import com.example.hiring.analytics.AnalyticsTestSpark
 import cats.effect.{ExitCode, IO, IOApp, Ref, Resource}
 import cats.syntax.all.*
 import com.example.hiring.analytics.adapter.spark.SparkRuntime
@@ -332,6 +333,7 @@ object HiringAnalyticsStreamingWorkloadMain extends IOApp {
                     val decisions = settings.common.lakehouseRoot.stripSuffix("/") + "/control/streaming_decisions"
                     val progress = settings.common.lakehouseRoot.stripSuffix("/") + "/control/streaming_progress"
                     def observe: IO[Unit] = for {
+                      _ <- execution(AnalyticsTestSpark.applyRuntimeSettings(spark))
                       existing <- samples.get
                       coordinates <- execution {
                         if (!DeltaTable.isDeltaTable(spark, bronze)) Set.empty[(Int, Long)]

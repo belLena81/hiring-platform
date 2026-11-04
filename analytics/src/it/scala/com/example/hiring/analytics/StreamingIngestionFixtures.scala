@@ -276,7 +276,8 @@ private[analytics] object StreamingIngestionFixtures {
             if (io.delta.tables.DeltaTable.isDeltaTable(spark, path)) spark.read.format("delta").load(path).count()
             else 0L
           )
-        (count(paths.bronze), count(paths.silver), count(paths.streamingProgress)).mapN(Stored.apply)
+        blocking.blocking(AnalyticsTestSpark.applyRuntimeSettings(spark)) *>
+          (count(paths.bronze), count(paths.silver), count(paths.streamingProgress)).mapN(Stored.apply)
       }
   }
 

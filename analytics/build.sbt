@@ -22,6 +22,14 @@ lazy val munitScalaCheckVersion = "1.3.1"
 lazy val archUnitVersion = "1.5.1"
 lazy val IntegrationTest = config("it") extend Test
 
+// Partition defaults for tiny test tables, as system properties so sessions that production wiring creates in-process
+// (AppModule batch and streaming runs) get them too; keep in step with AnalyticsTestSpark.settings. Production
+// configuration is unchanged.
+lazy val testPartitionDefaults = Seq(
+  "-Dspark.sql.shuffle.partitions=2",
+  "-Dspark.databricks.delta.snapshotPartitions=2"
+)
+
 // Unit suites run concurrently in at most this many forked JVMs.
 lazy val unitTestConcurrency = 4
 
@@ -105,7 +113,7 @@ lazy val analytics = (project in file("."))
       // Loopback driver address: a changed host network address must not break executor-to-driver class loading.
       "-Dspark.driver.host=127.0.0.1",
       "-Dspark.driver.bindAddress=127.0.0.1"
-    ),
+    ) ++ testPartitionDefaults,
     Test / envVars += "SPARK_LOCAL_IP" -> "127.0.0.1",
     IntegrationTest / scalaSource := baseDirectory.value / "src" / "it" / "scala",
     IntegrationTest / parallelExecution := false,
@@ -126,7 +134,7 @@ lazy val analytics = (project in file("."))
       // Loopback driver address: a changed host network address must not break executor-to-driver class loading.
       "-Dspark.driver.host=127.0.0.1",
       "-Dspark.driver.bindAddress=127.0.0.1"
-    ),
+    ) ++ testPartitionDefaults,
     IntegrationTest / envVars += "SPARK_LOCAL_IP" -> "127.0.0.1",
     scalacOptions ++= Seq(
       "-encoding",

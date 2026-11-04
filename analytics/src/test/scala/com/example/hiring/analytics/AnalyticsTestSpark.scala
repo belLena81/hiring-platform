@@ -30,5 +30,16 @@ private[analytics] object AnalyticsTestSpark {
       builder.config(key, value)
     }
 
+  /** The `spark.sql.*` and `spark.databricks.delta.*` entries of `settings` that a live session accepts (the extensions
+    * and catalog are static), for a session obtained through production wiring such as `SparkRuntime.sparkMongo`.
+    */
+  def runtimeSettings: Vector[(String, String)] = settings.filter { case (key, _) =>
+    (key.startsWith("spark.sql.") || key.startsWith("spark.databricks.delta.")) &&
+    key != "spark.sql.extensions" && key != "spark.sql.catalog.spark_catalog"
+  }
+
+  def applyRuntimeSettings(session: org.apache.spark.sql.SparkSession): Unit =
+    runtimeSettings.foreach { case (key, value) => session.conf.set(key, value) }
+
   def session(appName: String): SparkSession = builder(appName).getOrCreate()
 }

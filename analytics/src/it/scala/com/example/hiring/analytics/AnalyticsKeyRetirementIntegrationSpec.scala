@@ -71,15 +71,7 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.CatsEffectSuite 
     releaseDatabase = release
     database = mongo.getDatabase(ownedDatabase.name)
     reactiveDatabase = reactiveMongo.getDatabase(database.getName)
-    spark = SparkSession
-      .builder()
-      .master("local[1]")
-      .appName("AnalyticsKeyRetirementIntegrationSpec")
-      .config("spark.ui.enabled", "false")
-      .config("spark.databricks.delta.vacuum.retentionWindowIgnore.enabled", "false")
-      .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-      .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
-      .getOrCreate()
+    spark = AnalyticsTestSpark.builder("AnalyticsKeyRetirementIntegrationSpec", "local[1]").getOrCreate()
     lakehouseRoot = Files.createTempDirectory("analytics-key-retirement-")
     val required = Vector(
       "analytics_report_snapshots",
@@ -425,7 +417,6 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.CatsEffectSuite 
           )
           for {
             _ <- execution.attachSparkContext(session.sparkContext)
-            _ <- execution(session.conf.set("spark.sql.shuffle.partitions", "2"))
             _ <- continuity(old)
             _ <- execution {
               AnalyticsTableSchemas.createOrValidate(session, paths.silver, AnalyticsDeltaCatalog.Silver)
@@ -519,16 +510,7 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.CatsEffectSuite 
         Resource
           .make(execution {
             org.apache.spark.sql.delta.DeltaLog.clearCache()
-            SparkSession
-              .builder()
-              .master("local[1]")
-              .appName("HiringAnalyticsRetiredKeyRestart")
-              .config("spark.ui.enabled", "false")
-              .config("spark.sql.shuffle.partitions", "2")
-              .config("spark.databricks.delta.vacuum.retentionWindowIgnore.enabled", "false")
-              .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-              .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
-              .getOrCreate()
+            AnalyticsTestSpark.builder("HiringAnalyticsRetiredKeyRestart", "local[1]").getOrCreate()
           })(session => execution.blocking(session.stop()))
           .use { session =>
             def continuity(keys: SubjectPseudonymizer) = lock.resource(paths.root).use { _ =>

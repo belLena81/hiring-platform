@@ -412,14 +412,7 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends AnalyticsMongoIntegra
             .append("lastPublishedRevision", 0L)
             .append("lastRunId", "")
         )
-      spark = SparkSession
-        .builder()
-        .master("local[1]")
-        .appName("MongoAnalyticsErasureWorkerRestartIntegrationSpec")
-        .config("spark.ui.enabled", "false")
-        .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-        .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
-        .getOrCreate()
+      spark = AnalyticsTestSpark.builder("MongoAnalyticsErasureWorkerRestartIntegrationSpec", "local[1]").getOrCreate()
 
       val firstStore =
         AnalyticsErasureWorkerTestSupport.stores(mongo4catsClient(client), mongo4catsDatabase(client, databaseName))
