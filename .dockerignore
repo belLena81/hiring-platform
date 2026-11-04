@@ -9,6 +9,7 @@
 .bsp
 .idea
 .metals
+**/.sbt-home
 __pycache__
 **/__pycache__
 _logs

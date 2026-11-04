@@ -5,8 +5,10 @@ protocol) and, like guard-harness.py, prints a decision object instead of a RESU
 """
 
 import json
+import os
 import re
 import shlex
+import stat
 import subprocess
 import sys
 import time
@@ -153,7 +155,14 @@ def unpushed_gated_commits():
 
 
 def untracked():
-    return {line for line in git("ls-files", "--others", "--exclude-standard").splitlines() if line}
+    return {line for line in git("ls-files", "--others", "--exclude-standard").splitlines()
+            if line and not is_sandbox_mount(PROJECT / line)}
+
+
+def is_sandbox_mount(path):
+    """Inside the Bash sandbox, protected paths such as .mcp.json appear as /dev/null character devices; they are not changes.
+    A path git quoted does not exist under that name, so it counts as a change and an unusual name is never hidden."""
+    return os.path.lexists(path) and stat.S_ISCHR(os.lstat(path).st_mode)
 
 
 def commit_includes_unstaged(commit_line):

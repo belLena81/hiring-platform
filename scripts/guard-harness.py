@@ -24,6 +24,9 @@ PROJECT = Path(__file__).resolve().parent.parent
 MANIFEST = PROJECT / ".local" / "config" / "test-services" / "manifest.json"
 WRAPPER = "scripts/run-local-tests.sh"
 WRAPPER_VERBS = {"start", "test", "analytics", "interview", "retention", "recovery", "status", "stop"}
+SANDBOX_EXCLUDED_SCRIPTS = {WRAPPER, "scripts/check-local.sh", "scripts/check-agent-hooks-live.sh"}
+SANDBOX_EXCLUDED_GIT = {"push", "fetch", "pull", "add", "commit", "reset", "checkout", "restore", "switch", "stash", "merge",
+                        "rebase", "rm", "mv", "tag", "branch"}
 
 WRITE_COMMANDS = {"rm", "rmdir", "unlink", "shred", "mv", "cp", "tee", "touch", "mkdir", "chmod", "chown", "ln", "dd",
                   "install", "truncate", "rsync", "curl", "wget", "tar", "unzip", "patch", "split", "csplit"}
@@ -41,7 +44,7 @@ SEGMENT_SPLIT = re.compile(r"\|\||&&|;|\||\n|&(?!>)")
 DB_URI = re.compile(r"mongodb(?:\+srv)?://[^\s'\"]+", re.IGNORECASE)
 
 # The workflow files come from scripts/harness_paths.py (shared with check-docs-current.py); these are the guard's extras.
-PROTECTED_PREFIXES = harness_paths.WORKFLOW_PREFIXES + (".git/", ".local/config/", ".codex/")
+PROTECTED_PREFIXES = harness_paths.WORKFLOW_PREFIXES + (".git/", ".local/config/", ".codex/", ".local/logs/review-runs")
 PROTECTED_FILES = set(harness_paths.WORKFLOW_FILES)
 SECRET_TEXT = re.compile(
     r"(^|[\s/='\"<>@:])\.env(?!\.(example|sample|template)(\s|$|'|\"))(\.[\w.-]+)?($|[\s/'\")};`])|\.local/config|(^|[\s/='\"<>@])\.(aws|ssh|codex|gnupg)(/|$|\s)|"
@@ -139,6 +142,14 @@ def candidate_paths(arg):
     return values
 
 
+def runs_outside_sandbox(name, args):
+    """Pure: is this command one of sandbox.excludedCommands in .claude/settings.json? Those match the command text, so a
+    relative script or git itself would resolve inside whatever directory the shell is in."""
+    if name in SANDBOX_EXCLUDED_SCRIPTS:
+        return True
+    return name == "git" and bool(args) and args[0] in SANDBOX_EXCLUDED_GIT
+
+
 def check_segment(tokens, cwd):
     """Return (kind, reason) for the first violated rule in one simple command, else None."""
     if tokens and (tokens[0] in {"case", "coproc", "function", "select", "esac"} or tokens[0].endswith("()")
@@ -163,6 +174,9 @@ def check_segment(tokens, cwd):
         return "ask", "Command name is built dynamically: human approval required."
     command = os.path.basename(tokens[0])
     args = [a.rstrip(")}") if a.endswith((")", "}")) and not a.startswith(("'", '"')) else a for a in tokens[1:]]
+    if runs_outside_sandbox(tokens[0], args) and os.path.realpath(cwd) != os.path.realpath(PROJECT):
+        return "deny", (f"'{tokens[0]}' runs outside the Bash sandbox, so it must start from the project root: "
+                        "another directory could hold a planted copy of the script or a planted .git.")
 
     if command in {"sudo", "su", "doas"}:
         return "deny", "Privilege escalation is not allowed in this project."

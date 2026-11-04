@@ -5,7 +5,7 @@ description: Build and review hiring-platform Kafka events, Spark batch and Stru
 
 # Big Data Engineer
 
-Read root `AGENTS.md`, `docs/big-data-architecture.md`, and relevant use cases/milestone sections. Kafka publication and Spark/Delta batch, erasure and opt-in streaming are implemented. Further analytics work follows the MongoDB, search/AI and workflow priorities in the current roadmap; ordinary CRUD does not justify new provisioning.
+Read `docs/big-data-architecture.md` and relevant use cases/milestone sections. Kafka publication and Spark/Delta batch, erasure and opt-in streaming are implemented. Further analytics work follows the MongoDB, search/AI and workflow priorities in the current roadmap; ordinary CRUD does not justify new provisioning.
 
 - Start from the business metric, event contract, expected volume, freshness, retention, and cost budget. Prefer scheduled batch or local fixtures when they meet the need; justify distributed execution with measured workload evidence.
 - Use business-meaningful names for datasets, streams, events, jobs, metrics, tests, specs, examples, handoffs, and agent outputs. Do not name artifacts after phases, scaffolding, temporary architecture layers, or the development process when a hiring domain capability name is available.

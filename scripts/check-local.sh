@@ -23,9 +23,9 @@ Usage: scripts/check-local.sh
        scripts/check-local.sh --help
 
 Runs, in order, and stops at the first failure:
-  1/8 project skill validation        (python3 scripts/check-skills.py)
-  2/8 documentation currency and spec verdicts (python3 scripts/check-docs-current.py: uncommitted and unpushed decision changes carry docs;
-                                      python3 scripts/check-spec-verdicts.py: every done spec records Code, Security and QA verdicts)
+  1/8 project skill validation        (python3 -I scripts/check-skills.py)
+  2/8 documentation currency and spec verdicts (python3 -I scripts/check-docs-current.py: uncommitted and unpushed decision changes carry docs;
+                                      python3 -I scripts/check-spec-verdicts.py: every done spec records Code, Security and QA verdicts)
   3/8 container script checks         (scripts/check-container-runtime.sh)
   4/8 Java 17+ check
   5/8 root build formatting           (sbt scalafmtCheckAll scalafmtSbtCheck, limit 15 min)
@@ -47,8 +47,8 @@ Exit codes: 0 PASS, 1 FAIL, 2 usage error or precondition not met (BLOCKED), 130
 The last line is "RESULT: PASS|FAIL|BLOCKED ..." with the step reached and duration.
 
 Examples:
-  bash scripts/check-local.sh
-  JAVA_HOME=/path/to/jdk17 bash scripts/check-local.sh
+  scripts/check-local.sh
+  JAVA_HOME=/path/to/jdk17 scripts/check-local.sh
 HELP
 }
 
@@ -161,7 +161,7 @@ git check-ignore -q "$project_root/.local/logs/check-local-root-format.log" || {
 }
 mkdir -p "$project_root/.local/logs"
 
-run_foreground "project skill validation" "fix the reported skill or agent definition, then run again" python3 scripts/check-skills.py
+run_foreground "project skill validation" "fix the reported skill or agent definition, then run again" python3 -I scripts/check-skills.py
 run_foreground "documentation currency and spec verdicts" "update README.md, ARCHITECTURE.md or docs/ (docs/wiki/ included) for the listed decision changes, or commit with a Docs-Impact trailer first; record the missing review verdict lines of a done spec" bash -c 'python3 -I scripts/check-docs-current.py && python3 -I scripts/check-spec-verdicts.py'
 run_foreground "container script checks" "read the failure printed above, fix scripts/check-container-runtime.sh or docker/*.sh" scripts/check-container-runtime.sh
 

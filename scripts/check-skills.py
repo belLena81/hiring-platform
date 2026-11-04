@@ -21,7 +21,8 @@ on a failure so Claude Code returns the problems to the agent.
 
 Checks offline (no network, about 1 second, so no progress lines) that every role named in AGENTS.md has a project-local
 .claude/skills/<role>/SKILL.md with valid frontmatter, that no unexpected skill folder exists, and that each delegated
-role has a subagent definition in .claude/agents with an explicit tool list (read-only reviewers get no write tools).
+role has a subagent definition in .claude/agents with an explicit tool list (read-only reviewers get no write tools). Reviewers
+must declare the read-only scope hook and a forked skill; the writer and architect their path scope hook; authors a skills preload.
 
 Exit codes: 0 PASS, 1 FAIL (problems are listed), 2 usage error or required file missing (BLOCKED), 130 interrupted.
 The last line is "RESULT: PASS|FAIL|BLOCKED skills=<n> agents=<n> problems=<n> duration=<s>".
@@ -33,6 +34,8 @@ Example:
 READ_ONLY_ROLES = {"code-reviewer", "security-engineer", "qa-engineer"}
 WRITE_TOOLS = {"Edit", "Write", "NotebookEdit"}
 COORDINATOR_ROLES = {"product-manager"}
+SCOPED_ROLES = {"code-reviewer": "read-only", "security-engineer": "read-only", "qa-engineer": "read-only",
+                "technical-writer": "documentation", "software-architect": "design"}
 
 
 def frontmatter(path):
@@ -41,6 +44,39 @@ def frontmatter(path):
     if match is None:
         return None
     return dict(re.findall(r"^([a-zA-Z_-]+):\s*([^\n]+)$", match.group(1), re.MULTILINE))
+
+
+def enforcement_problems(role, agent_text, skill_file):
+    """The promises a role makes that its definition must enforce: a reviewer's scope hook and forked skill, an author's preload."""
+    problems = []
+    expected_scope = SCOPED_ROLES.get(role)
+    block = re.match(r"\A---\n(.*?)\n---(?:\n|$)", agent_text, re.DOTALL)
+    agent_text = block.group(1) if block else ""  # A sentence in the body must not satisfy these checks.
+    if expected_scope and f"scripts/guard-agent-scope.py {expected_scope}" not in agent_text:
+        problems.append(f"Subagent must declare the {expected_scope} scope hook: {role}")
+    skill_metadata = (frontmatter(skill_file) or {}) if skill_file.is_file() else {}
+    if role in READ_ONLY_ROLES:
+        if skill_metadata.get("context") != "fork" or skill_metadata.get("agent") != role:
+            problems.append(f"Reviewer skill must declare context: fork and agent: {role}")
+    elif not re.search(rf"^skills:\s*\n\s*-\s*{re.escape(role)}\s*$", agent_text, re.MULTILINE):
+        problems.append(f"Subagent must preload its skill through the skills field: {role}")
+    return problems
+
+
+def extra_agent_problems(name, agent_text, roles):
+    """An agent that shares another role's skill, such as scala-refactorer: explicit tools and model, and a project skill preload."""
+    block = re.match(r"\A---\n(.*?)\n---(?:\n|$)", agent_text, re.DOTALL)
+    text = block.group(1) if block else ""
+    problems = []
+    if not re.search(rf"^name:\s*{re.escape(name)}\s*$", text, re.MULTILINE):
+        # Otherwise another file could declare the name of a reviewer without its restrictions.
+        problems.append(f"Subagent name must match its file name: {name}")
+    if not re.search(r"^tools:\s*\S", text, re.MULTILINE) or not re.search(r"^model:\s*\S", text, re.MULTILINE):
+        problems.append(f"Subagent must declare explicit tools and model: {name}")
+    preload = re.search(r"^skills:\s*\n\s*-\s*([a-z0-9-]+)\s*$", text, re.MULTILINE)
+    if preload is None or preload.group(1) not in roles:
+        problems.append(f"Subagent must preload a project skill through the skills field: {name}")
+    return problems
 
 
 def main():
@@ -92,6 +128,11 @@ def main():
             errors.append(f"Read-only reviewer has write tools: {role}")
         if role in READ_ONLY_ROLES and not tools:
             errors.append(f"Read-only reviewer must declare an explicit tool list: {role}")
+        errors.extend(enforcement_problems(role, agent_file.read_text(), (skill_root / role / "SKILL.md")))
+
+    for agent_file in sorted(agent_root.glob("*.md")):
+        if agent_file.stem not in delegated_roles:
+            errors.extend(extra_agent_problems(agent_file.stem, agent_file.read_text(), expected_roles))
 
     counts = f"skills={len(expected_roles)} agents={len(delegated_roles)}"
     if errors:

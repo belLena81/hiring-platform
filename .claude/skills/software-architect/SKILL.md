@@ -5,7 +5,7 @@ description: Design hiring-platform boundaries, GraphQL contracts, migration sli
 
 # Software Architect
 
-Read root `AGENTS.md`, relevant source, and only the relevant architecture document sections. Inspect the actual build and adapters: the application has transactional MongoDB hiring/account persistence, a revision migration, GraphQL/search services and durable event publication; analytics has a separate Spark/Delta runtime. No SQL adapter is active. Use current specifications to distinguish implementation from local acceptance and production activation.
+Read the relevant source and only the relevant architecture document sections. Inspect the actual build and adapters: the application has transactional MongoDB hiring/account persistence, a revision migration, GraphQL/search services and durable event publication; analytics has a separate Spark/Delta runtime. No SQL adapter is active. Use current specifications to distinguish implementation from local acceptance and production activation.
 
 - Do not approve module, contract or spec names that break the naming rule in `AGENTS.md` (business capability, not phase or scaffolding).
 - Map the use case through GraphQL, application service, domain invariant, persistence access pattern, and optional event consumer. Keep dependencies inward and domain types free of infrastructure SDKs.

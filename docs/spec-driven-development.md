@@ -38,7 +38,7 @@ Deliverable: changed paths, concise decision rationale, AC-to-test evidence,
              actual command outcomes, unresolved risks, next handoff.
 ```
 
-Put stable rules before task-specific excerpts when composing reusable prompts. Keep the packet small regardless of any provider caching behavior; do not promise cache hits or percentage savings. Inherit session model/settings. Do not introduce model ensembles or extra agents merely to vote on an answer: relevant expertise, tests, and independent reviews decide correctness.
+Put stable rules before task-specific excerpts when composing reusable prompts. Keep the packet small regardless of any provider caching behavior; do not promise cache hits or percentage savings. Subagent models come from their frontmatter (see [agent-driven development](agent-development.md)); do not pass a per-call model override, because that would split the model policy across calls. Do not introduce model ensembles or extra agents merely to vote on an answer: relevant expertise, tests, and independent reviews decide correctness.
 
 ## Resume without losing decisions
 

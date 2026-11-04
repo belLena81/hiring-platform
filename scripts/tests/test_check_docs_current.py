@@ -133,8 +133,9 @@ class Hook(unittest.TestCase):
 
     def test_a_message_file_is_read_for_the_trailer(self):
         import tempfile
-        with tempfile.NamedTemporaryFile("w", dir=gate.PROJECT / "scripts" / "tests", suffix=".msg",
-                                         delete=False) as handle:
+        # target/ is ignored and writable inside the Bash sandbox, where scripts/ is read-only.
+        (gate.PROJECT / "target").mkdir(exist_ok=True)
+        with tempfile.NamedTemporaryFile("w", dir=gate.PROJECT / "target", suffix=".msg", delete=False) as handle:
             handle.write("Rename\n\nDocs-Impact: none - internal rename only\n")
         relative = Path(handle.name).relative_to(gate.PROJECT)
         try:
@@ -229,6 +230,13 @@ class CommitMessageHook(unittest.TestCase):
         with mock.patch.object(gate, "merging", return_value=True), \
                 mock.patch.object(gate, "names", side_effect=AssertionError("index must not be read")):
             self.assertEqual(gate.commit_msg(Path("/nonexistent")), 0)
+
+
+class SandboxMounts(unittest.TestCase):
+    def test_D7c_a_character_device_is_a_sandbox_mount_and_a_real_file_is_not(self):
+        self.assertTrue(gate.is_sandbox_mount(Path("/dev/null")))
+        self.assertFalse(gate.is_sandbox_mount(Path(__file__)))
+        self.assertFalse(gate.is_sandbox_mount(Path("/nonexistent/quoted-name")))
 
 
 if __name__ == "__main__":

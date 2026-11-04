@@ -190,7 +190,7 @@ build_root="$repo_root/.local/data/test-builds"
 for path in "$config_root/manifest.json" "$registry_root/owner" "$log_root/run.log" "$build_root/root/owner.lock" "$build_root/analytics/owner.lock"; do
   git check-ignore -q "$path" || blocked "test output path is not git-ignored: ${path#"$repo_root"/}" "add it to .gitignore, then run again"
 done
-python3 - "$repo_root" "$config_root" "$registry_root" "$log_root" "$build_root" "$build_root/root" "$build_root/analytics" "$build_root/root/target" "$build_root/analytics/target" <<'PY_PATHS' || blocked "unsafe test output directory (see the message above)" "fix ownership, permissions or symlinks of the named path under .local/, then run again"
+python3 -I - "$repo_root" "$config_root" "$registry_root" "$log_root" "$build_root" "$build_root/root" "$build_root/analytics" "$build_root/root/target" "$build_root/analytics/target" <<'PY_PATHS' || blocked "unsafe test output directory (see the message above)" "fix ownership, permissions or symlinks of the named path under .local/, then run again"
 from pathlib import Path
 import os,stat,sys
 repo=Path(sys.argv[1])
@@ -219,7 +219,7 @@ done
 exec 9>"$config_root/setup.lock"
 acquire_lock 9 "another run-local-tests invocation to finish test service setup"
 initialize_manifest() {
-  python3 - "$repo_root" "$config_root" <<'PY'
+  python3 -I - "$repo_root" "$config_root" <<'PY'
 from pathlib import Path
 import base64,hashlib,json,re,secrets,socket,sys
 repo=Path(sys.argv[1]).resolve(); root=Path(sys.argv[2]); file=root/'manifest.json'
@@ -269,7 +269,7 @@ require_manifest() {
   test_project="$(cat "$config_root/project")"
 }
 verify_service_identity() {
-  python3 - "$repo_root" "$config_root" <<'PY_IDENTITY'
+  python3 -I - "$repo_root" "$config_root" <<'PY_IDENTITY'
 from pathlib import Path
 import json,re,subprocess,sys,time
 repo=Path(sys.argv[1]);config=Path(sys.argv[2]);m=json.loads((config/'manifest.json').read_text())
@@ -300,7 +300,7 @@ if not re.search(r'ClusterId:\s*'+re.escape(m['kafkaClusterId'])+r'(?:\s|$)',res
 PY_IDENTITY
 }
 cleanup_orphans() {
-  python3 - "$repo_root" "$config_root" "$registry_root" <<'PY_CLEAN'
+  python3 -I - "$repo_root" "$config_root" "$registry_root" <<'PY_CLEAN'
 from pathlib import Path
 import fcntl,json,re,subprocess,sys
 repo=Path(sys.argv[1]);config=Path(sys.argv[2]);runs=Path(sys.argv[3]);m=json.loads((config/'manifest.json').read_text())
@@ -382,7 +382,7 @@ start() {
   if ! cmp -s "$config_root/current.json" "$config_root/initialized.json"; then
     compose run --rm --no-deps initialize >"$log_root/initialize.log" 2>&1 || fail_step "service initialization" "$log_root/initialize.log"
   fi
-  nonce="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["nonce"])' "$config_root/manifest.json")"
+  nonce="$(python3 -I -c 'import json,sys;print(json.load(open(sys.argv[1]))["nonce"])' "$config_root/manifest.json")"
   compose exec -T mongodb mongosh --quiet --eval "db.getSiblingDB('hiring_test_control').identity.updateOne({_id:'$nonce'},{\$setOnInsert:{project:'$test_project'}},{upsert:true})" >"$log_root/mongo-initialize.log" 2>&1 || fail_step "recording the Mongo test identity" "$log_root/mongo-initialize.log"
   cp "$config_root/current.json" "$config_root/initialized.json"
   cleanup_orphans >"$log_root/orphan-cleanup.log" 2>&1 || fail_step "cleanup of leftover test resources" "$log_root/orphan-cleanup.log"
@@ -466,7 +466,7 @@ case "$mode" in
     current_phase="stopping test services"
     export HIRING_TEST_STOP=true
     require_manifest
-    python3 - "$registry_root" "$config_root/manifest.json" <<'PY_STOP' || blocked "refusing to stop the services (see the message above)" "wait for the active test run to finish, then run stop again"
+    python3 -I - "$registry_root" "$config_root/manifest.json" <<'PY_STOP' || blocked "refusing to stop the services (see the message above)" "wait for the active test run to finish, then run stop again"
 from pathlib import Path
 import fcntl,json,sys
 runs=Path(sys.argv[1]);m=json.loads(Path(sys.argv[2]).read_text())
@@ -489,7 +489,7 @@ PY_STOP
     op_say "stopping this workspace's test services (compose down, at most ${compose_timeout}s)"
     op_ticker_start "stop"
     compose down --volumes >"$log_root/stop.log" 2>&1 || fail_step "compose down" "$log_root/stop.log"
-    python3 - "$config_root" "$registry_root" <<'PY_DELETE' || fail_step "removing leftover run registrations" "$log_root/stop.log"
+    python3 -I - "$config_root" "$registry_root" <<'PY_DELETE' || fail_step "removing leftover run registrations" "$log_root/stop.log"
 from pathlib import Path
 import fcntl,json,re,sys
 root=Path(sys.argv[1]);runs=Path(sys.argv[2]);m=json.loads((root/'manifest.json').read_text())
@@ -522,12 +522,12 @@ PY_DELETE
     ;;
   test|analytics|interview|retention|recovery)
     start
-    run_id="$(python3 -c 'import secrets;print(secrets.token_hex(16))')"
+    run_id="$(python3 -I -c 'import secrets;print(secrets.token_hex(16))')"
     run_root="$registry_root/$run_id"
     mkdir -p "$run_root"
     exec 8>"$run_root/owner.lock"
     acquire_lock 8 "this run's ownership lock"
-    python3 - "$config_root/manifest.json" "$run_root/service.json" <<'PY_RUN'
+    python3 -I - "$config_root/manifest.json" "$run_root/service.json" <<'PY_RUN'
 import json,sys
 from pathlib import Path
 m=json.loads(Path(sys.argv[1]).read_text());Path(sys.argv[2]).write_text(json.dumps({'nonce':m['nonce'],'project':m['project']}))

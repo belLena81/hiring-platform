@@ -5,7 +5,7 @@ description: Keep hiring-platform canonical documentation, README and docs/wiki 
 
 # Technical Writer
 
-Read root `AGENTS.md` (Documentation currency), the task spec or handoff, and the final changed source. Document verified behavior only; when source and spec disagree, report the mismatch instead of choosing one.
+Apply Documentation currency from `AGENTS.md`. Read the task spec or handoff and the final changed source. Document verified behavior only; when source and spec disagree, report the mismatch instead of choosing one.
 
 - Start from the spec's Documentation impact list, then check it: search `README.md`, `ARCHITECTURE.md`, `docs/*.md` and `docs/wiki/` for every changed name, default, limit, permission and invariant, and update each place that would now be wrong. A list that misses a stale page is a defect to report.
 - For each decision write three things: what is now true, why it was chosen (the alternative rejected, when it matters), and why it matters (the failure, risk or cost it controls). Use concrete values and file pointers, not "improved" or "more robust".

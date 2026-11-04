@@ -104,7 +104,7 @@ The streaming profile reads `.local/config/analytics-streaming.conf`, selects it
 Phase 6 and Phase 7 local acceptance is by criterion-tagged tests, not by a standalone launcher. The proof launcher (`scenarios`, `diagnose`, `run`, `stage-maintenance`) and its nonce-scoped activation were removed in commit `3755455`; their run identifiers are historical only. Run the tests with:
 
 ```bash
-bash scripts/check-local.sh                                                         # formatting, unit and integration suites (Docker, Java 17+, 85% merged coverage)
+scripts/check-local.sh                                                              # formatting, unit and integration suites (Docker, Java 17+, 85% merged coverage)
 scripts/run-local-tests.sh analytics '*HiringAnalyticsStreamingBoundaryRecoveryIntegrationSpec'  # one or more analytics integration suites (glob)
 scripts/run-local-tests.sh recovery                                                 # AccountDeletionRecoveryIntegrationSpec (HAL-04.4)
 scripts/run-local-tests.sh retention                                                # KafkaTopicRetentionCheck: shortened Kafka topic retention
@@ -145,7 +145,7 @@ For project-only sbt JDK selection, create an ignored `.sbtopts` file in this ro
 Use Java 17+ and sbt 1.11.1. Set `JAVA_HOME` to your installed JDK when the default Java is older, then run:
 
 ```bash
-bash scripts/check-local.sh
+scripts/check-local.sh
 ```
 
 The command validates local skills, runs formatting checks, then runs the root and analytics unit and integration suites under JaCoCo. It therefore requires Docker (through `scripts/run-local-tests.sh`) and fails when merged unit + integration line coverage is below 85%. The unit suite alone is Docker-independent: `sbt test` runs it, and `sbt 'IntegrationTest / test'` runs the real HTTP lifecycle and disposable MongoDB tests. These commands are local checks, not deployment or performance certification.

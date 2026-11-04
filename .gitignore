@@ -7,6 +7,19 @@ node_modules/
 !**/src/main/**/target/
 !**/src/test/**/target/
 
+### Claude Code Bash sandbox: /dev/null mounts over protected paths, visible to git only inside the sandbox ###
+/.bash_profile
+/.bashrc
+/.gitconfig
+/.profile
+/.ripgreprc
+/.vscode
+/.zprofile
+/.zshrc
+
+### sbt home and caches of Claude Code sessions, kept apart from ~/.sbt (root and analytics builds) ###
+.sbt-home/
+
 ### Local settings and runtime data ###
 /.local/
 /_logs/

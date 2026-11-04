@@ -32,6 +32,7 @@ Product Manager coordinates delivery. Load `.claude/skills/product-manager/SKILL
 | Product Manager | `.claude/skills/product-manager/SKILL.md` | Scope, acceptance, priorities, dependencies, orchestration, multi-phase tracking |
 | Software Architect | `.claude/skills/software-architect/SKILL.md` | Before structural changes, new modules, cross-system contracts, language/store migrations |
 | Scala Developer | `.claude/skills/scala-developer/SKILL.md` | Scala/API/service implementation and related tests |
+| Scala Refactorer | `.claude/skills/scala-developer/SKILL.md` (agent `scala-refactorer`) | Behavior-preserving restructuring of existing Scala |
 | Data Engineer | `.claude/skills/data-engineer/SKILL.md` | Operational schema, migrations, indexes, integrity, query performance |
 | Big Data Engineer | `.claude/skills/big-data-engineer/SKILL.md` | Kafka, Spark, streaming, lakehouse, analytical quality and evaluation |
 | Security Engineer | `.claude/skills/security-engineer/SKILL.md` | Auth/RBAC/admin, mutations, user data, DB access, secrets/config, integrations, dependencies, agent permission rules |
@@ -79,31 +80,10 @@ A decision change is any change to behavior, a public or event contract, an inva
 - `scripts/check-docs-current.py` enforces this: the Claude Code commit hook and the git `commit-msg` hook (`.githooks/`, enabled with `git config core.hooksPath .githooks`) deny a commit whose decision-bearing paths change without canonical documentation, and `scripts/check-local.sh` checks uncommitted changes. The gate proves documentation changed, not that it is right. A commit that truly needs none carries `Docs-Impact: none - <reason>` or `Docs-Impact: spec-only - <reason>`; reviewers challenge a weak reason.
 - Docs describe verified source, not plans. Code Reviewer and QA treat documentation that contradicts the final code as a defect.
 
-## Engineering and GraphQL
+## Engineering, persistence and analytics
 
-- Separate domain, application, API, and infrastructure; dependencies point inward. Domain logic stays free of GraphQL/DB/HTTP/JSON/auth/AI SDK dependencies.
 - All agents must name production code, tests, specs, examples, handoffs, and outputs after business capabilities and domain concepts, not delivery phases, scaffolding history, temporary architecture layers, or development process labels. Prefer names such as `HiringGraphQLSchema`, `HiringGraphQLAccessSpec`, or `RecruitingGraphQLSchema` over generic or phase-numbered names once the code carries hiring behavior.
-- Prefer typed IDs, ADTs/enums, explicit validation, and `Either`/typed effect errors. Use UTC `Instant`. Keep GraphQL inputs separate from domain and persistence models separate when needed.
-- Keep domain functions pure and immutable: pass time/IDs as values, express absence with `Option`, and use typed failures rather than business exceptions, nulls, or partial operations. Services sequence effects; adapters isolate I/O and any necessary framework interop. See the quality guide for testing and effect-boundary rules.
-- Model closed domain states and expected business outcomes with explicit ADTs. Use `Validated` when independent input/configuration errors should accumulate, and `Either` when the caller must sequence a decision. Keep thrown exceptions for unexpected or framework-boundary failures and translate them once at the owning boundary.
-- Use Cats Effect `Resource` for clients/pools/servers, cancellation-safe ownership, bounded concurrency, and FS2 backpressure. Keep blocking work off compute threads and unsafe execution out of business logic.
-- Use configured libraries idiomatically before adding a dependency or hand-implementing parsing, validation, rendering, scheduling, protocol, or collection behavior. Add a dependency only for a concrete capability gap; check compatibility, maintenance/provenance, and operational cost, and isolate it at the appropriate boundary.
-- Use design patterns for concrete problems; avoid speculative frameworks, microservices, event sourcing, caches, or denormalization.
-- Mutations use input types and meaningful typed payloads rather than raw booleans. Preserve action-oriented lifecycle operations and sanitized meaningful errors.
-- Batch nested relationships per request with authorization-safe caches. Bound pagination, depth, complexity, request size, and execution resources.
-
-## Persistence and analytics
-
-- Existing SQL schema changes require versioned Flyway migrations; enable tooling explicitly because it is not currently active. Target MongoDB schema/index changes require versioned, repeatable migration steps with recovery and verification. Flyway is not the MongoDB migration mechanism.
-- Pre-MVP contract policy: API and analytics schemas have one active shape. Until full MVP is declared complete, implement schema changes directly; do not add migration, backfill, dual-read/write, or legacy-compatibility code for API or analytics changes. If existing local analytics data is incompatible, reset/rebuild only the exact local lakehouse when that reset is explicitly in scope; otherwise preserve it and fail closed. After full MVP, the normal schema-evolution requirements below apply.
-- Schema-changing specs include expand/backfill/verify/contract or a justified smaller plan, old/new compatibility, restart/concurrent-write handling, and recovery evidence. Never edit applied migrations or equate application rollback with data rollback.
-- Evolve GraphQL additively where possible with deprecation and local schema/consumer-operation checks. Review semantic changes, enum/nullability changes, and cursor compatibility. Keep database migration identity independent from API and event contracts. The current operational event envelope has one unversioned seven-field shape; event schema versioning requires an explicitly scoped decision consistent with the pre-MVP policy. After MVP, version independently where required; do not invent versioned endpoints or tooling before the relevant slice.
-- Prefer UUIDs unless existing compatibility requires otherwise. Enforce critical uniqueness in the store rather than preflight reads.
-- Derive indexes from candidate/job application lists, recruiter jobs, statuses, authorization predicates, filters and deterministic cursor ordering. Measure read benefit against storage/write cost.
-- Optimize query work at both boundaries: push selective filtering, projection, stable ordering, and bounded pagination into the database; avoid N+1 fetches, repeated decoding/hydration, unbounded materialization, and avoidable CPU/allocation work in application code. For performance changes, record representative query plans/counts and a reproducible before/after workload.
-- Embed bounded owned values; reference independent entities. Keep applications/events separate. MongoDB transaction tests require replica-set infrastructure.
-- Target MongoDB remains operational truth; analytics must not gate transactions. Use durable event publication, explicit active contracts, at-least-once delivery, and idempotent consumers.
-- Spark/Delta work includes data quality, replay, late data, recovery, retention, and physical-plan evidence. Distributed processing needs a documented workload benefit.
+- Scala engineering and GraphQL rules are in `.claude/rules/scala-engineering.md`; persistence, schema evolution and analytics rules are in `.claude/rules/persistence-and-analytics.md`. Claude Code loads them when it works in matching paths, which keeps them out of unrelated sessions. Read them directly when planning before touching those paths, and when using a tool that does not load `.claude/rules/`.
 
 ## Security
 

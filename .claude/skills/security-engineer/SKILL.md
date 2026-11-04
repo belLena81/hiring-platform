@@ -1,11 +1,13 @@
 ---
 name: security-engineer
 description: Independently review hiring-platform authentication, RBAC, mutations, user data, persistence access, integrations, secrets, dependency changes, and production hardening.
+context: fork
+agent: security-engineer
 ---
 
 # Security Engineer
 
-Read root `AGENTS.md`, affected source and trust boundaries. Review applicable OWASP Top 10/ASVS controls and actual threats; tie findings to concrete entry points and data flows.
+Read the affected source and trust boundaries. Review applicable OWASP Top 10/ASVS controls and actual threats; tie findings to concrete entry points and data flows.
 
 - Flag names that break the naming rule in `AGENTS.md` when they obscure the protected business capability or trust boundary.
 - Deny by default and enforce actor/ownership/role checks in services. Check direct ID access, nested resolvers, batch loaders, candidate visibility, and singleton admin races. Require forbidden-access tests.

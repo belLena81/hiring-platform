@@ -2,6 +2,7 @@
 gate. Run: python3 -I -m unittest discover -s scripts/tests -p 'test_*.py'"""
 
 import importlib.util
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -29,6 +30,10 @@ ALL_WORKFLOW_PATHS = (tuple(sorted(harness_paths.WORKFLOW_FILES))
                       + COMPOSE_SAMPLES)
 
 
+def harness_paths_root():
+    return SCRIPTS.parent
+
+
 class WorkflowFilesAreCoveredEverywhere(unittest.TestCase):
     def test_the_shared_list_is_not_empty_and_includes_the_known_files(self):
         for path in ("AGENTS.md", "build.sbt", "analytics/Dockerfile", ".mcp.json", ".scalafmt.conf", ".sbtopts", ".jvmopts"):
@@ -45,6 +50,29 @@ class WorkflowFilesAreCoveredEverywhere(unittest.TestCase):
     def test_the_guard_asks_before_moving_or_replacing_a_workflow_directory(self):
         for path in ("scripts", ".claude", ".githooks", "project"):
             self.assertTrue(guard.is_protected(path), path)
+
+    def test_ARE_07_2_the_guard_asks_before_an_agent_edits_the_review_log(self):
+        self.assertTrue(guard.is_protected(".local/logs/review-runs.jsonl"))
+        self.assertFalse(guard.is_protected(".local/logs/other.log"))
+
+    def test_ARE_09_7_commands_outside_the_sandbox_start_only_from_the_project_root(self):
+        root = harness_paths_root()
+        for command in ("scripts/run-local-tests.sh status", "scripts/check-local.sh", "scripts/check-agent-hooks-live.sh",
+                        "git commit -m x", "git add README.md", "git push"):
+            outcome = guard.check_bash(command, root / "analytics")
+            self.assertEqual("deny", outcome and outcome[0], command)
+            self.assertIn("project root", outcome[1], command)
+            outcome = guard.check_bash(command, root)
+            self.assertNotIn("project root", (outcome or ("", ""))[1], command)
+
+    def test_ARE_09_7_read_only_git_stays_allowed_from_a_subdirectory(self):
+        self.assertIsNone(guard.check_bash("git status", harness_paths_root() / "analytics"))
+
+    def test_ARE_09_7_the_guard_knows_every_exclusion_in_the_settings(self):
+        settings = json.loads((harness_paths_root() / ".claude/settings.json").read_text())
+        for pattern in settings["sandbox"]["excludedCommands"]:
+            words = pattern.removesuffix(" *").split()
+            self.assertTrue(guard.runs_outside_sandbox(words[0], words[1:]), pattern)
 
     def test_the_docs_gate_requires_documentation_for_every_shared_path(self):
         for path in ALL_WORKFLOW_PATHS:

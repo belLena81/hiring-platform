@@ -20,6 +20,7 @@ One line per specification, grouped by what the first `- Status:` line says (rea
 | [guided-discovery-and-followup](guided-discovery-and-followup.md) | draft, not started; after the MVP claim |
 | [hiring-observability-resilience](hiring-observability-resilience.md) | draft |
 | [production-readiness](production-readiness.md) | draft |
+| [agent-role-enforcement](agent-role-enforcement.md) | in progress |
 
 ## Done (verdict gate applies)
 

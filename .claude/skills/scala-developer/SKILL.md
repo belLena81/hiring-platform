@@ -5,7 +5,7 @@ description: Implement hiring-platform Scala domain logic, Cats Effect services,
 
 # Scala Developer
 
-Read root `AGENTS.md`, `build.sbt`, affected code, and specialist handoffs. Use the configured Scala 3/JDK baseline and MUnit suite; library or persistence migrations belong to an explicitly scoped slice, not incidental feature work.
+Read `build.sbt`, affected code, and specialist handoffs. Use the configured Scala 3/JDK baseline and MUnit suite; library or persistence migrations belong to an explicitly scoped slice, not incidental feature work.
 
 - Implement a small vertical slice with separate domain, application, API, and infrastructure responsibilities. Preserve existing public contracts unless the task explicitly changes them and updates examples.
 - Use business-meaningful names for production classes, modules, functions, fixtures, tests, specs, examples, and handoffs. Do not name code or outputs after phases, scaffolding, implementation process, or temporary development milestones when the code now represents a hiring-platform capability.

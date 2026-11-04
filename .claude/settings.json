@@ -1,14 +1,88 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
-  "model": "sonnet",
+  "model": "opusplan",
   "effortLevel": "medium",
   "autoMemoryEnabled": false,
+  "env": {
+    "SBT_OPTS": "-Dsbt.server.forcestart=true -Dsbt.global.base=.sbt-home/global -Dsbt.boot.directory=.sbt-home/boot -Dsbt.ivy.home=.sbt-home/ivy2 -Dsbt.coursier.home=.sbt-home/coursier-home"
+  },
+  "sandbox": {
+    "enabled": true,
+    "failIfUnavailable": true,
+    "allowUnsandboxedCommands": false,
+    "autoAllowBashIfSandboxed": false,
+    "excludedCommands": [
+      "scripts/run-local-tests.sh *",
+      "scripts/check-local.sh",
+      "scripts/check-agent-hooks-live.sh",
+      "git push *",
+      "git fetch *",
+      "git pull *",
+      "git add *",
+      "git commit *",
+      "git reset *",
+      "git checkout *",
+      "git restore *",
+      "git switch *",
+      "git stash *",
+      "git merge *",
+      "git rebase *",
+      "git rm *",
+      "git mv *",
+      "git tag *",
+      "git branch *"
+    ],
+    "filesystem": {
+      "allowWrite": ["/tmp"],
+      "denyWrite": [
+        "./.git",
+        "./analytics/.sbtopts",
+        "./analytics/.jvmopts",
+        "./scripts",
+        "./.githooks",
+        "./build.sbt",
+        "./analytics/build.sbt",
+        "./project/plugins.sbt",
+        "./project/build.properties",
+        "./analytics/project/plugins.sbt",
+        "./analytics/project/build.properties",
+        "./AGENTS.md",
+        "./CLAUDE.md",
+        "./.claude/rules",
+        "./.sbtopts",
+        "./.jvmopts",
+        "./.scalafmt.conf",
+        "./analytics/.scalafmt.conf",
+        "./compose.yaml",
+        "./compose.test.yaml",
+        "./compose.cloud.yaml",
+        "./compose.atlas-local.yaml",
+        "./compose.observability.yaml",
+        "./compose.analytics-key-rotation.yaml",
+        "./Dockerfile",
+        "./analytics/Dockerfile",
+        "./docker",
+        "./analytics/spark-jvm.args",
+        "./project/project/build.properties",
+        "./.local/logs",
+        "./.local/config"
+      ],
+      "denyRead": [
+        "~/.sbt", "~/.ivy2", "~/.cache/coursier",
+        "~/.ssh", "~/.aws", "~/.gnupg", "~/.kube", "~/.docker", "~/.config/gh", "~/.config/gcloud", "~/.azure", "~/.netrc",
+        "~/.git-credentials", "~/.npmrc", "~/.pypirc", "~/.pgpass", "~/.sbt/credentials", "~/.sbt/.credentials", "~/.ivy2/.credentials", "~/.m2/settings.xml",
+        "~/.my.cnf", "~/.pki", "~/.oci", "~/.mongodb", "~/.config/rclone", "~/.config/pip",
+        "~/.claude/.credentials.json", "~/.claude.json", "~/.claude/projects", "~/.bash_history", "~/.zsh_history"
+      ]
+    },
+    "network": {
+      "allowedDomains": []
+    }
+  },
   "permissions": {
     "allow": [
       "Bash(sbt test)",
       "Bash(sbt compile)",
-      "Bash(sbt scalafmtCheckAll)",
-      "Bash(scripts/check-local.sh)",
       "Bash(python3 -I scripts/check-skills.py)",
       "Bash(python3 -I scripts/check-spec-verdicts.py)",
       "Bash(python3 -I -m unittest discover -s scripts/tests -p 'test_*.py')",
@@ -23,16 +97,29 @@
       "Bash(git show:*)",
       "Bash(git check-ignore:*)",
       "Bash(scripts/run-local-tests.sh status:*)",
-      "Bash(scripts/run-local-tests.sh test:*)",
-      "Bash(scripts/run-local-tests.sh analytics:*)",
-      "Bash(scripts/run-local-tests.sh interview)",
-      "Bash(scripts/run-local-tests.sh retention)",
-      "Bash(scripts/run-local-tests.sh recovery)",
       "Bash(scripts/run-local-tests.sh start)",
       "Bash(scripts/run-local-tests.sh --help)",
       "Bash(scripts/run-local-tests.sh -h)"
     ],
     "ask": [
+      "Bash(scripts/check-agent-hooks-live.sh)",
+      "Bash(git restore:*)",
+      "Bash(git switch:*)",
+      "Bash(git stash:*)",
+      "Bash(git merge:*)",
+      "Bash(git rebase:*)",
+      "Bash(git rm:*)",
+      "Bash(git mv:*)",
+      "Bash(git tag:*)",
+      "Bash(git branch:*)",
+      "Bash(git fetch:*)",
+      "Bash(git pull:*)",
+      "Bash(scripts/check-local.sh)",
+      "Bash(scripts/run-local-tests.sh test:*)",
+      "Bash(scripts/run-local-tests.sh analytics:*)",
+      "Bash(scripts/run-local-tests.sh interview)",
+      "Bash(scripts/run-local-tests.sh retention)",
+      "Bash(scripts/run-local-tests.sh recovery)",
       "Bash(git commit:*)",
       "Bash(git push:*)",
       "Bash(git add:*)",
@@ -96,9 +183,27 @@
             "command": "\"$CLAUDE_PROJECT_DIR\"/scripts/check-done.sh --subagent || exit 2"
           }
         ]
+      },
+      {
+        "matcher": "code-reviewer|security-engineer|qa-engineer",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -I \"$CLAUDE_PROJECT_DIR\"/scripts/record-review-run.py"
+          }
+        ]
       }
     ],
     "PostToolUse": [
+      {
+        "matcher": "SubagentHandback",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -I \"$CLAUDE_PROJECT_DIR\"/scripts/record-review-run.py"
+          }
+        ]
+      },
       {
         "matcher": "Edit|Write",
         "hooks": [
@@ -115,7 +220,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 -I \"$CLAUDE_PROJECT_DIR\"/scripts/guard-harness.py || exit 2"
+            "command": "python3 -I \"$CLAUDE_PROJECT_DIR\"/scripts/guard-harness.py || exit 2",
+            "onFailure": "block"
           }
         ]
       },
@@ -124,7 +230,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 -I \"$CLAUDE_PROJECT_DIR\"/scripts/check-docs-current.py --hook"
+            "command": "python3 -I \"$CLAUDE_PROJECT_DIR\"/scripts/check-docs-current.py --hook || exit 2",
+            "onFailure": "block"
           }
         ]
       }

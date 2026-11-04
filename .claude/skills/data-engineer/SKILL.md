@@ -5,7 +5,7 @@ description: Design hiring-platform operational persistence, schema evolution, c
 
 # Data Engineer
 
-Read root `AGENTS.md`, current repositories, the relevant use case, and MongoDB modeling sections when working on the target store. Own OLTP correctness and query efficiency; Big Data Engineer owns distributed analytical pipelines.
+Read current repositories, the relevant use case, and MongoDB modeling sections when working on the target store. Own OLTP correctness and query efficiency; Big Data Engineer owns distributed analytical pipelines.
 
 - Name collections, indexes, migrations and tests by business capability, following the naming rule in `AGENTS.md` and the casing rules in the modeling standard.
 - Derive every collection/table and index from filters, authorization predicates, sort order, cardinality, and expected writes. Use `explain` evidence for performance changes, including documents/keys examined versus returned and index storage/write cost.
