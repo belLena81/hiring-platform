@@ -70,6 +70,7 @@
         "./.local/data/test-builds"
       ],
       "denyRead": [
+        "./.env.local", "./.env.development", "./.env.test", "./.env.production",
         "~/.sbt", "~/.ivy2", "~/.cache/coursier",
         "~/.ssh", "~/.aws", "~/.gnupg", "~/.kube", "~/.docker", "~/.config/gh", "~/.config/gcloud", "~/.azure", "~/.netrc",
         "~/.git-credentials", "~/.npmrc", "~/.pypirc", "~/.pgpass", "~/.sbt/credentials", "~/.sbt/.credentials", "~/.ivy2/.credentials", "~/.m2/settings.xml",

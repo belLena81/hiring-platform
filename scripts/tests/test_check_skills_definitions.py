@@ -128,6 +128,12 @@ class ProjectSettings(unittest.TestCase):
         for compose in ROOT.glob("compose*.yaml"):
             self.assertIn(f"./{compose.name}", denied)
 
+    def test_ARE_09_11_common_env_file_names_are_denied_by_name_because_the_sandbox_ignores_globs_on_linux(self):
+        denied = self.settings["sandbox"]["filesystem"]["denyRead"]
+        for name in ("local", "development", "test", "production"):
+            self.assertIn(f"./.env.{name}", denied)
+        self.assertNotIn("./.env.example", denied)
+
     def test_ARE_07_1_the_review_log_hook_is_wired_for_every_reviewer_and_never_blocks(self):
         hooks = self.settings["hooks"]
         recorder = "scripts/record-review-run.py"
