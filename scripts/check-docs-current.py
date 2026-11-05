@@ -160,9 +160,14 @@ def untracked():
 
 
 def is_sandbox_mount(path):
-    """Inside the Bash sandbox, protected paths such as .mcp.json appear as /dev/null character devices; they are not changes.
-    A path git quoted does not exist under that name, so it counts as a change and an unusual name is never hidden."""
-    return os.path.lexists(path) and stat.S_ISCHR(os.lstat(path).st_mode)
+    """The Bash sandbox holds a denied path that does not exist as a /dev/null character device inside the sandbox and, while a
+    sandboxed command runs, as an empty read-only file on disk, which a hook outside the sandbox can see. Neither is a change. A real
+    empty read-only file is skipped too, which hides nothing. A path git quoted does not exist under that name, so it counts."""
+    if not os.path.lexists(path):
+        return False
+    status = os.lstat(path)
+    empty_read_only = stat.S_ISREG(status.st_mode) and status.st_size == 0 and not status.st_mode & 0o222
+    return stat.S_ISCHR(status.st_mode) or empty_read_only
 
 
 def commit_includes_unstaged(commit_line):

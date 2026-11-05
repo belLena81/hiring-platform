@@ -238,6 +238,19 @@ class SandboxMounts(unittest.TestCase):
         self.assertFalse(gate.is_sandbox_mount(Path(__file__)))
         self.assertFalse(gate.is_sandbox_mount(Path("/nonexistent/quoted-name")))
 
+    def test_D7c_an_empty_read_only_placeholder_is_a_sandbox_mount_and_a_writable_or_filled_file_is_not(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            placeholder = Path(folder) / "placeholder"
+            placeholder.touch()
+            self.assertFalse(gate.is_sandbox_mount(placeholder))
+            placeholder.chmod(0o444)
+            self.assertTrue(gate.is_sandbox_mount(placeholder))
+            filled = Path(folder) / "filled"
+            filled.write_text("x")
+            filled.chmod(0o444)
+            self.assertFalse(gate.is_sandbox_mount(filled))
+
 
 if __name__ == "__main__":
     unittest.main()

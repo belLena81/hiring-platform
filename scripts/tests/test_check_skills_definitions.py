@@ -170,6 +170,14 @@ class ProjectSettings(unittest.TestCase):
             self.assertIn(f"git {command} *", excluded)
         self.assertEqual(16, sum(1 for pattern in excluded if pattern.startswith("git ")))
 
+    def test_ARE_09_9_no_command_outside_the_sandbox_runs_without_a_prompt_and_skills_run_no_shell(self):
+        allow = " ".join(self.settings["permissions"]["allow"])
+        for pattern in self.settings["sandbox"]["excludedCommands"]:
+            self.assertNotIn(pattern.removesuffix(" *"), allow, pattern)
+        self.assertIs(True, self.settings["disableSkillShellExecution"])
+        for skill in (ROOT / ".claude/skills").glob("*/SKILL.md"):
+            self.assertNotRegex(skill.read_text(), r"(^|\s)!`|^```!", skill.parent.name)
+
     def test_ARE_09_6_every_excluded_command_except_the_wrapper_needs_approval(self):
         ask = self.settings["permissions"]["ask"]
         allow = self.settings["permissions"]["allow"]

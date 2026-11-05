@@ -3,6 +3,7 @@
   "model": "opusplan",
   "effortLevel": "medium",
   "autoMemoryEnabled": false,
+  "disableSkillShellExecution": true,
   "env": {
     "SBT_OPTS": "-Dsbt.server.forcestart=true -Dsbt.global.base=.sbt-home/global -Dsbt.boot.directory=.sbt-home/boot -Dsbt.ivy.home=.sbt-home/ivy2 -Dsbt.coursier.home=.sbt-home/coursier-home"
   },
@@ -96,13 +97,13 @@
       "Bash(git diff:*)",
       "Bash(git log:*)",
       "Bash(git show:*)",
-      "Bash(git check-ignore:*)",
+      "Bash(git check-ignore:*)"
+    ],
+    "ask": [
       "Bash(scripts/run-local-tests.sh status:*)",
       "Bash(scripts/run-local-tests.sh start)",
       "Bash(scripts/run-local-tests.sh --help)",
-      "Bash(scripts/run-local-tests.sh -h)"
-    ],
-    "ask": [
+      "Bash(scripts/run-local-tests.sh -h)",
       "Bash(scripts/check-agent-hooks-live.sh)",
       "Bash(git restore:*)",
       "Bash(git switch:*)",
@@ -217,7 +218,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Bash|Edit|Write|NotebookEdit|MultiEdit",
+        "matcher": "Bash|Edit|Write|NotebookEdit|MultiEdit|Skill",
         "hooks": [
           {
             "type": "command",

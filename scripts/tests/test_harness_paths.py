@@ -155,11 +155,39 @@ class WorkflowFilesAreCoveredEverywhere(unittest.TestCase):
             self.assertEqual("deny", outcome and outcome[0], command)
 
     def test_ARE_09_7_a_legitimate_continuation_keeps_its_answer(self):
-        self.assertIsNone(guard.check_bash("git log \\\n  --oneline -5", harness_paths_root()))
+        root = harness_paths_root()
+        self.assertIsNone(guard.check_bash("git log \\\n  --oneline -5", root))
+        self.assertIsNone(guard.check_bash("grep -rn foo \\\n  src/main", root))
+        self.assertIsNone(guard.check_bash("rg foo \\\n  src/main", root))
+        self.assertIsNone(guard.check_bash("cd .. && ls \\\n  -l", root / "analytics"))
 
-    def test_ARE_09_7_a_backtick_form_stays_an_ask_as_a_recorded_limit(self):
-        outcome = guard.check_bash("echo `echo \\\\ #x; sudo id`", harness_paths_root())
+    def test_ARE_09_7_a_quoted_hash_before_a_continuation_over_asks_as_a_recorded_limit(self):
+        outcome = guard.check_bash("grep -rn '#x' \\\n  src/main", harness_paths_root())
         self.assertEqual("ask", outcome and outcome[0])
+
+    def test_ARE_09_7_the_second_reading_starts_from_the_call_s_own_directory(self):
+        outcome = guard.check_bash("cd docs #x;\\\ncp a ../../outside", harness_paths_root())
+        self.assertEqual("deny", outcome and outcome[0])
+
+    def test_ARE_09_7_recorded_limits_stay_an_ask(self):
+        for command in ("echo `echo \\\\ #x; sudo id`", "echo $'\\'\\\\ #''; sudo id", "(( 1 \\\\ # )); sudo id", "(( 1 # )); sudo id"):
+            outcome = guard.check_bash(command, harness_paths_root())
+            self.assertEqual("ask", outcome and outcome[0], command)
+
+    def test_ARE_09_8_only_a_role_skill_at_the_project_root_passes_without_a_prompt(self):
+        for skill in guard.os.listdir(harness_paths_root() / ".claude/skills"):
+            self.assertIsNone(guard.skill_problem(skill), skill)
+        self.assertIsNone(guard.skill_problem(" code-reviewer "))
+        for skill in ("probe", " probe", "x:probe", "a:b", "x/y:code-reviewer", "/code-reviewer", "two words", "aws-core:aws-iam",
+                      "simplify", "../code-reviewer", ""):
+            outcome = guard.skill_problem(skill)
+            self.assertEqual("ask", outcome and outcome[0], skill)
+
+    def test_ARE_09_8_the_guard_hook_sees_the_skill_tool(self):
+        settings = json.loads((harness_paths_root() / ".claude/settings.json").read_text())
+        matchers = [group["matcher"] for group in settings["hooks"]["PreToolUse"]
+                    if any("guard-harness.py" in handler["command"] for handler in group["hooks"])]
+        self.assertTrue(any("Skill" in matcher.split("|") for matcher in matchers))
 
     def test_split_segments_tells_an_escaped_hash_position_from_a_real_comment(self):
         self.assertEqual(["", "sudo id"], guard.split_segments("#a\nsudo id"))

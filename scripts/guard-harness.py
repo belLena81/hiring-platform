@@ -40,6 +40,7 @@ EXCLUDED_SCRIPT_TEXT = re.compile("|".join(re.escape(os.path.basename(script)) f
 # Runs past & on purpose: `git 2>&1 commit` is git commit. No word boundary before git: joining a continuation can attach a comment's
 # last word to it. Reading too far or too loosely only applies this rule to a harmless call.
 EXCLUDED_GIT_TEXT = re.compile(r"git\b[^;|\n]*\b(" + "|".join(sorted(SANDBOX_EXCLUDED_GIT)) + r")\b")
+COMMENT_BEFORE_CONTINUATION = re.compile(r"#[^\n]*\\\n")
 PLAIN_WORD_CHARACTER = re.compile(r"[\w ./:=@%+,~^-]")
 QUOTED_TEXT = re.compile(r"\\.|'[^']*'|\"(?:[^\"\\]|\\.)*\"", re.DOTALL)
 UNUSUAL_REDIRECT = re.compile(r">\||<>|\{\w+\}[<>]")
@@ -197,6 +198,9 @@ def hidden_redirect_problem(command):
     if ")#" in command:
         # Bash starts a comment here after a subshell but not after an escaped or $( ) close; telling them apart needs parsing.
         return "ask", "A # right after ) can hide later lines from the guard: human approval required."
+    if "((" in command:
+        # Inside arithmetic a # is not a comment, but split_segments would read one and hide what follows.
+        return "ask", "Arithmetic can hide later commands from the guard: human approval required."
     for segment in split_segments(command):
         bare = QUOTED_TEXT.sub("''", segment)
         if UNUSUAL_REDIRECT.search(bare) or any(re.search(r"[<>]", word) for word in words_before_trailing_redirects(bare)):
@@ -442,20 +446,23 @@ def check_bash(command, cwd):
         if SECRET_PATH.search(target):
             return "deny", "Secret/credential files must not be read through input redirection."
     result = worst(result, hidden_redirect_problem(command))
-    current = cwd
-    # Both readings of a line continuation, because bash does not continue a line inside a comment: `# x;\` then `sudo id` runs sudo.
-    for segment in split_segments(command) + (split_segments(as_sent) if as_sent != command else []):
-        try:
-            tokens = shlex.split(segment)
-        except ValueError:
-            result = worst(result, ("ask", "Command could not be parsed safely: human approval required."))
-            continue
-        for match in re.finditer(r"\d*>[>|&]?\s*([\"']?[^\s&|;<>\"']+)", segment):
-            result = worst(result, classify_write(match.group(1), current))
-        result = worst(result, check_segment(list(tokens), current))
-        current = next_cwd(tokens, current)
-        if result and result[0] == "deny":
-            return result
+    # Bash does not continue a line inside a comment, so `# x;\` then `sudo id` runs sudo. A # before a continuation on its line gets
+    # a second reading, even inside quotes, where it can over-ask; without a #, it would misjudge a legitimate multi-line command.
+    readings = [command, as_sent] if COMMENT_BEFORE_CONTINUATION.search(as_sent) else [command]
+    for reading in readings:
+        current = cwd
+        for segment in split_segments(reading):
+            try:
+                tokens = shlex.split(segment)
+            except ValueError:
+                result = worst(result, ("ask", "Command could not be parsed safely: human approval required."))
+                continue
+            for match in re.finditer(r"\d*>[>|&]?\s*([\"']?[^\s&|;<>\"']+)", segment):
+                result = worst(result, classify_write(match.group(1), current))
+            result = worst(result, check_segment(list(tokens), current))
+            current = next_cwd(tokens, current)
+            if result and result[0] == "deny":
+                return result
     return result
 
 
@@ -523,6 +530,19 @@ def check_file(tool_input, cwd):
     return None
 
 
+def skill_problem(skill):
+    """Ask before any skill that is not a role skill at the project root.
+
+    Sandboxed code can write a nested .claude/skills folder, because denyWrite cannot list paths that do not exist yet, and Claude
+    Code then offers that skill. Reviews kept finding names and folders that a search for nested skills missed, so this is an
+    allowlist. A plugin or built-in skill gets a prompt too, which costs little because they are rarely invoked by the model."""
+    name = skill.strip()
+    if re.fullmatch(r"[a-z0-9-]+", name) and (PROJECT / ".claude" / "skills" / name / "SKILL.md").is_file():
+        return None
+    return "ask", (f"{name or 'This skill'} is not a role skill at the project root. Code in the sandbox can plant a nested skill, "
+                   "so approve it only if you expected it.")
+
+
 def main():
     event = json.load(sys.stdin)
     cwd = Path(event.get("cwd") or PROJECT)
@@ -531,6 +551,8 @@ def main():
         outcome = check_bash(tool_input.get("command") or "", cwd)
     elif tool in {"Edit", "Write", "NotebookEdit", "MultiEdit"}:
         outcome = check_file(tool_input, cwd)
+    elif tool == "Skill":
+        outcome = skill_problem(tool_input.get("skill") or "")
     else:
         outcome = None
     if outcome:
