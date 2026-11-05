@@ -178,7 +178,8 @@ class WorkflowFilesAreCoveredEverywhere(unittest.TestCase):
         root = harness_paths_root()
         for command in ("scripts/run-local-tests.sh status", "scripts/run-local-tests.sh start", "scripts/run-local-tests.sh --help",
                         "scripts/run-local-tests.sh -h", "scripts/run-local-tests.sh  retention", "scripts/run-local-tests.sh 'test'",
-                        "scripts/run-local-tests.sh  'analytics'", "scripts/check-local.sh", "scripts/check-local.sh  ",
+                        "scripts/run-local-tests.sh  'analytics'", "scripts/run-local-tests.sh interview",
+                        "scripts/run-local-tests.sh recovery", "scripts/run-local-tests.sh stop", "scripts/check-local.sh", "scripts/check-local.sh  ",
                         "scripts/check-agent-hooks-live.sh"):
             outcome = guard.check_bash(command, root)
             self.assertEqual("ask", outcome and outcome[0], command)
@@ -197,7 +198,7 @@ class WorkflowFilesAreCoveredEverywhere(unittest.TestCase):
             self.assertIn(f"Bash({script}:*)", ask)
             self.assertEqual([f"Bash({script}:*)"], [rule for rule in ask if script in rule])
 
-    def test_ARE_09_10_monitor_is_denied_because_the_guard_does_not_see_it(self):
+    def test_ARE_09_10_monitor_is_denied(self):
         settings = json.loads((harness_paths_root() / ".claude/settings.json").read_text())
         self.assertIn("Monitor", settings["permissions"]["deny"])
 
