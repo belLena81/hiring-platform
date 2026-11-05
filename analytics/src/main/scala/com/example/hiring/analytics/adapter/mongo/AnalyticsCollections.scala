@@ -71,6 +71,7 @@ private[analytics] object AnalyticsCollections {
     val SubjectId = "subjectId"
     val Kind = "kind"
     val TransactionalId = "transactionalId"
+    val GenerationId = "generationId"
     val FencedAt = "fencedAt"
     val ProducerRegistry = "producerRegistry"
   }
@@ -85,6 +86,7 @@ private[analytics] object AnalyticsCollections {
 
   object MigrationIds {
     val AttributableProducerRegistrations = "012_attributable_producer_registrations"
+    val ProducerGenerationRegistrations = "036_producer_generation_registrations"
     val OutboxSubjectReferences = "003_event_outbox_subject_references"
   }
 }

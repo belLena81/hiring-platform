@@ -64,8 +64,9 @@ class InterviewWorkflowConfigSpec extends FunSuite {
       ("provider-timeout-seconds = 0", ConfigError.InvalidInterviewProviderTimeout),
       ("provider-timeout-seconds = 2147483647", ConfigError.InvalidInterviewProviderTimeout),
       ("provider-timeout-seconds = 30", ConfigError.InvalidInterviewClaimWindow),
-      ("claim-seconds = 3601", ConfigError.InvalidInterviewClaimSeconds),
-      ("claim-seconds = 10", ConfigError.InvalidInterviewClaimWindow),
+      ("claim-seconds = 906", ConfigError.InvalidInterviewClaimSeconds),
+      ("claim-seconds = 14", ConfigError.InvalidInterviewClaimSeconds),
+      ("claim-seconds = 15", ConfigError.InvalidInterviewClaimWindow),
       ("pre-commit-deadline-seconds = 0", ConfigError.InvalidInterviewPreCommitDeadline),
       ("pre-commit-deadline-seconds = 301", ConfigError.InvalidInterviewPreCommitDeadline),
       ("replay-retention-seconds = 604801", ConfigError.InvalidInterviewReplayRetention),
@@ -84,7 +85,7 @@ class InterviewWorkflowConfigSpec extends FunSuite {
     List(
       "max-attempts = 100",
       "retry-cap-seconds = 1",
-      "claim-seconds = 3600",
+      "claim-seconds = 905",
       "completed-dedup-retention-seconds = 31536000",
       "clock-skew-tolerance-millis = 0"
     ).foreach(setting => assert(configuration(s"kafka.interview.$setting").isRight, clues(setting)))
@@ -97,7 +98,7 @@ class InterviewWorkflowConfigSpec extends FunSuite {
     )
     // Cross-field rules run once the section decodes, and they accumulate with each other.
     assertEquals(
-      errorsOf("kafka.interview { claim-seconds = 10, retry-base-seconds = 31 }").toSet,
+      errorsOf("kafka.interview { claim-seconds = 15, retry-base-seconds = 31 }").toSet,
       Set[ConfigError](ConfigError.InvalidInterviewClaimWindow, ConfigError.InvalidInterviewRetryWindow)
     )
   }
@@ -121,7 +122,7 @@ class InterviewWorkflowConfigSpec extends FunSuite {
       interviewErrors(configured.copy(workerUsername = configured.orchestratorUsername)),
       List(ConfigError.InvalidInterviewPrincipals)
     )
-    assertEquals(interviewErrors(configured.copy(claimSeconds = 10)), List(ConfigError.InvalidInterviewClaimWindow))
+    assertEquals(interviewErrors(configured.copy(claimSeconds = 15)), List(ConfigError.InvalidInterviewClaimWindow))
     assertEquals(interviewErrors(configured.copy(fencerPassword = None)), List(ConfigError.InvalidKafkaCredentials))
     assertEquals(
       interviewErrors(configured.copy(fencerUsername = configured.workerUsername)),
@@ -145,7 +146,7 @@ class InterviewWorkflowConfigSpec extends FunSuite {
       List(ConfigError.InvalidInterviewClaimWindow)
     )
     assertEquals(
-      interviewErrors(configured.copy(orchestratorPassword = None, workerPassword = None, claimSeconds = 10)),
+      interviewErrors(configured.copy(orchestratorPassword = None, workerPassword = None, claimSeconds = 15)),
       List(
         ConfigError.InvalidKafkaCredentials,
         ConfigError.InvalidKafkaCredentials,

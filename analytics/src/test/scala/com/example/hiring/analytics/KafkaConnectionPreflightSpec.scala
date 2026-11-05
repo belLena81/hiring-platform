@@ -22,6 +22,13 @@ class KafkaConnectionPreflightSpec extends munit.CatsEffectSuite {
     assertEquals(calls, 0)
     check.attempt.map { result => assert(result.isLeft); assertEquals(calls, 1) }
   }
+  test("PLAIN is rejected without loopback plaintext while SCRAM stays valid") {
+    val plain = connection.copy(saslMechanism = KafkaSaslMechanism.Plain)
+    assert(KafkaConnection.validate(plain).isValid)
+    assert(KafkaConnection.validate(plain.copy(allowPlaintext = false)).isInvalid)
+    assert(KafkaConnection.validate(plain.copy(securityProtocol = KafkaSecurityProtocol.SaslSsl)).isInvalid)
+    assert(KafkaConnection.validate(connection.copy(securityProtocol = KafkaSecurityProtocol.SaslSsl)).isValid)
+  }
   test("Compose endpoint bypasses DNS while loopback requires successful resolution") {
     for {
       _ <- KafkaConnection

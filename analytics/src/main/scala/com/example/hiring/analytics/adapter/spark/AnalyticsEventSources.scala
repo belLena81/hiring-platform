@@ -46,6 +46,7 @@ private[analytics] final class KafkaOffsetRangeSource[F[_]: Async](
           .option("startingOffsets", KafkaOffsetRangeSource.offsetJson(manifest.offsetRanges, _.startOffset))
           .option("endingOffsets", KafkaOffsetRangeSource.offsetJson(manifest.offsetRanges, _.endOffsetExclusive))
           .option("failOnDataLoss", "true")
+          .option("includeHeaders", "true")
           .load()
       }.translating(AnalyticsError.SourceReadFailure(_))
     } yield frame

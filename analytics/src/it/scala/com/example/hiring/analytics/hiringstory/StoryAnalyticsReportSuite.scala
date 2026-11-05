@@ -7,7 +7,6 @@ import com.example.hiring.analytics.adapter.spark.SparkRuntime
 import com.example.hiring.analytics.app.AppModule
 import com.example.hiring.analytics.config.{AnalyticsBatchSettings, AnalyticsConfigFixtures}
 import com.example.hiring.analytics.service.batch.AnalyticsPublication
-import com.example.hiring.testing.LocalTestServices
 import com.mongodb.client.MongoClients
 import io.circe.parser.parse
 import munit.CatsEffectSuite
@@ -86,12 +85,9 @@ abstract class StoryAnalyticsReportSuite(eventsFile: String, reportFile: String,
       properties.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, classOf[StringSerializer].getName)
       properties.put(ProducerConfig.TRANSACTIONAL_ID_CONFIG, "hiring-publisher-story-" + UUID.randomUUID())
       properties.put(ProducerConfig.ACKS_CONFIG, "all")
-      properties.put("security.protocol", "SASL_PLAINTEXT")
-      properties.put("sasl.mechanism", "PLAIN")
-      properties.put(
-        "sasl.jaas.config",
-        LocalTestServices.jaasConfig("hiring_publisher_v2", manifest.publisherPassword)
-      )
+      com.example.hiring.testing.LocalTestServices
+        .saslSettings("hiring_publisher_v2", manifest.publisherPassword)
+        .foreach { case (key, setting) => properties.put(key, setting) }
       val producer = new KafkaProducer[String, String](properties)
       try {
         producer.initTransactions()

@@ -162,7 +162,13 @@ final class MongoOperationalCollectionValidatorsIntegrationSpec extends MongoInt
         _ <- insert(fixture.database, MongoCollections.EventOutbox, inserted)
         fresh <- find(fixture.database, MongoCollections.EventOutbox, value.eventId.toString)
         claimed <- outbox
-          .claim("validator-test", s"hiring-publisher-${UUID.randomUUID()}", now.plusSeconds(1), 30.seconds, 1)
+          .claim(
+            "validator-test",
+            ProducerGenerationFixtures.of(s"hiring-publisher-${UUID.randomUUID()}"),
+            now.plusSeconds(1),
+            30.seconds,
+            1
+          )
           .value
           .flatMap(result)
         leased <- find(fixture.database, MongoCollections.EventOutbox, value.eventId.toString)

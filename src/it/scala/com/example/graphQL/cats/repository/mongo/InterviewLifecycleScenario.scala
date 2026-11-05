@@ -295,8 +295,8 @@ private[mongo] final case class InterviewLifecycleScenario(
       clock
     )
 
-  private val commandGeneration = InterviewPublisherGeneration(InterviewPublisherRole.Orchestrator, UUID.randomUUID())
-  private val resultGeneration = InterviewPublisherGeneration(InterviewPublisherRole.Worker, UUID.randomUUID())
+  private val commandGeneration = ProducerGenerationFixtures.interview(InterviewPublisherRole.Orchestrator)
+  private val resultGeneration = ProducerGenerationFixtures.interview(InterviewPublisherRole.Worker)
 
   private def transport: InterviewTransport[IO] = new InterviewTransport[IO] {
     override def generationFor(message: InterviewMessage): InterviewPublisherGeneration =

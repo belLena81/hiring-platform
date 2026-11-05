@@ -2,7 +2,7 @@ package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.{Deferred, IO, Resource}
 import cats.syntax.all.*
-import com.example.graphQL.cats.config.KafkaSaslSecurityProtocol
+import com.example.graphQL.cats.config.{KafkaSaslMechanism, KafkaSaslSecurityProtocol}
 import com.example.graphQL.cats.domain.model.ApplicationStatus
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, UserId}
 import com.example.graphQL.cats.domain.workflow.*
@@ -62,6 +62,7 @@ final class InterviewPublicationFencingIntegrationSpec extends KafkaIntegrationS
       "interview_fencer",
       values("KAFKA_INTERVIEW_FENCER_PASSWORD"),
       KafkaSaslSecurityProtocol.Plaintext,
+      KafkaSaslMechanism.ScramSha512,
       Diagnostics.noop[IO]
     )
   }
@@ -77,10 +78,10 @@ final class InterviewPublicationFencingIntegrationSpec extends KafkaIntegrationS
     val values = new Properties()
     val _ = values.setProperty("bootstrap.servers", broker.bootstrap)
     val _ = values.setProperty("security.protocol", "SASL_PLAINTEXT")
-    val _ = values.setProperty("sasl.mechanism", "PLAIN")
+    val _ = values.setProperty("sasl.mechanism", "SCRAM-SHA-512")
     val _ = values.setProperty(
       "sasl.jaas.config",
-      s"org.apache.kafka.common.security.plain.PlainLoginModule required username=\"$username\" password=\"$password\";"
+      s"org.apache.kafka.common.security.scram.ScramLoginModule required username=\"$username\" password=\"$password\";"
     )
     val _ = values.setProperty("request.timeout.ms", "10000")
     val _ = values.setProperty("default.api.timeout.ms", "15000")
@@ -111,6 +112,8 @@ final class InterviewPublicationFencingIntegrationSpec extends KafkaIntegrationS
     producer(broker, broker.username(worker), broker.password(worker), generation.transactionalId)
       .evalTap(value => IO.blocking(value.initTransactions()))
   }
+
+  private def workerId(value: String): ProducerWorkerId = ProducerWorkerId.parse(value).toOption.get
 
   private def causes(error: Throwable): List[Throwable] =
     error :: Option(error.getCause).filterNot(_ eq error).toList.flatMap(causes)
@@ -204,8 +207,8 @@ final class InterviewPublicationFencingIntegrationSpec extends KafkaIntegrationS
       _ <- success(users.deleteAccount(subject, now, "deleted-account", MutationWriteContext.directWrite))
       request <- success(cleanup.find(subject))
       _ <- IO.fromOption(request)(new AssertionError("account deletion did not enqueue cleanup"))
-      ids <- success(cleanup.producerBatch(subject))
-    } yield ids
+      generations <- success(cleanup.producerBatch(subject))
+    } yield generations.map(_.transactionalId).distinct
   }
 
   test("account deletion fences an authorized paused sender; a fresh generation works only for an unaffected subject") {
@@ -214,8 +217,9 @@ final class InterviewPublicationFencingIntegrationSpec extends KafkaIntegrationS
         mongoResource.use { fixture =>
           val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop[IO])
           (
-            InterviewKafkaRuntime.publisherResource(kafka.config(worker)),
-            InterviewKafkaRuntime.publisherResource(kafka.config(worker)),
+            // Concurrent generations need distinct worker ids: one transactional id has one live producer.
+            InterviewKafkaRuntime.publisherResource(kafka.config(worker).copy(workerId = workerId("interview-a"))),
+            InterviewKafkaRuntime.publisherResource(kafka.config(worker).copy(workerId = workerId("interview-b"))),
             kafka.fencer
           ).tupled.use { case (transport, peer, fencer) =>
             for {
@@ -266,25 +270,27 @@ final class InterviewPublicationFencingIntegrationSpec extends KafkaIntegrationS
                   } yield (outcome, currentClaim)
                 }
               _ = assert(result._1.forall(_.left.exists(_.isInstanceOf[InterviewProducerGenerationFenced])))
-              _ <- InterviewKafkaRuntime.publisherResource(kafka.config(worker)).use { replacement =>
-                for {
-                  at <- IO.realTimeInstant
-                  refused <- repository
-                    .authorizePublication(result._2, replacement.generationFor(item.message), at)
-                    .value
-                  _ = assert(
-                    refused.fold(_ => true, allowed => !allowed),
-                    "new generation must reauthorize deleted subject"
-                  )
-                  unrelated <- scheduled(fixture.database, repository, result = worker)
-                  permitted <- success(
-                    repository.authorizePublication(unrelated.claim, replacement.generationFor(unrelated.message), at)
-                  )
-                  _ = assert(permitted)
-                  _ <- replacement.publish(unrelated.message)
-                  _ <- success(repository.markPublished(unrelated.claim, at))
-                } yield ()
-              }
+              _ <- InterviewKafkaRuntime
+                .publisherResource(kafka.config(worker).copy(workerId = workerId("interview-a")))
+                .use { replacement =>
+                  for {
+                    at <- IO.realTimeInstant
+                    refused <- repository
+                      .authorizePublication(result._2, replacement.generationFor(item.message), at)
+                      .value
+                    _ = assert(
+                      refused.fold(_ => true, allowed => !allowed),
+                      "new generation must reauthorize deleted subject"
+                    )
+                    unrelated <- scheduled(fixture.database, repository, result = worker)
+                    permitted <- success(
+                      repository.authorizePublication(unrelated.claim, replacement.generationFor(unrelated.message), at)
+                    )
+                    _ = assert(permitted)
+                    _ <- replacement.publish(unrelated.message)
+                    _ <- success(repository.markPublished(unrelated.claim, at))
+                  } yield ()
+                }
             } yield ()
           }
         }
@@ -327,7 +333,11 @@ final class InterviewPublicationFencingIntegrationSpec extends KafkaIntegrationS
     broker.flatMap { kafka =>
       mongoResource.use { fixture =>
         val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop[IO])
-        val generation = InterviewPublisherGeneration(InterviewPublisherRole.Orchestrator, UUID.randomUUID())
+        val generation = InterviewPublisherGeneration(
+          InterviewPublisherRole.Orchestrator,
+          workerId("fenced-sender"),
+          ProducerGenerationId(UUID.randomUUID())
+        )
         (initializedProducer(kafka, generation), kafka.fencer).tupled.use { case (sender, fencer) =>
           for {
             _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO], interviewTopics)
@@ -402,14 +412,18 @@ final class InterviewPublicationFencingIntegrationSpec extends KafkaIntegrationS
     broker.flatMap { kafka =>
       val wrongPrefixes = List(false, true).traverse_ { worker =>
         val wrongRole = if (worker) InterviewPublisherRole.Orchestrator else InterviewPublisherRole.Worker
-        val generation = InterviewPublisherGeneration(wrongRole, UUID.randomUUID())
+        val generation =
+          InterviewPublisherGeneration(wrongRole, workerId("wrong-prefix"), ProducerGenerationId(UUID.randomUUID()))
         producer(kafka, kafka.username(worker), kafka.password(worker), generation.transactionalId).use { value =>
           IO.blocking(value.initTransactions()).attempt.map(result => assert(result.left.exists(denied)))
         }
       }
       val wrongTopics = List(false, true).traverse_ { worker =>
         val role = if (worker) InterviewPublisherRole.Worker else InterviewPublisherRole.Orchestrator
-        initializedProducer(kafka, InterviewPublisherGeneration(role, UUID.randomUUID())).use { value =>
+        initializedProducer(
+          kafka,
+          InterviewPublisherGeneration(role, workerId("wrong-topic"), ProducerGenerationId(UUID.randomUUID()))
+        ).use { value =>
           val topic = if (worker) interviewTopics.commands else interviewTopics.results
           IO.blocking {
             value.beginTransaction()

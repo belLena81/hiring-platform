@@ -162,9 +162,32 @@ object LocalTestServices {
       } yield ()
     }
 
-  /** PLAIN login module text; literals escape backslash, quote and control characters like the production builders. */
-  def jaasConfig(username: String, password: String): String =
-    s"org.apache.kafka.common.security.plain.PlainLoginModule required username=${jaasLiteral(username)} password=${jaasLiteral(password)};"
+  /** SASL mechanism of a test client; SCRAM-SHA-512 is what the isolated broker's client listeners accept. */
+  enum TestSaslMechanism(val kafkaValue: String, val loginModule: String) {
+    case ScramSha512
+        extends TestSaslMechanism("SCRAM-SHA-512", "org.apache.kafka.common.security.scram.ScramLoginModule")
+    case Plain extends TestSaslMechanism("PLAIN", "org.apache.kafka.common.security.plain.PlainLoginModule")
+  }
+
+  /** Login module text; literals escape backslash, quote and control characters like the production builders. */
+  def jaasConfig(
+      username: String,
+      password: String,
+      mechanism: TestSaslMechanism = TestSaslMechanism.ScramSha512
+  ): String =
+    s"${mechanism.loginModule} required username=${jaasLiteral(username)} password=${jaasLiteral(password)};"
+
+  /** `security.protocol`, `sasl.mechanism` and `sasl.jaas.config` for a client of the isolated broker. */
+  def saslSettings(
+      username: String,
+      password: String,
+      mechanism: TestSaslMechanism = TestSaslMechanism.ScramSha512
+  ): Map[String, String] =
+    Map(
+      "security.protocol" -> "SASL_PLAINTEXT",
+      "sasl.mechanism" -> mechanism.kafkaValue,
+      "sasl.jaas.config" -> jaasConfig(username, password, mechanism)
+    )
 
   private def jaasLiteral(value: String): String =
     value
@@ -180,12 +203,15 @@ object LocalTestServices {
       }
       .mkString("\"", "", "\"")
 
-  def adminProperties(value: Manifest, username: String, password: String): Properties = {
+  def adminProperties(
+      value: Manifest,
+      username: String,
+      password: String,
+      mechanism: TestSaslMechanism = TestSaslMechanism.ScramSha512
+  ): Properties = {
     val properties = new Properties()
     properties.put("bootstrap.servers", value.kafkaBootstrap)
-    properties.put("security.protocol", "SASL_PLAINTEXT")
-    properties.put("sasl.mechanism", "PLAIN")
-    properties.put("sasl.jaas.config", jaasConfig(username, password))
+    saslSettings(username, password, mechanism).foreach { case (key, setting) => properties.put(key, setting) }
     properties.put("default.api.timeout.ms", "10000")
     properties.put("request.timeout.ms", "10000")
     properties

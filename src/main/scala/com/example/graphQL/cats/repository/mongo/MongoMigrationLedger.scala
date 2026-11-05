@@ -52,6 +52,7 @@ private[mongo] object MigrationIds {
   val ApplicationEventActorRole = MigrationId("033_application_event_actor_role")
   val InterviewWorkflowInitiatorRole = MigrationId("034_interview_workflow_initiator_role")
   val EventOutboxAggregateOrder = MigrationId("035_event_outbox_aggregate_order")
+  val ProducerGenerationRegistrations = MigrationId("036_producer_generation_registrations")
 }
 
 /** Typed setup failures. They remain Throwables so the setup lifecycle boundary keeps one failure channel, while

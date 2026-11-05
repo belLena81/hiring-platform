@@ -24,9 +24,9 @@ object OperationalEventTopic {
     properties.put("group.id", s"hiring-story-acceptance-${UUID.randomUUID()}")
     properties.put("key.deserializer", classOf[StringDeserializer].getName)
     properties.put("value.deserializer", classOf[ByteArrayDeserializer].getName)
-    properties.put("security.protocol", "SASL_PLAINTEXT")
-    properties.put("sasl.mechanism", "PLAIN")
-    properties.put("sasl.jaas.config", LocalTestServices.jaasConfig(reader, manifest.readerPassword))
+    LocalTestServices.saslSettings(reader, manifest.readerPassword).foreach { case (key, value) =>
+      properties.put(key, value)
+    }
     properties.put("isolation.level", "read_committed")
     properties.put("enable.auto.commit", "false")
     val consumer = new KafkaConsumer[String, Array[Byte]](properties)

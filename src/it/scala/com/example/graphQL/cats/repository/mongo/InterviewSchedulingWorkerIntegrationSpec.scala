@@ -198,7 +198,8 @@ final class InterviewSchedulingWorkerIntegrationSpec extends KafkaIntegrationSui
           false,
           topics = interviewTopics,
           workerGroup = kafkaNamespace.workers,
-          orchestratorGroup = kafkaNamespace.orchestrator
+          orchestratorGroup = kafkaNamespace.orchestrator,
+          workerId = producerWorkerId("interview-a")
         ),
         Diagnostics.noop[IO]
       ) {
@@ -215,7 +216,8 @@ final class InterviewSchedulingWorkerIntegrationSpec extends KafkaIntegrationSui
           true,
           topics = interviewTopics,
           workerGroup = kafkaNamespace.workers,
-          orchestratorGroup = kafkaNamespace.orchestrator
+          orchestratorGroup = kafkaNamespace.orchestrator,
+          workerId = producerWorkerId("interview-a")
         ),
         Diagnostics.noop[IO]
       ) {
@@ -232,7 +234,8 @@ final class InterviewSchedulingWorkerIntegrationSpec extends KafkaIntegrationSui
           true,
           topics = interviewTopics,
           workerGroup = kafkaNamespace.workers,
-          orchestratorGroup = kafkaNamespace.orchestrator
+          orchestratorGroup = kafkaNamespace.orchestrator,
+          workerId = producerWorkerId("interview-b")
         ),
         Diagnostics.noop[IO]
       ) {
@@ -252,6 +255,10 @@ final class InterviewSchedulingWorkerIntegrationSpec extends KafkaIntegrationSui
       _ <- second.publisher(routing)
     } yield ()
   }
+
+  // One transactional id has one live producer: the two worker resources need distinct worker ids. The orchestrator
+  // and the first worker share an id because their role prefixes differ.
+  private def producerWorkerId(value: String): ProducerWorkerId = ProducerWorkerId.parse(value).toOption.get
 
   test("32 interviews survive two worker resources and actual consumer publisher restart") {
     configuration.flatMap { env =>

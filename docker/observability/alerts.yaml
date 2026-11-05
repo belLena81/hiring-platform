@@ -49,3 +49,43 @@ groups:
           severity: ticket
         annotations:
           summary: API p95 latency above 300 ms for 2 minutes (provisional threshold; evaluated only at 0.1 non-probe req/s or more).
+  # Kafka client rules. Names follow the observed conversion (dots to underscores, counters get _total; the
+  # "{record}"-style annotation units add no suffix, as for hiring_backlog_pending). Every threshold below is a
+  # STARTING VALUE, not an SLO: no measured Kafka workload exists yet. Send ratios are evaluated only when sends occur.
+  - name: hiring-kafka
+    rules:
+      - alert: HiringKafkaConsumerLagHigh
+        expr: min_over_time(hiring_kafka_consumer_lag[10m]) > 1000
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: Consumer group {{ $labels.hiring_consumer_group }} lags more than 1000 records on {{ $labels.messaging_destination_name }} partition {{ $labels.messaging_kafka_partition }} for 10 minutes (starting threshold).
+      - alert: HiringKafkaPublisherSendFailureRatioHigh
+        expr: |
+          (
+            sum(rate(hiring_kafka_producer_send_failures_total[5m]))
+              / sum(rate(hiring_kafka_producer_send_duration_seconds_count[5m]))
+          > 0.1
+          )
+          and
+          sum(rate(hiring_kafka_producer_send_duration_seconds_count[5m])) > 0
+        for: 5m
+        labels:
+          severity: ticket
+        annotations:
+          summary: More than 10% of Kafka producer sends failed over 5 minutes (starting threshold).
+      - alert: HiringKafkaProducerFenced
+        expr: sum(increase(hiring_kafka_producer_send_failures_total{error_type=~"ProducerFencedException|InvalidProducerEpochException"}[15m])) >= 3
+        for: 15m
+        labels:
+          severity: ticket
+        annotations:
+          summary: Repeated fenced or invalid-epoch send failures within 15 minutes; a single fence after erasure or retirement is expected. Sustained repeats suggest two publishers sharing one worker id. Thresholds are starting values.
+      - alert: HiringKafkaRebalanceRateHigh
+        expr: sum by (hiring_consumer_group) (rate(hiring_kafka_consumer_rebalances_total[10m])) * 60 > 5
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: Consumer group {{ $labels.hiring_consumer_group }} moves more than 5 partitions per minute (assigned plus revoked) for 10 minutes; members are flapping (starting threshold).

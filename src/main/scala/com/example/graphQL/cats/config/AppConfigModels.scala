@@ -2,6 +2,7 @@ package com.example.graphQL.cats.config
 
 import com.comcast.ip4s.{Cidr, IpAddress}
 import com.example.graphQL.cats.domain.search.SearchFusionStrategy
+import com.example.graphQL.cats.service.port.ProducerWorkerId
 import io.github.iltotore.iron.*
 import io.github.iltotore.iron.pureconfig.given
 import io.github.iltotore.iron.constraint.any.{In, Not, StrictEqual}
@@ -150,6 +151,7 @@ enum ConfigError(val key: String, val paths: Set[String] = Set.empty) {
   case InvalidKafkaConsumerGroup extends ConfigError("KAFKA_CONSUMER_GROUP", Set("kafka.consumer-group"))
   case InvalidKafkaSaslSecurityProtocol
       extends ConfigError("KAFKA_SASL_SECURITY_PROTOCOL", Set("kafka.sasl-security-protocol"))
+  case InvalidKafkaSaslMechanism extends ConfigError("KAFKA_SASL_MECHANISM", Set("kafka.sasl-mechanism"))
   case InvalidKafkaRestartMaxDelay
       extends ConfigError("HIRING_KAFKA_RESTART_MAX_DELAY_SECONDS", Set("kafka.restart-max-delay-seconds"))
   case InvalidKafkaWorkerId extends ConfigError("KAFKA_WORKER_ID", Set("kafka.publisher.worker-id"))
@@ -165,6 +167,15 @@ enum ConfigError(val key: String, val paths: Set[String] = Set.empty) {
       extends ConfigError("KAFKA_QUARANTINE_TTL_DAYS", Set("kafka.consumer.quarantine-ttl-days"))
   case InvalidKafkaPartitionConcurrency
       extends ConfigError("KAFKA_PARTITION_CONCURRENCY", Set("kafka.consumer.partition-concurrency"))
+  case InvalidKafkaMaxPollRecords
+      extends ConfigError("KAFKA_CONSUMER_MAX_POLL_RECORDS", Set("kafka.consumer.max-poll-records"))
+  case InvalidKafkaMaxPollInterval
+      extends ConfigError("KAFKA_CONSUMER_MAX_POLL_INTERVAL_SECONDS", Set("kafka.consumer.max-poll-interval-seconds"))
+  case InvalidKafkaCommitBatchSize
+      extends ConfigError("KAFKA_CONSUMER_COMMIT_BATCH_SIZE", Set("kafka.consumer.commit-batch-size"))
+  case InvalidKafkaCommitBatchInterval
+      extends ConfigError("KAFKA_CONSUMER_COMMIT_BATCH_INTERVAL_MS", Set("kafka.consumer.commit-batch-interval-millis"))
+  case InvalidKafkaCommitBatchWindow extends ConfigError("KAFKA_CONSUMER_COMMIT_BATCH_WINDOW")
   case InvalidKafkaCredentials
       extends ConfigError(
         "KAFKA_CREDENTIALS",
@@ -208,6 +219,16 @@ enum ConfigError(val key: String, val paths: Set[String] = Set.empty) {
       extends ConfigError("INTERVIEW_PUBLICATION_POLL_INTERVAL_MS", Set("kafka.interview.publication-poll-interval-ms"))
   case InvalidInterviewClockSkewTolerance
       extends ConfigError("INTERVIEW_CLOCK_SKEW_TOLERANCE_MILLIS", Set("kafka.interview.clock-skew-tolerance-millis"))
+  case InvalidInterviewWorkerId extends ConfigError("INTERVIEW_WORKER_ID", Set("kafka.interview.worker-id"))
+  case InvalidInterviewMaxPollRecords
+      extends ConfigError("INTERVIEW_MAX_POLL_RECORDS", Set("kafka.interview.max-poll-records"))
+  case InvalidInterviewMaxPollInterval
+      extends ConfigError("INTERVIEW_MAX_POLL_INTERVAL_SECONDS", Set("kafka.interview.max-poll-interval-seconds"))
+  case InvalidInterviewCommitBatchSize
+      extends ConfigError("INTERVIEW_COMMIT_BATCH_SIZE", Set("kafka.interview.commit-batch-size"))
+  case InvalidInterviewCommitBatchInterval
+      extends ConfigError("INTERVIEW_COMMIT_BATCH_INTERVAL_MS", Set("kafka.interview.commit-batch-interval-millis"))
+  case InvalidInterviewCommitBatchWindow extends ConfigError("INTERVIEW_COMMIT_BATCH_WINDOW")
   case InvalidInterviewPartitionConcurrency
       extends ConfigError("INTERVIEW_PARTITION_CONCURRENCY", Set("kafka.interview.partition-concurrency"))
   case InvalidInterviewCommandsTopic
@@ -244,6 +265,13 @@ object ConfigError {
 enum KafkaSaslSecurityProtocol(val kafkaValue: String) {
   case Tls extends KafkaSaslSecurityProtocol("SASL_SSL")
   case Plaintext extends KafkaSaslSecurityProtocol("SASL_PLAINTEXT")
+}
+
+/** SCRAM keeps the secret off the wire; PLAIN is accepted only where the plaintext/loopback rule already holds. */
+enum KafkaSaslMechanism(val kafkaValue: String, val loginModule: String) {
+  case ScramSha512
+      extends KafkaSaslMechanism("SCRAM-SHA-512", "org.apache.kafka.common.security.scram.ScramLoginModule")
+  case Plain extends KafkaSaslMechanism("PLAIN", "org.apache.kafka.common.security.plain.PlainLoginModule")
 }
 
 /** Embedding provider settings; `apiKey` exists only when vector search is enabled, so a missing key is
@@ -368,7 +396,7 @@ final case class GraphQLConfig(
 )
 final case class TrustedProxyConfig(cidrs: List[Cidr[IpAddress]])
 final case class KafkaPublisherConfig(
-    workerId: String,
+    workerId: ProducerWorkerId,
     batchSize: Int,
     leaseSeconds: Int,
     retryDelaySeconds: Int,
@@ -385,12 +413,20 @@ final case class KafkaConsumerConfig(
     quarantineTtlDays: Int,
     saslUsername: Option[String] = None,
     saslPassword: Option[String] = None,
-    partitionConcurrency: Int = KafkaConsumerConfig.DefaultPartitionConcurrency
+    partitionConcurrency: Int = KafkaConsumerConfig.DefaultPartitionConcurrency,
+    maxPollRecords: Int = KafkaConsumerConfig.DefaultMaxPollRecords,
+    maxPollIntervalSeconds: Int = KafkaConsumerConfig.DefaultMaxPollIntervalSeconds,
+    commitBatchSize: Int = KafkaConsumerConfig.DefaultCommitBatchSize,
+    commitBatchIntervalMillis: Int = KafkaConsumerConfig.DefaultCommitBatchIntervalMillis
 ) {
   override def toString: String = s"KafkaConsumerConfig($enabled, $partitionConcurrency, [REDACTED])"
 }
 object KafkaConsumerConfig {
   inline val DefaultPartitionConcurrency = 4
+  inline val DefaultMaxPollRecords = 100
+  inline val DefaultMaxPollIntervalSeconds = 300
+  inline val DefaultCommitBatchSize = 100
+  inline val DefaultCommitBatchIntervalMillis = 5000
 }
 final case class KafkaConfig(
     enabled: Boolean,
@@ -401,7 +437,8 @@ final case class KafkaConfig(
     consumer: KafkaConsumerConfig,
     saslSecurityProtocol: KafkaSaslSecurityProtocol = KafkaSaslSecurityProtocol.Tls,
     interview: InterviewRuntimeConfig = InterviewRuntimeConfig(),
-    restartMaxDelaySeconds: Int = KafkaConfig.DefaultRestartMaxDelaySeconds
+    restartMaxDelaySeconds: Int = KafkaConfig.DefaultRestartMaxDelaySeconds,
+    saslMechanism: KafkaSaslMechanism = KafkaSaslMechanism.ScramSha512
 )
 object KafkaConfig {
   inline val DefaultRestartMaxDelaySeconds = 30
@@ -435,13 +472,27 @@ type KafkaBootstrapServers = String :| (Not[Blank] & MaxLength[512])
 type KafkaTopic = String :| (Not[Blank] & MaxLength[249])
 type KafkaConsumerGroup = String :| (Not[Blank] & MaxLength[249])
 type KafkaBatchSize = Int :| Interval.Closed[1, 500]
-type KafkaLeaseSeconds = Int :| Interval.Closed[1, 3600]
+
+/** 15 to 905 s. At least 15 s: the producer transaction timeout is the lease less a 5 s margin and never below 10 s, so
+  * a shorter lease could not hold a publication wave's sends plus commit. At most 905 s: the transaction timeout would
+  * otherwise exceed the broker default `transaction.max.timeout.ms` (900000 ms) and `initTransactions` would fail.
+  */
+type KafkaLeaseSeconds = Int :| Interval.Closed[15, 905]
 type KafkaRetryDelaySeconds = Int :| Interval.Closed[1, 3600]
 type KafkaMaxAttempts = Int :| Interval.Closed[1, 100]
 type KafkaPollIntervalMs = Int :| Interval.Closed[100, 60000]
 type KafkaRetentionDays = Int :| Interval.Closed[1, 365]
 type HttpsUrl = String :| StartWith["https://"]
 type RerankModel = String :| In[("rerank-2.5", "rerank-2.5-lite", "rerank-2", "rerank-2-lite")]
+
+/** Bounds `max.poll.records` and the commit batch size. */
+type KafkaPollCount = Int :| Interval.Closed[1, 10000]
+
+/** Bounds `max.poll.interval.ms` so seconds times 1000 cannot overflow Int. */
+type KafkaPollIntervalSeconds = Int :| Interval.Closed[1, 3600]
+
+/** Positive; the relation to the poll interval is checked by `KafkaConfigValidation`. */
+type KafkaCommitIntervalMillis = Int :| GreaterEqual[1]
 type KafkaRestartMaxDelaySeconds = Int :| Interval.Closed[1, 300]
 type PartitionConcurrency = Int :| Interval.Closed[1, 64]
 type DiscoveryMaxTimeMs = Int :| Interval.Closed[100, 60000]
@@ -478,7 +529,8 @@ type EmbeddingWorkerRestartDelayMs = Int :| Interval.Closed[100, 60000]
 type InterviewMaxAttempts = Int :| Interval.Closed[1, 100]
 type InterviewRetrySeconds = Int :| Interval.Closed[1, 300]
 type InterviewProviderTimeoutSeconds = Int :| Interval.Closed[1, 3600]
-type InterviewClaimSeconds = Int :| Interval.Closed[1, 3600]
+// Upper bound 905: the producer transaction timeout derived from the claim must not exceed the broker maximum (900000 ms).
+type InterviewClaimSeconds = Int :| Interval.Closed[15, 905]
 type InterviewPreCommitDeadlineSeconds = Int :| Interval.Closed[1, 300]
 type InterviewReplayRetentionSeconds = Long :| StrictEqual[604800L]
 type InterviewCompletedDedupRetentionSeconds = Long :| Interval.Closed[691200L, 31536000L]
@@ -513,11 +565,22 @@ final case class InterviewRuntimeConfig(
       com.example.graphQL.cats.domain.workflow.InterviewTopicPair.Default,
     workerGroup: String = "hiring-interview-workers",
     orchestratorGroup: String = "hiring-interview-orchestrator",
-    proposalTtlSeconds: Int = 259200
+    proposalTtlSeconds: Int = 259200,
+    workerId: ProducerWorkerId = InterviewRuntimeConfig.DefaultWorkerId,
+    maxPollRecords: Int = KafkaConsumerConfig.DefaultMaxPollRecords,
+    maxPollIntervalSeconds: Int = KafkaConsumerConfig.DefaultMaxPollIntervalSeconds,
+    commitBatchSize: Int = KafkaConsumerConfig.DefaultCommitBatchSize,
+    commitBatchIntervalMillis: Int = KafkaConsumerConfig.DefaultCommitBatchIntervalMillis
 ) {
+
+  override def toString: String = s"InterviewRuntimeConfig($enabled, $workerId, [REDACTED])"
 
   /** How long a reschedule proposal stays open: 1 hour to 14 days, 72 hours by default. */
   def proposalTtl: java.time.Duration = java.time.Duration.ofSeconds(proposalTtlSeconds.toLong)
+}
+
+object InterviewRuntimeConfig {
+  val DefaultWorkerId: ProducerWorkerId = ProducerWorkerId.parse("interview-local").toOption.get
 }
 
 /** Atlas discovery limits. `maxTime` is bounded by `DiscoveryMaxTimeMs` at decode time and must stay below the HTTP

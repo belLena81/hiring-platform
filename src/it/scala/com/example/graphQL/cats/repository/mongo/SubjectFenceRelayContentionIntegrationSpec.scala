@@ -114,15 +114,18 @@ final class SubjectFenceRelayContentionIntegrationSpec extends MongoIntegrationS
 
       // The relay cycle as the publisher drives it: claim (acquire), renew, then publish (release).
       def relayCycle(cycles: Ref[IO, Int]): IO[Unit] =
-        outbox.claim("relay", "hiring-publisher-relay", at.plusSeconds(1000), lease, 1).value.flatMap {
-          case Right(claimed) if claimed.nonEmpty =>
-            val head = claimed.head
-            outbox.renewLease(head.event.eventId, head.leaseToken, head.subjectIds, lease).value *>
-              outbox
-                .markPublished(head.event.eventId, head.leaseToken, at.plusSeconds(1001), at.plusSeconds(4000))
-                .value *> cycles.update(_ + 1)
-          case _ => IO.sleep(5.millis)
-        }
+        outbox
+          .claim("relay", ProducerGenerationFixtures.of("hiring-publisher-relay"), at.plusSeconds(1000), lease, 1)
+          .value
+          .flatMap {
+            case Right(claimed) if claimed.nonEmpty =>
+              val head = claimed.head
+              outbox.renewLease(head.event.eventId, head.leaseToken, head.subjectIds, lease).value *>
+                outbox
+                  .markPublished(head.event.eventId, head.leaseToken, at.plusSeconds(1001), at.plusSeconds(4000))
+                  .value *> cycles.update(_ + 1)
+            case _ => IO.sleep(5.millis)
+          }
 
       for {
         _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])

@@ -1,6 +1,7 @@
 #!/bin/bash
-# Local Compose broker provisioning: creates the hiring topics and grants each principal only the access it needs.
-# Idempotent; rerun on every stack start. The broker password is read from its Compose secret file.
+# Local Compose broker provisioning: creates the SCRAM client users and the hiring topics, and grants each principal
+# only the access it needs. Idempotent; rerun on every stack start. Passwords are read from Compose secret files and
+# never printed. Admin traffic uses the broker principal's PLAIN login on the INTERNAL listener (see compose.yaml).
 set -euo pipefail
 
 umask 077
@@ -12,6 +13,7 @@ printf 'security.protocol=SASL_PLAINTEXT\nsasl.mechanism=PLAIN\nsasl.jaas.config
 unset broker_password
 
 bootstrap="kafka:9092"
+partitions="${KAFKA_TOPIC_PARTITIONS:-1}"
 topic="${KAFKA_TOPIC:-hiring.operational-events}"
 # Keep these aligned with ANALYTICS_RETENTION_KAFKA_RETENTION and ANALYTICS_RETENTION_KAFKA_SEGMENT_ROLL (milliseconds).
 topic_retention_ms="${KAFKA_TOPIC_RETENTION_MS:-604800000}"
@@ -22,9 +24,55 @@ topics() { "$bin/kafka-topics.sh" --bootstrap-server "$bootstrap" --command-conf
 configs() { "$bin/kafka-configs.sh" --bootstrap-server "$bootstrap" --command-config "$admin_properties" "$@"; }
 acls() { "$bin/kafka-acls.sh" --bootstrap-server "$bootstrap" --command-config "$admin_properties" "$@"; }
 
-until topics --create --if-not-exists --topic "$topic" --partitions "${KAFKA_TOPIC_PARTITIONS:-1}" --replication-factor 1 >/dev/null 2>&1; do
-  sleep 2
-done
+# SCRAM-SHA-512 client users (the ACLs below grant them access). alter replaces the credential, so reruns are
+# idempotent and a rotated secret file takes effect. The retry loop also waits for the broker to accept requests. The
+# password never appears in a process argument list: it goes to the tool through an owner-only (umask 077) properties
+# file via --add-config-file, removed on exit; stdout is discarded and stderr is shown, with the password redacted, if
+# the wait is exhausted. Passwords must be printable ASCII (0x21-0x7E) without , = ] or \ : the tool reads the file as
+# ISO-8859-1 while clients send UTF-8, so a non-ASCII password would never match. (Assumes Kafka 3.9 ConfigCommand
+# accepts the SCRAM entry from --add-config-file; the file form has no brackets, unlike --add-config, and is unverified
+# until the next stack start.)
+scram_properties="$(mktemp)"
+scram_errors="$(mktemp)"
+trap 'rm -f "$admin_properties" "$scram_properties" "$scram_errors"' EXIT
+scram_user() {
+  local user="$1" secret_file="$2" password
+  password="$(<"/run/secrets/${secret_file}")"
+  # Byte-wise C locale, so [:graph:] is exactly 0x21-0x7E (no space, control, newline or non-ASCII byte).
+  local LC_ALL=C
+  if [[ -z "$password" || "$password" =~ [^[:graph:]] || "$password" == *,* || "$password" == *=* ||
+    "$password" == *']'* || "$password" == *'\'* ]]; then
+    echo "provision-access: secret ${secret_file} is empty, not printable ASCII, or contains , = ] or a backslash" >&2
+    exit 65
+  fi
+  printf 'SCRAM-SHA-512=iterations=8192,password=%s\n' "$password" >"$scram_properties"
+  # Bounded wait (60 x 2 s) for the broker; stderr is kept in an owner-only file and printed, redacted, on exhaustion
+  # (the tool may echo the credential string it rejected).
+  local attempt errors
+  for attempt in $(seq 1 60); do
+    if configs --alter --entity-type users --entity-name "$user" --add-config-file "$scram_properties" \
+      >/dev/null 2>"$scram_errors"; then
+      : >"$scram_properties"
+      return 0
+    fi
+    sleep 2
+  done
+  echo "provision-access: creating the SCRAM credential for ${user} failed after 60 attempts; last error:" >&2
+  errors="$(<"$scram_errors")"
+  printf '%s\n' "${errors//"$password"/<redacted>}" >&2
+  exit 70
+}
+scram_user hiring_publisher_v2 kafka_publisher_password
+scram_user analytics_reader kafka_reader_password
+scram_user analytics_fencer kafka_fencer_password
+scram_user interview_command_publisher kafka_interview_orchestrator_password
+scram_user interview_result_publisher kafka_interview_worker_password
+scram_user interview_fencer kafka_interview_fencer_password
+
+# Topic contract: partitions, retention, segment, max bytes and owner per topic are tabulated in
+# docs/big-data-architecture.md (topic contract table). KAFKA_TOPIC_PARTITIONS applies to every topic created here;
+# consumer parallelism is bounded by it.
+topics --create --if-not-exists --topic "$topic" --partitions "$partitions" --replication-factor 1
 # Explicit retention and segment roll: the analytics erasure budget assumes kafka-retention + kafka-segment-roll
 # (application.conf analytics.operational.retention), so the topic must not inherit silent broker defaults.
 configs --entity-type topics --entity-name "$topic" --alter \
@@ -59,7 +107,7 @@ done
 
 # Interview principals can only send commands/read results or read commands/send results.
 for interview_topic in hiring.interview-commands hiring.interview-results; do
-  topics --create --if-not-exists --topic "$interview_topic" --partitions 1 --replication-factor 1 \
+  topics --create --if-not-exists --topic "$interview_topic" --partitions "$partitions" --replication-factor 1 \
     --config min.insync.replicas=1 --config cleanup.policy=delete --config retention.ms=604800000 --config max.message.bytes=65536
   configs --entity-type topics --entity-name "$interview_topic" --alter \
     --add-config min.insync.replicas=1,cleanup.policy=delete,retention.ms=604800000,max.message.bytes=65536

@@ -117,7 +117,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         permitted <- success(
           repository.authorizePublication(
             claim,
-            InterviewPublisherGeneration(InterviewPublisherRole.Orchestrator, UUID.randomUUID()),
+            ProducerGenerationFixtures.interview(InterviewPublisherRole.Orchestrator),
             now
           )
         )
@@ -125,7 +125,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         duplicate <- repository
           .authorizePublication(
             claim,
-            InterviewPublisherGeneration(InterviewPublisherRole.Orchestrator, UUID.randomUUID()),
+            ProducerGenerationFixtures.interview(InterviewPublisherRole.Orchestrator),
             now
           )
           .value
@@ -1226,7 +1226,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegra
         clock <- Ref.of[IO, Instant](now)
         sends <- Ref.of[IO, Int](0)
         transport = new InterviewTransport[IO] {
-          private val generation = InterviewPublisherGeneration(InterviewPublisherRole.Orchestrator, UUID.randomUUID())
+          private val generation = ProducerGenerationFixtures.interview(InterviewPublisherRole.Orchestrator)
           override def generationFor(message: InterviewMessage): InterviewPublisherGeneration = generation
           override def publish(message: InterviewMessage): IO[Unit] =
             sends.update(_ + 1) *> clock.update(_.plusSeconds(61)) *>

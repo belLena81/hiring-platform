@@ -35,7 +35,7 @@ One owner per file; no shared-file formatting during concurrent edits. Reviews a
 
 Execution slot migration conservatively preserves existing command-count budgets; prepaid queued commands use their slot once. Unknown executions reconcile. Only guarded Admin repair resets an epoch. Existing provider/hiring receipts remain authoritative.
 
-Interview producer generations register in a sibling subject-fence field, leaving operational publisher identities and analytics fencing unchanged. Replacement generations initialize before fresh authorization. Cleanup proceeds Pending -> ProducersFenced -> MongoPurged -> AwaitingRetention -> Complete, with broker-confirmed fencing and physical topic retention.
+Interview producer generations register in `producer_registrations` with kind Interview inside publication authorization, one row per subject, transactional id (`hiring-interview-orchestrator-<worker id>` or `hiring-interview-worker-<worker id>`) and generation id. A replacement keeps the transactional id, draws a new generation id at initialization and is authorized afresh; concurrent instances must use distinct worker ids (two instances sharing one fence each other). Cleanup proceeds Pending -> ProducersFenced -> MongoPurged -> AwaitingRetention -> Complete, with broker-confirmed fencing and physical topic retention.
 
 Old nontransactional publishers must be stopped and lose topic-write credentials at maintenance cutover before the new protocol is activated. Migrations 010/011 gate new workers and restart legacy cleanup proof using fresh barriers; no mixed writers, reset, production migration, service restart or deployment is performed by this local implementation. Broker/config changes are prepared and exercised only in disposable test infrastructure.
 

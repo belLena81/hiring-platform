@@ -4,7 +4,12 @@ import cats.effect.{IO, Ref}
 import cats.syntax.all.*
 import com.example.graphQL.cats.config.{KafkaConfig, KafkaConsumerConfig, KafkaPublisherConfig}
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, WorkerAlive}
-import com.example.graphQL.cats.service.port.{ConsumerReceiptRepository, EventQuarantineRepository, RepositoryF}
+import com.example.graphQL.cats.service.port.{
+  ConsumerReceiptRepository,
+  EventQuarantineRepository,
+  ProducerWorkerId,
+  RepositoryF
+}
 import munit.CatsEffectSuite
 import scala.concurrent.duration.*
 
@@ -17,7 +22,7 @@ final class OperationalEventConsumerReceiptWindowSpec extends CatsEffectSuite {
     bootstrapServers = "127.0.0.1:9092",
     topic = "hiring.operational-events",
     consumerGroup = "test-consumer",
-    publisher = KafkaPublisherConfig("test", 10, 30, 1, 3, 100),
+    publisher = KafkaPublisherConfig(ProducerWorkerId.parse("test").toOption.get, 10, 30, 1, 3, 100),
     consumer = KafkaConsumerConfig(enabled = true, receiptTtlDays = receiptTtlDays, quarantineTtlDays = 7)
   )
 

@@ -10,6 +10,8 @@ import com.example.graphQL.cats.service.port.{
   InterviewCleanupUpdate,
   InterviewCleanupCursor,
   InterviewCleanupPage,
+  ProducerGeneration,
+  ProducerGenerationId,
   RepositoryF
 }
 import com.example.graphQL.cats.service.RepositoryError
@@ -28,6 +30,8 @@ final class InterviewSubjectCleanupWorkerSpec extends CatsEffectSuite {
     Vector("hiring-interview-worker-00000000-0000-0000-0000-000000000002"),
     InterviewCleanupState.Pending
   )
+  private def generation(transactionalId: String, n: Long = 1L) =
+    ProducerGeneration(transactionalId, ProducerGenerationId(new UUID(0L, n)))
   private val barriers = Vector(
     InterviewRetentionBarrier("hiring.interview-commands", 0, 4L),
     InterviewRetentionBarrier("hiring.interview-results", 0, 5L)
@@ -42,10 +46,10 @@ final class InterviewSubjectCleanupWorkerSpec extends CatsEffectSuite {
   private final class Store(
       state: Ref[IO, InterviewSubjectCleanup],
       calls: Ref[IO, Vector[String]],
-      registrations: Ref[IO, Vector[String]]
+      registrations: Ref[IO, Vector[ProducerGeneration]]
   ) extends InterviewSubjectCleanupRepository[IO] {
     override def producerBatch(id: UserId) = RepositoryF.lift(registrations.get.map(_.take(64)))
-    override def markProducersFenced(id: UserId, ids: Vector[String], at: Instant) =
+    override def markProducersFenced(id: UserId, ids: Vector[ProducerGeneration]) =
       RepositoryF.lift(registrations.update(_.filterNot(ids.contains)))
     override def pendingPage(
         cursor: Option[InterviewCleanupCursor],
@@ -86,15 +90,15 @@ final class InterviewSubjectCleanupWorkerSpec extends CatsEffectSuite {
       )
       for {
         state <- Ref.of[IO, Vector[InterviewSubjectCleanup]](Vector(initial, second, third))
-        registrations <- Ref.of[IO, Map[UserId, Vector[String]]](
-          Vector(initial, second, third).map(v => v.subjectId -> v.transactionalIds).toMap
+        registrations <- Ref.of[IO, Map[UserId, Vector[ProducerGeneration]]](
+          Vector(initial, second, third).map(v => v.subjectId -> v.transactionalIds.map(generation(_))).toMap
         )
         calls <- Ref.of[IO, Vector[String]](Vector.empty)
         events <- Ref.of[IO, Vector[(LogEvent, Map[LogField, String])]](Vector.empty)
         store = new InterviewSubjectCleanupRepository[IO] {
           override def producerBatch(id: UserId) =
             RepositoryF.lift(registrations.get.map(_.getOrElse(id, Vector.empty).take(64)))
-          override def markProducersFenced(id: UserId, ids: Vector[String], at: Instant) =
+          override def markProducersFenced(id: UserId, ids: Vector[ProducerGeneration]) =
             RepositoryF.lift(
               registrations.update(values =>
                 values.updated(id, values.getOrElse(id, Vector.empty).filterNot(ids.contains))
@@ -169,10 +173,10 @@ final class InterviewSubjectCleanupWorkerSpec extends CatsEffectSuite {
   }
 
   test("generation churn is fenced in bounded durable batches before Mongo purge") {
-    val ids = Vector.fill(130)("hiring-interview-worker-" + UUID.randomUUID())
+    val ids = Vector.tabulate(130)(n => generation("hiring-interview-worker-w" + n, n.toLong))
     for {
       state <- Ref.of[IO, InterviewSubjectCleanup](initial.copy(transactionalIds = Vector.empty))
-      registrations <- Ref.of[IO, Vector[String]](ids)
+      registrations <- Ref.of[IO, Vector[ProducerGeneration]](ids)
       calls <- Ref.of[IO, Vector[String]](Vector.empty)
       batches <- Ref.of[IO, Vector[Int]](Vector.empty)
       fencer = new InterviewPublisherFencer[IO] {
@@ -203,6 +207,50 @@ final class InterviewSubjectCleanupWorkerSpec extends CatsEffectSuite {
     }
   }
 
+  test(
+    "KFH-04.3 erasure marks only the generations it read as Fenced while a later generation stays Active"
+  ) {
+    val id = "hiring-interview-worker-interview-a"
+    val earlier = generation(id, 1L)
+    val later = generation(id, 2L)
+    for {
+      state <- Ref.of[IO, InterviewSubjectCleanup](initial.copy(transactionalIds = Vector.empty))
+      registrations <- Ref.of[IO, Vector[ProducerGeneration]](Vector(earlier))
+      calls <- Ref.of[IO, Vector[String]](Vector.empty)
+      fenced <- Ref.of[IO, Vector[Vector[String]]](Vector.empty)
+      // The successor generation registers while the broker fence of the earlier one is in flight.
+      fencer = new InterviewPublisherFencer[IO] {
+        def fence(values: Vector[String]) =
+          RepositoryF.lift(
+            fenced
+              .getAndUpdate(_ :+ values)
+              .flatMap(previous => IO.whenA(previous.isEmpty)(registrations.update(_ :+ later)))
+          )
+      }
+      worker = new InterviewSubjectCleanupWorker[IO](
+        new Store(state, calls, registrations),
+        fencer,
+        IO.pure(barriers),
+        _ => IO.pure(false),
+        Diagnostics.noop,
+        IO.pure(now)
+      )
+      _ <- worker.runOnce(None).value
+      afterFirst <- state.get
+      activeAfterFirst <- registrations.get
+      _ <- worker.runOnce(None).value
+      afterSecond <- state.get
+      activeAfterSecond <- registrations.get
+      observed <- fenced.get
+    } yield {
+      assertEquals(activeAfterFirst, Vector(later))
+      assertEquals(afterFirst.state, InterviewCleanupState.Pending)
+      assertEquals(activeAfterSecond, Vector.empty)
+      assertEquals(afterSecond.state, InterviewCleanupState.ProducersFenced)
+      assertEquals(observed, Vector(Vector(id), Vector(id)))
+    }
+  }
+
   test("worker persists captured physical topic identities through the configured pure policy") {
     val topics = InterviewTopicPair("hiring-test-worker.commands", "hiring-test-worker.results")
     val captured = Vector(
@@ -212,7 +260,7 @@ final class InterviewSubjectCleanupWorkerSpec extends CatsEffectSuite {
     for {
       state <- Ref.of[IO, InterviewSubjectCleanup](initial.copy(state = InterviewCleanupState.MongoPurged))
       calls <- Ref.of[IO, Vector[String]](Vector.empty)
-      registrations <- Ref.of[IO, Vector[String]](Vector.empty)
+      registrations <- Ref.of[IO, Vector[ProducerGeneration]](Vector.empty)
       fencer = new InterviewPublisherFencer[IO] {
         def fence(ids: Vector[String]) = RepositoryF.at[IO].pure(())
       }
@@ -236,7 +284,7 @@ final class InterviewSubjectCleanupWorkerSpec extends CatsEffectSuite {
   test("fencer rejection never purges or captures a barrier") {
     for {
       state <- Ref.of[IO, InterviewSubjectCleanup](initial)
-      registrations <- Ref.of[IO, Vector[String]](initial.transactionalIds)
+      registrations <- Ref.of[IO, Vector[ProducerGeneration]](initial.transactionalIds.map(generation(_)))
       calls <- Ref.of[IO, Vector[String]](Vector.empty)
       fencer = new InterviewPublisherFencer[IO] {
         override def fence(ids: Vector[String]): RepositoryF[IO, Unit] = {
@@ -264,7 +312,7 @@ final class InterviewSubjectCleanupWorkerSpec extends CatsEffectSuite {
   test("an outstanding broker fence withholds purge and completion until confirmed") {
     for {
       state <- Ref.of[IO, InterviewSubjectCleanup](initial)
-      registrations <- Ref.of[IO, Vector[String]](initial.transactionalIds)
+      registrations <- Ref.of[IO, Vector[ProducerGeneration]](initial.transactionalIds.map(generation(_)))
       calls <- Ref.of[IO, Vector[String]](Vector.empty)
       started <- Deferred[IO, Unit]
       confirmed <- Deferred[IO, Unit]
@@ -305,16 +353,16 @@ final class InterviewSubjectCleanupWorkerSpec extends CatsEffectSuite {
   test("a crash after accepted fencing repeats fencing before advancing durable state") {
     for {
       state <- Ref.of[IO, InterviewSubjectCleanup](initial)
-      registrations <- Ref.of[IO, Vector[String]](initial.transactionalIds)
+      registrations <- Ref.of[IO, Vector[ProducerGeneration]](initial.transactionalIds.map(generation(_)))
       calls <- Ref.of[IO, Vector[String]](Vector.empty)
       first <- Ref.of[IO, Boolean](true)
       store = new Store(state, calls, registrations)
       failingStore = new InterviewSubjectCleanupRepository[IO] {
         override def producerBatch(id: UserId) = store.producerBatch(id)
-        override def markProducersFenced(id: UserId, ids: Vector[String], at: Instant) =
+        override def markProducersFenced(id: UserId, ids: Vector[ProducerGeneration]) =
           RepositoryF.lift(first.getAndSet(false)).flatMap {
             case true  => RepositoryF.at[IO].raise(RepositoryError.Unavailable)
-            case false => store.markProducersFenced(id, ids, at)
+            case false => store.markProducersFenced(id, ids)
           }
         override def pendingPage(cursor: Option[InterviewCleanupCursor], observedAt: Instant) =
           store.pendingPage(cursor, observedAt)
@@ -352,7 +400,7 @@ final class InterviewSubjectCleanupWorkerSpec extends CatsEffectSuite {
   test("cancellation before fencing confirmation preserves pending work for restart") {
     for {
       state <- Ref.of[IO, InterviewSubjectCleanup](initial)
-      registrations <- Ref.of[IO, Vector[String]](initial.transactionalIds)
+      registrations <- Ref.of[IO, Vector[ProducerGeneration]](initial.transactionalIds.map(generation(_)))
       calls <- Ref.of[IO, Vector[String]](Vector.empty)
       started <- Deferred[IO, Unit]
       blocked <- Deferred[IO, Unit]
@@ -408,7 +456,7 @@ final class InterviewSubjectCleanupWorkerSpec extends CatsEffectSuite {
       finished <- Deferred[IO, Unit]
       repository = new InterviewSubjectCleanupRepository[IO] {
         override def producerBatch(id: UserId) = RepositoryF.at[IO].pure(Vector.empty)
-        override def markProducersFenced(id: UserId, ids: Vector[String], at: Instant) =
+        override def markProducersFenced(id: UserId, ids: Vector[ProducerGeneration]) =
           RepositoryF.at[IO].pure(())
         override def pendingPage(cursor: Option[InterviewCleanupCursor], observedAt: Instant) =
           RepositoryF.lift(calls.update(_ :+ cursor)).flatMap { _ =>

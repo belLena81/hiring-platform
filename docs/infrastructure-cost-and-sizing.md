@@ -216,10 +216,10 @@ Do not partition tables at this size; the common guideline is to partition only 
 ### Kafka
 
 1. Keep partitions minimal; serverless products bill per partition-hour.
-2. Producer batching (`linger.ms`, `batch.size`) and compression (lz4 or zstd); whether a vendor bills compressed or uncompressed bytes varies.
+2. Producer batching and compression are fixed in `KafkaClientSettings`: lz4 compression, `linger.ms` 5, and one Kafka transaction per four-claim publication wave instead of one per record (two coordinator round trips saved per record); whether a vendor bills compressed or uncompressed bytes varies.
 3. Kafka retention of 7 days is one input to the erasure completion budget, not the whole wait. The default worst case from the Delta purge is 15 days (Kafka 8 d = 7 d retention + 1 d segment roll, Delta log 1 d + 14 d, vacuum 7 d), checked against a 21-day `erasure-completion-budget`. Shorter retention erases sooner but shortens replay; see [big-data architecture](big-data-architecture.md#erasure-and-limits).
 4. Tiered storage is not worth it at this volume.
-5. RF=3 with `min.insync.replicas=2` only when broker fault tolerance is required; cost rises to about $105+.
+5. RF=3 with `min.insync.replicas=2` only when broker fault tolerance is required; cost rises to about $105+. The [topic contract](big-data-architecture.md#kafka-topic-contract) recommends 6 + 3 + 3 = 12 partitions at RF=3 for production: the held data above (0.27 GB at RF=1) becomes about 0.8 GB, and at the MSK Serverless figure of $0.0015 per partition-hour the partitions alone cost about $13 a month before cluster charges. Arithmetic on the stated assumptions, not a measurement.
 
 Held data: Kafka keeps a record for at most retention plus segment roll, so the bound is 8 days (7 + 1), not 14. At the assumed 1 GB a month (about 33 MB a day, before replication and overhead, RF=1) the bound holds about 0.27 GB, against about 0.47 GB at 14 days. This is arithmetic on the workload assumption, not a measurement.
 

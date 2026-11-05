@@ -192,9 +192,10 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
       database
         .getCollection("producer_registrations")
         .insertOne(
-          new Document("_id", s"$subjectId:$transactionalId")
+          new Document("_id", s"$subjectId:$transactionalId:00000000-0000-0000-0000-0000000000a1")
             .append("subjectId", subjectId)
             .append("transactionalId", transactionalId)
+            .append("generationId", "00000000-0000-0000-0000-0000000000a1")
             .append("kind", "Operational")
             .append("state", "Active")
             .append("registeredAt", java.util.Date.from(java.time.Instant.now()))
@@ -221,12 +222,9 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
       properties.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, classOf[StringSerializer].getName)
       properties.put(ProducerConfig.TRANSACTIONAL_ID_CONFIG, transactionalId)
       properties.put(ProducerConfig.ACKS_CONFIG, "all")
-      properties.put("security.protocol", "SASL_PLAINTEXT")
-      properties.put("sasl.mechanism", "PLAIN")
-      properties.put(
-        "sasl.jaas.config",
-        s"org.apache.kafka.common.security.plain.PlainLoginModule required username=\"hiring_publisher_v2\" password=\"${namespace.manifest.publisherPassword}\";"
-      )
+      com.example.hiring.testing.LocalTestServices
+        .saslSettings("hiring_publisher_v2", namespace.manifest.publisherPassword)
+        .foreach { case (key, setting) => properties.put(key, setting) }
       val producer = new KafkaProducer[String, String](properties)
       try {
         producer.initTransactions()
@@ -486,6 +484,7 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
                           .find(
                             new Document("subjectId", requestId)
                               .append("transactionalId", transactionalId)
+                              .append("generationId", "00000000-0000-0000-0000-0000000000a1")
                               .append("kind", "Operational")
                               .append("state", "Active")
                           )

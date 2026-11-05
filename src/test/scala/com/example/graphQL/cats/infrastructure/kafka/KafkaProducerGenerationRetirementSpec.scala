@@ -2,6 +2,7 @@ package com.example.graphQL.cats.infrastructure.kafka
 
 import com.example.graphQL.cats.config.{KafkaConfig, KafkaPublisherConfig, KafkaConsumerConfig, InterviewRuntimeConfig}
 import com.example.graphQL.cats.service.RepositoryError
+import com.example.graphQL.cats.service.port.ProducerWorkerId
 import munit.FunSuite
 import java.util.UUID
 
@@ -11,7 +12,16 @@ final class KafkaProducerGenerationRetirementSpec extends FunSuite {
     "localhost:9092",
     "hiring.operational-events",
     "test",
-    KafkaPublisherConfig("worker", 1, 60, 1, 5, 1000, Some("publisher"), Some("publisher-secret")),
+    KafkaPublisherConfig(
+      ProducerWorkerId.parse("worker").toOption.get,
+      1,
+      60,
+      1,
+      5,
+      1000,
+      Some("publisher"),
+      Some("publisher-secret")
+    ),
     KafkaConsumerConfig(false, 8, 7),
     interview = InterviewRuntimeConfig(
       orchestratorUsername = Some("orchestrator"),
@@ -37,8 +47,18 @@ final class KafkaProducerGenerationRetirementSpec extends FunSuite {
     )
   }
 
-  test("unknown, noncanonical and unconfigured generation identities fail closed") {
-    val invalid = List("arbitrary-" + UUID.randomUUID(), "hiring-publisher-1-1-1-1-1", "hiring-publisher-not-a-uuid")
+  test("stable worker ids select their principal and unknown, malformed and unconfigured identities fail closed") {
+    assertEquals(
+      KafkaProducerGenerationRetirement.credentials(config, "hiring-publisher-publisher-a"),
+      Right("publisher" -> "publisher-secret")
+    )
+    val invalid = List(
+      "arbitrary-" + UUID.randomUUID(),
+      "hiring-publisher-Upper_Case",
+      "hiring-publisher-",
+      "hiring-publisher-a:b",
+      "hiring-publisher-" + "a" * 65
+    )
     invalid.foreach(id =>
       assertEquals(KafkaProducerGenerationRetirement.credentials(config, id), Left(RepositoryError.InvalidStoredData))
     )

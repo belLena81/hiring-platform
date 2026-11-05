@@ -1,0 +1,5 @@
+{
+  "description": "a repeated key (here in the payload) is malformed; parsers disagree on which duplicate wins. The envelope is given as raw text in envelopeRaw because a parsed object cannot hold duplicates",
+  "expected": "rejected",
+  "envelopeRaw": "{\"eventId\":\"00000000-0000-0000-0000-000000000201\",\"eventType\":\"APPLICATION_STATUS_CHANGED\",\"occurredAt\":\"2026-09-19T10:15:30Z\",\"aggregateType\":\"Application\",\"aggregateId\":\"00000000-0000-0000-0000-000000000203\",\"actorId\":\"00000000-0000-0000-0000-000000000202\",\"payload\":{\"applicationId\":\"00000000-0000-0000-0000-000000000203\",\"candidateId\":\"00000000-0000-0000-0000-000000000202\",\"jobId\":\"00000000-0000-0000-0000-000000000204\",\"previousStatus\":\"Interview\",\"newStatus\":\"Created\",\"newStatus\":\"Hired\"}}"
+}

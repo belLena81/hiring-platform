@@ -1,4 +1,4 @@
-# Local hiring stack: MongoDB replica set, SASL Kafka, and opt-in API and analytics profiles.
+# Local hiring stack: MongoDB replica set, SASL/SCRAM Kafka, and opt-in API and analytics profiles.
 # Secrets are files in the ignored .local/config/secrets/ directory (directory 0700, files 0644, one value per file);
 # containers read them from /run/secrets and the images export them as environment variables only inside the process.
 # See README "Container runtime" for creating them.
@@ -29,6 +29,7 @@ x-analytics-environment: &analytics-environment
   # Local Compose broker only: credentials are unencrypted on this private Compose network.
   ANALYTICS_KAFKA_SECURITY_PROTOCOL: SASL_PLAINTEXT
   ANALYTICS_KAFKA_ALLOW_PLAINTEXT: "true"
+  ANALYTICS_KAFKA_SASL_MECHANISM: SCRAM-SHA-512
   ANALYTICS_KAFKA_USERNAME: analytics_reader
   ANALYTICS_KAFKA_PASSWORD_FILE: /run/secrets/kafka_reader_password
   ANALYTICS_LAKEHOUSE_ROOT: file:///var/lib/hiring-analytics/lakehouse
@@ -112,7 +113,12 @@ services:
 
   kafka:
     image: apache/kafka:3.9.2@sha256:05b4616e0702ef2729327705d54ad6b50ea70b271c4b730fabd2320789fb7b02
-    # Builds the SASL/PLAIN JAAS settings from the secret files inside the container, then runs the image entrypoint.
+    # Builds the broker-only PLAIN JAAS settings from the broker secret file inside the container, then runs the image
+    # entrypoint. Listener layout (D6): EXTERNAL (host clients) accepts SCRAM-SHA-512 only; INTERNAL (Compose network)
+    # accepts SCRAM-SHA-512 for clients plus PLAIN, whose JAAS knows only the broker principal, so that principal serves
+    # inter-broker traffic and the provisioning admin without a SCRAM credential at storage-format time (the image's
+    # /etc/kafka/docker/run formats storage itself and offers no --add-scram hook); CONTROLLER keeps PLAIN with that
+    # single principal. Client SCRAM credentials are created by kafka-acl-init.
     entrypoint: ["/opt/hiring/broker-entrypoint.sh"]
     environment:
       KAFKA_NODE_ID: "1"
@@ -123,7 +129,12 @@ services:
       KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
       KAFKA_INTER_BROKER_LISTENER_NAME: "INTERNAL"
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:SASL_PLAINTEXT,INTERNAL:SASL_PLAINTEXT,EXTERNAL:SASL_PLAINTEXT"
-      KAFKA_SASL_ENABLED_MECHANISMS: "PLAIN"
+      KAFKA_SASL_ENABLED_MECHANISMS: "SCRAM-SHA-512,PLAIN"
+      KAFKA_LISTENER_NAME_INTERNAL_SASL_ENABLED_MECHANISMS: "SCRAM-SHA-512,PLAIN"
+      KAFKA_LISTENER_NAME_EXTERNAL_SASL_ENABLED_MECHANISMS: "SCRAM-SHA-512"
+      KAFKA_LISTENER_NAME_CONTROLLER_SASL_ENABLED_MECHANISMS: "PLAIN"
+      KAFKA_LISTENER_NAME_INTERNAL_SCRAM___SHA___512_SASL_JAAS_CONFIG: "org.apache.kafka.common.security.scram.ScramLoginModule required;"
+      KAFKA_LISTENER_NAME_EXTERNAL_SCRAM___SHA___512_SASL_JAAS_CONFIG: "org.apache.kafka.common.security.scram.ScramLoginModule required;"
       KAFKA_SASL_MECHANISM_INTER_BROKER_PROTOCOL: "PLAIN"
       KAFKA_SASL_MECHANISM_CONTROLLER_PROTOCOL: "PLAIN"
       KAFKA_AUTHORIZER_CLASS_NAME: "org.apache.kafka.metadata.authorizer.StandardAuthorizer"
@@ -138,12 +149,6 @@ services:
       KAFKA_HEAP_OPTS: -Xms512m -Xmx512m
     secrets:
       - kafka_broker_password
-      - kafka_publisher_password
-      - kafka_reader_password
-      - kafka_fencer_password
-      - kafka_interview_orchestrator_password
-      - kafka_interview_worker_password
-      - kafka_interview_fencer_password
     ports:
       - "127.0.0.1:9092:29092"
     volumes:
@@ -170,7 +175,14 @@ services:
     entrypoint: ["/opt/hiring/provision-access.sh"]
     environment:
       KAFKA_TOPIC: ${KAFKA_TOPIC:-hiring.operational-events}
-    secrets: [kafka_broker_password]
+    secrets:
+      - kafka_broker_password
+      - kafka_publisher_password
+      - kafka_reader_password
+      - kafka_fencer_password
+      - kafka_interview_orchestrator_password
+      - kafka_interview_worker_password
+      - kafka_interview_fencer_password
     volumes:
       - ./docker/kafka/provision-access.sh:/opt/hiring/provision-access.sh:ro
     <<: *least-privilege

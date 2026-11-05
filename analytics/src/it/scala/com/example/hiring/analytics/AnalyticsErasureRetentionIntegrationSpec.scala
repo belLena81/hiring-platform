@@ -196,12 +196,9 @@ final class AnalyticsErasureRetentionIntegrationSpec extends SharedRecoveryRunti
       properties.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, classOf[StringSerializer].getName)
       properties.put(ProducerConfig.TRANSACTIONAL_ID_CONFIG, transactionalId)
       properties.put(ProducerConfig.ACKS_CONFIG, "all")
-      properties.put("security.protocol", "SASL_PLAINTEXT")
-      properties.put("sasl.mechanism", "PLAIN")
-      properties.put(
-        "sasl.jaas.config",
-        s"""org.apache.kafka.common.security.plain.PlainLoginModule required username="hiring_publisher_v2" password="${namespace.manifest.publisherPassword}";"""
-      )
+      com.example.hiring.testing.LocalTestServices
+        .saslSettings("hiring_publisher_v2", namespace.manifest.publisherPassword)
+        .foreach { case (key, setting) => properties.put(key, setting) }
       val producer = new KafkaProducer[String, String](properties)
       producer.initTransactions()
       producer.beginTransaction()

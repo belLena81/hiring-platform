@@ -42,12 +42,14 @@
     "SubjectId": "subjectId",
     "Kind": "kind",
     "TransactionalId": "transactionalId",
+    "GenerationId": "generationId",
     "FencedAt": "fencedAt",
     "ProducerRegistry": "producerRegistry"
   },
   "migrationIds": {
     "eventOutboxSubjectReferences": "003_event_outbox_subject_references",
-    "attributableProducerRegistrations": "012_attributable_producer_registrations"
+    "attributableProducerRegistrations": "012_attributable_producer_registrations",
+    "producerGenerationRegistrations": "036_producer_generation_registrations"
   },
   "indexes": [
     {

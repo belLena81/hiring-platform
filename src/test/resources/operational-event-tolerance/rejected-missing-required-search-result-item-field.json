@@ -1,0 +1,22 @@
+{
+  "description": "a missing required search result item field is malformed",
+  "expected": "rejected",
+  "envelope": {
+    "eventId": "00000000-0000-0000-0000-000000000201",
+    "eventType": "SEARCH_PERFORMED",
+    "occurredAt": "2026-09-19T10:15:30Z",
+    "aggregateType": "Search",
+    "aggregateId": "00000000-0000-0000-0000-000000000205",
+    "actorId": "00000000-0000-0000-0000-000000000202",
+    "payload": {
+      "searchId": "00000000-0000-0000-0000-000000000205",
+      "searchKind": "semanticJobSearch",
+      "results": [
+        {
+          "resultId": "00000000-0000-0000-0000-000000000301",
+          "rank": 1
+        }
+      ]
+    }
+  }
+}

@@ -121,10 +121,9 @@ class OperationalEventWireCodecSpec extends FunSuite {
     assertEquals(Codec.validate(event), Right(event))
   }
 
-  test("missing, extra, sensitive and mismatched payload fields are rejected") {
+  test("KFH-03.2 missing, mistyped and mismatched payload fields are rejected") {
     val malformed = List(
       withPayload(statusEvent, _.mapObject(_.remove("candidateId"))),
-      withPayload(statusEvent, _.mapObject(_.add("feedback", Json.fromString("secret")))),
       withPayload(statusEvent, _.mapObject(_.add("newStatus", Json.fromString("Unknown")))),
       withPayload(statusEvent, _ => Json.Null),
       Codec.validate(statusEvent.copy(aggregateId = jobId.toString)),
@@ -259,10 +258,11 @@ class OperationalEventWireCodecSpec extends FunSuite {
     assertEquals(Codec.encode(statusEvent).map(_.length), Right(size))
   }
 
-  test("versioned or malformed envelope fields remain rejected") {
+  test(
+    "malformed envelope fields remain rejected; the version lives in the header, so a body schemaVersion is ignored"
+  ) {
     val json = Codec.json(statusEvent)
     val invalid = List(
-      json.mapObject(_.add("schemaVersion", Json.fromInt(99))),
       json.mapObject(_.add("eventId", Json.fromString("invalid"))),
       json.mapObject(_.add("eventType", Json.fromString("UNKNOWN"))),
       json.mapObject(_.add("occurredAt", Json.fromString("invalid"))),

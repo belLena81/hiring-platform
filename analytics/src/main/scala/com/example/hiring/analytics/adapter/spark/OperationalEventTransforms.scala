@@ -10,9 +10,13 @@ import org.apache.spark.sql.{Column, DataFrame}
 import org.apache.spark.sql.functions.{
   array,
   array_distinct,
+  array_except,
+  decode,
+  filter,
   array_sort,
   coalesce,
   encode,
+  exists,
   forall,
   get_json_object,
   isnan,
@@ -100,18 +104,20 @@ object OperationalEventTransforms {
       .withColumn(Columns.RawValue, col(Columns.Value).cast(StringType))
       .withColumn(Columns.Envelope, from_json(col(Columns.RawValue), EnvelopeSchema))
     parsed.select(
-      col(Columns.Topic),
-      col(Columns.Partition),
-      col(Columns.Offset),
-      col(Columns.Timestamp).as(Columns.KafkaTimestamp),
-      col(Columns.RawValue),
-      lower(col(Columns.EnvelopeEventId)).as(Columns.EventId),
-      col(Columns.EnvelopeEventType),
-      try_to_timestamp(col(Columns.EnvelopeOccurredAt)).as(Columns.OccurredAt),
-      col(Columns.EnvelopeAggregateType),
-      col(Columns.EnvelopeAggregateId),
-      lower(col(Columns.EnvelopeActorId)).as(Columns.ActorId),
-      col(Columns.EnvelopePayload).as(Columns.Payload)
+      (Seq(
+        col(Columns.Topic),
+        col(Columns.Partition),
+        col(Columns.Offset),
+        col(Columns.Timestamp).as(Columns.KafkaTimestamp),
+        col(Columns.RawValue),
+        lower(col(Columns.EnvelopeEventId)).as(Columns.EventId),
+        col(Columns.EnvelopeEventType),
+        try_to_timestamp(col(Columns.EnvelopeOccurredAt)).as(Columns.OccurredAt),
+        col(Columns.EnvelopeAggregateType),
+        col(Columns.EnvelopeAggregateId),
+        lower(col(Columns.EnvelopeActorId)).as(Columns.ActorId),
+        col(Columns.EnvelopePayload).as(Columns.Payload)
+      ) ++ (if (records.columns.contains(HeadersColumn)) Seq(col(HeadersColumn)) else Seq.empty))*
     )
   }
 
@@ -165,7 +171,9 @@ object OperationalEventTransforms {
   private val SearchKindAbsentColumn = "_hiringSearchKindAbsent"
   private val SearchIdAbsentColumn = "_hiringSearchIdAbsent"
   private val RankAbsentColumn = "_hiringRankAbsent"
+  private val HeadersAgreeColumn = "_hiringHeadersAgree"
   private val ValidityHelpers = Vector(
+    HeadersAgreeColumn,
     VariantColumn,
     EnvelopeKeysColumn,
     OccurredAtTextColumn,
@@ -190,6 +198,13 @@ object OperationalEventTransforms {
     else {
       val raw = col(Columns.RawValue)
       frame
+        .withColumn(
+          HeadersAgreeColumn,
+          !headersMalformed(frame) && schemaVersionSupported(frame) &&
+            headerFlag(frame, ContentTypeHeader, _ === lit(ContentTypeJson)) &&
+            headerFlag(frame, EventTypeHeader, _ === col(Columns.EventType)) &&
+            headerFlag(frame, EventIdHeader, value => lower(value) === lower(col(Columns.EventId)))
+        )
         .withColumn(VariantColumn, try_parse_json(raw))
         .withColumn(EnvelopeKeysColumn, sortedKeys(raw))
         .withColumn(OccurredAtTextColumn, get_json_object(raw, "$.occurredAt"))
@@ -205,6 +220,70 @@ object OperationalEventTransforms {
         .withColumn(Columns.IsValidEvent, validityExpression)
         .drop(ValidityHelpers*)
     }
+
+  // Kafka record headers are optional metadata (records written before they existed carry none). A header that is
+  // present must agree with the body; the body stays authoritative and headers never reach the fingerprint.
+  private val HeadersColumn = Columns.Headers
+  private val SupportedSchemaVersion = "1"
+  private val ContentTypeHeader = "content-type"
+  private val ContentTypeJson = "application/json"
+  private val SchemaVersionHeader = "hiring-schema-version"
+  private val EventTypeHeader = "hiring-event-type"
+  private val EventIdHeader = "hiring-event-id"
+  private val MaxHeaderValueBytes = 256
+  private val ContractHeaders = Seq(ContentTypeHeader, SchemaVersionHeader, EventTypeHeader, EventIdHeader)
+  val UnsupportedVersionReason = "UNSUPPORTED_SCHEMA_VERSION"
+  val InvalidEnvelopeReason = "INVALID_OPERATIONAL_EVENT_ENVELOPE"
+
+  private def headerValues(frameHasHeaders: Boolean, name: String): Column =
+    if (!frameHasHeaders) lit(null).cast(ArrayType(StringType))
+    else
+      transform(
+        filter(col(HeadersColumn), header => header.getField("key") === lit(name)),
+        header => decode(header.getField("value"), "UTF-8")
+      )
+
+  /** True when no header of this name exists, or every one satisfies `agrees`. */
+  private def headerAgrees(values: Column, agrees: Column => Column): Column =
+    coalesce(forall(values, value => coalesce(agrees(value), lit(false))), lit(true))
+
+  private def headerFlag(frame: DataFrame, name: String, agrees: Column => Column): Column =
+    headerAgrees(headerValues(frame.columns.contains(HeadersColumn), name), agrees)
+
+  private def schemaVersionSupported(frame: DataFrame): Column =
+    headerFlag(frame, SchemaVersionHeader, _ === lit(SupportedSchemaVersion))
+
+  /** The application reader's malformed-headers refusal: a duplicate key (even with equal values), a value over 256
+    * bytes, or a null or non-UTF-8 value of a contract header. Unknown headers are not UTF-8 checked. Absent headers
+    * are fine.
+    */
+  private def headersMalformed(frame: DataFrame): Column =
+    if (!frame.columns.contains(HeadersColumn)) lit(false)
+    else {
+      val headers = col(HeadersColumn)
+      val keys = transform(headers, header => header.getField("key"))
+      val duplicate = size(array_distinct(keys)) =!= size(keys)
+      val tooLong = exists(headers, header => length(header.getField("value")) > lit(MaxHeaderValueBytes))
+      val badText = exists(
+        headers,
+        header =>
+          coalesce(
+            header.getField("key").isin(ContractHeaders*) &&
+              coalesce(!is_valid_utf8(header.getField("value").cast(StringType)), lit(true)),
+            lit(false)
+          )
+      )
+      coalesce(duplicate || tooLong || badText, lit(false))
+    }
+
+  /** Quarantine reason of a record already known to be invalid: an unsupported version header wins over other causes.
+    */
+  def quarantineReason(frame: DataFrame): Column =
+    org.apache.spark.sql.functions
+      .when(!headersMalformed(frame) && !schemaVersionSupported(frame), lit(UnsupportedVersionReason))
+      .otherwise(lit(InvalidEnvelopeReason))
+
+  private def headersAgree: Column = col(HeadersAgreeColumn)
 
   private def validityExpression: Column =
     coalesce(
@@ -224,8 +303,15 @@ object OperationalEventTransforms {
   private def payload(name: String): Column = col(s"payload.$name")
   private def uuid(value: Column): Column = value.rlike(UuidPattern)
   private def expectedKeys(names: String*): Column = array_sort(array(names.map(lit)*))
-  private def keys(json: Column, names: String*): Column = sortedKeys(json) === expectedKeys(names*)
-  private def payloadKeys(names: String*): Column = col(PayloadKeysColumn) === expectedKeys(names*)
+
+  /** Tolerant reader: every required key must be present and no key may repeat (parsers disagree on which duplicate
+    * wins); keys the contract does not know are ignored.
+    */
+  private def hasKeys(presentSorted: Column, names: String*): Column =
+    size(array_except(expectedKeys(names*), presentSorted)) === lit(0) &&
+      size(array_distinct(presentSorted)) === size(presentSorted)
+  private def keys(json: Column, names: String*): Column = hasKeys(sortedKeys(json), names*)
+  private def payloadKeys(names: String*): Column = hasKeys(col(PayloadKeysColumn), names*)
   private def aggregate(kind: String, id: Column): Column =
     col(Columns.AggregateType) === lit(kind) && uuid(id) && col(Columns.AggregateId) === lower(id)
   private def rank(value: Column): Column = value.between(1, 100)
@@ -246,7 +332,7 @@ object OperationalEventTransforms {
       AnalyticsEventType.JobUpdated.wire,
       AnalyticsEventType.JobClosed.wire
     ) &&
-      payloadKeys("job") && (col(JobKeysColumn) === expectedKeys("jobId", "skills", "status")) &&
+      payloadKeys("job") && hasKeys(col(JobKeysColumn), "jobId", "skills", "status") &&
       aggregate("Job", job.getField("jobId")) && job.getField("status").isin("Open", "Closed") &&
       (kind =!= lit(AnalyticsEventType.JobClosed.wire) || job.getField("status") === lit("Closed")) &&
       skills.isNotNull && size(skills) <= lit(100) && size(array_distinct(skills)) === size(skills) &&
@@ -329,7 +415,8 @@ object OperationalEventTransforms {
     col(OccurredAtTextColumn).rlike(InstantPattern) &&
     is_valid_utf8(col(Columns.RawValue)) && uuid(col(Columns.EventId)) && uuid(col(Columns.ActorId)) &&
     length(encode(col(Columns.RawValue), "UTF-8")) <= lit(MaxEnvelopeBytes) &&
-    (col(EnvelopeKeysColumn) === expectedKeys(
+    hasKeys(
+      col(EnvelopeKeysColumn),
       Columns.EventId,
       "eventType",
       "occurredAt",
@@ -337,7 +424,7 @@ object OperationalEventTransforms {
       "aggregateId",
       "actorId",
       "payload"
-    )) &&
+    ) && headersAgree &&
     (jobFact || created || changed || hired || searched || viewed || clicked || recordingFailed)
   }
 

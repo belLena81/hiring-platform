@@ -17,6 +17,7 @@ import com.example.graphQL.cats.service.port.{
   EventQuarantineRepository,
   MutationWriteContext,
   OperationalEventOutboxRepository,
+  ProducerGeneration,
   RepositoryF,
   SearchRecordingFailureRepository,
   SearchSessionRepository
@@ -136,20 +137,20 @@ final class MongoOperationalEventOutboxRepository(
 
   override def claim(
       workerId: String,
-      transactionalId: String,
+      generation: ProducerGeneration,
       now: Instant,
       leaseDuration: FiniteDuration,
       limit: Int
   ): RepositoryF[IO, List[ClaimedOperationalEvent]] =
     LeaseRequest.whenValid(workerId, leaseDuration)(
       MongoRepositorySupport.repositoryGuard(diagnostics, "outbox.claim")(
-        claimPage(workerId, transactionalId, now, leaseDuration, limit)
+        claimPage(workerId, generation, now, leaseDuration, limit)
       )
     )
 
   private def claimPage(
       workerId: String,
-      transactionalId: String,
+      generation: ProducerGeneration,
       now: Instant,
       leaseDuration: FiniteDuration,
       limit: Int
@@ -253,7 +254,7 @@ final class MongoOperationalEventOutboxRepository(
         val (beforeBlocked, _) = examined.span(row => !blocked(row.getString(MongoFields.Id)))
         val nowPinned = pinned || beforeBlocked.size < examined.size
         val nextCursor = if (pinned) cursor else beforeBlocked.lastOption.orElse(cursor)
-        claimBatch(workerId, transactionalId, now, leaseDuration, batch.claimable, MongoOutboxClaimBatch.Attempts)
+        claimBatch(workerId, generation, now, leaseDuration, batch.claimable, MongoOutboxClaimBatch.Attempts)
           .flatMap(claimed =>
             scan(
               rest,
@@ -368,6 +369,24 @@ final class MongoOperationalEventOutboxRepository(
       )
     ).flatMap(_ => releaseSubjectLeases(eventId, leaseToken))
 
+  override def releaseUncharged(
+      eventId: UUID,
+      leaseToken: String,
+      now: Instant,
+      availableAt: Instant
+  ): RepositoryF[IO, Unit] =
+    updateClaimed(
+      eventId,
+      leaseToken,
+      MongoUpdate.combine(
+        MongoUpdate.set(MongoFields.State, OutboxState.Retryable.toString),
+        MongoUpdate.set(MongoFields.AvailableAt, availableAt.toDate),
+        MongoUpdate.inc(MongoFields.Attempts, Int.box(-1)),
+        MongoLeaseQueue.releaseLease,
+        MongoUpdate.set(MongoFields.UpdatedAt, now.toDate)
+      )
+    ).flatMap(_ => releaseSubjectLeases(eventId, leaseToken))
+
   override def markFailed(
       eventId: UUID,
       leaseToken: String,
@@ -435,7 +454,7 @@ final class MongoOperationalEventOutboxRepository(
     */
   private def claimBatch(
       workerId: String,
-      transactionalId: String,
+      generation: ProducerGeneration,
       now: Instant,
       leaseDuration: FiniteDuration,
       candidates: List[MongoOutboxClaimBatch.Candidate],
@@ -448,12 +467,12 @@ final class MongoOperationalEventOutboxRepository(
         MongoRepositorySupport
           .repositoryGuard(diagnostics, "outbox.claimBatch")(
             transactionRunner.run(TransactionOperation.OutboxClaimBatch) { session =>
-              claimInSession(session, workerId, transactionalId, now, leaseDuration, candidates, token)
+              claimInSession(session, workerId, generation, now, leaseDuration, candidates, token)
             }
           )
           .leftFlatMap {
             case RepositoryError.Conflict if attempts > 1 =>
-              claimBatch(workerId, transactionalId, now, leaseDuration, candidates, attempts - 1)
+              claimBatch(workerId, generation, now, leaseDuration, candidates, attempts - 1)
             case RepositoryError.Conflict => MongoF.pure(Nil)
             case error                    => MongoF.raise(error)
           }
@@ -464,17 +483,17 @@ final class MongoOperationalEventOutboxRepository(
     */
   private[mongo] def claimCandidates(
       workerId: String,
-      transactionalId: String,
+      generation: ProducerGeneration,
       now: Instant,
       leaseDuration: FiniteDuration,
       candidates: List[MongoOutboxClaimBatch.Candidate]
   ): RepositoryF[IO, List[ClaimedOperationalEvent]] =
-    claimBatch(workerId, transactionalId, now, leaseDuration, candidates, MongoOutboxClaimBatch.Attempts)
+    claimBatch(workerId, generation, now, leaseDuration, candidates, MongoOutboxClaimBatch.Attempts)
 
   private def claimInSession(
       session: Option[ClientSession[IO]],
       workerId: String,
-      transactionalId: String,
+      generation: ProducerGeneration,
       now: Instant,
       leaseDuration: FiniteDuration,
       candidates: List[MongoOutboxClaimBatch.Candidate],
@@ -497,7 +516,7 @@ final class MongoOperationalEventOutboxRepository(
       (suppressed, live) = readable.partition(_.subjectIds.exists(deleted))
       _ <- failClaimed(session, token, unreadable, "INVALID_EVENT_CONTRACT", now)
       _ <- failClaimed(session, token, suppressed.map(_.event.eventId.toString), "SUBJECT_DELETED", now)
-      _ <- leaseSubjects(session, live, transactionalId, token, now, leaseDuration)
+      _ <- leaseSubjects(session, live, generation, token, leaseDuration)
     } yield live
 
   /** Per partition key, the id of the earliest `Retryable` or `InFlight` event by `(occurredAt, _id)`. `Published` and
@@ -671,9 +690,8 @@ final class MongoOperationalEventOutboxRepository(
   private[mongo] def leaseSubjects(
       session: Option[ClientSession[IO]],
       live: List[ClaimedOperationalEvent],
-      transactionalId: String,
+      generation: ProducerGeneration,
       token: String,
-      now: Instant,
       leaseDuration: FiniteDuration
   ): RepositoryF[IO, Unit] =
     if (live.isEmpty) MongoF.pure(())
@@ -738,9 +756,8 @@ final class MongoOperationalEventOutboxRepository(
           database,
           session,
           grants.map(_._1),
-          transactionalId,
-          ProducerRegistrationValues.Operational,
-          now
+          generation,
+          ProducerRegistrationValues.Operational
         )
     }
 

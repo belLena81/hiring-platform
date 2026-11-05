@@ -218,9 +218,8 @@ final class MongoInterviewCommandQueue(
                   database,
                   session,
                   subject.value.toString,
-                  generation.transactionalId,
-                  ProducerRegistrationValues.Interview,
-                  now
+                  generation.producerGeneration,
+                  ProducerRegistrationValues.Interview
                 )
             )
           else ().asRepository

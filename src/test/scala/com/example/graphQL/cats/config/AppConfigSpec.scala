@@ -6,6 +6,7 @@ import com.comcast.ip4s.{Host, Port as Ip4sPort}
 import munit.FunSuite
 import pureconfig.ConfigSource
 import cats.data.NonEmptyList
+import com.example.graphQL.cats.service.port.ProducerWorkerId
 import scala.concurrent.duration.*
 
 class AppConfigSpec extends FunSuite {
@@ -148,7 +149,7 @@ class AppConfigSpec extends FunSuite {
       topic = "hiring.operational-events.v1",
       consumerGroup = "hiring-phase5-consumer",
       publisher = KafkaPublisherConfig(
-        workerId = "local-publisher",
+        workerId = ProducerWorkerId.parse("local-publisher").toOption.get,
         batchSize = 25,
         leaseSeconds = 30,
         retryDelaySeconds = 5,
@@ -609,7 +610,16 @@ class AppConfigSpec extends FunSuite {
   }
 
   test("Kafka SASL credentials never appear in rendered publisher or consumer settings") {
-    val publisher = KafkaPublisherConfig("worker", 10, 30, 5, 3, 500, Some("synthetic-user"), Some("synthetic-secret"))
+    val publisher = KafkaPublisherConfig(
+      ProducerWorkerId.parse("worker").toOption.get,
+      10,
+      30,
+      5,
+      3,
+      500,
+      Some("synthetic-user"),
+      Some("synthetic-secret")
+    )
     val consumer = KafkaConsumerConfig(true, 7, 14, Some("synthetic-user"), Some("synthetic-secret"))
     List(publisher.toString, consumer.toString).foreach { rendered =>
       assert(!rendered.contains("synthetic-secret"), rendered)
@@ -954,6 +964,7 @@ class AppConfigSpec extends FunSuite {
     val bounded = List(
       ("auth.rate-limit.window-seconds", 1, 3600, ConfigError.InvalidAuthRateLimitWindow),
       ("kafka.publisher.batch-size", 1, 500, ConfigError.InvalidKafkaBatchSize),
+      ("kafka.publisher.lease-seconds", 15, 905, ConfigError.InvalidKafkaLeaseSeconds),
       ("vector-search.num-candidates", PageSize.Max, 10000, ConfigError.InvalidVectorNumCandidates),
       ("vector-search.indexes.ready-timeout-ms", 1000, 600000, ConfigError.InvalidSearchIndexReadyTimeout),
       ("vector-search.embedding.retry-delay-ms", 100, 60000, ConfigError.InvalidEmbeddingRetryDelay)
@@ -1130,6 +1141,7 @@ class AppConfigSpec extends FunSuite {
     List(
       ("mongo.reset-on-start = \"sometimes\"", ConfigError.InvalidMongoResetOnStart),
       ("kafka.publisher.worker-id = \" \"", ConfigError.InvalidKafkaWorkerId),
+      ("kafka.interview.worker-id = \"Bad_Id\"", ConfigError.InvalidInterviewWorkerId),
       ("kafka.consumer.enabled = \"maybe\"", ConfigError.InvalidKafkaConsumerEnabled),
       ("vector-search.indexes.candidate-lexical = \"\"", ConfigError.InvalidCandidateLexicalIndex),
       ("vector-search.rerank.enabled = \"later\"", ConfigError.InvalidRerankEnabled),

@@ -37,6 +37,7 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
     |    topic = "hiring.operational-events"
     |    security-protocol = ${?ANALYTICS_KAFKA_SECURITY_PROTOCOL}
     |    allow-plaintext = ${?ANALYTICS_KAFKA_ALLOW_PLAINTEXT}
+    |    sasl-mechanism = ${?ANALYTICS_KAFKA_SASL_MECHANISM}
     |    fencer {
     |      username = ${?ANALYTICS_KAFKA_FENCER_USERNAME}
     |      password = ${?ANALYTICS_KAFKA_FENCER_PASSWORD}
@@ -561,6 +562,27 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
         assert(KafkaConnection.validate(plaintext(endpoint)).isInvalid, s"expected rejected endpoint: $endpoint")
       }
     assert(KafkaConnection.validate(plaintext("localhost:9092,broker.example:9092")).isInvalid)
+  }
+
+  test("Kafka SASL mechanism defaults to SCRAM-SHA-512 and PLAIN needs the plaintext opt-in") {
+    val local = settings ++ Map(
+      "ANALYTICS_KAFKA_SECURITY_PROTOCOL" -> "SASL_PLAINTEXT",
+      "ANALYTICS_KAFKA_ALLOW_PLAINTEXT" -> "true"
+    )
+    val defaulted = AnalyticsConfigFixtures.batch(hocon, local).toOption.getOrElse(fail("expected local config"))
+    assertEquals(defaulted.common.kafka.saslMechanism, KafkaSaslMechanism.ScramSha512)
+
+    val plain = AnalyticsConfigFixtures
+      .batch(hocon, local + ("ANALYTICS_KAFKA_SASL_MECHANISM" -> "PLAIN"))
+      .toOption
+      .getOrElse(fail("expected loopback PLAIN config"))
+    assertEquals(plain.common.kafka.saslMechanism, KafkaSaslMechanism.Plain)
+
+    val plainOverTls = AnalyticsConfigFixtures.batch(hocon, settings + ("ANALYTICS_KAFKA_SASL_MECHANISM" -> "PLAIN"))
+    assert(plainOverTls.swap.toOption.exists(_.getMessage.contains("SASL PLAIN")))
+
+    val unknown = AnalyticsConfigFixtures.batch(hocon, local + ("ANALYTICS_KAFKA_SASL_MECHANISM" -> "GSSAPI"))
+    assert(unknown.swap.toOption.exists(_.getMessage.contains("sasl-mechanism")))
   }
 
   test("Kafka configuration rejects unsupported protocols and malformed opt-in values") {

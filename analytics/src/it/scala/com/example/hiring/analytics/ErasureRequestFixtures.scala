@@ -63,12 +63,19 @@ private[analytics] object ErasureRequestFixtures {
               .append("state", "Complete")
               .append("version", Long.box(1L))
           )
+        db.getCollection("hiring_migration_ledger")
+          .insertOne(
+            new Document("_id", "036_producer_generation_registrations")
+              .append("state", "Complete")
+              .append("version", Long.box(1L))
+          )
         transactionalIds.foreach { transactionalId =>
           db.getCollection("producer_registrations")
             .insertOne(
-              new Document("_id", s"$subject:$transactionalId")
+              new Document("_id", s"$subject:$transactionalId:00000000-0000-0000-0000-0000000000a1")
                 .append("subjectId", subject)
                 .append("transactionalId", transactionalId)
+                .append("generationId", "00000000-0000-0000-0000-0000000000a1")
                 .append("kind", "Operational")
                 .append("state", "Active")
                 .append("registeredAt", Date.from(at))

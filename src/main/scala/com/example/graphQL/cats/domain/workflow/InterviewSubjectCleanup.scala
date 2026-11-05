@@ -1,6 +1,5 @@
 package com.example.graphQL.cats.domain.workflow
 
-import com.example.graphQL.cats.domain.model.Identifiers
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import java.time.Instant
 
@@ -67,12 +66,13 @@ enum InterviewCleanupObservation {
 object InterviewSubjectCleanup {
   private val ProducerPrefixes = Vector("hiring-interview-orchestrator-", "hiring-interview-worker-")
 
+  /** Mirrors ProducerWorkerId.Pattern, which the domain cannot import; a spec pins the two together. */
+  val WorkerIdPattern = "[a-z0-9][a-z0-9-]{0,63}"
+
+  /** Interview transactional ids are a role prefix followed by a worker id. */
   def validateProducerIds(ids: Vector[String]): Either[InterviewCleanupError, Vector[String]] = {
     def valid(id: String): Boolean = ProducerPrefixes.exists { prefix =>
-      id.startsWith(prefix) && {
-        val suffix = id.substring(prefix.length)
-        Identifiers.parse(suffix)(identity).exists(_.toString == suffix)
-      }
+      id.startsWith(prefix) && id.substring(prefix.length).matches(WorkerIdPattern)
     }
     Either.cond(ids.forall(valid), ids.distinct.sorted, InterviewCleanupError.InvalidProducerIds)
   }

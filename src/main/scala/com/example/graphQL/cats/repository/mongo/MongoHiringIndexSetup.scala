@@ -86,6 +86,20 @@ private[mongo] object MongoHiringIndexSetup {
       .partialFilterExpression(Filters.in(MongoFields.State, MongoOutboxClaimBatch.PendingStates.asJava))
   )
 
+  /** Retirement reads the Active generations of one transactional id registered before a cut, in `(registeredAt, _id)`
+    * order: equality prefix, range and sort are all served by the key.
+    */
+  val producerRegistrationGenerationStateIndex: IndexSpec = IndexSpec(
+    MongoProducerRegistrations.Collection,
+    Indexes.ascending(
+      MongoFields.TransactionalId,
+      MongoFields.State,
+      MongoProducerRegistrations.RegisteredAt,
+      MongoFields.Id
+    ),
+    new IndexOptions().name(ProducerRegistrationGenerationState)
+  )
+
   val jobCanonicalFilterIndexes: List[IndexSpec] = List(jobOpenCityIndex, jobEmbeddingMetaIndex)
   private val indexSpecs: List[IndexSpec] = List(
     IndexSpec(
@@ -100,11 +114,7 @@ private[mongo] object MongoHiringIndexSetup {
       Indexes.ascending("subjectId", MongoFields.Kind, MongoFields.State, MongoFields.Id),
       new IndexOptions().name(ProducerRegistrationSubjectState)
     ),
-    IndexSpec(
-      MongoProducerRegistrations.Collection,
-      Indexes.ascending("transactionalId", MongoFields.State, MongoFields.Id),
-      new IndexOptions().name(ProducerRegistrationGenerationState)
-    ),
+    producerRegistrationGenerationStateIndex,
     IndexSpec(
       MongoProducerRegistrations.Collection,
       Indexes.ascending(MongoFields.ExpiresAt),

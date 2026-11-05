@@ -65,7 +65,7 @@ final class OutboxBatchClaimIntegrationSpec extends MongoIntegrationSuite {
       limit: Int
   ): IO[List[ClaimedOperationalEvent]] =
     repository
-      .claim(worker, s"hiring-publisher-$worker", at, lease, limit)
+      .claim(worker, ProducerGenerationFixtures.of(s"hiring-publisher-$worker"), at, lease, limit)
       .value
       .flatMap(_.fold(error => IO.raiseError(new AssertionError(s"claim failed: $error")), IO.pure))
 
@@ -472,6 +472,43 @@ final class OutboxBatchClaimIntegrationSpec extends MongoIntegrationSuite {
     }
   }
 
+  test("KFH-01.7 an uncharged release keeps attempts unchanged, a charged release does not, and the token guards it") {
+    mongoResource.use { fixture =>
+      val List(a, b) = List(UUID.randomUUID(), UUID.randomUUID()).map(job => aggregateEvents(job, 1).head)
+      val repository = outbox(fixture)
+      for {
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
+        _ <- seed(fixture, List(a, b))
+        first <- claim(repository, "w", now.plusSeconds(1), limit = 10)
+        stale <- repository
+          .releaseUncharged(a.eventId, "not-the-lease-token", now.plusSeconds(2), now.plusSeconds(2))
+          .value
+        _ <- succeeded(
+          repository.releaseUncharged(
+            a.eventId,
+            first.find(_.event.eventId == a.eventId).get.leaseToken,
+            now.plusSeconds(2),
+            now.plusSeconds(2)
+          )
+        )
+        _ <- succeeded(
+          repository.releaseForRetry(
+            b.eventId,
+            first.find(_.event.eventId == b.eventId).get.leaseToken,
+            now.plusSeconds(2),
+            now.plusSeconds(2)
+          )
+        )
+        second <- claim(repository, "w", now.plusSeconds(3), limit = 10)
+      } yield {
+        assertEquals(first.map(_.attempts).toSet, Set(1))
+        assertEquals(stale, Left(RepositoryError.Conflict))
+        assertEquals(second.find(_.event.eventId == a.eventId).map(_.attempts), Some(1))
+        assertEquals(second.find(_.event.eventId == b.eventId).map(_.attempts), Some(2))
+      }
+    }
+  }
+
   test("DDR-06.1 a later event is not claimed while the lease of an earlier in-flight event is still running") {
     mongoResource.use { fixture =>
       val job = UUID.randomUUID()
@@ -726,14 +763,20 @@ final class OutboxBatchClaimIntegrationSpec extends MongoIntegrationSuite {
         )
         // A stale page read could still offer B; the claim transaction refuses it without the page filter.
         stale <- repository
-          .claimCandidates("w", "hiring-publisher-w", now.plusSeconds(3), 30.seconds, List(candidate(b)))
+          .claimCandidates(
+            "w",
+            ProducerGenerationFixtures.of("hiring-publisher-w"),
+            now.plusSeconds(3),
+            30.seconds,
+            List(candidate(b))
+          )
           .value
         state <- row(fixture, b.eventId).map(_.getString(MongoFields.State))
         // Both offered together: only the earlier one is leased.
         both <- repository
           .claimCandidates(
             "w",
-            "hiring-publisher-w",
+            ProducerGenerationFixtures.of("hiring-publisher-w"),
             now.plusSeconds(601),
             30.seconds,
             List(candidate(a), candidate(b))

@@ -25,6 +25,14 @@ class InterviewMessageSpec extends FunSuite {
     assert(!json.contains("candidate"))
     assert(!json.contains("startsAt"))
   }
+  test("KFH-03.7 interview body with a repeated key is refused") {
+    val json = new String(InterviewMessageCodec.bytes(message), java.nio.charset.StandardCharsets.UTF_8)
+    val repeated = json.replace("{", s"""{"revision":7,""")
+    assertEquals(
+      InterviewMessageCodec.parse(repeated.getBytes(java.nio.charset.StandardCharsets.UTF_8)),
+      Left("interview message repeats a key")
+    )
+  }
   test("invalid step and oversized messages fail closed") {
     val json = new String(InterviewMessageCodec.bytes(message), java.nio.charset.StandardCharsets.UTF_8)
     assert(InterviewMessageCodec.parse(json.replace("Reserve", "Unknown").getBytes).isLeft)

@@ -28,6 +28,7 @@ import com.example.graphQL.cats.infrastructure.logging.SafeDiagnostics
 import com.example.graphQL.cats.infrastructure.telemetry.{
   BacklogCapability,
   BacklogMetrics,
+  KafkaClientMetrics,
   BacklogSampler,
   GraphQLOutcomeMetrics,
   TelemetryRuntime
@@ -54,7 +55,13 @@ object Main extends IOApp {
     telemetry <- TelemetryRuntime.resource(this.runtime.metrics)
     graphQLOutcomes <- Resource.eval(GraphQLOutcomeMetrics.create(telemetry.meterProvider))
     mongoCommands <- Resource.eval(IO.delay(MongoCommandTelemetry.create(telemetry.openTelemetry)))
-    runtime <- MongoHiringRuntime.resource(config, diagnostics, mongoCommands.instrument(MongoClientRole.Hiring))
+    kafkaMetrics <- KafkaClientMetrics.resource(telemetry.meterProvider)
+    runtime <- MongoHiringRuntime.resource(
+      config,
+      diagnostics,
+      mongoCommands.instrument(MongoClientRole.Hiring),
+      kafkaMetrics
+    )
     // Read-only sampling uses its own small client so a slow sample cannot take a connection from hiring work.
     samplingClient <- MongoDatabaseProbe.clientResource(
       config.mongoUri,

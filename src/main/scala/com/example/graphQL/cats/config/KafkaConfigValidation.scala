@@ -12,7 +12,16 @@ private[config] object KafkaConfigValidation {
         kafka.saslSecurityProtocol.getOrElse(KafkaSaslSecurityProtocol.Tls),
         kafka.bootstrapServers
       ),
+      validKafkaSaslMechanism(kafka.saslMechanism.getOrElse(KafkaSaslMechanism.ScramSha512), kafka.bootstrapServers),
       validKafkaCredentials(kafka.enabled, kafka.publisher.saslUsername, kafka.publisher.saslPassword),
+      validCommitBatch(
+        kafka.consumer.maxPollRecords,
+        kafka.consumer.maxPollIntervalSeconds,
+        kafka.consumer.commitBatchSize,
+        kafka.consumer.commitBatchIntervalMillis,
+        ConfigError.InvalidKafkaCommitBatchSize,
+        ConfigError.InvalidKafkaCommitBatchWindow
+      ),
       validKafkaCredentials(
         kafka.enabled && kafka.consumer.enabled,
         kafka.consumer.saslUsername,
@@ -23,7 +32,7 @@ private[config] object KafkaConfigValidation {
         kafka.enabled,
         List(kafka.publisher.saslUsername, kafka.consumer.saslUsername).flatten
       )
-    ).mapN { (saslSecurityProtocol, _, _, interview) =>
+    ).mapN { (saslSecurityProtocol, saslMechanism, _, _, _, interview) =>
       KafkaConfig(
         kafka.enabled,
         kafka.bootstrapServers,
@@ -33,7 +42,8 @@ private[config] object KafkaConfigValidation {
         kafka.consumer,
         saslSecurityProtocol,
         interview,
-        kafka.restartMaxDelaySeconds.getOrElse(KafkaConfig.DefaultRestartMaxDelaySeconds)
+        kafka.restartMaxDelaySeconds.getOrElse(KafkaConfig.DefaultRestartMaxDelaySeconds),
+        saslMechanism
       )
     }
 
@@ -53,8 +63,16 @@ private[config] object KafkaConfigValidation {
       validRetryWindow(raw.retryBaseSeconds, raw.retryCapSeconds),
       validClaimWindow(raw.providerTimeoutSeconds, raw.claimSeconds),
       validTopicPair(raw.commandsTopic, raw.resultsTopic),
-      validGroupPair(raw.workerGroup, raw.orchestratorGroup)
-    ).mapN { (_, _, _, _, _, _, _, topics, _) =>
+      validGroupPair(raw.workerGroup, raw.orchestratorGroup),
+      validCommitBatch(
+        raw.maxPollRecords.getOrElse(defaults.maxPollRecords),
+        raw.maxPollIntervalSeconds.getOrElse(defaults.maxPollIntervalSeconds),
+        raw.commitBatchSize.getOrElse(defaults.commitBatchSize),
+        raw.commitBatchIntervalMillis.getOrElse(defaults.commitBatchIntervalMillis),
+        ConfigError.InvalidInterviewCommitBatchSize,
+        ConfigError.InvalidInterviewCommitBatchWindow
+      )
+    ).mapN { (_, _, _, _, _, _, _, topics, _, _) =>
       InterviewRuntimeConfig(
         raw.enabled,
         raw.orchestratorUsername,
@@ -78,7 +96,12 @@ private[config] object KafkaConfigValidation {
         topics,
         raw.workerGroup,
         raw.orchestratorGroup,
-        raw.proposalTtlSeconds
+        raw.proposalTtlSeconds,
+        raw.workerId,
+        raw.maxPollRecords.getOrElse(defaults.maxPollRecords),
+        raw.maxPollIntervalSeconds.getOrElse(defaults.maxPollIntervalSeconds),
+        raw.commitBatchSize.getOrElse(defaults.commitBatchSize),
+        raw.commitBatchIntervalMillis.getOrElse(defaults.commitBatchIntervalMillis)
       )
     }
   }
@@ -101,7 +124,9 @@ private[config] object KafkaConfigValidation {
   private def validRetryWindow(baseSeconds: Int, capSeconds: Int): ValidatedNel[ConfigError, Unit] =
     Either.cond(capSeconds >= baseSeconds, (), ConfigError.InvalidInterviewRetryWindow).toValidatedNel
 
-  /** A claim must outlive the provider call by a fixed margin so a slow provider cannot outlast its lease. */
+  /** A claim must outlive the provider call by a fixed margin so a slow provider cannot outlast its lease. The margin
+    * also keeps every valid claim above the 15 s floor that the producer transaction timeout (claim less 5 s) needs.
+    */
   private def validClaimWindow(providerTimeoutSeconds: Int, claimSeconds: Int): ValidatedNel[ConfigError, Unit] =
     Either
       .cond(
@@ -120,6 +145,39 @@ private[config] object KafkaConfigValidation {
     Either.cond(workerGroup != orchestratorGroup, (), ConfigError.InvalidInterviewGroupPair).toValidatedNel
 
   private val ClaimMarginSeconds = 30L
+
+  /** A commit batch must fit in one poll, and its flush interval must fit inside the poll-interval liveness window. */
+  private def validCommitBatch(
+      maxPollRecords: Int,
+      maxPollIntervalSeconds: Int,
+      commitBatchSize: Int,
+      commitBatchIntervalMillis: Int,
+      sizeError: ConfigError,
+      windowError: ConfigError
+  ): ValidatedNel[ConfigError, Unit] =
+    (
+      Either.cond(commitBatchSize <= maxPollRecords, (), sizeError).toValidatedNel,
+      Either
+        .cond(commitBatchIntervalMillis.toLong < maxPollIntervalSeconds.toLong * 1000L, (), windowError)
+        .toValidatedNel
+    ).mapN((_, _) => ())
+
+  /** PLAIN sends the secret in clear, so it follows the same plaintext/loopback rule as SASL_PLAINTEXT. */
+  def validKafkaSaslMechanism(
+      mechanism: KafkaSaslMechanism,
+      bootstrapServers: String
+  ): ValidatedNel[ConfigError, KafkaSaslMechanism] =
+    mechanism match {
+      case KafkaSaslMechanism.ScramSha512 => mechanism.validNel
+      case KafkaSaslMechanism.Plain       =>
+        Either
+          .cond(
+            validKafkaSaslSecurityProtocol(KafkaSaslSecurityProtocol.Plaintext, bootstrapServers).isValid,
+            mechanism,
+            ConfigError.InvalidKafkaSaslMechanism
+          )
+          .toValidatedNel
+    }
 
   def validKafkaSaslSecurityProtocol(
       protocol: KafkaSaslSecurityProtocol,

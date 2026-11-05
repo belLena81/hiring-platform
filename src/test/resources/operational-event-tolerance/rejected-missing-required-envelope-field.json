@@ -1,0 +1,18 @@
+{
+  "description": "a missing required envelope field is malformed",
+  "expected": "rejected",
+  "envelope": {
+    "eventId": "00000000-0000-0000-0000-000000000201",
+    "eventType": "APPLICATION_STATUS_CHANGED",
+    "occurredAt": "2026-09-19T10:15:30Z",
+    "aggregateType": "Application",
+    "aggregateId": "00000000-0000-0000-0000-000000000203",
+    "payload": {
+      "applicationId": "00000000-0000-0000-0000-000000000203",
+      "candidateId": "00000000-0000-0000-0000-000000000202",
+      "jobId": "00000000-0000-0000-0000-000000000204",
+      "previousStatus": "Interview",
+      "newStatus": "Hired"
+    }
+  }
+}

@@ -172,7 +172,7 @@ final class LeaseExpiryDatabaseClockIntegrationSpec extends MongoIntegrationSuit
       at: Instant,
       duration: FiniteDuration
   ): IO[List[ClaimedOperationalEvent]] =
-    success(repository.claim(worker, s"hiring-publisher-$worker", at, duration, 1))
+    success(repository.claim(worker, ProducerGenerationFixtures.of(s"hiring-publisher-$worker"), at, duration, 1))
 
   test("DDR-01.1 an outbox event lease and its subject lease end at database time plus the requested duration") {
     mongoResource.use { fixture =>
@@ -477,7 +477,13 @@ final class LeaseExpiryDatabaseClockIntegrationSpec extends MongoIntegrationSuit
         offered <- runner
           .run(TransactionOperation.ApplicationWrite)(session =>
             repository
-              .leaseSubjects(session, List(intruder), "hiring-publisher-intruder", "intruder-token", wall, 30.seconds)
+              .leaseSubjects(
+                session,
+                List(intruder),
+                ProducerGenerationFixtures.of("hiring-publisher-intruder"),
+                "intruder-token",
+                30.seconds
+              )
           )
           .value
         fence <- MongoRepositoryTestSupport.findOne(

@@ -152,6 +152,7 @@ private[analytics] final class SparkHiringAnalyticsStream[F[_]: Async](
           .option("maxOffsetsPerTrigger", (settings.maxOffsetsPerTrigger: Int))
           .option("failOnDataLoss", "true")
           .option("kafka.isolation.level", "read_committed")
+          .option("includeHeaders", "true")
           .load()
           .writeStream
           .queryName(settings.streamId)

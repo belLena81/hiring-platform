@@ -16,6 +16,7 @@ import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.infrastructure.kafka.OperationalEventKafkaRuntime
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField}
 import com.example.graphQL.cats.service.events.OperationalEvents
+import com.example.graphQL.cats.service.port.ProducerWorkerId
 import com.mongodb.client.model.Filters
 import org.apache.kafka.clients.consumer.KafkaConsumer
 import org.apache.kafka.common.TopicPartition
@@ -39,7 +40,7 @@ class OperationalEventComposeIntegrationSpec extends KafkaIntegrationSuite {
     topic = kafkaNamespace.events,
     consumerGroup = kafkaNamespace.eventGroup,
     publisher = KafkaPublisherConfig(
-      "compose-evidence-writer",
+      ProducerWorkerId.parse("compose-evidence-writer").toOption.get,
       50,
       30,
       1,
@@ -77,12 +78,9 @@ class OperationalEventComposeIntegrationSpec extends KafkaIntegrationSuite {
     properties.put("group.id", s"analytics-range-evidence-${UUID.randomUUID()}")
     properties.put("key.deserializer", classOf[StringDeserializer].getName)
     properties.put("value.deserializer", classOf[ByteArrayDeserializer].getName)
-    properties.put("security.protocol", "SASL_PLAINTEXT")
-    properties.put("sasl.mechanism", "PLAIN")
-    properties.put(
-      "sasl.jaas.config",
-      s"org.apache.kafka.common.security.plain.PlainLoginModule required username=\"${kafka.consumer.saslUsername.get}\" password=\"${kafka.consumer.saslPassword.get}\";"
-    )
+    LocalTestServices
+      .saslSettings(kafka.consumer.saslUsername.get, kafka.consumer.saslPassword.get)
+      .foreach { case (key, value) => properties.put(key, value) }
     properties.put("isolation.level", "read_committed")
     val consumer = new KafkaConsumer[String, Array[Byte]](properties)
     val partition = new TopicPartition(kafka.topic, 0)
@@ -283,13 +281,14 @@ class OperationalEventComposeIntegrationSpec extends KafkaIntegrationSuite {
                   _ = registrations.foreach { registration =>
                     val transactionalId = registration.getString("transactionalId")
                     assert(transactionalId != null && transactionalId.startsWith("hiring-publisher-"))
+                    // KFH-04: the transactional id is the stable prefix + worker id and each row is keyed per
+                    // generation: subject:transactionalId:generationId, with a canonical UUID generation id.
+                    assertEquals(transactionalId, "hiring-publisher-" + kafka.publisher.workerId.value)
+                    val generationId = registration.getString("generationId")
+                    assertEquals(UUID.fromString(generationId).toString, generationId)
                     assertEquals(
                       registration.getString("_id"),
-                      s"${registration.getString("subjectId")}:$transactionalId"
-                    )
-                    assertEquals(
-                      UUID.fromString(transactionalId.stripPrefix("hiring-publisher-")).toString,
-                      transactionalId.stripPrefix("hiring-publisher-")
+                      s"${registration.getString("subjectId")}:$transactionalId:$generationId"
                     )
                     assert(registration.getDate("registeredAt") != null)
                     assert(!registration.containsKey("expiresAt"))

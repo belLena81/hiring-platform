@@ -8,6 +8,7 @@ One line per specification, grouped by what the first `- Status:` line says (rea
 
 | Spec | Status |
 |---|---|
+| [kafka-flow-hardening](kafka-flow-hardening.md) | in progress; publication waves, batched commits, tolerant wire reader with headers, stable producer identity with generations (migration 036), SCRAM-SHA-512, Kafka client metrics |
 | [analytics-mongo-persistence](analytics-mongo-persistence.md) | in progress; no final QA PASS recorded after the integration regressions were fixed |
 | [hiring-container-runtime](hiring-container-runtime.md) | in review |
 | [hiring-discovery-search-quality](hiring-discovery-search-quality.md) | in progress; Phase 10 partial, `.C` cloud rows open |

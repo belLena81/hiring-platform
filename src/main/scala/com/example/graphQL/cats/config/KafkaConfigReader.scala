@@ -4,6 +4,7 @@ import io.github.iltotore.iron.*
 import io.github.iltotore.iron.pureconfig.{RefinedConfigError, given}
 import _root_.pureconfig.*
 import _root_.pureconfig.error.CannotConvert
+import com.example.graphQL.cats.service.port.ProducerWorkerId
 
 /** Pureconfig's tuple derivation nests one inline per field, so the 23-field interview section exceeds the compiler's
   * successive-inline limit when iron's inline readers are resolved inside it. These resolve them once, outside.
@@ -23,8 +24,16 @@ private object InterviewSettingReaders {
   given ConfigReader[InterviewProposalTtlSeconds] = refined
   given ConfigReader[InterviewTopicName] = refined
   given ConfigReader[InterviewGroupName] = refined
+  given ConfigReader[KafkaPollCount] = refined
+  given ConfigReader[KafkaPollIntervalSeconds] = refined
+  given ConfigReader[KafkaCommitIntervalMillis] = refined
 }
 import InterviewSettingReaders.given
+
+private[config] given ConfigReader[ProducerWorkerId] =
+  ConfigReader[String].emap(raw =>
+    ProducerWorkerId.parse(raw).left.map(reason => CannotConvert(raw, "ProducerWorkerId", reason))
+  )
 
 private[config] given ConfigReader[KafkaPublisherConfig] =
   ConfigReader.forProduct8(
@@ -38,7 +47,7 @@ private[config] given ConfigReader[KafkaPublisherConfig] =
     "sasl-password"
   )(
     (
-        workerId: NonBlankStr,
+        workerId: ProducerWorkerId,
         batchSize: KafkaBatchSize,
         leaseSeconds: KafkaLeaseSeconds,
         retryDelaySeconds: KafkaRetryDelaySeconds,
@@ -60,13 +69,17 @@ private[config] given ConfigReader[KafkaPublisherConfig] =
   )
 
 private[config] given ConfigReader[KafkaConsumerConfig] =
-  ConfigReader.forProduct6(
+  ConfigReader.forProduct10(
     "enabled",
     "receipt-ttl-days",
     "quarantine-ttl-days",
     "sasl-username",
     "sasl-password",
-    "partition-concurrency"
+    "partition-concurrency",
+    "max-poll-records",
+    "max-poll-interval-seconds",
+    "commit-batch-size",
+    "commit-batch-interval-millis"
   )(
     (
         enabled: Boolean,
@@ -74,7 +87,11 @@ private[config] given ConfigReader[KafkaConsumerConfig] =
         quarantineTtlDays: KafkaRetentionDays,
         username: Option[String],
         password: Option[String],
-        partitionConcurrency: Option[PartitionConcurrency]
+        partitionConcurrency: Option[PartitionConcurrency],
+        maxPollRecords: Option[KafkaPollCount],
+        maxPollIntervalSeconds: Option[KafkaPollIntervalSeconds],
+        commitBatchSize: Option[KafkaPollCount],
+        commitBatchIntervalMillis: Option[KafkaCommitIntervalMillis]
     ) =>
       KafkaConsumerConfig(
         enabled,
@@ -82,7 +99,11 @@ private[config] given ConfigReader[KafkaConsumerConfig] =
         quarantineTtlDays,
         username,
         password,
-        partitionConcurrency.getOrElse(KafkaConsumerConfig.DefaultPartitionConcurrency)
+        partitionConcurrency.getOrElse(KafkaConsumerConfig.DefaultPartitionConcurrency),
+        maxPollRecords.getOrElse(KafkaConsumerConfig.DefaultMaxPollRecords),
+        maxPollIntervalSeconds.getOrElse(KafkaConsumerConfig.DefaultMaxPollIntervalSeconds),
+        commitBatchSize.getOrElse(KafkaConsumerConfig.DefaultCommitBatchSize),
+        commitBatchIntervalMillis.getOrElse(KafkaConsumerConfig.DefaultCommitBatchIntervalMillis)
       )
   )
 
@@ -91,6 +112,13 @@ private[config] given ConfigReader[KafkaSaslSecurityProtocol] =
     KafkaSaslSecurityProtocol.values
       .find(_.kafkaValue == value)
       .toRight(CannotConvert(value, "KafkaSaslSecurityProtocol", "unknown protocol"))
+  )
+
+private[config] given ConfigReader[KafkaSaslMechanism] =
+  ConfigReader[String].emap(value =>
+    KafkaSaslMechanism.values
+      .find(_.kafkaValue == value)
+      .toRight(CannotConvert(value, "KafkaSaslMechanism", "unknown mechanism"))
   )
 
 private[config] final case class RawKafkaConfig(
@@ -102,7 +130,8 @@ private[config] final case class RawKafkaConfig(
     consumer: KafkaConsumerConfig,
     saslSecurityProtocol: Option[KafkaSaslSecurityProtocol] = None,
     interview: Option[RawInterviewRuntimeConfig] = None,
-    restartMaxDelaySeconds: Option[KafkaRestartMaxDelaySeconds] = None
+    restartMaxDelaySeconds: Option[KafkaRestartMaxDelaySeconds] = None,
+    saslMechanism: Option[KafkaSaslMechanism] = None
 ) derives ConfigReader
 
 /** Scala defaults apply when the whole `kafka.interview` section is absent; present sections list every required key.
@@ -131,5 +160,10 @@ private[config] final case class RawInterviewRuntimeConfig(
     resultsTopic: InterviewTopicName = "hiring.interview-results",
     workerGroup: InterviewGroupName = "hiring-interview-workers",
     orchestratorGroup: InterviewGroupName = "hiring-interview-orchestrator",
-    proposalTtlSeconds: InterviewProposalTtlSeconds = 259200
+    proposalTtlSeconds: InterviewProposalTtlSeconds = 259200,
+    workerId: ProducerWorkerId = InterviewRuntimeConfig.DefaultWorkerId,
+    maxPollRecords: Option[KafkaPollCount] = None,
+    maxPollIntervalSeconds: Option[KafkaPollIntervalSeconds] = None,
+    commitBatchSize: Option[KafkaPollCount] = None,
+    commitBatchIntervalMillis: Option[KafkaCommitIntervalMillis] = None
 ) derives ConfigReader

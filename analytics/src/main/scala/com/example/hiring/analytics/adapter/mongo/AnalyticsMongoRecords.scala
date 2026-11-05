@@ -46,6 +46,7 @@ private[analytics] object AnalyticsMongoRecords {
       _id: String,
       subjectId: String,
       transactionalId: String,
+      generationId: String,
       kind: String,
       state: String
   )

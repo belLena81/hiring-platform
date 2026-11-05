@@ -7,6 +7,7 @@ import com.example.graphQL.cats.config.{
   KafkaConfig,
   KafkaConsumerConfig,
   KafkaPublisherConfig,
+  KafkaSaslMechanism,
   KafkaSaslSecurityProtocol
 }
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
@@ -16,7 +17,7 @@ import com.example.graphQL.cats.service.resilience.CircuitBreaker
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField}
-import com.example.graphQL.cats.infrastructure.events.OperationalEventWireCodec
+import com.example.graphQL.cats.infrastructure.events.{OperationalEventHeaders, OperationalEventWireCodec}
 import com.example.graphQL.cats.service.events.*
 import fs2.Stream
 import munit.CatsEffectSuite
@@ -44,13 +45,21 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
     bootstrapServers = "127.0.0.1:9092",
     topic = OperationalEventEnvelope.Topic,
     consumerGroup = "test-consumer",
-    publisher = KafkaPublisherConfig("test", 10, 30, 1, 3, 100),
+    publisher = KafkaPublisherConfig(ProducerWorkerId.parse("test").toOption.get, 10, 30, 1, 3, 100),
     consumer = KafkaConsumerConfig(enabled = true, receiptTtlDays = 9, quarantineTtlDays = 7)
   )
 
   test("publisher and reader use independent SASL principals") {
-    val publisher = KafkaClientSettings.security(Some("publisher"), Some("publish-secret"))
-    val reader = KafkaClientSettings.security(Some("analytics_reader"), Some("read-secret"))
+    val publisher = KafkaClientSettings.security(
+      Some("publisher"),
+      Some("publish-secret"),
+      mechanism = KafkaSaslMechanism.ScramSha512
+    )
+    val reader = KafkaClientSettings.security(
+      Some("analytics_reader"),
+      Some("read-secret"),
+      mechanism = KafkaSaslMechanism.ScramSha512
+    )
     assertEquals(publisher.get("security.protocol"), Some("SASL_SSL"))
     assert(publisher.getOrElse("sasl.jaas.config", "").contains("username=\"publisher\""))
     assert(reader.getOrElse("sasl.jaas.config", "").contains("username=\"analytics_reader\""))
@@ -61,13 +70,17 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
     val properties = KafkaClientSettings.security(
       Some("publisher"),
       Some("publish-secret"),
-      KafkaSaslSecurityProtocol.Plaintext
+      KafkaSaslSecurityProtocol.Plaintext,
+      KafkaSaslMechanism.ScramSha512
     )
     assertEquals(properties.get("security.protocol"), Some("SASL_PLAINTEXT"))
   }
 
   test("Kafka clients without credentials state PLAINTEXT explicitly and carry no SASL properties") {
-    assertEquals(KafkaClientSettings.security(None, None), Map("security.protocol" -> "PLAINTEXT"))
+    assertEquals(
+      KafkaClientSettings.security(None, None, mechanism = KafkaSaslMechanism.ScramSha512),
+      Map("security.protocol" -> "PLAINTEXT")
+    )
   }
 
   test("outbox failure reasons carry exception class names and never client messages or credentials") {
@@ -253,19 +266,21 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
     }
   }
 
-  test("an undurable record stops sequential processing before a later offset can commit") {
+  test("an undurable record stops sequential processing before a later offset can be emitted for commit") {
     for {
       processed <- cats.effect.Ref.of[IO, Vector[Long]](Vector.empty)
-      committed <- cats.effect.Ref.of[IO, Vector[Long]](Vector.empty)
+      emitted <- cats.effect.Ref.of[IO, Vector[Long]](Vector.empty)
       result <- List(10L, 11L).traverse_ { offset =>
-        KafkaRuntimeSupport.processRecord("hiring.events", 0, offset)(
-          RepositoryF
-            .lift(processed.update(_ :+ offset))
-            .flatMap(_ => RepositoryF.at[IO].fromEither(Either.cond(offset != 10L, (), RepositoryError.Unavailable)))
-        )(committed.update(_ :+ offset))
+        KafkaRuntimeSupport
+          .processRecord("hiring.events", 0, offset)(
+            RepositoryF
+              .lift(processed.update(_ :+ offset))
+              .flatMap(_ => RepositoryF.at[IO].fromEither(Either.cond(offset != 10L, (), RepositoryError.Unavailable)))
+          )(KafkaFixtures.offset("hiring.events", 0, offset, "g")(_ => IO.unit))
+          .flatMap(committable => emitted.update(_ :+ committable.offsetAndMetadata.offset - 1))
       }.attempt
       handled <- processed.get
-      offsets <- committed.get
+      offsets <- emitted.get
     } yield {
       assert(result.isLeft)
       assertEquals(handled, Vector(10L))
@@ -389,42 +404,13 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
     }
   }
 
-  test("publisher bounds active work to four even when many facts share one key") {
-    for {
-      active <- Ref.of[IO, Int](0)
-      maximum <- Ref.of[IO, Int](0)
-      entered <- Deferred[IO, Unit]
-      release <- Deferred[IO, Unit]
-      fiber <- OperationalEventKafkaRuntime
-        .publishClaims(List.fill(20)(claim("one-key", UUID.randomUUID()))) { _ =>
-          active
-            .updateAndGet(_ + 1)
-            .flatMap { count =>
-              maximum.update(_.max(count)) *> (if (count == 4) entered.complete(()).void else IO.unit) *> release.get
-            }
-            .guarantee(active.update(_ - 1))
-        }
-        .start
-      _ <- entered.get
-      before <- active.get
-      _ <- release.complete(())
-      _ <- fiber.joinWithNever
-      peak <- maximum.get
-      remaining <- active.get
-    } yield {
-      assertEquals(before, 4)
-      assertEquals(peak, 4)
-      assertEquals(remaining, 0)
-    }
-  }
-
   test("publication waves respect the per-poll budget and stop on an empty result") {
     for {
       limits <- Ref.of[IO, Vector[Int]](Vector.empty)
       published <- Ref.of[IO, Int](0)
       _ <- OperationalEventKafkaRuntime.publishWaves(10) { limit =>
         limits.update(_ :+ limit).as(List.fill(limit)(claim("one-key", UUID.randomUUID())))
-      }(_ => published.update(_ + 1))
+      }(wave => published.update(_ + wave.size))
       requests <- limits.get
       count <- published.get
       emptyRequests <- Ref.of[IO, Int](0)
@@ -444,30 +430,15 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
       .map(result => assert(result.isLeft))
   }
 
-  test("publisher overlaps independent partition keys") {
-    for {
-      arrivals <- Ref.of[IO, Int](0)
-      barrier <- Deferred[IO, Unit]
-      _ <- OperationalEventKafkaRuntime.publishClaims(
-        List(claim("job-1", UUID.randomUUID()), claim("job-2", UUID.randomUUID()))
-      ) { value =>
-        arrivals.modify(count => (count + 1, count + 1)).flatMap { count =>
-          if (count == 2) barrier.complete(()).void else barrier.get
-        } *> IO(assert(value.partitionKey == "job-1" || value.partitionKey == "job-2"))
-      }
-      count <- arrivals.get
-    } yield assertEquals(count, 2)
-  }
-
   private val publisherBreakerSettings = CircuitBreakerPolicy.Settings(2, 10.seconds, 100.millis, 1.second, 1)
 
   private def failingPublication(breaker: CircuitBreaker[IO], error: Throwable, released: Ref[IO, Int]) =
     OperationalEventKafkaRuntime
-      .publishClaim(
+      .publishWave(
         config,
         publicationOutbox(IO.pure(Right(())), IO.pure(Right(())), released.update(_ + 1).as(Right(()))),
         Diagnostics.noop,
-        claim("key", UUID.randomUUID())
+        List(claim("key", UUID.randomUUID()))
       )(OperationalEventKafkaRuntime.guardedSend(breaker, IO.raiseError(error)))
       .attempt
 
@@ -534,7 +505,8 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
     } yield {
       assert(results.forall(_.isLeft), clue(results))
       assertEquals(state, CircuitBreakerPolicy.initial)
-      assertEquals(retried, 0)
+      // KFH-01.5: a fenced wave releases its claim uncharged instead of leaving it to expire.
+      assertEquals(retried, 4)
     }
   }
 
@@ -549,9 +521,7 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
       probeClaims <- OperationalEventKafkaRuntime.claimWithin(breaker, 4)(limit =>
         limits.update(_ :+ limit).as(List(claim("key", UUID.randomUUID())))
       )
-      _ <- OperationalEventKafkaRuntime.publishClaims(probeClaims)(_ =>
-        OperationalEventKafkaRuntime.guardedSend(breaker, IO.unit)
-      )
+      _ <- probeClaims.traverse_(_ => OperationalEventKafkaRuntime.guardedSend(breaker, IO.unit))
       afterRecovery <- OperationalEventKafkaRuntime.claimWithin(breaker, 4)(limit => limits.update(_ :+ limit).as(Nil))
       observed <- limits.get
     } yield {
@@ -569,11 +539,11 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
       before <- released.get
       sent <- Ref.of[IO, Boolean](false)
       _ <- OperationalEventKafkaRuntime
-        .publishClaim(
+        .publishWave(
           config,
           publicationOutbox(IO.pure(Right(())), IO.pure(Right(())), released.update(_ + 1).as(Right(()))),
           Diagnostics.noop,
-          claim("key", UUID.randomUUID())
+          List(claim("key", UUID.randomUUID()))
         )(OperationalEventKafkaRuntime.guardedSend(breaker, sent.set(true)))
       after <- released.get
       didSend <- sent.get
@@ -590,7 +560,7 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
   ): OperationalEventOutboxRepository[IO] = new OperationalEventOutboxRepository[IO] {
     def claim(
         workerId: String,
-        transactionalId: String,
+        generation: ProducerGeneration,
         at: Instant,
         duration: scala.concurrent.duration.FiniteDuration,
         limit: Int
@@ -606,6 +576,8 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
       RepositoryF.fromFEither(published)
     def releaseForRetry(id: UUID, token: String, at: Instant, available: Instant): RepositoryF[IO, Unit] =
       RepositoryF.fromFEither(retried)
+    def releaseUncharged(id: UUID, token: String, at: Instant, available: Instant): RepositoryF[IO, Unit] =
+      RepositoryF.fromFEither(retried)
     def markFailed(id: UUID, token: String, at: Instant, reason: String): RepositoryF[IO, Unit] =
       RepositoryF.fromFEither(retried)
   }
@@ -617,7 +589,12 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
         observed.update(_ :+ "renew").as(Right(())),
         observed.update(_ :+ "published").as(Right(()))
       )
-      _ <- OperationalEventKafkaRuntime.publishClaim(config, outbox, Diagnostics.noop, claim("key", UUID.randomUUID()))(
+      _ <- OperationalEventKafkaRuntime.publishWave(
+        config,
+        outbox,
+        Diagnostics.noop,
+        List(claim("key", UUID.randomUUID()))
+      )(
         observed.update(_ :+ "send")
       )
       events <- observed.get
@@ -629,7 +606,7 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
       sent <- Ref.of[IO, Boolean](false)
       outbox = publicationOutbox(IO.pure(Left(RepositoryError.Conflict)), IO.pure(Right(())))
       result <- OperationalEventKafkaRuntime
-        .publishClaim(config, outbox, Diagnostics.noop, claim("key", UUID.randomUUID()))(sent.set(true))
+        .publishWave(config, outbox, Diagnostics.noop, List(claim("key", UUID.randomUUID())))(sent.set(true))
         .attempt
       didSend <- sent.get
     } yield {
@@ -649,7 +626,7 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
       )
       shortLease = config.copy(publisher = config.publisher.copy(leaseSeconds = 3))
       result <- OperationalEventKafkaRuntime
-        .publishClaim(shortLease, outbox, Diagnostics.noop, claim("key", UUID.randomUUID()))(
+        .publishWave(shortLease, outbox, Diagnostics.noop, List(claim("key", UUID.randomUUID())))(
           IO.never[Unit].onCancel(cancelled.set(true))
         )
         .attempt
@@ -677,7 +654,7 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
         retries.update(_ + 1).as(Right(()))
       )
       fiber <- OperationalEventKafkaRuntime
-        .publishClaim(config, outbox, Diagnostics.noop, claim("key", UUID.randomUUID()))(
+        .publishWave(config, outbox, Diagnostics.noop, List(claim("key", UUID.randomUUID())))(
           (entered.complete(()) *> IO.never[Unit]).onCancel(cancelled.set(true))
         )
         .start
@@ -698,12 +675,131 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
       sends <- Ref.of[IO, Int](0)
       outbox = publicationOutbox(IO.pure(Right(())), IO.pure(Left(RepositoryError.Unavailable)))
       result <- OperationalEventKafkaRuntime
-        .publishClaim(config, outbox, Diagnostics.noop, claim("key", UUID.randomUUID()))(sends.update(_ + 1))
+        .publishWave(config, outbox, Diagnostics.noop, List(claim("key", UUID.randomUUID())))(sends.update(_ + 1))
         .attempt
       count <- sends.get
     } yield {
       assert(result.isLeft)
       assertEquals(count, 1)
+    }
+  }
+
+  private def recordWith(
+      values: Fakes,
+      bytes: Array[Byte],
+      headers: List[(String, Array[Byte])]
+  ): IO[Boolean] =
+    OperationalEventKafkaRuntime
+      .recordDurably(
+        config,
+        values.receipts,
+        values.quarantines,
+        config.topic,
+        0,
+        9L,
+        Some(bytes),
+        headers = headers
+      )
+      .value
+      .map(_.isRight)
+
+  private def header(key: String, value: String): (String, Array[Byte]) = key -> value.getBytes("UTF-8")
+
+  test("KFH-03.3 a header event type that disagrees with the body is quarantined as MalformedEnvelope") {
+    fakes.flatMap { values =>
+      val body = event(OperationalEventType.JOB_UPDATED)
+      val headers = OperationalEventHeaders
+        .operational(body)
+        .map((key, value) =>
+          if (key == OperationalEventHeaders.EventType) header(key, OperationalEventType.APPLICATION_CREATED.toString)
+          else key -> value
+        )
+      for {
+        committed <- recordWith(values, OperationalEventWireCodec.bytes(body), headers)
+        records <- values.quarantined.get
+        receipts <- values.stored.get
+      } yield {
+        assert(committed)
+        assertEquals(records.map(_.category), Vector(OperationalEventFailureCategory.MalformedEnvelope))
+        assertEquals(receipts, Map.empty)
+      }
+    }
+  }
+
+  test("KFH-03.4 an unsupported schema version is quarantined as UnsupportedVersion and the offset may commit") {
+    fakes.flatMap { values =>
+      val body = event(OperationalEventType.JOB_UPDATED)
+      val headers = OperationalEventHeaders
+        .operational(body)
+        .map((key, value) => if (key == OperationalEventHeaders.SchemaVersion) header(key, "2") else key -> value)
+      for {
+        decodable <- recordWith(values, OperationalEventWireCodec.bytes(body), headers)
+        undecodable <- recordWith(values, "{\"future\":true}".getBytes("UTF-8"), headers)
+        records <- values.quarantined.get
+        receipts <- values.stored.get
+      } yield {
+        assert(decodable && undecodable)
+        assertEquals(
+          records.map(_.category),
+          Vector(OperationalEventFailureCategory.UnsupportedVersion, OperationalEventFailureCategory.UnsupportedVersion)
+        )
+        assertEquals(receipts, Map.empty)
+      }
+    }
+  }
+
+  test("KFH-03.7 a duplicate header is malformed, and quarantine keeps the value bytes but no header content") {
+    fakes.flatMap { values =>
+      val body = event(OperationalEventType.JOB_UPDATED)
+      val headers = OperationalEventHeaders.operational(body) :+ header("traceparent", "secret-trace") :+
+        header("traceparent", "secret-trace-2")
+      for {
+        committed <- recordWith(values, OperationalEventWireCodec.bytes(body), headers)
+        records <- values.quarantined.get
+      } yield {
+        assert(committed)
+        assertEquals(records.map(_.category), Vector(OperationalEventFailureCategory.MalformedEnvelope))
+        assertEquals(records.head.rawBytes.toList, OperationalEventWireCodec.bytes(body).toList)
+        assert(!records.head.reason.contains("secret-trace"))
+      }
+    }
+  }
+
+  test("KFH-03.7 a null-valued contract header is quarantined as MalformedEnvelope and the offset may commit") {
+    fakes.flatMap { values =>
+      val body = event(OperationalEventType.JOB_UPDATED)
+      val headers = OperationalEventHeaders
+        .operational(body)
+        .map((key, value) => if (key == OperationalEventHeaders.EventId) key -> (null: Array[Byte]) else key -> value)
+      for {
+        committed <- recordWith(values, OperationalEventWireCodec.bytes(body), headers)
+        records <- values.quarantined.get
+        receipts <- values.stored.get
+      } yield {
+        assert(committed)
+        assertEquals(records.map(_.category), Vector(OperationalEventFailureCategory.MalformedEnvelope))
+        assertEquals(receipts, Map.empty)
+      }
+    }
+  }
+
+  test("KFH-03.3 matching or absent headers record exactly one receipt") {
+    fakes.flatMap { values =>
+      val body = event(OperationalEventType.JOB_UPDATED)
+      for {
+        withHeaders <- recordWith(
+          values,
+          OperationalEventWireCodec.bytes(body),
+          OperationalEventHeaders.operational(body)
+        )
+        withoutHeaders <- recordWith(values, OperationalEventWireCodec.bytes(body), Nil)
+        receipts <- values.stored.get
+        records <- values.quarantined.get
+      } yield {
+        assert(withHeaders && withoutHeaders)
+        assertEquals(receipts.keySet, Set(config.consumerGroup -> body.eventId))
+        assertEquals(records, Vector.empty)
+      }
     }
   }
 

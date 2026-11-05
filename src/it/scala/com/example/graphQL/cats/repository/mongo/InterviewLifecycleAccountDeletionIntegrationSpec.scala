@@ -192,8 +192,8 @@ final class InterviewLifecycleAccountDeletionIntegrationSpec extends MongoIntegr
 
   private def captureTransport(sink: Ref[IO, Vector[InterviewMessage]]): InterviewTransport[IO] =
     new InterviewTransport[IO] {
-      private val commands = InterviewPublisherGeneration(InterviewPublisherRole.Orchestrator, UUID.randomUUID())
-      private val results = InterviewPublisherGeneration(InterviewPublisherRole.Worker, UUID.randomUUID())
+      private val commands = ProducerGenerationFixtures.interview(InterviewPublisherRole.Orchestrator)
+      private val results = ProducerGenerationFixtures.interview(InterviewPublisherRole.Worker)
       override def generationFor(message: InterviewMessage): InterviewPublisherGeneration =
         if (message.result.nonEmpty) results else commands
       override def publish(message: InterviewMessage): IO[Unit] = sink.update(_ :+ message)

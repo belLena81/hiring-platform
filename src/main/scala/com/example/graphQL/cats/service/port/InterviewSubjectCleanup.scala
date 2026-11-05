@@ -30,7 +30,7 @@ val InterviewRetentionBarrier = com.example.graphQL.cats.domain.workflow.Intervi
 
 trait InterviewPublisherFencer[F[_]] {
 
-  /** Success confirms broker fencing for every captured generation, including an otherwise idle producer. */
+  /** Success confirms broker fencing for every listed transactional id, including an otherwise idle producer. */
   def fence(transactionalIds: Vector[String]): RepositoryF[F, Unit]
 }
 
@@ -39,8 +39,10 @@ enum InterviewCleanupUpdate {
 }
 
 trait InterviewSubjectCleanupRepository[F[_]] {
-  def producerBatch(subject: UserId): RepositoryF[F, Vector[String]]
-  def markProducersFenced(subject: UserId, ids: Vector[String], now: Instant): RepositoryF[F, Unit]
+  def producerBatch(subject: UserId): RepositoryF[F, Vector[ProducerGeneration]]
+
+  /** Marks exactly the listed generations Fenced; a later generation of the same transactional id stays Active. */
+  def markProducersFenced(subject: UserId, generations: Vector[ProducerGeneration]): RepositoryF[F, Unit]
   def pendingPage(cursor: Option[InterviewCleanupCursor], observedAt: Instant): RepositoryF[F, InterviewCleanupPage]
   def find(subject: UserId): RepositoryF[F, Option[InterviewSubjectCleanup]]
   def transition(

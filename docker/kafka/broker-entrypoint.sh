@@ -1,6 +1,8 @@
 #!/bin/bash
-# Local Compose broker entrypoint: builds the SASL/PLAIN JAAS settings from Compose secret files inside the container,
-# so broker and client passwords never appear in container metadata, then hands over to the image's own entrypoint.
+# Local Compose broker entrypoint: builds the broker-only SASL/PLAIN JAAS settings from the broker Compose secret file
+# inside the container, so the password never appears in container metadata, then hands over to the image's own
+# entrypoint. Client users authenticate with SCRAM-SHA-512; their credentials live in the cluster metadata and are
+# created by provision-access.sh, so no client password is read or embedded here.
 set -euo pipefail
 
 read_secret() {
@@ -19,23 +21,15 @@ read_secret() {
 }
 
 broker="$(read_secret kafka_broker_password)"
-publisher="$(read_secret kafka_publisher_password)"
-reader="$(read_secret kafka_reader_password)"
-fencer="$(read_secret kafka_fencer_password)"
-orchestrator="$(read_secret kafka_interview_orchestrator_password)"
-worker="$(read_secret kafka_interview_worker_password)"
-interview_fencer="$(read_secret kafka_interview_fencer_password)"
 
 login_module="org.apache.kafka.common.security.plain.PlainLoginModule required"
-users="user_broker=\"${broker}\" user_hiring_publisher_v2=\"${publisher}\" user_analytics_reader=\"${reader}\""
-users+=" user_analytics_fencer=\"${fencer}\" user_interview_command_publisher=\"${orchestrator}\""
-users+=" user_interview_result_publisher=\"${worker}\" user_interview_fencer=\"${interview_fencer}\""
-server_jaas="${login_module} username=\"broker\" password=\"${broker}\" ${users};"
+# The only PLAIN identity: the broker principal (controller listener, inter-broker and provisioning admin on INTERNAL).
+server_jaas="${login_module} username=\"broker\" password=\"${broker}\" user_broker=\"${broker}\";"
 
-export KAFKA_SASL_JAAS_CONFIG="${login_module} username=\"broker\" password=\"${broker}\";"
+# With several enabled mechanisms the broker ignores an unprefixed sasl.jaas.config, so every entry is per listener and
+# mechanism. The PLAIN entries also supply the broker's own client credentials (inter-broker and controller).
 export KAFKA_LISTENER_NAME_INTERNAL_PLAIN_SASL_JAAS_CONFIG="$server_jaas"
-export KAFKA_LISTENER_NAME_EXTERNAL_PLAIN_SASL_JAAS_CONFIG="$server_jaas"
 export KAFKA_LISTENER_NAME_CONTROLLER_PLAIN_SASL_JAAS_CONFIG="$server_jaas"
-unset broker publisher reader fencer orchestrator worker interview_fencer users server_jaas
+unset broker server_jaas
 
 exec /__cacert_entrypoint.sh /etc/kafka/docker/run

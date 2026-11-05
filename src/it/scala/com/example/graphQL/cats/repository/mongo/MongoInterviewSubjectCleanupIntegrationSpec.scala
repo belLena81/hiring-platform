@@ -11,7 +11,9 @@ import com.example.graphQL.cats.service.port.{
   RepositoryF,
   InterviewCleanupUpdate,
   InterviewCleanupCursor,
-  InterviewCleanupPage
+  InterviewCleanupPage,
+  ProducerGeneration,
+  ProducerGenerationId
 }
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.domain.workflow.{
@@ -633,10 +635,22 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
             .append("deleted", true)
         )
         _ <- MongoProducerRegistrations
-          .register(fixture.database, None, subject.value.toString, generation, "Interview", Instant.now())
+          .register(
+            fixture.database,
+            None,
+            subject.value.toString,
+            ProducerGenerationFixtures.of(generation),
+            "Interview"
+          )
           .value
         _ <- MongoProducerRegistrations
-          .register(fixture.database, None, subject.value.toString, unrelated, "Operational", Instant.now())
+          .register(
+            fixture.database,
+            None,
+            subject.value.toString,
+            ProducerGenerationFixtures.of(unrelated),
+            "Operational"
+          )
           .value
         _ <- cleanup.enqueue(subject, Instant.now(), None).value.flatMap(result => IO(assert(result.isRight)))
         ids <- cleanup.producerBatch(subject).value
@@ -649,11 +663,11 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
           Filters.eq("_id", subject.value.toString)
         )
       } yield {
-        assertEquals(ids, Right(Vector(generation)))
+        assertEquals(ids, Right(Vector(ProducerGenerationFixtures.of(generation))))
         assertEquals(current.toOption.flatten.map(_.transactionalIds), Some(Vector.empty))
         assertEquals(current.toOption.flatten.map(_.state), Some(InterviewCleanupState.Pending))
         assert(!complete)
-        assertEquals(operational, Right(Vector(unrelated)))
+        assertEquals(operational, Right(Vector(ProducerGenerationFixtures.of(unrelated))))
         assert(fence.forall(!_.containsKey("transactionalIds")))
       }
     }
@@ -944,8 +958,16 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
             "_id",
             MongoInterviewCleanupMigrations.MigrationId,
             MongoProducerRegistrationMigrations.MigrationId,
+            MongoProducerGenerationRegistrationMigrations.MigrationId,
             MongoInterviewCleanupIntegrityMigrations.MigrationId
           )
+        )
+        // A database at 035: the legacy registry validator is in force until 036 rewrites the 012 rows.
+        setup <- MongoHiringSetup.setupDatabase(fixture.database)
+        _ <- MongoHiringValidators.install(
+          setup,
+          MongoProducerRegistrations.Collection,
+          MongoProducerRegistrationMigrations.registrationValidatorV1
         )
         _ <- allowCorruptFixtures(fixture.database)
         _ <- fixture.database
@@ -978,7 +1000,15 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
         resumed <- cleanup.find(subject).value
       } yield {
         assertEquals(reopened.toOption.flatten.map(_.state), Some(InterviewCleanupState.Pending))
-        assertEquals(ids, Right(Vector(generation)))
+        // Migration 036 keys the copied 012 row by the UUID suffix of the legacy transactional id.
+        assertEquals(
+          ids,
+          Right(
+            Vector(
+              ProducerGeneration(generation, ProducerGenerationId(UUID.fromString(generation.takeRight(36))))
+            )
+          )
+        )
         assertEquals(reopened.toOption.flatten.map(_.transactionalIds), Some(Vector.empty))
         assertEquals(resumed.toOption.flatten.map(_.state), Some(InterviewCleanupState.ProducersFenced))
         assertEquals(resumed.toOption.flatten.map(_.revision), Some(2L))

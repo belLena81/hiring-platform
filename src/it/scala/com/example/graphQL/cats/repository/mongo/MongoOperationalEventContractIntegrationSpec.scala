@@ -30,7 +30,13 @@ class MongoOperationalEventContractIntegrationSpec extends MongoIntegrationSuite
         _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
         _ <- MongoRepositoryTestSupport.insertOne(fixture.database, MongoCollections.EventOutbox, document(value))
         claimed <- repository
-          .claim("precision-test", s"hiring-publisher-${UUID.randomUUID()}", now.plusSeconds(1), 30.seconds, 1)
+          .claim(
+            "precision-test",
+            ProducerGenerationFixtures.of(s"hiring-publisher-${UUID.randomUUID()}"),
+            now.plusSeconds(1),
+            30.seconds,
+            1
+          )
           .value
           .flatMap(result)
       } yield {
@@ -128,7 +134,13 @@ class MongoOperationalEventContractIntegrationSpec extends MongoIntegrationSuite
           _ <- MongoRepositoryTestSupport.insertOne(fixture.database, MongoCollections.EventOutbox, bad)
           _ <- MongoRepositoryTestSupport.insertOne(fixture.database, MongoCollections.EventOutbox, document(healthy))
           claimed <- repository
-            .claim("contract-test", s"hiring-publisher-${UUID.randomUUID()}", now, 30.seconds, 1)
+            .claim(
+              "contract-test",
+              ProducerGenerationFixtures.of(s"hiring-publisher-${UUID.randomUUID()}"),
+              now,
+              30.seconds,
+              1
+            )
             .value
             .flatMap(result)
           retained <- MongoRepositoryTestSupport.findOne(
@@ -165,10 +177,22 @@ class MongoOperationalEventContractIntegrationSpec extends MongoIntegrationSuite
           _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO])
           _ <- MongoRepositoryTestSupport.insertOne(fixture.database, MongoCollections.EventOutbox, bad)
           claimed <- repository
-            .claim("contract-test", s"hiring-publisher-${UUID.randomUUID()}", now, 30.seconds, 1)
+            .claim(
+              "contract-test",
+              ProducerGenerationFixtures.of(s"hiring-publisher-${UUID.randomUUID()}"),
+              now,
+              30.seconds,
+              1
+            )
             .value
           again <- repository
-            .claim("contract-test", s"hiring-publisher-${UUID.randomUUID()}", now, 30.seconds, 1)
+            .claim(
+              "contract-test",
+              ProducerGenerationFixtures.of(s"hiring-publisher-${UUID.randomUUID()}"),
+              now,
+              30.seconds,
+              1
+            )
             .value
           retained <- MongoRepositoryTestSupport.findOne(
             fixture.database,

@@ -2,25 +2,25 @@
   "description": "Shared contract for Kafka SASL client settings. Asserted by KafkaClientSettingsSpec (root) and KafkaClientPropertiesSpec (analytics) so the two builders cannot drift. JAAS literals escape backslash, double quote, and the control characters newline, carriage return, tab, backspace and form feed.",
   "credentialed": [
     {
-      "name": "tls-plain-credentials",
+      "name": "tls-scram-credentials",
       "protocol": "SASL_SSL",
       "username": "reader",
       "password": "credential",
       "expected": {
         "security.protocol": "SASL_SSL",
-        "sasl.mechanism": "PLAIN",
-        "sasl.jaas.config": "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"reader\" password=\"credential\";"
+        "sasl.mechanism": "SCRAM-SHA-512",
+        "sasl.jaas.config": "org.apache.kafka.common.security.scram.ScramLoginModule required username=\"reader\" password=\"credential\";"
       }
     },
     {
-      "name": "local-plaintext-transport",
+      "name": "local-plaintext-scram-transport",
       "protocol": "SASL_PLAINTEXT",
       "username": "publisher",
       "password": "publish-secret",
       "expected": {
         "security.protocol": "SASL_PLAINTEXT",
-        "sasl.mechanism": "PLAIN",
-        "sasl.jaas.config": "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"publisher\" password=\"publish-secret\";"
+        "sasl.mechanism": "SCRAM-SHA-512",
+        "sasl.jaas.config": "org.apache.kafka.common.security.scram.ScramLoginModule required username=\"publisher\" password=\"publish-secret\";"
       }
     },
     {
@@ -30,8 +30,8 @@
       "password": "pa\"ss\\",
       "expected": {
         "security.protocol": "SASL_SSL",
-        "sasl.mechanism": "PLAIN",
-        "sasl.jaas.config": "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"us\\\"er\\\\x\" password=\"pa\\\"ss\\\\\";"
+        "sasl.mechanism": "SCRAM-SHA-512",
+        "sasl.jaas.config": "org.apache.kafka.common.security.scram.ScramLoginModule required username=\"us\\\"er\\\\x\" password=\"pa\\\"ss\\\\\";"
       }
     },
     {
@@ -41,8 +41,8 @@
       "password": "tab\tvalue\r",
       "expected": {
         "security.protocol": "SASL_SSL",
-        "sasl.mechanism": "PLAIN",
-        "sasl.jaas.config": "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"line\\nuser\" password=\"tab\\tvalue\\r\";"
+        "sasl.mechanism": "SCRAM-SHA-512",
+        "sasl.jaas.config": "org.apache.kafka.common.security.scram.ScramLoginModule required username=\"line\\nuser\" password=\"tab\\tvalue\\r\";"
       }
     }
   ],

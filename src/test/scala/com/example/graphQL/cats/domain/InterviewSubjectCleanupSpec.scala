@@ -51,7 +51,7 @@ final class InterviewSubjectCleanupSpec extends FunSuite {
     }
   }
 
-  test("producer identity validation isolates interview prefixes and canonical UUIDs") {
+  test("producer identity validation isolates interview prefixes and accepts worker ids and legacy UUID suffixes") {
     val id = "hiring-interview-worker-00000000-0000-0000-0000-000000000002"
     assertEquals(InterviewSubjectCleanup.validateProducerIds(Vector(id, id)), Right(Vector(id)))
     assertEquals(
@@ -59,8 +59,27 @@ final class InterviewSubjectCleanupSpec extends FunSuite {
       Left(InterviewCleanupError.InvalidProducerIds)
     )
     assertEquals(
-      InterviewSubjectCleanup.validateProducerIds(Vector("hiring-interview-worker-1-1-1-1-1")),
-      Left(InterviewCleanupError.InvalidProducerIds)
+      InterviewSubjectCleanup.validateProducerIds(Vector("hiring-interview-worker-interview-a1")),
+      Right(Vector("hiring-interview-worker-interview-a1"))
+    )
+    List(
+      "hiring-interview-worker-",
+      "hiring-interview-worker-Worker_1",
+      "hiring-interview-worker--leading",
+      "hiring-interview-worker-a:b",
+      "hiring-interview-worker-" + "a" * 65
+    ).foreach(invalid =>
+      assertEquals(
+        InterviewSubjectCleanup.validateProducerIds(Vector(invalid)),
+        Left(InterviewCleanupError.InvalidProducerIds)
+      )
+    )
+  }
+
+  test("the domain worker id pattern mirrors the single parser of the transactional id format") {
+    assertEquals(
+      InterviewSubjectCleanup.WorkerIdPattern,
+      com.example.graphQL.cats.service.port.ProducerWorkerId.Pattern
     )
   }
 

@@ -3,6 +3,7 @@ package com.example.graphQL.cats.service
 import cats.{Applicative, MonadThrow}
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.policy.{CircuitBreakerPolicy, ConsumerReceiptWindowRefusal}
+import com.example.graphQL.cats.service.port.ProducerTransactionalId
 import com.example.graphQL.cats.service.resilience.CircuitBreakerName
 import com.example.graphQL.cats.shared.{HiringHttpPaths, Parsing}
 import java.util.Locale
@@ -18,6 +19,20 @@ enum LogEvent(val category: String, val component: String, val message: String, 
       extends LogEvent("PRODUCER_GENERATION_STARTED", "KAFKA", "Producer generation initialized", LogLevel.Info)
   case ProducerGenerationClosed
       extends LogEvent("PRODUCER_GENERATION_CLOSED", "KAFKA", "Producer generation resources released", LogLevel.Info)
+  case ConsumerCommitDropped
+      extends LogEvent(
+        "CONSUMER_COMMIT_DROPPED",
+        "KAFKA",
+        "An offset commit was dropped because the consumer group rebalanced; the records are redelivered",
+        LogLevel.Warn
+      )
+  case PublicationWaveAbandoned
+      extends LogEvent(
+        "PUBLICATION_WAVE_ABANDONED",
+        "KAFKA",
+        "A publication wave was abandoned and its remaining claims released for retry",
+        LogLevel.Warn
+      )
   case ConfigInvalid extends LogEvent("CONFIG_INVALID", "CONFIG", "Application configuration rejected", LogLevel.Error)
   case MongoUnavailable
       extends LogEvent("MONGO_UNAVAILABLE", "READINESS", "Database readiness check failed", LogLevel.Warn)
@@ -131,6 +146,7 @@ enum LogOutcome(val wire: String) {
 
 enum LogField(val key: String, val sensitive: Boolean = false) {
   case TransactionalId extends LogField("transactionalId")
+  case GenerationId extends LogField("generationId")
   case Method extends LogField("method")
   case Route extends LogField("route")
   case Status extends LogField("status")
@@ -264,9 +280,6 @@ object LogFields {
     com.example.graphQL.cats.service.events.OperationalEventPayload.SearchKind.values.map(_.wire).toSet
   private def canonicalUuid(value: String): Boolean = Parsing.parseUuid(value).exists(_.toString == value)
 
-  private val transactionalIdPrefixes =
-    List("hiring-publisher-", "hiring-interview-orchestrator-", "hiring-interview-worker-")
-
   def failure(error: Throwable): Map[LogField, String] = {
     val location = error.getStackTrace.iterator
       .take(32)
@@ -304,7 +317,8 @@ object LogFields {
   def validPublic(field: LogField, value: String, allowed: PublicLogValues = PublicLogValues.none): Boolean =
     field match {
       case LogField.TransactionalId =>
-        transactionalIdPrefixes.exists(prefix => value.startsWith(prefix) && canonicalUuid(value.drop(prefix.length)))
+        ProducerTransactionalId.parse(value).isRight
+      case LogField.GenerationId => canonicalUuid(value)
       case LogField.Method => Set("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "OTHER").contains(value)
       case LogField.Route  => HiringHttpPaths.public.contains(value) || value == "_unmatched"
       case LogField.Status => value.toIntOption.exists(status => status >= 100 && status <= 599)
