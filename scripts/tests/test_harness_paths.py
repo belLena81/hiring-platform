@@ -174,6 +174,15 @@ class WorkflowFilesAreCoveredEverywhere(unittest.TestCase):
             outcome = guard.check_bash(command, harness_paths_root())
             self.assertEqual("ask", outcome and outcome[0], command)
 
+    def test_ARE_09_9_every_spelling_of_a_script_outside_the_sandbox_asks(self):
+        root = harness_paths_root()
+        for command in ("scripts/run-local-tests.sh status", "scripts/run-local-tests.sh start", "scripts/run-local-tests.sh --help",
+                        "scripts/run-local-tests.sh -h", "scripts/run-local-tests.sh  retention", "scripts/run-local-tests.sh 'test'",
+                        "scripts/run-local-tests.sh  'analytics'", "scripts/check-local.sh", "scripts/check-local.sh  ",
+                        "scripts/check-agent-hooks-live.sh"):
+            outcome = guard.check_bash(command, root)
+            self.assertEqual("ask", outcome and outcome[0], command)
+
     def test_ARE_09_8_only_a_role_skill_at_the_project_root_passes_without_a_prompt(self):
         for skill in guard.os.listdir(harness_paths_root() / ".claude/skills"):
             self.assertIsNone(guard.skill_problem(skill), skill)

@@ -40,6 +40,9 @@ EXCLUDED_SCRIPT_TEXT = re.compile("|".join(re.escape(os.path.basename(script)) f
 # Runs past & on purpose: `git 2>&1 commit` is git commit. No word boundary before git: joining a continuation can attach a comment's
 # last word to it. Reading too far or too loosely only applies this rule to a harmless call.
 EXCLUDED_GIT_TEXT = re.compile(r"git\b[^;|\n]*\b(" + "|".join(sorted(SANDBOX_EXCLUDED_GIT)) + r")\b")
+# A hook's ask goes to a person even in auto mode, while a spelling that misses the exact ask rules, such as two spaces or a quoted
+# verb, could still match the wildcard exclusion and reach the classifier. Asking here covers every spelling.
+OUTSIDE_SANDBOX_ASK = "This command runs outside the Bash sandbox with full access: human approval required."
 COMMENT_BEFORE_CONTINUATION = re.compile(r"#[^\n]*\\\n")
 PLAIN_WORD_CHARACTER = re.compile(r"[\w ./:=@%+,~^-]")
 QUOTED_TEXT = re.compile(r"\\.|'[^']*'|\"(?:[^\"\\]|\\.)*\"", re.DOTALL)
@@ -273,13 +276,15 @@ def check_segment(tokens, cwd):
         if re.search(r"[`$]", " ".join(args)):
             return "deny", "Shell substitution is not allowed in wrapper arguments."
         if args in (["--help"], ["-h"]):
-            return None  # prints static usage text only; runs before any docker, git, flock or test action
+            return "ask", OUTSIDE_SANDBOX_ASK
         verb = args[0] if args else ""
         if verb not in WRAPPER_VERBS:
             return "deny", f"Unknown test wrapper verb '{verb}'."
         if verb == "stop":
             return "ask", "Stopping the isolated test stack removes its containers and volumes: human approval required."
-        return None
+        return "ask", OUTSIDE_SANDBOX_ASK
+    if tokens[0] in SANDBOX_EXCLUDED_SCRIPTS:
+        return "ask", OUTSIDE_SANDBOX_ASK
     if command in DIRECT_DB_TOOLS:
         return "deny", f"Direct '{command}' access is blocked; use {WRAPPER}, which verifies the isolated test identity."
     if command in SHELL_WRAPPERS:

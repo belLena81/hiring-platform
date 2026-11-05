@@ -125,7 +125,7 @@ Agents run and seed tests only through `scripts/run-local-tests.sh`; it targets 
 `.claude/settings.json` enforces this with permission rules plus the `scripts/guard-harness.py` PreToolUse hook:
 
 - **Allowed without prompt:** `sbt test|compile`, which run inside the sandbox.
-- **Human approval required (outside the sandbox):** wrapper verbs `start`, `status`, `--help` and `-h`, because their command text could select a planted copy of the script.
+- **Human approval required (outside the sandbox):** wrapper verbs `start`, `status`, `--help` and `-h`, because their command text could select a planted copy of the script. The guard also asks for every spelling of the wrapper and the other excluded scripts, because a spelling such as two spaces or a quoted verb can miss an exact `ask` rule and still match the wildcard exclusion. The guard's ask goes to a person in auto mode too, read from the Claude Code 2.1.318 binary and not observed.
 - **Human approval required (code-running):** wrapper verbs `test`, `analytics`, `interview`, `retention`, `recovery`, and `scripts/check-local.sh`. They need Docker, so they run outside the Bash sandbox, and they execute test code an agent may have edited. Without a prompt the sandbox would not matter for the main test entry point. This is a safe default the owner can reverse.
 - **Human approval required (cleanup):** `scripts/run-local-tests.sh stop`, `rm`/`rmdir`, `sbt clean`, `find -delete` (enforced by `guard-harness.py`), any docker lifecycle or cleanup verb.
 - **Denied:** `mongosh`/`mongo*`/Kafka CLI tools, `docker exec|run|cp`, compose files other than `compose.test.yaml`, any MongoDB URI that is not the manifest's isolated endpoint (including ports 27017/9092), `sudo`, and writes (Edit/Write, redirects, `cp`/`mv`/`rm` targets) outside the project folder.
@@ -150,7 +150,7 @@ Remaining gap, which `denyWrite` cannot close: sandboxed code can still create n
 
 `sbt test` passes fully inside the sandbox, from `.sbt-home/` (1827 of 1827 on the recorded run). Unit tests must not depend on network DNS, because the sandbox has none: `DisposableAtlas.authorizedUri` takes an injected `DnsClient` (`test-support/src/main/scala/com/example/hiring/testing/DisposableAtlas.scala`), and `DisposableAtlasSpec` passes a stub for its `mongodb+srv://` case.
 
-Entry points outside the sandbox must start Python with `-I`. `python3 -` and `python3 -c` put the working directory first on `sys.path`, so a module such as `pathlib.py` planted in the writable project root would run as the user when the wrapper's unprompted `status` or `start` runs Python. `python3 -I` leaves the script and working directories off `sys.path`.
+Entry points outside the sandbox must start Python with `-I`. `python3 -` and `python3 -c` put the working directory first on `sys.path`, so a module such as `pathlib.py` planted in the writable project root would run as the user when an approved wrapper verb such as `status` or `start` runs Python, and the approval prompt would not show it. `python3 -I` leaves the script and working directories off `sys.path`.
 
 Why it matters: an agent may run test code it just edited. The sandbox limits that code's reads of credentials, its writes outside the allowed paths, and its writes to scripts and hooks that run later without a prompt. It does not limit the excluded entry points, and the remaining gap above stays open.
 
