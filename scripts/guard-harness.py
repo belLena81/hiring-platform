@@ -40,8 +40,9 @@ EXCLUDED_SCRIPT_TEXT = re.compile("|".join(re.escape(os.path.basename(script)) f
 # Runs past & on purpose: `git 2>&1 commit` is git commit. No word boundary before git: joining a continuation can attach a comment's
 # last word to it. Reading too far or too loosely only applies this rule to a harmless call.
 EXCLUDED_GIT_TEXT = re.compile(r"git\b[^;|\n]*\b(" + "|".join(sorted(SANDBOX_EXCLUDED_GIT)) + r")\b")
-# A hook's ask goes to a person even in auto mode, while a spelling that misses the exact ask rules, such as two spaces or a quoted
-# verb, could still match the wildcard exclusion and reach the classifier. Asking here covers every spelling.
+# A second layer under the prefix ask rules in .claude/settings.json, for the Bash tool only. It answers when the first word is the
+# script path as the exclusion writes it, including with two spaces or a quoted verb. A different path form such as ./scripts/x gets
+# no answer here; it matches no exclusion, so it stays sandboxed. A hook's ask reaches a person in auto mode (traced, not observed).
 OUTSIDE_SANDBOX_ASK = "This command runs outside the Bash sandbox with full access: human approval required."
 COMMENT_BEFORE_CONTINUATION = re.compile(r"#[^\n]*\\\n")
 PLAIN_WORD_CHARACTER = re.compile(r"[\w ./:=@%+,~^-]")
@@ -50,7 +51,8 @@ UNUSUAL_REDIRECT = re.compile(r">\||<>|\{\w+\}[<>]")
 REDIRECT_OPERATOR = re.compile(r"\d*(?:&>>?|>>?|<<?)&?")
 REDIRECT_WITH_TARGET = re.compile(r"[^\s<>]*(?:&>>?|>>?|<<?)&?[^\s<>]+")
 SHELL_WRAPPERS = {"bash", "sh", "zsh", "dash", "eval", "env", "command", "xargs", "exec", "nohup", "time", "timeout",
-                  "nice", "stdbuf", "setsid", "script", "watch", "python", "python3", "perl", "ruby", "node", "npx", "npm",
+                  "nice", "stdbuf", "gnohup", "gtime", "gtimeout", "gnice", "gstdbuf", "setsid", "script", "watch", "python",
+                  "python3", "perl", "ruby", "node", "npx", "npm",
                   "awk", "gawk", "source", "."}
 SHELL_KEYWORDS = {"if", "then", "else", "elif", "fi", "do", "done", "while", "until", "for", "!", "{", "}", "(", ")"}
 SEGMENT_SPLIT = re.compile(r"\|\||&&|;|\||\n|&(?!>)")

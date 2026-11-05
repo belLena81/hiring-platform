@@ -178,24 +178,13 @@ class ProjectSettings(unittest.TestCase):
         for skill in (ROOT / ".claude/skills").glob("*/SKILL.md"):
             self.assertNotRegex(skill.read_text(), r"(^|\s)!`|^```!", skill.parent.name)
 
-    def test_ARE_09_6_every_excluded_command_except_the_wrapper_needs_approval(self):
+    def test_ARE_09_6_every_excluded_command_has_a_prefix_rule_that_needs_approval(self):
         ask = self.settings["permissions"]["ask"]
         allow = self.settings["permissions"]["allow"]
         for pattern in self.settings["sandbox"]["excludedCommands"]:
-            if pattern == "scripts/run-local-tests.sh *":
-                continue
-            rule = f"Bash({pattern[:-2]}:*)" if pattern.endswith(" *") else f"Bash({pattern})"
+            rule = f"Bash({pattern.removesuffix(' *')}:*)"
             self.assertIn(rule, ask, pattern)
             self.assertNotIn(rule, allow, pattern)
-
-    def test_ARE_09_3_test_runs_outside_the_sandbox_need_approval(self):
-        permissions = self.settings["permissions"]
-        for verb in ("test:*", "analytics:*", "interview", "retention", "recovery"):
-            rule = f"Bash(scripts/run-local-tests.sh {verb})"
-            self.assertNotIn(rule, permissions["allow"])
-            self.assertIn(rule, permissions["ask"])
-        self.assertNotIn("Bash(scripts/check-local.sh)", permissions["allow"])
-        self.assertIn("Bash(scripts/check-local.sh)", permissions["ask"])
 
 
 if __name__ == "__main__":

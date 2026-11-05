@@ -174,7 +174,7 @@ class WorkflowFilesAreCoveredEverywhere(unittest.TestCase):
             outcome = guard.check_bash(command, harness_paths_root())
             self.assertEqual("ask", outcome and outcome[0], command)
 
-    def test_ARE_09_9_every_spelling_of_a_script_outside_the_sandbox_asks(self):
+    def test_ARE_09_3_a_script_path_as_the_exclusion_writes_it_asks(self):
         root = harness_paths_root()
         for command in ("scripts/run-local-tests.sh status", "scripts/run-local-tests.sh start", "scripts/run-local-tests.sh --help",
                         "scripts/run-local-tests.sh -h", "scripts/run-local-tests.sh  retention", "scripts/run-local-tests.sh 'test'",
@@ -182,6 +182,24 @@ class WorkflowFilesAreCoveredEverywhere(unittest.TestCase):
                         "scripts/check-agent-hooks-live.sh"):
             outcome = guard.check_bash(command, root)
             self.assertEqual("ask", outcome and outcome[0], command)
+
+    def test_ARE_09_3_a_command_prefix_the_exclusion_strips_asks(self):
+        root = harness_paths_root()
+        for prefix in ("gnohup", "gtime", "gtimeout 5", "gnice", "gstdbuf -oL", "nohup", "time", "timeout 5", "nice", "stdbuf -oL"):
+            for command in ("scripts/check-local.sh", "scripts/run-local-tests.sh status", "git commit -m x", "git push origin main"):
+                outcome = guard.check_bash(f"{prefix} {command}", root)
+                self.assertEqual("ask", outcome and outcome[0], f"{prefix} {command}")
+
+    def test_ARE_09_3_every_excluded_script_has_a_prefix_ask_rule(self):
+        settings = json.loads((harness_paths_root() / ".claude/settings.json").read_text())
+        ask = settings["permissions"]["ask"]
+        for script in guard.SANDBOX_EXCLUDED_SCRIPTS:
+            self.assertIn(f"Bash({script}:*)", ask)
+            self.assertEqual([f"Bash({script}:*)"], [rule for rule in ask if script in rule])
+
+    def test_ARE_09_10_monitor_is_denied_because_the_guard_does_not_see_it(self):
+        settings = json.loads((harness_paths_root() / ".claude/settings.json").read_text())
+        self.assertIn("Monitor", settings["permissions"]["deny"])
 
     def test_ARE_09_8_only_a_role_skill_at_the_project_root_passes_without_a_prompt(self):
         for skill in guard.os.listdir(harness_paths_root() / ".claude/skills"):
