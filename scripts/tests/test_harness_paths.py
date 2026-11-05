@@ -202,6 +202,16 @@ class WorkflowFilesAreCoveredEverywhere(unittest.TestCase):
         settings = json.loads((harness_paths_root() / ".claude/settings.json").read_text())
         self.assertIn("Monitor", settings["permissions"]["deny"])
 
+    def test_ARE_09_11_root_env_files_are_denied_by_exact_path_not_by_glob(self):
+        # `claude doctor` warns about glob patterns in Read and Edit rules on Linux; exact paths clear the warning
+        # and keep the permission-layer deny for the Read, Grep, Glob and Edit tools.
+        deny = json.loads((harness_paths_root() / ".claude/settings.json").read_text())["permissions"]["deny"]
+        for name in (".env", ".env.local", ".env.development", ".env.production", ".env.test"):
+            for tool in ("Read", "Edit"):
+                self.assertIn(f"{tool}(./{name})", deny)
+        env_globs = [rule for rule in deny if rule.startswith(("Read(", "Edit(")) and ".env" in rule and any(c in rule for c in "*?[")]
+        self.assertEqual([], env_globs)
+
     def test_ARE_09_8_only_a_role_skill_at_the_project_root_passes_without_a_prompt(self):
         for skill in guard.os.listdir(harness_paths_root() / ".claude/skills"):
             self.assertIsNone(guard.skill_problem(skill), skill)
