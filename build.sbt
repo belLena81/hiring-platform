@@ -100,6 +100,8 @@ lazy val root = (project in file("."))
       "-unchecked",
       "-Wunused:all",
       "-Wvalue-discard",
+      // Raised for the pureconfig derivation of the large Kafka config case classes in KafkaConfigReader.scala.
+      "-Xmax-inlines:128",
       "-Werror"
     ),
     libraryDependencies ++= Seq(

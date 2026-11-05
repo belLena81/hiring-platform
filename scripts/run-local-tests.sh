@@ -42,6 +42,9 @@ Recorded durations: a root integration run took 566 s plus units on 2026-10-08 (
 a whole scripts/check-local.sh (both builds, formatting, coverage) took 1h48m-2h18m. Full test/analytics runs therefore
 need well over an hour; the default per-invocation limit is 4 h.
   interview                  the three interview Kafka integration suites (root build)
+  kafka                      the Kafka transport integration suites of the root build (SCRAM authentication, producer
+                             restart fencing, operational event publication, topic retention reader and quiet-topic
+                             retention), with no unit phase
   retention                  KafkaTopicRetentionCheck (shortened Kafka topic retention)
   recovery                   AccountDeletionRecoveryIntegrationSpec (compiles the API classpath first)
   status                     show the test services (docker compose ps)
@@ -125,7 +128,7 @@ trap on_interrupt INT TERM HUP
 
 case "$mode" in
   -h|--help|help) help_text; result_done=1; exit 0 ;;
-  start|test|analytics|interview|retention|recovery|status|stop) ;;
+  start|test|analytics|interview|kafka|retention|recovery|status|stop) ;;
   "") usage_error "missing MODE" ;;
   *) usage_error "unknown mode or option: $mode" ;;
 esac
@@ -147,7 +150,7 @@ for tool in python3 flock setsid timeout git docker; do
   command -v "$tool" >/dev/null 2>&1 || blocked "required tool not found: $tool" "install $tool and put it on PATH"
 done
 case "$mode" in
-  test|analytics|interview|retention|recovery)
+  test|analytics|interview|kafka|retention|recovery)
     command -v sbt >/dev/null 2>&1 || blocked "required tool not found: sbt" "install sbt and put it on PATH" ;;
 esac
 
@@ -160,6 +163,7 @@ describe_banner() {
     analytics) if [[ -n "$globs_text" ]]; then printf 'analytics build: integration suites [%s]; no recorded duration, depends on the suites' "$globs_text"
                else printf 'analytics build: full unit + integration under JaCoCo with the 85%% coverage gate; expected about 1 h (a whole check-local took 1h48m-2h18m)'; fi ;;
     interview) printf 'three interview Kafka integration suites; no recorded duration' ;;
+    kafka) printf 'five Kafka transport integration suites of the root build, no unit phase; no recorded duration' ;;
     retention) printf 'KafkaTopicRetentionCheck; no recorded duration' ;;
     recovery) printf 'compiles the API classpath, then AccountDeletionRecoveryIntegrationSpec; no recorded duration' ;;
     status) printf 'shows the test services; expected under 30 s' ;;
@@ -408,6 +412,7 @@ OP_PHASE_DESCRIBE() { # logfile
       elif (( summaries == 0 )); then printf 'phase 1/2 analytics unit tests under JaCoCo (includes compilation)'
       else printf 'phase 2/2 analytics integration suites and merged coverage (it:jacoco)'; fi ;;
     interview) printf 'interview Kafka integration suites (it:testOnly)' ;;
+    kafka) printf 'Kafka transport integration suites (it:testOnly)' ;;
     retention) printf 'Kafka topic retention check (runMain)' ;;
     recovery) printf 'account-deletion recovery suite (it:testOnly)' ;;
   esac
@@ -520,7 +525,7 @@ PY_DELETE
     op_say "removed only $test_project; cached images remain"
     finish PASS 0 "services=removed"
     ;;
-  test|analytics|interview|retention|recovery)
+  test|analytics|interview|kafka|retention|recovery)
     start
     run_id="$(python3 -c 'import secrets;print(secrets.token_hex(16))')"
     run_root="$registry_root/$run_id"
@@ -574,6 +579,9 @@ PY_RUN
         fi
         ;;
       interview) run_sbt "interview suites" 'it:testOnly *InterviewKafkaRestartIntegrationSpec *InterviewPublicationFencingIntegrationSpec *InterviewSchedulingWorkerIntegrationSpec' ;;
+      # Kafka transport suites without the unit phase: the root `test` mode's `sbt test` cannot complete on a JDK whose
+      # lambda metafactory rejects the SafeDiagnostics sink (pre-existing at 1ec7a9d), so these suites get a direct mode.
+      kafka) run_sbt "kafka transport suites" 'it:testOnly *KafkaScramAuthenticationIntegrationSpec *ProducerRestartFencingIntegrationSpec *OperationalEventComposeIntegrationSpec *KafkaTopicRetentionReaderIntegrationSpec *KafkaQuietTopicRetentionIntegrationSpec' ;;
       retention) run_sbt "topic retention check" 'Test / runMain com.example.hiring.testing.KafkaTopicRetentionCheck' ;;
       test)
         if (( $# > 1 )); then

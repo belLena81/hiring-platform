@@ -55,28 +55,67 @@ class OperationalEventWireContractSpec extends FunSuite {
     assertEquals(OperationalEventTransforms.validEvents(frame(kinds.map(event.tupled))).count(), 10L)
   }
 
-  test("AIR-04.3 a search recording failure with free text or extra fields is malformed") {
+  test("AIR-04.3 a search recording failure with free text or a mistyped failure is malformed") {
     val valid = parse(event("SEARCH_RECORDING_FAILED", "Search")).toOption.get
     val payload = valid.hcursor.downField("payload").focus.get
     val invalid = List(
       payload.mapObject(_.add("failure", Json.fromString("query text with spaces"))),
       payload.mapObject(_.add("failure", Json.Null)),
       payload.mapObject(_.add("failure", Json.fromInt(123))),
-      payload.mapObject(_.add("query", Json.fromString("secret"))),
       payload.mapObject(_.remove("searchKind"))
     ).map(changed => valid.mapObject(_.add("payload", changed)).noSpaces)
     assertEquals(OperationalEventTransforms.validEvents(frame(invalid)).count(), 0L)
   }
 
-  test("unknown fields, missing per-event fields, invalid IDs and aggregate mismatches are malformed") {
+  test("KFH-03.2 a missing required field is invalid") {
     val valid = parse(event("APPLICATION_STATUS_CHANGED", "Application")).toOption.get
     val payload = valid.hcursor.downField("payload").focus.get
     val invalid = List(
-      valid.mapObject(_.add("schemaVersion", Json.fromInt(1))),
+      valid.mapObject(_.remove("actorId")),
+      valid.mapObject(_.remove("payload")),
+      valid.mapObject(_.add("payload", payload.mapObject(_.remove("candidateId")))),
+      valid.mapObject(_.add("payload", payload.mapObject(_.remove("previousStatus"))))
+    ).map(_.noSpaces)
+    val parsed = frame(invalid)
+    assertEquals(OperationalEventTransforms.validEvents(parsed).count(), 0L)
+    assertEquals(OperationalEventTransforms.malformedEvents(parsed).count(), invalid.size.toLong)
+  }
+
+  test("KFH-03.1 an envelope with an unknown additive field is valid") {
+    val envelope = parse(event("APPLICATION_STATUS_CHANGED", "Application")).toOption.get
+    val payload = envelope.hcursor.downField("payload").focus.get
+    val job = parse(event("JOB_CREATED", "Job")).toOption.get
+    val jobPayload = job.hcursor.downField("payload").focus.get
+    val search = parse(event("SEARCH_PERFORMED", "Search")).toOption.get
+    val searchPayload = search.hcursor.downField("payload").focus.get
+    val result = Json.obj(
+      "resultId" -> Json.fromString(AnalyticsOperationalEventFixtures.id("job")),
+      "rank" -> Json.fromInt(1),
+      "score" -> Json.fromDoubleOrNull(0.5),
+      "explanation" -> Json.fromString("additive")
+    )
+    val extra = Json.fromString("additive")
+    val tolerated = List(
+      envelope.mapObject(_.add("schemaVersion", Json.fromInt(1))),
+      envelope.mapObject(_.add("payload", payload.mapObject(_.add("priority", extra)))),
+      job.mapObject(
+        _.add(
+          "payload",
+          jobPayload.mapObject(fields => fields.add("job", fields("job").get.mapObject(_.add("title", extra))))
+        )
+      ),
+      search.mapObject(_.add("payload", searchPayload.mapObject(_.add("results", Json.arr(result)))))
+    ).map(_.noSpaces)
+    assertEquals(OperationalEventTransforms.validEvents(frame(tolerated)).count(), tolerated.size.toLong)
+  }
+
+  test("invalid IDs, mistyped fields and aggregate mismatches are malformed") {
+    val valid = parse(event("APPLICATION_STATUS_CHANGED", "Application")).toOption.get
+    val payload = valid.hcursor.downField("payload").focus.get
+    val invalid = List(
       valid.mapObject(_.add("actorId", Json.fromString("actor"))),
       valid.mapObject(_.add("aggregateId", Json.fromString(AnalyticsOperationalEventFixtures.id("other")))),
       valid.mapObject(_.add("payload", payload.mapObject(_.remove("candidateId")))),
-      valid.mapObject(_.add("payload", payload.mapObject(_.add("feedback", Json.fromString("secret"))))),
       valid.mapObject(_.add("payload", payload.mapObject(_.add("newStatus", Json.fromString("Unknown")))))
     ).map(_.noSpaces)
     val parsed = frame(invalid)
@@ -175,7 +214,7 @@ class OperationalEventWireContractSpec extends FunSuite {
     assertEquals(OperationalEventTransforms.validEvents(frame(List(mixedCase))).count(), 1L)
   }
 
-  test("result arrays enforce IDs, ranks, finite scores and exact nested fields") {
+  test("result arrays enforce IDs, ranks, and finite scores") {
     val valid = parse(event("SEARCH_PERFORMED", "Search")).toOption.get
     val base = Json.obj(
       "resultId" -> Json.fromString(AnalyticsOperationalEventFixtures.id("job")),
@@ -194,7 +233,6 @@ class OperationalEventWireContractSpec extends FunSuite {
       withResults(List(base.mapObject(_.add("score", Json.fromString("0.5"))))),
       withResults(List(base.mapObject(_.add("rank", Json.fromString("1"))))),
       withResults(List(base.mapObject(_.add("rank", Json.fromDoubleOrNull(1.0))))),
-      withResults(List(base.mapObject(_.add("private", Json.fromString("secret"))))),
       withResults(List(base, base.mapObject(_.add("rank", Json.fromInt(2)))))
     )
     val numericId = parse(event("APPLICATION_CREATED", "Application")).toOption.get

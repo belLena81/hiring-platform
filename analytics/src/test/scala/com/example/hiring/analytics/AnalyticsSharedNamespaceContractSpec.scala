@@ -70,6 +70,7 @@ class AnalyticsSharedNamespaceContractSpec extends munit.FunSuite {
       "SubjectId" -> f.SubjectId,
       "Kind" -> f.Kind,
       "TransactionalId" -> f.TransactionalId,
+      "GenerationId" -> f.GenerationId,
       "FencedAt" -> f.FencedAt,
       "ProducerRegistry" -> f.ProducerRegistry
     )
@@ -107,7 +108,8 @@ class AnalyticsSharedNamespaceContractSpec extends munit.FunSuite {
   test("MSC-07.1 the ledger migration ids analytics names match the contract") {
     val actual = Map(
       "eventOutboxSubjectReferences" -> AnalyticsCollections.MigrationIds.OutboxSubjectReferences,
-      "attributableProducerRegistrations" -> AnalyticsCollections.MigrationIds.AttributableProducerRegistrations
+      "attributableProducerRegistrations" -> AnalyticsCollections.MigrationIds.AttributableProducerRegistrations,
+      "producerGenerationRegistrations" -> AnalyticsCollections.MigrationIds.ProducerGenerationRegistrations
     )
     assertEquals(actual, strings("migrationIds"))
   }

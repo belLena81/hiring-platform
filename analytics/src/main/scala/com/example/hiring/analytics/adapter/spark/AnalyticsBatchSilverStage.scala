@@ -73,7 +73,7 @@ private[analytics] final class AnalyticsBatchSilverStage[F[_]: Async](
           OperationalEventTransforms
             .malformedEvents(parsed)
             .withColumn("quarantineId", quarantineId())
-            .withColumn("quarantineReason", lit("INVALID_OPERATIONAL_EVENT_ENVELOPE")),
+            .withColumn("quarantineReason", OperationalEventTransforms.quarantineReason(parsed)),
           bronze.startedAt,
           retention.quarantineDays
         )

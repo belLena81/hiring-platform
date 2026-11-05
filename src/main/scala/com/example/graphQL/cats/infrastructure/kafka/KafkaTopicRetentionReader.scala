@@ -25,7 +25,8 @@ object KafkaTopicRetentionReader {
       config.bootstrapServers,
       config.consumer.saslUsername,
       config.consumer.saslPassword,
-      config.saslSecurityProtocol
+      config.saslSecurityProtocol,
+      config.saslMechanism
     )
     val resource = new ConfigResource(ConfigResource.Type.TOPIC, config.topic)
     KafkaAdminClient

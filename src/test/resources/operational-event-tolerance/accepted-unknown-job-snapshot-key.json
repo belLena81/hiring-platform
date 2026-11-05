@@ -1,0 +1,22 @@
+{
+  "description": "unknown additive key in job snapshot is ignored",
+  "expected": "accepted",
+  "envelope": {
+    "eventId": "00000000-0000-0000-0000-000000000201",
+    "eventType": "JOB_CREATED",
+    "occurredAt": "2026-09-19T10:15:30Z",
+    "aggregateType": "Job",
+    "aggregateId": "00000000-0000-0000-0000-000000000204",
+    "actorId": "00000000-0000-0000-0000-000000000202",
+    "payload": {
+      "job": {
+        "jobId": "00000000-0000-0000-0000-000000000204",
+        "skills": [
+          "Scala"
+        ],
+        "status": "Open",
+        "later": "x"
+      }
+    }
+  }
+}

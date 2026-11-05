@@ -47,6 +47,14 @@ object ProducerGenerationRetirementMain extends IOApp {
                             Json
                               .obj(
                                 "transactionalIds" -> Json.arr(page.transactionalIds.map(Json.fromString)*),
+                                "generations" -> Json.arr(
+                                  page.generations.map(generation =>
+                                    Json.obj(
+                                      "transactionalId" -> Json.fromString(generation.transactionalId),
+                                      "generationId" -> Json.fromString(generation.generationId.value.toString)
+                                    )
+                                  )*
+                                ),
                                 "nextCursor" -> page.nextCursor.fold(Json.Null)(Json.fromString)
                               )
                               .noSpaces

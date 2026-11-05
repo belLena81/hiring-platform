@@ -16,8 +16,8 @@ final class InterviewSubjectCleanupWorkerRestartSpec extends CatsEffectSuite {
 
   /** Never consulted by these tests; every answer is the empty one. */
   private object IdleRepository extends InterviewSubjectCleanupRepository[IO] {
-    override def producerBatch(subject: UserId) = RepositoryF.pure[IO, Vector[String]](Vector.empty)
-    override def markProducersFenced(subject: UserId, ids: Vector[String], now: Instant) =
+    override def producerBatch(subject: UserId) = RepositoryF.pure[IO, Vector[ProducerGeneration]](Vector.empty)
+    override def markProducersFenced(subject: UserId, ids: Vector[ProducerGeneration]) =
       RepositoryF.pure[IO, Unit](())
     override def pendingPage(cursor: Option[InterviewCleanupCursor], observedAt: Instant) =
       RepositoryF.pure[IO, InterviewCleanupPage](InterviewCleanupPage(Vector.empty, None))
@@ -85,8 +85,8 @@ final class InterviewSubjectCleanupWorkerRestartSpec extends CatsEffectSuite {
     Ref.of[IO, Int](0).flatMap { count =>
       val repository = new InterviewSubjectCleanupRepository[IO] {
         def producerBatch(subject: UserId) = IdleRepository.producerBatch(subject)
-        def markProducersFenced(subject: UserId, ids: Vector[String], now: Instant) =
-          IdleRepository.markProducersFenced(subject, ids, now)
+        def markProducersFenced(subject: UserId, ids: Vector[ProducerGeneration]) =
+          IdleRepository.markProducersFenced(subject, ids)
         def pendingPage(cursor: Option[InterviewCleanupCursor], observedAt: Instant) =
           RepositoryF.pure[IO, InterviewCleanupPage](InterviewCleanupPage(entries, None))
         def find(subject: UserId) = IdleRepository.find(subject)

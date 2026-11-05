@@ -1,7 +1,7 @@
 package com.example.graphQL.cats.infrastructure.kafka
 
 import cats.effect.{IO, Resource}
-import com.example.graphQL.cats.config.KafkaSaslSecurityProtocol
+import com.example.graphQL.cats.config.{KafkaSaslMechanism, KafkaSaslSecurityProtocol}
 import com.example.graphQL.cats.domain.workflow.InterviewTopicPair
 import com.example.graphQL.cats.service.port.InterviewRetentionBarrier
 import org.apache.kafka.clients.consumer.KafkaConsumer
@@ -43,9 +43,11 @@ object InterviewKafkaRetention {
       username: String,
       password: String,
       protocol: KafkaSaslSecurityProtocol,
+      mechanism: KafkaSaslMechanism,
       topics: InterviewTopicPair = InterviewTopicPair.Default
   ): InterviewKafkaRetention = {
-    val properties = KafkaClientSettings.clientProperties(bootstrapServers, Some(username), Some(password), protocol)
+    val properties =
+      KafkaClientSettings.clientProperties(bootstrapServers, Some(username), Some(password), protocol, mechanism)
     properties.setProperty("key.deserializer", classOf[StringDeserializer].getName)
     properties.setProperty("value.deserializer", classOf[ByteArrayDeserializer].getName)
     properties.setProperty("enable.auto.commit", "false")

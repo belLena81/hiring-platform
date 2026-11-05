@@ -45,12 +45,17 @@ services:
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:SASL_PLAINTEXT,INTERNAL:SASL_PLAINTEXT,EXTERNAL:SASL_PLAINTEXT
-      KAFKA_SASL_ENABLED_MECHANISMS: PLAIN
+      KAFKA_SASL_ENABLED_MECHANISMS: SCRAM-SHA-512,PLAIN
+      # Client listeners authenticate with SCRAM-SHA-512 (D6). INTERNAL also accepts PLAIN for the broker principal only,
+      # which serves inter-broker traffic and the initialize admin before any SCRAM credential exists; EXTERNAL is SCRAM only.
+      KAFKA_LISTENER_NAME_INTERNAL_SASL_ENABLED_MECHANISMS: SCRAM-SHA-512,PLAIN
+      KAFKA_LISTENER_NAME_EXTERNAL_SASL_ENABLED_MECHANISMS: SCRAM-SHA-512
+      KAFKA_LISTENER_NAME_CONTROLLER_SASL_ENABLED_MECHANISMS: PLAIN
+      KAFKA_LISTENER_NAME_INTERNAL_SCRAM___SHA___512_SASL_JAAS_CONFIG: org.apache.kafka.common.security.scram.ScramLoginModule required;
+      KAFKA_LISTENER_NAME_EXTERNAL_SCRAM___SHA___512_SASL_JAAS_CONFIG: org.apache.kafka.common.security.scram.ScramLoginModule required;
       KAFKA_SASL_MECHANISM_INTER_BROKER_PROTOCOL: PLAIN
       KAFKA_SASL_MECHANISM_CONTROLLER_PROTOCOL: PLAIN
-      KAFKA_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.plain.PlainLoginModule required username="broker" password="${HIRING_TEST_BROKER_PASSWORD:?}";'
-      KAFKA_LISTENER_NAME_INTERNAL_PLAIN_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.plain.PlainLoginModule required username="broker" password="${HIRING_TEST_BROKER_PASSWORD:?}" user_broker="${HIRING_TEST_BROKER_PASSWORD:?}" user_hiring_publisher_v2="${HIRING_TEST_PUBLISHER_PASSWORD:?}" user_analytics_reader="${HIRING_TEST_READER_PASSWORD:?}" user_analytics_fencer="${HIRING_TEST_FENCER_PASSWORD:?}" user_interview_command_publisher="${HIRING_TEST_ORCHESTRATOR_PASSWORD:?}" user_interview_result_publisher="${HIRING_TEST_WORKER_PASSWORD:?}" user_interview_fencer="${HIRING_TEST_INTERVIEW_FENCER_PASSWORD:?}";'
-      KAFKA_LISTENER_NAME_EXTERNAL_PLAIN_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.plain.PlainLoginModule required username="broker" password="${HIRING_TEST_BROKER_PASSWORD:?}" user_broker="${HIRING_TEST_BROKER_PASSWORD:?}" user_hiring_publisher_v2="${HIRING_TEST_PUBLISHER_PASSWORD:?}" user_analytics_reader="${HIRING_TEST_READER_PASSWORD:?}" user_analytics_fencer="${HIRING_TEST_FENCER_PASSWORD:?}" user_interview_command_publisher="${HIRING_TEST_ORCHESTRATOR_PASSWORD:?}" user_interview_result_publisher="${HIRING_TEST_WORKER_PASSWORD:?}" user_interview_fencer="${HIRING_TEST_INTERVIEW_FENCER_PASSWORD:?}";'
+      KAFKA_LISTENER_NAME_INTERNAL_PLAIN_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.plain.PlainLoginModule required username="broker" password="${HIRING_TEST_BROKER_PASSWORD:?}" user_broker="${HIRING_TEST_BROKER_PASSWORD:?}";'
       KAFKA_LISTENER_NAME_CONTROLLER_PLAIN_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.plain.PlainLoginModule required username="broker" password="${HIRING_TEST_BROKER_PASSWORD:?}" user_broker="${HIRING_TEST_BROKER_PASSWORD:?}";'
       KAFKA_AUTHORIZER_CLASS_NAME: org.apache.kafka.metadata.authorizer.StandardAuthorizer
       KAFKA_SUPER_USERS: User:broker
@@ -74,6 +79,12 @@ services:
         condition: service_started
     environment:
       HIRING_TEST_BROKER_PASSWORD: ${HIRING_TEST_BROKER_PASSWORD:?}
+      HIRING_TEST_PUBLISHER_PASSWORD: ${HIRING_TEST_PUBLISHER_PASSWORD:?}
+      HIRING_TEST_READER_PASSWORD: ${HIRING_TEST_READER_PASSWORD:?}
+      HIRING_TEST_FENCER_PASSWORD: ${HIRING_TEST_FENCER_PASSWORD:?}
+      HIRING_TEST_ORCHESTRATOR_PASSWORD: ${HIRING_TEST_ORCHESTRATOR_PASSWORD:?}
+      HIRING_TEST_WORKER_PASSWORD: ${HIRING_TEST_WORKER_PASSWORD:?}
+      HIRING_TEST_INTERVIEW_FENCER_PASSWORD: ${HIRING_TEST_INTERVIEW_FENCER_PASSWORD:?}
     entrypoint: ["/bin/bash", "-ec"]
     command:
       - |
@@ -84,6 +95,28 @@ services:
           /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --list >/dev/null 2>&1 && break
           sleep 1
         done
+        # SCRAM-SHA-512 credentials come before any ACL. The admin above logs in with PLAIN on the INTERNAL listener; the
+        # broker principal also gets a SCRAM credential because host-side tests reach the EXTERNAL listener (SCRAM only).
+        # The password goes through an owner-only properties file (--add-config-file), never a process argument.
+        trap 'rm -f /tmp/admin.properties /tmp/scram.properties /tmp/client-plain.properties /tmp/client-plain.err' EXIT
+        for pair in 'broker:HIRING_TEST_BROKER_PASSWORD' 'hiring_publisher_v2:HIRING_TEST_PUBLISHER_PASSWORD' 'analytics_reader:HIRING_TEST_READER_PASSWORD' 'analytics_fencer:HIRING_TEST_FENCER_PASSWORD' 'interview_command_publisher:HIRING_TEST_ORCHESTRATOR_PASSWORD' 'interview_result_publisher:HIRING_TEST_WORKER_PASSWORD' 'interview_fencer:HIRING_TEST_INTERVIEW_FENCER_PASSWORD'; do
+          principal="$${pair%%:*}"; variable="$${pair#*:}"
+          printf 'SCRAM-SHA-512=iterations=8192,password=%s\n' "$${!variable}" > /tmp/scram.properties
+          /opt/kafka/bin/kafka-configs.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --alter --entity-type users --entity-name "$$principal" --add-config-file /tmp/scram.properties >/dev/null
+        done
+        rm -f /tmp/scram.properties
+        # KFH-06.1 on the INTERNAL listener: only the broker principal may use PLAIN there, so a client user must be refused.
+        printf 'security.protocol=SASL_PLAINTEXT\nsasl.mechanism=PLAIN\nsasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required username="analytics_reader" password="%s";\n' "$$HIRING_TEST_READER_PASSWORD" > /tmp/client-plain.properties
+        # The refusal must be an authentication failure: an unreachable broker or any other error also fails setup.
+        if /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --command-config /tmp/client-plain.properties --list >/dev/null 2>/tmp/client-plain.err; then
+          echo "client principal authenticated with PLAIN on the internal listener" >&2
+          exit 1
+        fi
+        if ! grep -q -E 'SaslAuthenticationException|Authentication failed|Unsupported SASL mechanism|UnsupportedSaslMechanismException' /tmp/client-plain.err; then
+          echo "PLAIN client check failed for a reason other than SASL authentication" >&2
+          exit 1
+        fi
+        rm -f /tmp/client-plain.properties /tmp/client-plain.err
         # Exact per-case ACLs are provisioned by the test namespace fixture; no broad test data grants.
         for principal in hiring_publisher_v2 analytics_fencer interview_command_publisher interview_result_publisher interview_fencer; do
           /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --add --allow-principal "User:$$principal" --operation IdempotentWrite --cluster >/dev/null

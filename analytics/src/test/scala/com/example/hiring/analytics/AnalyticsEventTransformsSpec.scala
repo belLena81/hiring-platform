@@ -567,7 +567,7 @@ class AnalyticsEventTransformsSpec extends AnalyticsBatchSpecFixtures {
     val client = KafkaClientProperties.clientProperties(authenticated).toOption.get
     val spark = KafkaClientProperties.sparkOptions(authenticated).toOption.get
     assertEquals(client.get("security.protocol"), Some("SASL_SSL"))
-    assertEquals(client.get("sasl.mechanism"), Some("PLAIN"))
+    assertEquals(client.get("sasl.mechanism"), Some("SCRAM-SHA-512"))
     assert(client.getOrElse("sasl.jaas.config", "").contains("username=\"analytics_reader\""))
     assertEquals(spark.get("kafka.security.protocol"), Some("SASL_SSL"))
     assertEquals(spark.get("kafka.group.id"), Some("hiring-analytics-batch"))

@@ -287,6 +287,7 @@ private[mongo] object MongoFields {
   val RetrievalScore = "retrievalScore"
   val SubjectId = "subjectId"
   val TransactionalId = "transactionalId"
+  val GenerationId = "generationId"
   val FencedAt = "fencedAt"
 }
 

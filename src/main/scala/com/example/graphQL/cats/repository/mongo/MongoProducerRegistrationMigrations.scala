@@ -18,7 +18,10 @@ private[mongo] object MongoProducerRegistrationMigrations {
   import MongoBatchScan.BatchSize
   private val LegacyAttributionFields = Vector("transactionalIds", MongoFields.InterviewTransactionalIds)
 
-  def registrationValidator: Document = {
+  /** The validator this step installs: rows keyed `subject:transactionalId` without a generation. Migration
+    * `036_producer_generation_registrations` installs the successor; the completed proof accepts both.
+    */
+  def registrationValidatorV1: Document = {
     val properties = new Document(MongoFields.Id, new Document("bsonType", "string"))
       .append(MongoFields.SubjectId, new Document("bsonType", "string"))
       .append(MongoFields.TransactionalId, new Document("bsonType", "string"))
@@ -65,13 +68,15 @@ private[mongo] object MongoProducerRegistrationMigrations {
       LegacyAttributionFields.map(field => new Document(field, new Document("$exists", false))).asJava
     )
 
-  private val validators: List[(String, Document)] = List(
-    MongoProducerRegistrations.Collection -> registrationValidator,
-    MongoCollections.OutboxSubjectFences -> fenceValidator
-  )
-
   private def verifyDefinitions(database: MongoHiringSetup.SetupDatabase): IO[CompletedProof] =
-    MongoHiringValidators.assertStrictValidators(database, validators).as(CompletedProof.Trusted)
+    MongoHiringValidators.assertAnyStrictValidator(
+      database,
+      MongoProducerRegistrations.Collection,
+      List(registrationValidatorV1, MongoProducerGenerationRegistrationMigrations.registrationValidator)
+    ) *>
+      MongoHiringValidators
+        .assertStrictValidators(database, List(MongoCollections.OutboxSubjectFences -> fenceValidator))
+        .as(CompletedProof.Trusted)
 
   private def cutover(run: MigrationRun): IO[Unit] = {
     val database = run.database
@@ -239,7 +244,7 @@ private[mongo] object MongoProducerRegistrationMigrations {
       verify(None) *>
       database
         .runCommand(
-          MongoHiringValidators.strictValidation(MongoProducerRegistrations.Collection, registrationValidator)
+          MongoHiringValidators.strictValidation(MongoProducerRegistrations.Collection, registrationValidatorV1)
         )
         .void
   }

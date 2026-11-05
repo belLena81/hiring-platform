@@ -20,6 +20,7 @@ import com.example.graphQL.cats.service.port.{
   InterviewCleanupUpdate,
   InterviewCleanupCursor,
   InterviewCleanupPage,
+  ProducerGeneration,
   RepositoryF
 }
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, RepositoryError}
@@ -82,19 +83,21 @@ final class MongoInterviewSubjectCleanup(
             .void
     } yield ()
 
-  override def producerBatch(subject: UserId): RepositoryF[IO, Vector[String]] =
+  override def producerBatch(subject: UserId): RepositoryF[IO, Vector[ProducerGeneration]] =
     guard("interviewCleanup.producerBatch") {
       MongoProducerRegistrations.batch(database, subject.value.toString, ProducerRegistrationValues.Interview)
     }
 
-  override def markProducersFenced(subject: UserId, ids: Vector[String], now: Instant): RepositoryF[IO, Unit] =
+  override def markProducersFenced(
+      subject: UserId,
+      generations: Vector[ProducerGeneration]
+  ): RepositoryF[IO, Unit] =
     guard("interviewCleanup.markProducersFenced") {
       MongoProducerRegistrations.markFenced(
         database,
         subject.value.toString,
         ProducerRegistrationValues.Interview,
-        ids,
-        now
+        generations
       )
     }
 

@@ -22,13 +22,30 @@ object KafkaSecurityProtocol {
   }
 }
 
+/** SASL mechanism of the analytics Kafka client. SCRAM-SHA-512 is the default; PLAIN exists for loopback brokers only.
+  */
+enum KafkaSaslMechanism(val kafkaValue: String, val loginModule: String) {
+  case ScramSha512
+      extends KafkaSaslMechanism("SCRAM-SHA-512", "org.apache.kafka.common.security.scram.ScramLoginModule")
+  case Plain extends KafkaSaslMechanism("PLAIN", "org.apache.kafka.common.security.plain.PlainLoginModule")
+}
+
+object KafkaSaslMechanism {
+  given ConfigReader[KafkaSaslMechanism] = ConfigReader[String].emap {
+    case "SCRAM-SHA-512" => Right(ScramSha512)
+    case "PLAIN"         => Right(Plain)
+    case _               => Left(UserValidationFailed("must be SCRAM-SHA-512 or PLAIN"))
+  }
+}
+
 /** Validated Kafka connection settings shared by analytics configuration and its adapters. */
 final case class KafkaConnection(
     bootstrapServers: String,
     saslUsername: Option[String] = None,
     saslPassword: Option[String] = None,
     securityProtocol: KafkaSecurityProtocol = KafkaSecurityProtocol.SaslSsl,
-    allowPlaintext: Boolean = false
+    allowPlaintext: Boolean = false,
+    saslMechanism: KafkaSaslMechanism = KafkaSaslMechanism.ScramSha512
 ) {
   override def toString: String = "KafkaConnection([REDACTED])"
 }
@@ -43,6 +60,15 @@ object KafkaConnection {
         case (Some(user), Some(password)) if user.trim.nonEmpty && password.nonEmpty => connection.validNec
         case _ => "Kafka SASL username and password must both be non-empty".invalidNec
       },
+      // PLAIN sends the secret itself; it is allowed only where plaintext transport is already allowed (loopback/Compose).
+      connection.saslMechanism match {
+        case KafkaSaslMechanism.ScramSha512 => connection.validNec
+        case KafkaSaslMechanism.Plain
+            if connection.securityProtocol == KafkaSecurityProtocol.SaslPlaintext && connection.allowPlaintext =>
+          connection.validNec
+        case KafkaSaslMechanism.Plain =>
+          "Kafka SASL PLAIN requires SASL_PLAINTEXT with analytics.kafka.allow-plaintext=true on a loopback broker".invalidNec
+      },
       connection.securityProtocol match {
         case KafkaSecurityProtocol.SaslSsl => connection.validNec
         case KafkaSecurityProtocol.SaslPlaintext
@@ -53,7 +79,7 @@ object KafkaConnection {
         case KafkaSecurityProtocol.SaslPlaintext =>
           "Kafka SASL_PLAINTEXT is restricted to validated loopback brokers and the local Compose kafka:9092 endpoint".invalidNec
       }
-    ).mapN((_, _, _) => connection)
+    ).mapN((_, _, _, _) => connection)
 
   private def structurallyLocal(servers: String): Boolean =
     servers.trim.nonEmpty && servers

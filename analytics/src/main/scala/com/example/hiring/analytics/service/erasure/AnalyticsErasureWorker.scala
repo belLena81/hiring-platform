@@ -180,12 +180,12 @@ final class AnalyticsErasureWorker[F[_]: Async](
       case ErasurePhase.Requested =>
         for {
           next <- nextPhase(claim, ErasurePhase.PublisherDrained)
-          transactionalIds <- lift(queue.transactionalIds(claim.requestId))
+          generations <- lift(queue.producerGenerations(claim.requestId))
           _ <-
-            if (transactionalIds.isEmpty) EitherT.rightT(())
+            if (generations.isEmpty) EitherT.rightT(())
             else
-              lift(kafka.producerFencer.fence(kafka.fencerConnection, transactionalIds)) *>
-                lift(now).flatMap(at => lift(queue.markProducersFenced(claim.requestId, transactionalIds, at))) *>
+              lift(kafka.producerFencer.fence(kafka.fencerConnection, generations.map(_.transactionalId).distinct)) *>
+                lift(queue.markProducersFenced(claim.requestId, generations)) *>
                 defer(claim, pollInterval)
           current <- lift(now)
           ready <- lift(queue.publisherDrainReady(claim.requestId, current, deliveryTimeout))

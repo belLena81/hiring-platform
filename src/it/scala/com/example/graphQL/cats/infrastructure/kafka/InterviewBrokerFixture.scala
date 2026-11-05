@@ -1,7 +1,7 @@
 package com.example.graphQL.cats.infrastructure.kafka
 
 import cats.effect.{IO, Resource}
-import com.example.graphQL.cats.config.KafkaSaslSecurityProtocol
+import com.example.graphQL.cats.config.{KafkaSaslMechanism, KafkaSaslSecurityProtocol}
 import com.example.graphQL.cats.domain.workflow.InterviewTopicPair
 import com.github.dockerjava.api.model.{ExposedPort, PortBinding, Ports, Ulimit}
 import org.apache.kafka.clients.admin.{Admin, NewTopic}
@@ -48,14 +48,15 @@ private[graphQL] object InterviewBrokerFixture {
       worker,
       topics = topics,
       workerGroup = "interview-outage-workers",
-      orchestratorGroup = "interview-outage-orchestrator"
+      orchestratorGroup = "interview-outage-orchestrator",
+      mechanism = KafkaSaslMechanism.Plain
     )
 
     def adminProperties: Properties = {
       val properties = new Properties()
       properties.put("bootstrap.servers", bootstrap)
       KafkaClientSettings
-        .security(Some("broker"), Some(password), KafkaSaslSecurityProtocol.Plaintext)
+        .security(Some("broker"), Some(password), KafkaSaslSecurityProtocol.Plaintext, KafkaSaslMechanism.Plain)
         .foreach { case (key, value) => val _ = properties.put(key, value) }
       properties.put("request.timeout.ms", "2000")
       properties.put("default.api.timeout.ms", "3000")

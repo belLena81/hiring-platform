@@ -31,7 +31,7 @@ Protect deletion, embedding convergence and durable publication first; reduce re
 
 ## Data and contract decisions
 
-Existing GraphQL names, status matrix, cursor encoding and seven-field unversioned operational envelope remain active. New internal retrieval, authority, retry and registration progress types stay behind ports. Operational Mongo storage evolves via a new migration (never edit applied migration contents), stopped incompatible writers, bounded durable progress and verification. Pre-MVP API/analytics have one shape and no legacy readers. Existing data is preserved.
+Existing GraphQL names, status matrix, cursor encoding and seven-field operational envelope (schema version 1 in a record header since 2026-11-05) remain active. New internal retrieval, authority, retry and registration progress types stay behind ports. Operational Mongo storage evolves via a new migration (never edit applied migration contents), stopped incompatible writers, bounded durable progress and verification. Pre-MVP API/analytics have one shape and no legacy readers. Existing data is preserved.
 
 Producer registration must touch the same subject fence transactionally; marking a subject deleted excludes concurrent registration. Cleanup must not copy the registry into another unbounded array. Active/unresolved registrations never expire through TTL. Restart after broker fencing but before Mongo acknowledgment repeats safe fencing.
 

@@ -583,7 +583,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
             )
             _ <- transactionalIds.traverse_(id =>
               MongoProducerRegistrations
-                .register(database, None, userId.value.toString, id, "Operational", now)
+                .register(database, None, userId.value.toString, ProducerGenerationFixtures.of(id), "Operational")
                 .value
                 .flatMap(result => IO(assert(result.isRight)))
             )
@@ -608,7 +608,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
                 .find(new Document("_id", userId.value.toString))
             )
             storedIds <- MongoProducerRegistrations.batch(database, userId.value.toString, "Operational").value
-            _ = assertEquals(storedIds.map(_.toList), Right(transactionalIds))
+            _ = assertEquals(storedIds.map(_.map(_.transactionalId).toSet), Right(transactionalIds.toSet))
             _ = assertEquals(request.map(_.getBoolean("producerRegistry").booleanValue()), Some(true))
             fencingVersion = request.flatMap(value => Option(value.getInteger("fencingVersion"))).map(_.intValue())
             _ = assertEquals(fencingVersion, Option(1))
@@ -644,7 +644,9 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
                 .collection(database, MongoCollections.EventOutbox)
                 .flatMap(_.insertMany(List(outboxRecord(value), outboxRecord(secondValue))))
             )
-            claimed <- outbox.claim("fence-test", transactionalId, now, 60.seconds, 50).value
+            claimed <- outbox
+              .claim("fence-test", ProducerGenerationFixtures.of(transactionalId), now, 60.seconds, 50)
+              .value
             _ = assert(claimed.exists(_.size == 1), clues(claimed))
             fence <- MongoRepositoryTestSupport.first(
               database
@@ -652,7 +654,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
                 .find(new Document("_id", actor.value.toString))
             )
             storedIds <- MongoProducerRegistrations.batch(database, actor.value.toString, "Operational").value
-            _ = assertEquals(storedIds, Right(Vector(transactionalId)))
+            _ = assertEquals(storedIds, Right(Vector(ProducerGenerationFixtures.of(transactionalId))))
             _ = assert(fence.forall(!_.containsKey("transactionalIds")))
           } yield ()
         }
@@ -696,13 +698,19 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
               database.getCollection(MongoCollections.EventOutbox).insertOne(outboxRecord(value))
             )
             first <- outbox
-              .claim("boundary-a", "hiring-publisher-00000000-0000-0000-0000-000000000391", now, 60.seconds, 1)
+              .claim(
+                "boundary-a",
+                ProducerGenerationFixtures.of("hiring-publisher-00000000-0000-0000-0000-000000000391"),
+                now,
+                60.seconds,
+                1
+              )
               .value
             // A caller clock a day ahead cannot take a live lease: only the database clock decides.
             held <- outbox
               .claim(
                 "boundary-b",
-                "hiring-publisher-00000000-0000-0000-0000-000000000392",
+                ProducerGenerationFixtures.of("hiring-publisher-00000000-0000-0000-0000-000000000392"),
                 now.plusSeconds(86400L),
                 60.seconds,
                 1
@@ -712,7 +720,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
             reclaimed <- outbox
               .claim(
                 "boundary-b",
-                "hiring-publisher-00000000-0000-0000-0000-000000000393",
+                ProducerGenerationFixtures.of("hiring-publisher-00000000-0000-0000-0000-000000000393"),
                 now,
                 60.seconds,
                 1
@@ -735,9 +743,9 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
       MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
         LocalTestServices.database(client).use { database =>
           val userId = UserId(UUID.randomUUID())
-          val firstPublisher = "hiring-publisher-00000000-0000-0000-0000-000000000385"
-          val secondPublisher = "hiring-publisher-00000000-0000-0000-0000-000000000386"
-          val racingPublisher = "hiring-publisher-00000000-0000-0000-0000-000000000387"
+          val firstPublisher = ProducerGenerationFixtures.of("hiring-publisher-00000000-0000-0000-0000-000000000385")
+          val secondPublisher = ProducerGenerationFixtures.of("hiring-publisher-00000000-0000-0000-0000-000000000386")
+          val racingPublisher = ProducerGenerationFixtures.of("hiring-publisher-00000000-0000-0000-0000-000000000387")
           val eventValue = event(
             800L,
             OperationalEventType.JOB_CREATED,
@@ -808,7 +816,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
             generationsBeforeRace <- MongoProducerRegistrations
               .batch(database, userId.value.toString, "Operational")
               .value
-            _ = assertEquals(generationsBeforeRace.map(_.toList), Right(List(firstPublisher, secondPublisher).sorted))
+            _ = assertEquals(generationsBeforeRace.map(_.toSet), Right(Set(firstPublisher, secondPublisher)))
             _ = assert(fenceBeforeRace.forall(!_.containsKey("transactionalIds")))
             _ <- expireClaim(database, expiredLeaseClaim)
             requestWritten <- Deferred[IO, Unit]
@@ -872,8 +880,8 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
               .batch(database, userId.value.toString, "Operational")
               .value
             _ = assertEquals(
-              capturedAfterDeletion.map(_.toList),
-              Right(List(firstPublisher, secondPublisher, racingPublisher).sorted)
+              capturedAfterDeletion.map(_.toSet),
+              Right(Set(firstPublisher, secondPublisher, racingPublisher))
             )
             storedUser <- MongoRepositoryTestSupport.first(
               database.getCollection(MongoCollections.Users).find(new Document("_id", userId.value.toString))
@@ -884,7 +892,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
             lateClaim <- outbox
               .claim(
                 "publisher-d",
-                "hiring-publisher-00000000-0000-0000-0000-000000000388",
+                ProducerGenerationFixtures.of("hiring-publisher-00000000-0000-0000-0000-000000000388"),
                 deletionAt.plusSeconds(200L),
                 60.seconds,
                 1

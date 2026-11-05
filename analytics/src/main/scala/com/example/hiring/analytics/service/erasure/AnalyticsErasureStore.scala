@@ -5,12 +5,20 @@ import com.example.hiring.analytics.domain.AccountSubjectId
 import java.time.Instant
 import scala.concurrent.duration.FiniteDuration
 
+/** One registered producer lifetime. Fencing is by transactional id on the broker; Fenced is recorded per generation,
+  * so a later generation of the same transactional id stays Active.
+  */
+final case class ErasureProducerGeneration(transactionalId: String, generationId: String)
+
 /** Queueing, publisher-drain, and worker-liveness operations for erasure requests. */
 trait ErasureQueue[F[_]] {
   def claim(now: Instant, leaseUntil: Instant, limit: Int): F[Vector[ErasureClaim]]
   def publisherDrainReady(subjectId: AccountSubjectId, now: Instant, deliveryTimeout: FiniteDuration): F[Boolean]
-  def transactionalIds(requestId: AccountSubjectId): F[Vector[String]]
-  def markProducersFenced(requestId: AccountSubjectId, ids: Vector[String], now: Instant): F[Unit]
+  def producerGenerations(requestId: AccountSubjectId): F[Vector[ErasureProducerGeneration]]
+  def markProducersFenced(
+      requestId: AccountSubjectId,
+      generations: Vector[ErasureProducerGeneration]
+  ): F[Unit]
   def purgeOutbox(subjectId: AccountSubjectId, now: Instant, deliveryTimeout: FiniteDuration): F[Boolean]
   def hasNonReadyOtherRequests(requestId: AccountSubjectId): F[Boolean]
   def heartbeat(now: Instant, leaseUntil: Instant): F[Unit]

@@ -368,8 +368,12 @@ final class AnalyticsErasureWorkerSpec extends CatsEffectSuite {
         deliveryTimeout: FiniteDuration
     ): IO[Boolean] =
       IO.pure(false)
-    override def transactionalIds(requestId: AccountSubjectId): IO[Vector[String]] = IO.pure(Vector.empty)
-    override def markProducersFenced(requestId: AccountSubjectId, ids: Vector[String], now: Instant): IO[Unit] = IO.unit
+    override def producerGenerations(requestId: AccountSubjectId): IO[Vector[ErasureProducerGeneration]] =
+      IO.pure(Vector.empty)
+    override def markProducersFenced(
+        requestId: AccountSubjectId,
+        generations: Vector[ErasureProducerGeneration]
+    ): IO[Unit] = IO.unit
     override def purgeOutbox(subjectId: AccountSubjectId, now: Instant, deliveryTimeout: FiniteDuration): IO[Boolean] =
       IO.pure(false)
     override def hasNonReadyOtherRequests(requestId: AccountSubjectId): IO[Boolean] = IO.pure(false)

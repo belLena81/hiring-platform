@@ -14,7 +14,11 @@ import java.time.Instant
 import java.util.UUID
 
 /** The operational event wire contract: the seven-field envelope and the payload shapes as JSON bytes. Semantic rules
-  * live in [[OperationalEventContract]]; this codec adds the structural key sets and the envelope size budget.
+  * live in [[OperationalEventContract]]; this codec adds the required key sets and the envelope size budget.
+  *
+  * Reading is tolerant: every required key must be present, and unknown additional keys at the envelope, payload, job
+  * snapshot and result-entry level are ignored so a producer can add fields without breaking consumers. Types, enum
+  * values, UUID and instant formats and the semantic contract stay strict. Encoding emits exactly the known keys.
   */
 object OperationalEventWireCodec {
   // Wire contract budget, independently below the broker's framed-record limit.
@@ -47,7 +51,7 @@ object OperationalEventWireCodec {
       payload: Json
   )
 
-  private val EnvelopeFields = Set(
+  private val EnvelopeFields = List(
     "eventId",
     "eventType",
     "occurredAt",
@@ -179,14 +183,19 @@ object OperationalEventWireCodec {
                 .toString
             )
             .leftMap(_ => "MalformedEnvelope")
-            .flatMap(raw => parse(raw).leftMap(_ => "MalformedEnvelope").flatMap(decode))
+            .flatMap(raw =>
+              parse(raw)
+                .leftMap(_ => "MalformedEnvelope")
+                .flatMap(json => Either.cond(!JsonDuplicateKeys.present(raw), json, "MalformedEnvelope"))
+                .flatMap(decode)
+            )
       )
 
   def decode(json: Json): Either[String, OperationalEventEnvelope] =
     for {
       nonNull <- Option(json).toRight("MalformedEnvelope")
-      fields <- nonNull.asObject.toRight("MalformedEnvelope")
-      _ <- Either.cond(fields.keys.toSet == EnvelopeFields, (), "MalformedEnvelope")
+      _ <- nonNull.asObject.toRight("MalformedEnvelope")
+      _ <- Either.cond(hasKeys(nonNull, EnvelopeFields), (), "MalformedEnvelope")
       wire <- summon[Decoder[WireEnvelope]].decodeJson(nonNull).leftMap(_ => "MalformedEnvelope")
       payload <- decodePayload(wire.eventType, wire.payload).leftMap(_.toString)
       valid <- OperationalEventWireCodec
@@ -204,12 +213,12 @@ object OperationalEventWireCodec {
         .leftMap(_.toString)
     } yield valid
 
-  private def exactFields(value: Json, names: String*): Boolean =
-    Option(value).flatMap(_.asObject).exists(_.keys.toSet == names.toSet)
+  private def hasKeys(value: Json, names: Iterable[String]): Boolean =
+    Option(value).flatMap(_.asObject).exists(fields => names.forall(fields.contains))
 
   private def read[A: Decoder](value: Json, names: String*): Either[OperationalEventContractError, A] =
     Either
-      .cond(exactFields(value, names*), (), OperationalEventContractError.InvalidPayload)
+      .cond(hasKeys(value, names), (), OperationalEventContractError.InvalidPayload)
       .flatMap(_ => summon[Decoder[A]].decodeJson(value).leftMap(_ => OperationalEventContractError.InvalidPayload))
 
   /** Reads the payload shape named by the event type; the semantic rules are applied afterwards by the contract. */
@@ -220,7 +229,7 @@ object OperationalEventWireCodec {
     eventType match {
       case OperationalEventType.JOB_CREATED | OperationalEventType.JOB_UPDATED | OperationalEventType.JOB_CLOSED =>
         for {
-          _ <- Either.cond(exactFields(value, "job"), (), OperationalEventContractError.InvalidPayload)
+          _ <- Either.cond(hasKeys(value, List("job")), (), OperationalEventContractError.InvalidPayload)
           job <- value.hcursor.get[Json]("job").leftMap(_ => OperationalEventContractError.InvalidPayload)
           snapshot <- read[JobSnapshot](job, "jobId", "skills", "status")
         } yield OperationalEventPayload.JobFact(
@@ -256,7 +265,7 @@ object OperationalEventWireCodec {
             value.hcursor
               .get[List[Json]]("results")
               .toOption
-              .exists(_.forall(exactFields(_, "resultId", "rank", "score"))),
+              .exists(_.forall(hasKeys(_, List("resultId", "rank", "score")))),
           OperationalEventContractError.InvalidPayload
         )
       case OperationalEventType.JOB_VIEWED =>

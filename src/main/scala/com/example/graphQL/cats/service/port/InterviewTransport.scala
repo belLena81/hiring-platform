@@ -20,9 +20,16 @@ enum InterviewPublisherRole(val transactionalIdPrefix: String) {
   case Worker extends InterviewPublisherRole("hiring-interview-worker-")
 }
 
-/** One initialized producer lifetime. A replacement receives a fresh identity and fresh authorization. */
-final case class InterviewPublisherGeneration(role: InterviewPublisherRole, id: UUID) {
-  def transactionalId: String = s"${role.transactionalIdPrefix}$id"
+/** One initialized producer lifetime. The transactional id is stable per role and worker; a replacement receives a
+  * fresh generation id and fresh authorization.
+  */
+final case class InterviewPublisherGeneration(
+    role: InterviewPublisherRole,
+    workerId: ProducerWorkerId,
+    generationId: ProducerGenerationId
+) {
+  def transactionalId: String = s"${role.transactionalIdPrefix}${workerId.value}"
+  def producerGeneration: ProducerGeneration = ProducerGeneration(transactionalId, generationId)
 }
 
 /** Fatal producer protocol failure, translated once by the Kafka adapter and handled by its resource owner. */

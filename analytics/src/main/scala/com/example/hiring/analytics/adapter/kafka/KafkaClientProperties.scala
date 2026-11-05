@@ -23,9 +23,9 @@ private[analytics] object KafkaClientProperties {
           case (Some(username), Some(password)) =>
             Right(
               transport ++ Map(
-                "sasl.mechanism" -> "PLAIN",
+                "sasl.mechanism" -> validated.saslMechanism.kafkaValue,
                 "sasl.jaas.config" ->
-                  s"org.apache.kafka.common.security.plain.PlainLoginModule required username=${jaasLiteral(username)} password=${jaasLiteral(password)};"
+                  s"${validated.saslMechanism.loginModule} required username=${jaasLiteral(username)} password=${jaasLiteral(password)};"
               )
             )
           case (None, None) => Right(transport)

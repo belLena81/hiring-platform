@@ -201,7 +201,7 @@ class OperationalEventParsedFrameSpec extends FunSuite {
     )
   }
 
-  test("AC-02.1 a job that is a string, array, null or missing a key is malformed") {
+  test("AC-02.1 a job that is a string, array, null or missing a key is malformed and an extra job key is tolerated") {
     def withJob(job: String) = jobBase.replaceFirst(""""job":\{[^}]*\}""", s""""job":$job""")
     assertEquals(
       accepted(
@@ -216,7 +216,7 @@ class OperationalEventParsedFrameSpec extends FunSuite {
           withJob("""{"jobId":"%s","status":"Open","skills":["Scala",1]}""".format(id("job-edge-job")))
         )
       ),
-      Seq(true, false, false, false, false, false, true, false)
+      Seq(true, false, false, false, false, true, true, false)
     )
   }
 
@@ -261,7 +261,9 @@ class OperationalEventParsedFrameSpec extends FunSuite {
     )
   }
 
-  test("AC-02.1 search results with extra fields, string numbers or a non-array are malformed") {
+  test(
+    "AC-02.1 search results with string numbers, a missing score, duplicate keys or a non-array are malformed; an extra field is tolerated"
+  ) {
     val base = search("edge-results", "searcher", "candidateMatches", Seq("r1"))
     val result = s"""{"resultId":"${id("r1")}","rank":1,"score":0.5}"""
     assert(base.contains(result))
@@ -279,7 +281,7 @@ class OperationalEventParsedFrameSpec extends FunSuite {
           with_(s"""{"resultId":"${id("r1")}","resultId":"${id("r1")}","rank":1,"score":0.5}""")
         )
       ),
-      Seq(true, false, false, false, false, false, false, false)
+      Seq(true, true, false, false, false, false, false, false)
     )
   }
 
@@ -475,7 +477,8 @@ class OperationalEventParsedFrameSpec extends FunSuite {
     // Over the payload text: job, results and four presence checks, plus payload and job key sets and one key set per
     // result. The previous per-branch expression held 16 get_json_object and 11 json_object_keys calls.
     assertEquals(validation.count(_.isInstanceOf[GetJsonObject]), 8)
-    assertEquals(validation.count(_.isInstanceOf[JsonObjectKeys]), 4)
+    // (the per-result key set appears twice: required keys present, no duplicate key)
+    assertEquals(validation.count(_.isInstanceOf[JsonObjectKeys]), 6)
     // On a file-backed source the optimizer keeps the expressions, so the optimized plan has no more calls either.
     val fileBacked = {
       val dir = java.nio.file.Files.createTempDirectory("parsed-frame-spec-").resolve("raw").toString

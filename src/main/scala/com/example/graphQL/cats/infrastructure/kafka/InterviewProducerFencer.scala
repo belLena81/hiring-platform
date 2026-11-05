@@ -3,7 +3,7 @@ package com.example.graphQL.cats.infrastructure.kafka
 import cats.data.EitherT
 import cats.effect.{IO, Resource}
 import cats.syntax.all.*
-import com.example.graphQL.cats.config.KafkaSaslSecurityProtocol
+import com.example.graphQL.cats.config.{KafkaSaslMechanism, KafkaSaslSecurityProtocol}
 import com.example.graphQL.cats.domain.workflow.InterviewSubjectCleanup
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogFields}
 import com.example.graphQL.cats.service.Diagnostics.*
@@ -21,10 +21,13 @@ object InterviewProducerFencer {
       username: String,
       password: String,
       protocol: KafkaSaslSecurityProtocol,
+      mechanism: KafkaSaslMechanism,
       diagnostics: Diagnostics[IO]
   ): Resource[IO, InterviewPublisherFencer[IO]] = {
     val acquire = IO.blocking(
-      Admin.create(KafkaClientSettings.clientProperties(bootstrapServers, Some(username), Some(password), protocol))
+      Admin.create(
+        KafkaClientSettings.clientProperties(bootstrapServers, Some(username), Some(password), protocol, mechanism)
+      )
     )
     Resource.make(acquire)(admin => IO.blocking(admin.close(Duration.ofSeconds(CloseTimeoutSeconds)))).map {
       admin => (transactionalIds: Vector[String]) =>

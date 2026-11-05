@@ -51,6 +51,7 @@ import com.example.graphQL.cats.infrastructure.auth.{
   HmacAuthenticationFingerprint
 }
 import com.example.graphQL.cats.infrastructure.kafka.OperationalEventKafkaRuntime
+import com.example.graphQL.cats.infrastructure.telemetry.KafkaClientMetrics
 import scala.concurrent.duration.*
 import com.example.graphQL.cats.infrastructure.embedding.VoyageEmbeddingService
 import com.mongodb.MongoClientSettings
@@ -101,7 +102,8 @@ object MongoHiringRuntime {
   def resource(
       config: AppConfig,
       diagnostics: Diagnostics[IO],
-      mongoInstrumentation: MongoClientSettings.Builder => MongoClientSettings.Builder = MongoCommandTelemetry.none
+      mongoInstrumentation: MongoClientSettings.Builder => MongoClientSettings.Builder = MongoCommandTelemetry.none,
+      kafkaMetrics: KafkaClientMetrics = KafkaClientMetrics.noop
   ): Resource[IO, MongoHiringRuntime] = {
     // Every service-stamped timestamp is persisted by MongoDB at millisecond precision; one clock keeps them equal.
     val clock: Clock[IO] = MillisecondClock(Clock[IO])
@@ -365,14 +367,16 @@ object MongoHiringRuntime {
           clock,
           UUIDGen[IO],
           breakers.kafkaPublisher,
-          alive
+          alive,
+          kafkaMetrics
         )
       _ <- InterviewSchedulingRuntime.resource(
         config.kafka,
         interviewRepository,
         new MongoInterviewSubjectCleanup(database, diagnostics, config.kafka.interview.topics),
         diagnostics,
-        alive
+        alive,
+        kafkaMetrics
       )
       // Open jobs of a deleted recruiter beyond the first deletion page are closed here, one transaction per page.
       closure = MongoRecruiterJobClosure.transactional(

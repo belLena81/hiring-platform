@@ -227,7 +227,7 @@ final class MongoAnalyticsErasureQueue[F[_]: Async: UUIDGen] private (
   }
 
   /** Each returned batch is durably retired only after broker-confirmed fencing. */
-  def transactionalIds(requestId: AccountSubjectId): F[Vector[String]] = mongo {
+  def producerGenerations(requestId: AccountSubjectId): F[Vector[ErasureProducerGeneration]] = mongo {
     requests.find(Filters.eq(AnalyticsCollections.Fields.Id, requestId.value)).first.flatMap {
       case Some(request) if request.fencingVersion.contains(1) && request.producerRegistry.contains(true) =>
         registrations
@@ -241,28 +241,53 @@ final class MongoAnalyticsErasureQueue[F[_]: Async: UUIDGen] private (
           .sort(Sorts.ascending(AnalyticsCollections.Fields.Id))
           .limit(64)
           .all
-          .map(_.toVector.map(_.transactionalId))
+          .map(_.toVector.map(row => ErasureProducerGeneration(row.transactionalId, row.generationId)))
       case _ => Async[F].raiseError(AnalyticsError.MalformedMarker)
     }
   }
 
-  def markProducersFenced(requestId: AccountSubjectId, ids: Vector[String], now: Instant): F[Unit] =
-    if (ids.isEmpty || ids.size > 64) Async[F].raiseError(AnalyticsError.MalformedMarker)
+  /** Marks exactly the generations read (by row identity), only while Active: a later generation of the same
+    * transactional id is untouched and a repeated mark cannot extend the expiry.
+    */
+  def markProducersFenced(
+      requestId: AccountSubjectId,
+      generations: Vector[ErasureProducerGeneration]
+  ): F[Unit] =
+    if (generations.isEmpty || generations.size > 64) Async[F].raiseError(AnalyticsError.MalformedMarker)
     else
       mongo {
-        registrations
-          .updateMany(
-            Filters.and(
-              Filters.eq(AnalyticsCollections.Fields.SubjectId, requestId.value),
-              Filters.eq(AnalyticsCollections.Fields.Kind, AnalyticsCollections.ProducerRegistration.OperationalKind),
-              Filters.in(AnalyticsCollections.Fields.TransactionalId, ids.asJava)
-            ),
-            Updates.combine(
-              Updates.set(AnalyticsCollections.Fields.State, AnalyticsCollections.ProducerRegistration.FencedState),
-              Updates.set(AnalyticsCollections.Fields.FencedAt, Date.from(now)),
-              Updates.set(AnalyticsCollections.Fields.ExpiresAt, Date.from(now.plusSeconds(8.days.toSeconds)))
+        fs2.interop.reactivestreams
+          .PublisherOps(
+            registrations.underlying.updateMany(
+              Filters.and(
+                Filters.eq(AnalyticsCollections.Fields.SubjectId, requestId.value),
+                Filters.eq(AnalyticsCollections.Fields.Kind, AnalyticsCollections.ProducerRegistration.OperationalKind),
+                Filters.in(
+                  AnalyticsCollections.Fields.Id,
+                  generations.map(g => s"${requestId.value}:${g.transactionalId}:${g.generationId}").asJava
+                ),
+                Filters.eq(AnalyticsCollections.Fields.State, AnalyticsCollections.ProducerRegistration.ActiveState)
+              ),
+              // fencedAt and expiresAt come from the database clock, like registeredAt;
+              java.util.List.of(
+                new Document(
+                  "$set",
+                  new Document(
+                    AnalyticsCollections.Fields.State,
+                    new Document("$literal", AnalyticsCollections.ProducerRegistration.FencedState)
+                  )
+                    .append(AnalyticsCollections.Fields.FencedAt, "$$NOW")
+                    .append(
+                      AnalyticsCollections.Fields.ExpiresAt,
+                      new Document("$add", java.util.List.of("$$NOW", java.lang.Long.valueOf(8.days.toMillis)))
+                    )
+                )
+              )
             )
           )
+          .toStreamBuffered[F](1)
+          .compile
+          .lastOrError
           .flatMap(result =>
             if (result.wasAcknowledged()) Async[F].unit
             else Async[F].raiseError(AnalyticsError.MalformedMarker)
@@ -426,21 +451,25 @@ final class MongoAnalyticsErasureQueue[F[_]: Async: UUIDGen] private (
     }
   }
 
+  /** Both registry migrations must be complete: rows without a generation id would never match the generation reads. */
   private def registryMigrationValidation: F[Unit] =
-    ledger
-      .find(
-        Filters.eq(AnalyticsCollections.Fields.Id, AnalyticsCollections.MigrationIds.AttributableProducerRegistrations)
-      )
-      .first
-      .flatMap { marker =>
-        Either
-          .cond(
-            marker.exists(value => value.state.contains("Complete") && value.version.contains(1L)),
-            (),
-            AnalyticsError.InvalidConfiguration("producer registration migration is incomplete")
-          )
-          .liftTo[F]
-      }
+    List(
+      AnalyticsCollections.MigrationIds.AttributableProducerRegistrations,
+      AnalyticsCollections.MigrationIds.ProducerGenerationRegistrations
+    ).traverse_ { id =>
+      ledger
+        .find(Filters.eq(AnalyticsCollections.Fields.Id, id))
+        .first
+        .flatMap { marker =>
+          Either
+            .cond(
+              marker.exists(value => value.state.contains("Complete") && value.version.contains(1L)),
+              (),
+              AnalyticsError.InvalidConfiguration("producer registration migration is incomplete")
+            )
+            .liftTo[F]
+        }
+    }
 
   private def migrationValidation(ledger: MongoCollection[F, AnalyticsMongoRecords.MigrationEntry]): F[Unit] = {
     ledger

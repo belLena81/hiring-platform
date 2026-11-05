@@ -8,6 +8,7 @@ private[analytics] object Columns {
   val Timestamp = "timestamp"
   val KafkaTimestamp = "kafkaTimestamp"
   val Value = "value"
+  val Headers = "headers"
   val RawValue = "rawValue"
   val Envelope = "envelope"
   val EnvelopeEventId = "envelope.eventId"

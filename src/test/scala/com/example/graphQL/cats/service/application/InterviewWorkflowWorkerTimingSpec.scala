@@ -100,7 +100,11 @@ final class InterviewWorkflowWorkerTimingSpec extends CatsEffectSuite {
       }
       transport = new InterviewTransport[IO] {
         def generationFor(value: InterviewMessage) =
-          InterviewPublisherGeneration(InterviewPublisherRole.Orchestrator, new UUID(0L, 78L))
+          InterviewPublisherGeneration(
+            InterviewPublisherRole.Orchestrator,
+            ProducerWorkerId.parse("orchestrator-test").toOption.get,
+            ProducerGenerationId(new UUID(0L, 78L))
+          )
         def publish(value: InterviewMessage) = IO.sleep(sendFor).onCancel(cancelled.set(true))
       }
       worker = new InterviewWorkflowWorker[IO](

@@ -112,7 +112,8 @@ class KafkaProducerFencerIntegrationSpec extends FunSuite {
       saslUsername = Some(username),
       saslPassword = Some(password),
       securityProtocol = KafkaSecurityProtocol.SaslPlaintext,
-      allowPlaintext = true
+      allowPlaintext = true,
+      saslMechanism = KafkaSaslMechanism.Plain
     )
 
   test(

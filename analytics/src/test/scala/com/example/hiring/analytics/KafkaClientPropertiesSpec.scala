@@ -1,7 +1,7 @@
 package com.example.hiring.analytics
 
 import com.example.hiring.analytics.adapter.kafka.KafkaClientProperties
-import com.example.hiring.analytics.config.{KafkaConnection, KafkaSecurityProtocol}
+import com.example.hiring.analytics.config.{KafkaConnection, KafkaSaslMechanism, KafkaSecurityProtocol}
 import com.example.hiring.analytics.adapter.spark.KafkaOffsetRangeSource
 import com.example.hiring.analytics.errors.AnalyticsError
 import io.circe.parser.parse
@@ -91,22 +91,40 @@ class KafkaClientPropertiesSpec extends munit.FunSuite {
       options,
       Map(
         "security.protocol" -> "SASL_SSL",
-        "sasl.mechanism" -> "PLAIN",
+        "sasl.mechanism" -> "SCRAM-SHA-512",
         "sasl.jaas.config" ->
-          "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"reader\" password=\"credential\";"
+          "org.apache.kafka.common.security.scram.ScramLoginModule required username=\"reader\" password=\"credential\";"
       )
     )
     assertEquals(
       KafkaClientProperties.sparkOptions(connection).toOption.get,
       Map(
         "kafka.security.protocol" -> "SASL_SSL",
-        "kafka.sasl.mechanism" -> "PLAIN",
+        "kafka.sasl.mechanism" -> "SCRAM-SHA-512",
         "kafka.sasl.jaas.config" ->
-          "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"reader\" password=\"credential\";",
+          "org.apache.kafka.common.security.scram.ScramLoginModule required username=\"reader\" password=\"credential\";",
         "kafka.group.id" -> "hiring-analytics-batch",
         "kafka.isolation.level" -> "read_committed"
       )
     )
+  }
+
+  test("PLAIN is emitted only for the explicit loopback plaintext opt-in") {
+    val local = KafkaConnection(
+      "localhost:9092",
+      Some("reader"),
+      Some("credential"),
+      KafkaSecurityProtocol.SaslPlaintext,
+      allowPlaintext = true,
+      saslMechanism = KafkaSaslMechanism.Plain
+    )
+    val options = KafkaClientProperties.clientProperties(local).toOption.get
+    assertEquals(options("sasl.mechanism"), "PLAIN")
+    assert(options("sasl.jaas.config").startsWith("org.apache.kafka.common.security.plain.PlainLoginModule required"))
+    assertEquals(KafkaClientProperties.sparkOptions(local).toOption.get("kafka.sasl.mechanism"), "PLAIN")
+    assert(KafkaClientProperties.clientProperties(local.copy(allowPlaintext = false)).isLeft)
+    assert(KafkaClientProperties.clientProperties(local.copy(securityProtocol = KafkaSecurityProtocol.SaslSsl)).isLeft)
+    assert(KafkaClientProperties.clientProperties(local.copy(bootstrapServers = "broker.example:9092")).isLeft)
   }
 
   test("connections without SASL credentials still set the secure protocol explicitly") {

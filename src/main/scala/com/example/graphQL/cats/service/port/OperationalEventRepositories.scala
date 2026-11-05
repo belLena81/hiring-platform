@@ -22,7 +22,7 @@ trait OperationalEventOutboxRepository[F[_]] {
   /** Claims due events; every lease ends `leaseDuration` after the database time (never a caller instant). */
   def claim(
       workerId: String,
-      transactionalId: String,
+      generation: ProducerGeneration,
       now: Instant,
       leaseDuration: FiniteDuration,
       limit: Int
@@ -42,6 +42,16 @@ trait OperationalEventOutboxRepository[F[_]] {
       retentionExpiresAt: Instant
   ): RepositoryF[F, Unit]
   def releaseForRetry(
+      eventId: java.util.UUID,
+      leaseToken: String,
+      now: Instant,
+      availableAt: Instant
+  ): RepositoryF[F, Unit]
+
+  /** Returns a claimed event to Retryable and refunds the attempt its claim charged: for work that was never really
+    * tried (lost lease of a sibling, fenced producer, abandoned wave). Guarded by the lease token like every settle.
+    */
+  def releaseUncharged(
       eventId: java.util.UUID,
       leaseToken: String,
       now: Instant,

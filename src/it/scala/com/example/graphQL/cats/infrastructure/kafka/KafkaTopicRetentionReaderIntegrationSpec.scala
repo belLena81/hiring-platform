@@ -13,6 +13,7 @@ import com.example.graphQL.cats.service.port.{
   ConsumerReceiptRepository,
   EventQuarantineRecord,
   EventQuarantineRepository,
+  ProducerWorkerId,
   RepositoryF
 }
 import com.example.graphQL.cats.service.events.OperationalEventEnvelope
@@ -35,7 +36,7 @@ class KafkaTopicRetentionReaderIntegrationSpec extends KafkaIntegrationSuite {
     bootstrapServers = kafkaNamespace.manifest.kafkaBootstrap,
     topic = topic,
     consumerGroup = kafkaNamespace.eventGroup,
-    publisher = KafkaPublisherConfig("test", 10, 30, 1, 3, 100),
+    publisher = KafkaPublisherConfig(ProducerWorkerId.parse("test").toOption.get, 10, 30, 1, 3, 100),
     consumer = KafkaConsumerConfig(
       enabled = true,
       receiptTtlDays = 9,

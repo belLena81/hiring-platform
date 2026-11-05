@@ -19,6 +19,7 @@ import org.apache.spark.sql.SparkSession
 import java.time.Instant
 import java.nio.file.Files
 import java.util.Date
+import scala.jdk.CollectionConverters.*
 import java.util.UUID
 import java.util.concurrent.{CountDownLatch, TimeUnit}
 import java.util.concurrent.atomic.AtomicBoolean
@@ -114,9 +115,10 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends AnalyticsMongoIntegra
       database
         .getCollection("producer_registrations")
         .insertOne(
-          new Document("_id", s"$requestId:hiring-publisher-test")
+          new Document("_id", s"$requestId:hiring-publisher-test:00000000-0000-0000-0000-0000000000a1")
             .append("subjectId", requestId)
             .append("transactionalId", "hiring-publisher-test")
+            .append("generationId", "00000000-0000-0000-0000-0000000000a1")
             .append("kind", "Operational")
             .append("state", "Active")
             .append("registeredAt", Date.from(requestedAt))
@@ -133,8 +135,11 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends AnalyticsMongoIntegra
 
       val result = for {
         initial <- store.queue.claim(requestedAt, requestedAt.plusSeconds(10), 1).map(_.head)
-        transactionalIds <- store.queue.transactionalIds(asAccountSubjectId(requestId))
-        _ = assertEquals(transactionalIds, Vector("hiring-publisher-test"))
+        generations <- store.queue.producerGenerations(asAccountSubjectId(requestId))
+        _ = assertEquals(
+          generations,
+          Vector(ErasureProducerGeneration("hiring-publisher-test", "00000000-0000-0000-0000-0000000000a1"))
+        )
         _ <- store.progress.advance(initial, ErasurePhase.PublisherDrained, 0, requestedAt.plusSeconds(1))
         publisherDrained = initial.copy(
           phase = ErasurePhase.PublisherDrained,
@@ -330,13 +335,136 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends AnalyticsMongoIntegra
           .append("state", "Complete")
           .append("version", Int.box(1))
       )
+      ledger.insertOne(
+        new Document("_id", "036_producer_generation_registrations")
+          .append("state", "Complete")
+          .append("version", Int.box(1))
+      )
       val stores = AnalyticsErasureWorkerTestSupport.stores(mongo4catsClient(client), mongo4catsDatabase(client, name))
       assert(stores.queue.preflight.attempt.unsafeRunSync().isLeft, "BSON int proof must fail closed")
       ledger.updateOne(
         new Document("_id", "012_attributable_producer_registrations"),
         new Document("$set", new Document("version", Long.box(1L)))
       )
+      assert(stores.queue.preflight.attempt.unsafeRunSync().isLeft, "the int generation proof must still fail closed")
+      ledger.updateOne(
+        new Document("_id", "036_producer_generation_registrations"),
+        new Document("$set", new Document("version", Long.box(1L)))
+      )
       assert(stores.queue.preflight.attempt.unsafeRunSync().isRight, "restored BSON long proof must recover")
+    } finally {
+      client.close()
+    }
+  }
+
+  test("KFH-04.3 erasure marks only the generations it read as Fenced while a later generation stays Active") {
+    val uri = endpointUri
+    val client = syncClient(uri)
+    val name = testDatabaseName
+    try {
+      val database = client.getDatabase(name)
+      val requestId = UUID.randomUUID().toString
+      val transactionalId = "hiring-publisher-publisher-a"
+      val read = "00000000-0000-0000-0000-0000000000b1"
+      val later = "00000000-0000-0000-0000-0000000000b2"
+      val at = Instant.parse("2026-01-01T00:00:00Z")
+      def register(generation: String) =
+        database
+          .getCollection("producer_registrations")
+          .insertOne(
+            new Document("_id", s"$requestId:$transactionalId:$generation")
+              .append("subjectId", requestId)
+              .append("transactionalId", transactionalId)
+              .append("generationId", generation)
+              .append("kind", "Operational")
+              .append("state", "Active")
+              .append("registeredAt", Date.from(at))
+          )
+      database
+        .getCollection(AnalyticsCollections.ErasureRequests)
+        .insertOne(
+          new Document("_id", requestId)
+            .append("state", "Pending")
+            .append("fencingVersion", 1)
+            .append("producerRegistry", true)
+            .append("requestedAt", Date.from(at))
+        )
+      register(read)
+      val store =
+        AnalyticsErasureWorkerTestSupport.stores(mongo4catsClient(client), mongo4catsDatabase(client, name))
+      val subject = asAccountSubjectId(requestId)
+      val result = for {
+        generations <- store.queue.producerGenerations(subject)
+        // The successor generation registers after the read and before the mark.
+        _ <- IO.blocking(register(later))
+        _ <- store.queue.markProducersFenced(subject, generations)
+        _ <- store.queue.markProducersFenced(subject, generations)
+        remaining <- store.queue.producerGenerations(subject)
+      } yield (generations, remaining)
+      val (readGenerations, remaining) = result.unsafeRunSync()
+      assertEquals(readGenerations, Vector(ErasureProducerGeneration(transactionalId, read)))
+      assertEquals(remaining, Vector(ErasureProducerGeneration(transactionalId, later)))
+      val stored = database
+        .getCollection("producer_registrations")
+        .find(new Document("subjectId", requestId))
+        .into(new java.util.ArrayList[Document]())
+        .asScala
+        .map(row => row.getString("generationId") -> row)
+        .toMap
+      assertEquals(stored(read).getString("state"), "Fenced")
+      // fencedAt and expiresAt are database-stamped: the caller instants (2026-01-01) are ignored, and the second mark
+      // neither moves fencedAt nor extends the expiry.
+      val fencedAt = stored(read).getDate("fencedAt").toInstant
+      assert(fencedAt.isAfter(Instant.now().minusSeconds(300)) && fencedAt.isBefore(Instant.now().plusSeconds(300)))
+      assertEquals(stored(read).getDate("expiresAt").toInstant, fencedAt.plusSeconds(8L * 24L * 3600L))
+      assertEquals(stored(later).getString("state"), "Active")
+      assert(!stored(later).containsKey("expiresAt"))
+    } finally {
+      client.close()
+    }
+  }
+
+  test("KFH-04.7 analytics erasure refuses to run until the producer registry migration is complete") {
+    val uri = endpointUri
+    val client = syncClient(uri)
+    val name = testDatabaseName
+    try {
+      val database = client.getDatabase(name)
+      List(
+        AnalyticsCollections.ErasureRequests,
+        AnalyticsCollections.ErasureCompletions,
+        AnalyticsCollections.ErasureHeartbeats,
+        AnalyticsCollections.ReportSnapshots,
+        AnalyticsCollections.ReportControl,
+        AnalyticsCollections.ReportRuns,
+        AnalyticsCollections.EventOutbox,
+        AnalyticsCollections.OutboxSubjectFences,
+        AnalyticsCollections.Users,
+        "producer_registrations"
+      ).foreach(database.createCollection)
+      val ledger = database.getCollection("hiring_migration_ledger")
+      ledger.insertOne(new Document("_id", "003_event_outbox_subject_references").append("state", "Complete"))
+      ledger.insertOne(
+        new Document("_id", "012_attributable_producer_registrations")
+          .append("state", "Complete")
+          .append("version", Long.box(1L))
+      )
+      val stores = AnalyticsErasureWorkerTestSupport.stores(mongo4catsClient(client), mongo4catsDatabase(client, name))
+      assert(
+        stores.queue.preflight.attempt.unsafeRunSync().isLeft,
+        "rows without a generation id would never match: refuse before the generation migration"
+      )
+      ledger.insertOne(
+        new Document("_id", "036_producer_generation_registrations")
+          .append("state", "Running")
+          .append("version", Long.box(1L))
+      )
+      assert(stores.queue.preflight.attempt.unsafeRunSync().isLeft, "a running generation migration is not complete")
+      ledger.updateOne(
+        new Document("_id", "036_producer_generation_registrations"),
+        new Document("$set", new Document("state", "Complete"))
+      )
+      assert(stores.queue.preflight.attempt.unsafeRunSync().isRight, "the completed migration permits erasure")
     } finally {
       client.close()
     }
@@ -399,6 +527,13 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends AnalyticsMongoIntegra
         .getCollection("hiring_migration_ledger")
         .insertOne(
           new Document("_id", "012_attributable_producer_registrations")
+            .append("state", "Complete")
+            .append("version", Long.box(1L))
+        )
+      database
+        .getCollection("hiring_migration_ledger")
+        .insertOne(
+          new Document("_id", "036_producer_generation_registrations")
             .append("state", "Complete")
             .append("version", Long.box(1L))
         )
@@ -586,9 +721,10 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends AnalyticsMongoIntegra
       database
         .getCollection("producer_registrations")
         .insertOne(
-          new Document("_id", s"$requestId:$transactionalId")
+          new Document("_id", s"$requestId:$transactionalId:00000000-0000-0000-0000-0000000000a1")
             .append("subjectId", requestId)
             .append("transactionalId", transactionalId)
+            .append("generationId", "00000000-0000-0000-0000-0000000000a1")
             .append("kind", "Operational")
             .append("state", "Active")
             .append("registeredAt", Date.from(now))

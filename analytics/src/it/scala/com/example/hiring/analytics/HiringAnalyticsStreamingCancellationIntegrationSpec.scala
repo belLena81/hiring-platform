@@ -9,6 +9,7 @@ import com.example.hiring.analytics.config.{
   AnalyticsConfigFixtures,
   AnalyticsStreamingSettings,
   KafkaConnection,
+  KafkaSaslMechanism,
   KafkaSecurityProtocol
 }
 import com.example.hiring.analytics.domain.{AnalyticsTopic, StreamingActivationIdentity, StreamingBatchId}
@@ -142,7 +143,8 @@ final class HiringAnalyticsStreamingCancellationIntegrationSpec extends Analytic
           Some("callback_test"),
           Some("synthetic-callback-password"),
           KafkaSecurityProtocol.SaslPlaintext,
-          allowPlaintext = true
+          allowPlaintext = true,
+          saslMechanism = KafkaSaslMechanism.Plain
         )
         sourceIds <- initialize(connection, harness.topic)
         checkpoint = runtime.root.resolve(".local/data/analytics/checkpoints/callback-" + UUID.randomUUID().toString)

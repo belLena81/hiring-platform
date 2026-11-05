@@ -16,7 +16,7 @@ import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.events.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.config.{KafkaConfig, KafkaPublisherConfig, KafkaConsumerConfig}
-import com.example.graphQL.cats.config.KafkaSaslSecurityProtocol
+import com.example.graphQL.cats.config.{KafkaSaslMechanism, KafkaSaslSecurityProtocol}
 import com.example.graphQL.cats.service.Diagnostics
 import java.time.Instant
 import java.util.UUID
@@ -166,7 +166,12 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
     val settings = ProducerSettings(Serializer[IO, String], Serializer[IO, Array[Byte]])
       .withBootstrapServers(principal.bootstrapServers)
       .withProperties(
-        KafkaClientSettings.security(Some(principal.username), Some(principal.password), principal.protocol)
+        KafkaClientSettings.security(
+          Some(principal.username),
+          Some(principal.password),
+          principal.protocol,
+          principal.mechanism
+        )
       )
     for {
       observed <- Ref.of[IO, Vector[String]](Vector.empty)
@@ -227,7 +232,12 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
         val settings = ProducerSettings(Serializer[IO, String], Serializer[IO, Array[Byte]])
           .withBootstrapServers(principal.bootstrapServers)
           .withProperties(
-            KafkaClientSettings.security(Some(principal.username), Some(principal.password), principal.protocol)
+            KafkaClientSettings.security(
+              Some(principal.username),
+              Some(principal.password),
+              principal.protocol,
+              principal.mechanism
+            )
           )
         for {
           _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop[IO], topics)
@@ -266,9 +276,10 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
             broker.bootstrap,
             topics.commands,
             broker.config(true).workerGroup,
-            KafkaPublisherConfig("test", 1, 60, 1, 5, 1000),
+            KafkaPublisherConfig(ProducerWorkerId.parse("test").toOption.get, 1, 60, 1, 5, 1000),
             KafkaConsumerConfig(true, 9, 7, Some(broker.config(true).username), Some(broker.config(true).password)),
-            KafkaSaslSecurityProtocol.Plaintext
+            KafkaSaslSecurityProtocol.Plaintext,
+            saslMechanism = KafkaSaslMechanism.Plain
           )
           partition = new TopicPartition(topics.commands, first.partition())
           _ <- InterviewKafkaRuntime
@@ -299,15 +310,24 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
           failedCommit <- KafkaRuntimeSupport
             .processRecord(topics.commands, first.partition(), first.offset())(
               repository.quarantine(identity, now)
-            )(IO.raiseError(new IllegalStateException("synthetic acknowledgment failure")))
+            )(
+              CommitProbeOffsets.offset(topics.commands, first.partition(), first.offset())(
+                IO.raiseError(new IllegalStateException("synthetic acknowledgment failure"))
+              )
+            )
+            .flatMap(_.commit)
             .attempt
           _ = assert(failedCommit.isLeft)
           acknowledged <- Ref.of[IO, Boolean](false)
-          _ <- KafkaRuntimeSupport.processRecord(
-            topics.commands,
-            first.partition(),
-            first.offset()
-          )(repository.quarantine(identity, now))(acknowledged.set(true))
+          _ <- KafkaRuntimeSupport
+            .processRecord(
+              topics.commands,
+              first.partition(),
+              first.offset()
+            )(repository.quarantine(identity, now))(
+              CommitProbeOffsets.offset(topics.commands, first.partition(), first.offset())(acknowledged.set(true))
+            )
+            .flatMap(_.commit)
           replayRows <- count(fixture.database, "interview_workflow_inbox", target)
           replayAck <- acknowledged.get
         } yield {
@@ -324,7 +344,7 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
       config(false).bootstrapServers,
       kafkaNamespace.events,
       kafkaNamespace.eventGroup,
-      KafkaPublisherConfig("test", 1, 60, 1, 5, 1000),
+      KafkaPublisherConfig(ProducerWorkerId.parse("test").toOption.get, 1, 60, 1, 5, 1000),
       KafkaConsumerConfig(true, 9, 7, Some("analytics_reader"), Some(kafkaNamespace.manifest.readerPassword)),
       KafkaSaslSecurityProtocol.Plaintext
     )
@@ -347,7 +367,8 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
         KafkaClientSettings.security(
           Some("hiring_publisher_v2"),
           Some(kafkaNamespace.manifest.publisherPassword),
-          KafkaSaslSecurityProtocol.Plaintext
+          KafkaSaslSecurityProtocol.Plaintext,
+          KafkaSaslMechanism.ScramSha512
         )
       )
     operationalDatabase.use { database =>
@@ -438,21 +459,28 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
               first.offset(),
               None
             )
-          )(IO.raiseError(new IllegalStateException("synthetic commit failure")))
+          )(
+            CommitProbeOffsets.offset(kafka.topic, first.partition(), first.offset())(
+              IO.raiseError(new IllegalStateException("synthetic commit failure"))
+            )
+          )
+          .flatMap(_.commit)
           .attempt
         _ = assert(failedCommit.isLeft)
         acknowledged <- Ref.of[IO, Boolean](false)
-        _ <- KafkaRuntimeSupport.processRecord(kafka.topic, first.partition(), first.offset())(
-          OperationalEventKafkaRuntime.recordDurably(
-            kafka,
-            storedReceipts,
-            storedQuarantine,
-            kafka.topic,
-            first.partition(),
-            first.offset(),
-            None
-          )
-        )(acknowledged.set(true))
+        _ <- KafkaRuntimeSupport
+          .processRecord(kafka.topic, first.partition(), first.offset())(
+            OperationalEventKafkaRuntime.recordDurably(
+              kafka,
+              storedReceipts,
+              storedQuarantine,
+              kafka.topic,
+              first.partition(),
+              first.offset(),
+              None
+            )
+          )(CommitProbeOffsets.offset(kafka.topic, first.partition(), first.offset())(acknowledged.set(true)))
+          .flatMap(_.commit)
         replayCount <- count(database, "event_quarantine", target)
         replayAcknowledged <- acknowledged.get
       } yield {
@@ -479,7 +507,12 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
     properties.put("key.deserializer", classOf[StringDeserializer].getName)
     properties.put("value.deserializer", classOf[ByteArrayDeserializer].getName)
     KafkaClientSettings
-      .security(config.consumer.saslUsername, config.consumer.saslPassword, config.saslSecurityProtocol)
+      .security(
+        config.consumer.saslUsername,
+        config.consumer.saslPassword,
+        config.saslSecurityProtocol,
+        config.saslMechanism
+      )
       .foreach { case (key, value) => properties.put(key, value); () }
     val consumer = new org.apache.kafka.clients.consumer.KafkaConsumer[String, Array[Byte]](properties)
     try Option(consumer.committed(Collections.singleton(partition)).get(partition)).map(_.offset())

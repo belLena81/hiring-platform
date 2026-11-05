@@ -137,7 +137,8 @@ object AnalyticsRuntimeConfig {
       password: AnalyticsNonBlank,
       topic: AnalyticsTopic,
       securityProtocol: Option[KafkaSecurityProtocol],
-      allowPlaintext: Option[Boolean]
+      allowPlaintext: Option[Boolean],
+      saslMechanism: Option[KafkaSaslMechanism]
   ) derives ConfigReader
   private final case class CommonInput(
       mongo: MongoInput,
@@ -279,7 +280,8 @@ object AnalyticsRuntimeConfig {
         Some(raw.kafka.username),
         Some(raw.kafka.password),
         raw.kafka.securityProtocol.getOrElse(KafkaSecurityProtocol.SaslSsl),
-        raw.kafka.allowPlaintext.getOrElse(false)
+        raw.kafka.allowPlaintext.getOrElse(false),
+        raw.kafka.saslMechanism.getOrElse(KafkaSaslMechanism.ScramSha512)
       )
     )
     (

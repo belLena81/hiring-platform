@@ -23,6 +23,7 @@ import org.apache.kafka.common.errors.{
 import org.apache.kafka.common.serialization.StringSerializer
 import org.bson.Document
 import com.example.hiring.testing.KafkaTestNamespace
+import com.example.hiring.testing.LocalTestServices.TestSaslMechanism
 import munit.FunSuite
 import org.testcontainers.kafka.KafkaContainer
 import org.testcontainers.utility.DockerImageName
@@ -61,20 +62,27 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
   )
   private val topic = sys.env.getOrElse("ANALYTICS_TOPIC", "hiring.operational-events")
 
-  private def localKafkaConnection(servers: String, username: String, password: String): KafkaConnection =
+  private def localKafkaConnection(
+      servers: String,
+      username: String,
+      password: String,
+      mechanism: KafkaSaslMechanism = KafkaSaslMechanism.ScramSha512
+  ): KafkaConnection =
     KafkaConnection(
       servers,
       saslUsername = Some(username),
       saslPassword = Some(password),
       securityProtocol = KafkaSecurityProtocol.SaslPlaintext,
-      allowPlaintext = true
+      allowPlaintext = true,
+      saslMechanism = mechanism
     )
 
   private def properties(
       username: String,
       password: String,
       transactionalId: Option[String] = None,
-      servers: String = bootstrapServers
+      servers: String = bootstrapServers,
+      mechanism: TestSaslMechanism = TestSaslMechanism.ScramSha512
   ): Properties = {
     val result = new Properties()
     result.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, servers)
@@ -82,12 +90,9 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
     result.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, classOf[StringSerializer].getName)
     result.put(ProducerConfig.ACKS_CONFIG, "all")
     transactionalId.foreach(result.put(ProducerConfig.TRANSACTIONAL_ID_CONFIG, _))
-    result.put("security.protocol", "SASL_PLAINTEXT")
-    result.put("sasl.mechanism", "PLAIN")
-    result.put(
-      "sasl.jaas.config",
-      s"org.apache.kafka.common.security.plain.PlainLoginModule required username=\"$username\" password=\"$password\";"
-    )
+    com.example.hiring.testing.LocalTestServices
+      .saslSettings(username, password, mechanism)
+      .foreach { case (key, setting) => result.put(key, setting) }
     result
   }
 
@@ -332,6 +337,9 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
       registeredTransactionalId: Option[String] = None,
       readerPassword: String = sys.env.getOrElse("KAFKA_READER_PASSWORD", "")
   ): Unit = {
+    // The interrupted-broker scenario runs its own Testcontainers broker, which is configured for PLAIN.
+    val brokerMechanism =
+      if (interruptedBroker.isDefined) KafkaSaslMechanism.Plain else KafkaSaslMechanism.ScramSha512
     assert(fencerPassword.nonEmpty && readerPassword.nonEmpty, "authenticated local worker credentials required")
     val mongoUri = sys.env.getOrElse(
       "HIRING_ANALYTICS_COMPOSE_MONGO_URI",
@@ -378,11 +386,19 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
             .append("version", java.lang.Long.valueOf(1L))
         )
       database
+        .getCollection("hiring_migration_ledger")
+        .insertOne(
+          new Document("_id", "036_producer_generation_registrations")
+            .append("state", "Complete")
+            .append("version", java.lang.Long.valueOf(1L))
+        )
+      database
         .getCollection("producer_registrations")
         .insertOne(
-          new Document("_id", s"$requestId:$transactionalId")
+          new Document("_id", s"$requestId:$transactionalId:00000000-0000-0000-0000-0000000000a1")
             .append("subjectId", requestId)
             .append("transactionalId", transactionalId)
+            .append("generationId", "00000000-0000-0000-0000-0000000000a1")
             .append("kind", "Operational")
             .append("state", "Active")
             .append("registeredAt", java.util.Date.from(requestedAt))
@@ -509,8 +525,8 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
         null,
         reactiveDatabase,
         store,
-        localKafkaConnection(workerBootstrapServers, "analytics_reader", readerPassword),
-        localKafkaConnection(workerBootstrapServers, "analytics_fencer", fencerPassword),
+        localKafkaConnection(workerBootstrapServers, "analytics_reader", readerPassword, brokerMechanism),
+        localKafkaConnection(workerBootstrapServers, "analytics_fencer", fencerPassword, brokerMechanism),
         topic,
         IntegrationAnalyticsLakehousePaths.unsafe("file:///tmp/analytics-poll-recovery-" + UUID.randomUUID().toString),
         AnalyticsTestSubjectPseudonymizer.fromSecret("poll-recovery-test-secret".padTo(32, 'x').getBytes("UTF-8")),
@@ -812,13 +828,19 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
       broker.start()
       val transactionalId = "hiring-publisher-admin-outage-" + UUID.randomUUID().toString
       val topicName = "admin-outage-" + UUID.randomUUID().toString
-      val adminProperties = properties("analytics_fencer", fencerPassword, servers = broker.getBootstrapServers)
+      val adminProperties = properties(
+        "analytics_fencer",
+        fencerPassword,
+        servers = broker.getBootstrapServers,
+        mechanism = TestSaslMechanism.Plain
+      )
       val admin = Admin.create(adminProperties)
       val producerProperties = properties(
         "hiring_publisher_v2",
         publisherPassword,
         Some(transactionalId),
-        servers = broker.getBootstrapServers
+        servers = broker.getBootstrapServers,
+        mechanism = TestSaslMechanism.Plain
       )
       val producer = new KafkaProducer[String, String](producerProperties)
       try {

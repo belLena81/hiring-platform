@@ -754,7 +754,9 @@ final class MongoOperationalAccessEvaluationIntegrationSpec extends MongoIntegra
           successful(
             outbox.claim(
               "synthetic-publisher",
-              "hiring-publisher-" + support.deterministicId("synthetic-publisher-generation").toString,
+              ProducerGenerationFixtures.of(
+                "hiring-publisher-" + support.deterministicId("synthetic-publisher-generation").toString
+              ),
               now,
               60.seconds,
               1

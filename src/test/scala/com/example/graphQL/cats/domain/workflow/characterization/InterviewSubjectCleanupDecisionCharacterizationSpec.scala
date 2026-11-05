@@ -61,7 +61,7 @@ class InterviewSubjectCleanupDecisionCharacterizationSpec extends GoldenTableSui
     ("revNegative", -1L, Vector(orchestrator, worker)),
     ("idsUnsortedDuplicated", 5L, Vector(worker, orchestrator, worker)),
     ("idsEmpty", 5L, Vector.empty),
-    ("idsInvalid", 5L, Vector(orchestrator, "hiring-interview-worker-not-a-uuid")),
+    ("idsInvalid", 5L, Vector(orchestrator, "hiring-interview-worker-Not_A_Worker")),
     ("idsForeignPrefix", 5L, Vector("other-" + worker))
   )
 

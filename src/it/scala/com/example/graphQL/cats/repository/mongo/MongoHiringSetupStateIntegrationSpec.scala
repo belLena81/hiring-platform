@@ -61,7 +61,8 @@ final class MongoHiringSetupStateIntegrationSpec extends MongoIntegrationSuite {
     "032_embedding_work_key_from_identity",
     "033_application_event_actor_role",
     "034_interview_workflow_initiator_role",
-    "035_event_outbox_aggregate_order"
+    "035_event_outbox_aggregate_order",
+    "036_producer_generation_registrations"
   )
 
   /** Records schema-changing commands, which the shared access fixture deliberately ignores. */

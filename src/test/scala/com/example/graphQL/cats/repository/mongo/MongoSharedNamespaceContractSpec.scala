@@ -68,6 +68,7 @@ class MongoSharedNamespaceContractSpec extends munit.FunSuite {
       "SubjectId" -> MongoFields.SubjectId,
       "Kind" -> MongoFields.Kind,
       "TransactionalId" -> MongoFields.TransactionalId,
+      "GenerationId" -> MongoFields.GenerationId,
       "FencedAt" -> MongoFields.FencedAt,
       "ProducerRegistry" -> MongoFields.ProducerRegistry
     )
@@ -94,7 +95,8 @@ class MongoSharedNamespaceContractSpec extends munit.FunSuite {
   test("MSC-07.1 shared ledger migration ids match the contract") {
     val actual = Map(
       "eventOutboxSubjectReferences" -> MigrationIds.EventOutboxSubjectReferences.value,
-      "attributableProducerRegistrations" -> MigrationIds.AttributableProducerRegistrations.value
+      "attributableProducerRegistrations" -> MigrationIds.AttributableProducerRegistrations.value,
+      "producerGenerationRegistrations" -> MigrationIds.ProducerGenerationRegistrations.value
     )
     assertEquals(actual, strings("migrationIds"))
   }

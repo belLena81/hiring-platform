@@ -130,7 +130,11 @@ final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
       }
       sender = new InterviewTransport[IO] {
         def generationFor(value: InterviewMessage) =
-          InterviewPublisherGeneration(InterviewPublisherRole.Orchestrator, new UUID(0L, 78L))
+          InterviewPublisherGeneration(
+            InterviewPublisherRole.Orchestrator,
+            ProducerWorkerId.parse("orchestrator-test").toOption.get,
+            ProducerGenerationId(new UUID(0L, 78L))
+          )
         def publish(value: InterviewMessage) = sent.update(_ + 1)
       }
       worker = new InterviewWorkflowWorker[IO](
@@ -317,7 +321,11 @@ final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
       }
       sender = new InterviewTransport[IO] {
         def generationFor(value: InterviewMessage) =
-          InterviewPublisherGeneration(InterviewPublisherRole.Orchestrator, new UUID(0L, 71L))
+          InterviewPublisherGeneration(
+            InterviewPublisherRole.Orchestrator,
+            ProducerWorkerId.parse("orchestrator-test").toOption.get,
+            ProducerGenerationId(new UUID(0L, 71L))
+          )
         def publish(value: InterviewMessage) = renewed.get
       }
       worker = new InterviewWorkflowWorker[IO](
@@ -363,7 +371,11 @@ final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
       }
       sender = new InterviewTransport[IO] {
         def generationFor(value: InterviewMessage) =
-          InterviewPublisherGeneration(InterviewPublisherRole.Orchestrator, new UUID(0L, 73L))
+          InterviewPublisherGeneration(
+            InterviewPublisherRole.Orchestrator,
+            ProducerWorkerId.parse("orchestrator-test").toOption.get,
+            ProducerGenerationId(new UUID(0L, 73L))
+          )
         def publish(value: InterviewMessage) = IO.never[Unit].onCancel(cancelled.complete(()).void)
       }
       worker = new InterviewWorkflowWorker[IO](
@@ -407,7 +419,11 @@ final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
         }
         sender = new InterviewTransport[IO] {
           def generationFor(value: InterviewMessage) =
-            InterviewPublisherGeneration(InterviewPublisherRole.Orchestrator, new UUID(0L, 81L))
+            InterviewPublisherGeneration(
+              InterviewPublisherRole.Orchestrator,
+              ProducerWorkerId.parse("orchestrator-test").toOption.get,
+              ProducerGenerationId(new UUID(0L, 81L))
+            )
           def publish(value: InterviewMessage) = sent.update(_ + 1)
         }
         worker = new InterviewWorkflowWorker[IO](
@@ -455,7 +471,11 @@ final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
       }
       sender = new InterviewTransport[IO] {
         def generationFor(value: InterviewMessage) =
-          InterviewPublisherGeneration(InterviewPublisherRole.Orchestrator, new UUID(0L, 83L))
+          InterviewPublisherGeneration(
+            InterviewPublisherRole.Orchestrator,
+            ProducerWorkerId.parse("orchestrator-test").toOption.get,
+            ProducerGenerationId(new UUID(0L, 83L))
+          )
         def publish(value: InterviewMessage) = clock.set(observedAt.plusMillis(70)) *> events.update(_ :+ "publish")
       }
       worker = new InterviewWorkflowWorker[IO](

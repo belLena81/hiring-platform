@@ -39,9 +39,9 @@ object HiringStoryEventExport {
     properties.put("group.id", s"hiring-story-export-${UUID.randomUUID()}")
     properties.put("key.deserializer", classOf[StringDeserializer].getName)
     properties.put("value.deserializer", classOf[ByteArrayDeserializer].getName)
-    properties.put("security.protocol", "SASL_PLAINTEXT")
-    properties.put("sasl.mechanism", "PLAIN")
-    properties.put("sasl.jaas.config", LocalTestServices.jaasConfig("analytics_reader", manifest.readerPassword))
+    LocalTestServices.saslSettings("analytics_reader", manifest.readerPassword).foreach { case (key, value) =>
+      properties.put(key, value)
+    }
     properties.put("isolation.level", "read_committed")
     properties.put("enable.auto.commit", "false")
     val directory = target(manifest.workspace).getParent

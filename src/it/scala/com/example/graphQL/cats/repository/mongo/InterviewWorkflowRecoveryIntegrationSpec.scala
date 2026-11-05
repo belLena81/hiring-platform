@@ -56,8 +56,8 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
       outgoing <- Ref.of[IO, Vector[InterviewMessage]](Vector.empty)
       transport = new InterviewTransport[IO] {
         private val commandGeneration =
-          InterviewPublisherGeneration(InterviewPublisherRole.Orchestrator, UUID.randomUUID())
-        private val resultGeneration = InterviewPublisherGeneration(InterviewPublisherRole.Worker, UUID.randomUUID())
+          ProducerGenerationFixtures.interview(InterviewPublisherRole.Orchestrator)
+        private val resultGeneration = ProducerGenerationFixtures.interview(InterviewPublisherRole.Worker)
         override def generationFor(message: InterviewMessage): InterviewPublisherGeneration =
           if (message.result.nonEmpty) resultGeneration else commandGeneration
         override def publish(message: InterviewMessage): IO[Unit] = outgoing.update(_ :+ message)
@@ -408,8 +408,8 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSui
         outgoing <- Ref.of[IO, Vector[InterviewMessage]](Vector.empty)
         transport = new InterviewTransport[IO] {
           private val commandGeneration =
-            InterviewPublisherGeneration(InterviewPublisherRole.Orchestrator, UUID.randomUUID())
-          private val resultGeneration = InterviewPublisherGeneration(InterviewPublisherRole.Worker, UUID.randomUUID())
+            ProducerGenerationFixtures.interview(InterviewPublisherRole.Orchestrator)
+          private val resultGeneration = ProducerGenerationFixtures.interview(InterviewPublisherRole.Worker)
           override def generationFor(message: InterviewMessage): InterviewPublisherGeneration =
             if (message.result.nonEmpty) resultGeneration else commandGeneration
           override def publish(message: InterviewMessage): IO[Unit] = outgoing.update(_ :+ message)

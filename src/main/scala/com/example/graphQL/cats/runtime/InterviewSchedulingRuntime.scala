@@ -4,6 +4,7 @@ import cats.effect.{IO, Resource}
 import cats.syntax.all.*
 import com.example.graphQL.cats.config.KafkaConfig
 import com.example.graphQL.cats.infrastructure.kafka.*
+import com.example.graphQL.cats.infrastructure.telemetry.KafkaClientMetrics
 import com.example.graphQL.cats.repository.mongo.{MongoInterviewSubjectCleanup, MongoInterviewWorkflowRepository}
 import com.example.graphQL.cats.service.{
   BackgroundWorker,
@@ -32,7 +33,8 @@ private[runtime] object InterviewSchedulingRuntime {
       repository: MongoInterviewWorkflowRepository,
       cleanup: MongoInterviewSubjectCleanup,
       diagnostics: Diagnostics[IO],
-      alive: ReadinessComponent => IO[WorkerAlive[IO]]
+      alive: ReadinessComponent => IO[WorkerAlive[IO]],
+      metrics: KafkaClientMetrics = KafkaClientMetrics.noop
   ): Resource[IO, Unit] = {
     val settings = config.interview
     if (!settings.enabled) Resource.unit[IO]
@@ -58,7 +60,7 @@ private[runtime] object InterviewSchedulingRuntime {
             LedgerInterviewCalendarProvider.durable(repository),
             LedgerInterviewNotificationProvider.durable(repository),
             InterviewWorkerSettings(
-              "interview-local",
+              settings.workerId.value,
               settings.publicationPollIntervalMs.millis,
               settings.claimSeconds.seconds,
               settings.providerTimeoutSeconds.seconds,
@@ -81,7 +83,14 @@ private[runtime] object InterviewSchedulingRuntime {
             topics = settings.topics,
             workerGroup = settings.workerGroup,
             orchestratorGroup = settings.orchestratorGroup,
-            restartMaxDelaySeconds = config.restartMaxDelaySeconds
+            restartMaxDelaySeconds = config.restartMaxDelaySeconds,
+            workerId = settings.workerId,
+            mechanism = config.saslMechanism,
+            maxPollRecords = settings.maxPollRecords,
+            maxPollIntervalSeconds = settings.maxPollIntervalSeconds,
+            commitBatchSize = settings.commitBatchSize,
+            commitBatchIntervalMillis = settings.commitBatchIntervalMillis,
+            claimSeconds = settings.claimSeconds
           )
           val resultConfig = InterviewKafkaConfig(
             config.bootstrapServers,
@@ -93,7 +102,14 @@ private[runtime] object InterviewSchedulingRuntime {
             topics = settings.topics,
             workerGroup = settings.workerGroup,
             orchestratorGroup = settings.orchestratorGroup,
-            restartMaxDelaySeconds = config.restartMaxDelaySeconds
+            restartMaxDelaySeconds = config.restartMaxDelaySeconds,
+            workerId = settings.workerId,
+            mechanism = config.saslMechanism,
+            maxPollRecords = settings.maxPollRecords,
+            maxPollIntervalSeconds = settings.maxPollIntervalSeconds,
+            commitBatchSize = settings.commitBatchSize,
+            commitBatchIntervalMillis = settings.commitBatchIntervalMillis,
+            claimSeconds = settings.claimSeconds
           )
           def receive(
               handler: InterviewMessage => RepositoryF[IO, Unit]
@@ -105,8 +121,8 @@ private[runtime] object InterviewSchedulingRuntime {
           def generation: Stream[IO, Unit] = Stream
             .resource(
               (
-                InterviewKafkaRuntime.publisherResource(commandConfig, diagnostics),
-                InterviewKafkaRuntime.publisherResource(resultConfig, diagnostics)
+                InterviewKafkaRuntime.publisherResource(commandConfig, diagnostics, metrics = metrics),
+                InterviewKafkaRuntime.publisherResource(resultConfig, diagnostics, metrics = metrics)
               ).tupled
             )
             .flatMap { case (commands, results) =>
@@ -128,10 +144,10 @@ private[runtime] object InterviewSchedulingRuntime {
             workerAlive <- Resource.eval(alive(ReadinessComponent.InterviewWorkerConsumer))
             publicationAlive <- Resource.eval(alive(ReadinessComponent.InterviewPublication))
             cleanupAlive <- Resource.eval(alive(ReadinessComponent.InterviewSubjectCleanup))
-            _ <- InterviewKafkaRuntime.consumerResource(commandConfig, diagnostics, orchestratorAlive)(
+            _ <- InterviewKafkaRuntime.consumerResource(commandConfig, diagnostics, orchestratorAlive, metrics)(
               receive(worker.receiveResult)
             )
-            _ <- InterviewKafkaRuntime.consumerResource(resultConfig, diagnostics, workerAlive)(
+            _ <- InterviewKafkaRuntime.consumerResource(resultConfig, diagnostics, workerAlive, metrics)(
               receive(worker.receiveCommand)
             )
             retention = InterviewKafkaRetention(
@@ -139,6 +155,7 @@ private[runtime] object InterviewSchedulingRuntime {
               orchestratorUsername,
               orchestratorPassword,
               config.saslSecurityProtocol,
+              config.saslMechanism,
               settings.topics
             )
             fencer <- InterviewProducerFencer.resource(
@@ -146,6 +163,7 @@ private[runtime] object InterviewSchedulingRuntime {
               fencerUsername,
               fencerPassword,
               config.saslSecurityProtocol,
+              config.saslMechanism,
               diagnostics
             )
             _ <- BackgroundWorker.resource(PublicationWorker, diagnostics)(
