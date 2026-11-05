@@ -124,13 +124,49 @@ class WorkflowFilesAreCoveredEverywhere(unittest.TestCase):
             self.assertEqual("deny", outcome and outcome[0], command)
             self.assertIn("project root", outcome[1], command)
 
-    def test_ARE_09_7_a_line_continuation_inside_a_comment_does_not_hide_a_command(self):
+    def test_ARE_09_7_the_reported_line_continuation_forms_do_not_hide_a_command(self):
         root = harness_paths_root()
         for command, cwd in (("# x\\\ngit commit -m m", root / "analytics"),
                              ("# a\\\ncd analytics # b\\\ngit commit -m m", root),
-                             ("git \\\ncommit -m x", root)):
+                             ("git \\\ncommit -m x", root),
+                             ("cd analytics #a\\\ngit \\\ncommit -m m", root),
+                             ("#a\\\ngit \\\ncommit -m m", root / "analytics")):
             outcome = guard.check_bash(command, cwd)
             self.assertEqual("deny", outcome and outcome[0], command)
+
+    def test_ARE_09_7_a_comment_after_an_escaped_backslash_hides_nothing_from_the_other_rules(self):
+        root = harness_paths_root()
+        for command in ("echo \\\\ # it's\ncp a /outside/dir\n# it's",
+                        "echo \\\\ # it's\ncp a /outside/dir # it's",
+                        "echo \\\\ # it's\nsudo id\n# it's",
+                        "echo \\\\;# it's\nsudo id # it's",
+                        "echo \\\\\\\\ # it's\nsudo id\n# it's"):
+            outcome = guard.check_bash(command, root)
+            self.assertEqual("deny", outcome and outcome[0], command)
+
+    def test_ARE_09_7_a_comment_at_the_start_of_a_call_hides_nothing_from_the_other_rules(self):
+        for command in ("# it's\nsudo id\n# it's", "# its\nsudo id"):
+            outcome = guard.check_bash(command, harness_paths_root())
+            self.assertEqual("deny", outcome and outcome[0], command)
+
+    def test_ARE_09_7_a_continuation_ending_a_comment_hides_nothing_from_the_other_rules(self):
+        for command in ("echo \\\\ #x;\\\nsudo id", "echo a #x;\\\nsudo id", "echo \\\\ #x;\\\ncp a /outside/dir", "# a\\\nsudo id"):
+            outcome = guard.check_bash(command, harness_paths_root())
+            self.assertEqual("deny", outcome and outcome[0], command)
+
+    def test_ARE_09_7_a_legitimate_continuation_keeps_its_answer(self):
+        self.assertIsNone(guard.check_bash("git log \\\n  --oneline -5", harness_paths_root()))
+
+    def test_ARE_09_7_a_backtick_form_stays_an_ask_as_a_recorded_limit(self):
+        outcome = guard.check_bash("echo `echo \\\\ #x; sudo id`", harness_paths_root())
+        self.assertEqual("ask", outcome and outcome[0])
+
+    def test_split_segments_tells_an_escaped_hash_position_from_a_real_comment(self):
+        self.assertEqual(["", "sudo id"], guard.split_segments("#a\nsudo id"))
+        self.assertEqual(["echo \\\\\\ #a", "sudo id"], guard.split_segments("echo \\\\\\ #a\nsudo id"))
+        self.assertEqual(["echo \\ #a", "sudo id"], guard.split_segments("echo \\ #a\nsudo id"))
+        self.assertEqual(["echo \\\\ ", "sudo id"], guard.split_segments("echo \\\\ #a\nsudo id"))
+        self.assertEqual(["echo \\;#a", "sudo id"], guard.split_segments("echo \\;#a\nsudo id"))
 
     def test_ARE_09_7_a_hash_inside_a_word_hides_nothing_from_the_other_rules(self):
         root = harness_paths_root()
@@ -141,7 +177,7 @@ class WorkflowFilesAreCoveredEverywhere(unittest.TestCase):
         outcome = guard.check_bash("echo \\)#x; 2>/dev/null git status", root)
         self.assertEqual("ask", outcome and outcome[0])
 
-    def test_ARE_09_7_a_message_may_hold_any_text_because_quoted_text_is_not_examined(self):
+    def test_ARE_09_7_this_rule_does_not_examine_words_in_a_quoted_message(self):
         for command in ("git commit -m \"fix cd handling\"", "git commit -m \"fix; cd handling\"",
                         "git commit -m \"fix (cd handling)\"", "git commit -m 'a > b; cd c'",
                         "git commit -m \"subject\" -m \"body\nCo-Authored-By: A <a@example.invalid>\""):

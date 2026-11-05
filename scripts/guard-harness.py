@@ -37,8 +37,9 @@ DIRECT_DB_TOOLS = {"mongosh", "mongo", "mongodump", "mongorestore", "mongoexport
                    "psql", "kafka-topics.sh", "kafka-acls.sh", "kafka-consumer-groups.sh", "kafka-configs.sh",
                    "nc", "ncat", "netcat", "socat", "telnet", "kcat", "kafkacat", "busybox", "podman", "nerdctl"}
 EXCLUDED_SCRIPT_TEXT = re.compile("|".join(re.escape(os.path.basename(script)) for script in sorted(SANDBOX_EXCLUDED_SCRIPTS)))
-# Runs past & on purpose: `git 2>&1 commit` is git commit. Reading too far only applies this rule to a harmless call.
-EXCLUDED_GIT_TEXT = re.compile(r"\bgit\b[^;|\n]*\b(" + "|".join(sorted(SANDBOX_EXCLUDED_GIT)) + r")\b")
+# Runs past & on purpose: `git 2>&1 commit` is git commit. No word boundary before git: joining a continuation can attach a comment's
+# last word to it. Reading too far or too loosely only applies this rule to a harmless call.
+EXCLUDED_GIT_TEXT = re.compile(r"git\b[^;|\n]*\b(" + "|".join(sorted(SANDBOX_EXCLUDED_GIT)) + r")\b")
 PLAIN_WORD_CHARACTER = re.compile(r"[\w ./:=@%+,~^-]")
 QUOTED_TEXT = re.compile(r"\\.|'[^']*'|\"(?:[^\"\\]|\\.)*\"", re.DOTALL)
 UNUSUAL_REDIRECT = re.compile(r">\||<>|\{\w+\}[<>]")
@@ -179,8 +180,8 @@ def outside_sandbox_problem(command, cwd):
     that looked for a cd or a redirect kept missing spellings. It reads the name with quotes and backslashes removed, so a call that
     merely mentions such a command in a pipeline or from a subdirectory is refused too. A guardrail, not a shell analysis: a name
     spelled with an expansion is not seen here, but it fails to match an exclusion's text as well."""
-    # The text as sent, and with line continuations joined: bash does not continue a line inside a comment, so either can be the
-    # one that shows the name. The allowlist reads the text as sent, so a continuation is never one simple command.
+    # Read as sent and with line continuations joined, because bash does not continue a line inside a comment or single quotes.
+    # The allowlist reads the text as sent, so a continuation is never one simple command.
     names = [re.sub(r"\$?[\"']|\\", "", text) for text in (command, command.replace("\\\n", ""))]
     if not any(EXCLUDED_SCRIPT_TEXT.search(plain) or EXCLUDED_GIT_TEXT.search(plain) for plain in names):
         return None
@@ -192,7 +193,7 @@ def outside_sandbox_problem(command, cwd):
 
 
 def hidden_redirect_problem(command):
-    """A redirect anywhere but the end of a simple command can hide the command name from the guard. Quoted text does not count."""
+    """A redirect anywhere but the end of a simple command can hide the command name from the guard. A quoted redirect does not count."""
     if ")#" in command:
         # Bash starts a comment here after a subshell but not after an escaped or $( ) close; telling them apart needs parsing.
         return "ask", "A # right after ) can hide later lines from the guard: human approval required."
@@ -442,7 +443,8 @@ def check_bash(command, cwd):
             return "deny", "Secret/credential files must not be read through input redirection."
     result = worst(result, hidden_redirect_problem(command))
     current = cwd
-    for segment in split_segments(command):
+    # Both readings of a line continuation, because bash does not continue a line inside a comment: `# x;\` then `sudo id` runs sudo.
+    for segment in split_segments(command) + (split_segments(as_sent) if as_sent != command else []):
         try:
             tokens = shlex.split(segment)
         except ValueError:
@@ -470,7 +472,7 @@ def next_cwd(tokens, current):
 
 def split_segments(command):
     """Split on ; | & && || and newlines, but not inside quotes or in redirections like 2>&1 / &>."""
-    segments, current, quote, i = [], [], None, 0
+    segments, current, quote, i, last_escaped = [], [], None, 0, -2  # -2: at index 0, i - 1 is -1, which must not look escaped.
     while i < len(command):
         ch = command[i]
         if quote:
@@ -483,7 +485,8 @@ def split_segments(command):
         elif ch == "\\" and i + 1 < len(command):
             current.append(ch + command[i + 1])
             i += 1
-        elif ch == "#" and (i == 0 or command[i - 1] in " \t\n;|&(") and not (i >= 2 and command[i - 2] == "\\"):
+            last_escaped = i  # Tracked in the walk: at top level, `\ #` continues a word, and in `\\ #` the # starts a comment.
+        elif ch == "#" and (i == 0 or command[i - 1] in " \t\n;|&(") and last_escaped != i - 1:
             while i < len(command) and command[i] != "\n":
                 i += 1
             continue
