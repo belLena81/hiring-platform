@@ -117,6 +117,11 @@ final class HiringSearchAcceptanceIntegrationSpec extends munit.CatsEffectSuite 
   private def search(document: String, field: String, variables: Json, actor: StoryActor): IO[Json] =
     operations.read(document, field, variables, actor)
 
+  /** Coverage cells are split by freshness and repair state, so a kind's total is the sum over its cells. */
+  private def countsByKind(cells: Vector[Json]): Map[String, Long] =
+    cells
+      .groupMapReduce(_.hcursor.get[String]("kind").getOrElse("?"))(_.hcursor.get[Long]("count").getOrElse(-1L))(_ + _)
+
   private def leakGuard(keys: Vector[String], context: String): Unit =
     assert(keys.toSet.intersect(hiddenJobs).isEmpty, s"$context returned a closed or unpublished job: $keys")
 
@@ -171,8 +176,15 @@ final class HiringSearchAcceptanceIntegrationSpec extends munit.CatsEffectSuite 
       coverage <- eventually("embedding coverage", embeddingDeadline)(
         operations.read(coverageDocument, "embeddingCoverage", Json.obj("model" -> model.asJson), administrator)
       ) { report =>
+        // Settled means every entity has a CURRENT cell with no queued repair work. A report taken while some jobs are
+        // still CURRENT but queued would otherwise end the wait early (cells are split by repair state).
         val cells = array(report, "cells")
-        cells.nonEmpty && cells.forall(_.hcursor.get[String]("freshness") == Right("CURRENT"))
+        cells.nonEmpty &&
+        cells.forall(cell =>
+          cell.hcursor.get[String]("freshness") == Right("CURRENT") &&
+            cell.hcursor.get[String]("repairState") == Right("NO_QUEUED_WORK")
+        ) &&
+        countsByKind(cells) == Map("JOB" -> 3L, "CANDIDATE_PROFILE" -> 4L)
       }
     } yield {
       def searchable(kind: String): Option[Long] =
@@ -181,10 +193,11 @@ final class HiringSearchAcceptanceIntegrationSpec extends munit.CatsEffectSuite 
           .flatMap(_.hcursor.get[Long]("searchableCount").toOption)
       assertEquals(searchable("JOB"), Some(3L), "J1, J2 and J4 are the open jobs")
       assertEquals(searchable("CANDIDATE_PROFILE"), Some(4L), "the four candidates have profiles")
-      val counts = array(coverage, "cells").map(cell =>
-        cell.hcursor.get[String]("kind").getOrElse("?") -> cell.hcursor.get[Long]("count").getOrElse(-1L)
+      assertEquals(
+        countsByKind(array(coverage, "cells")),
+        Map("JOB" -> 3L, "CANDIDATE_PROFILE" -> 4L),
+        "every searchable entity is CURRENT"
       )
-      assertEquals(counts.toMap, Map("JOB" -> 3L, "CANDIDATE_PROFILE" -> 4L), "every searchable entity is CURRENT")
       assert(array(coverage, "cells").forall(_.hcursor.get[String]("repairState") == Right("NO_QUEUED_WORK")))
     }
   }

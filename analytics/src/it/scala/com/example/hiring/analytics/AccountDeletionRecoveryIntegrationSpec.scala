@@ -54,9 +54,18 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
         .asScala
         .find(line => !line.startsWith("[") && line.contains("/target/") && line.contains(".jar"))
         .getOrElse(throw new IllegalArgumentException("Missing compiled API classpath"))
-      val socket = new java.net.ServerSocket(0, 1, java.net.InetAddress.getByName("127.0.0.1"))
-      val port = try socket.getLocalPort
-      finally socket.close()
+      // The API accepts HTTP_PORT only within 1024-32767 (config `Port`), below the kernel's ephemeral range, so a
+      // port from `new ServerSocket(0)` is always rejected as CONFIG_INVALID. Probe a random start in that range.
+      val loopback = java.net.InetAddress.getByName("127.0.0.1")
+      val configurablePorts = 20000 to 32000
+      val start = scala.util.Random.nextInt(configurablePorts.size)
+      val port = Iterator
+        .range(0, 200)
+        .map(i => configurablePorts((start + i) % configurablePorts.size))
+        .find { candidate =>
+          scala.util.Try { new java.net.ServerSocket(candidate, 1, loopback).close() }.isSuccess
+        }
+        .getOrElse(throw new java.io.IOException(s"No free port found in $configurablePorts"))
       val config = root.resolve("api.conf")
       val secret = UUID.randomUUID().toString + UUID.randomUUID().toString
       val contents = s"""include classpath("application.conf")
@@ -111,7 +120,12 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
         .evalMap { process =>
           val ready = IO
             .blocking {
-              require(process.isAlive, "Isolated recovery API exited before readiness")
+              require(
+                process.isAlive,
+                // The process is the supervisor of `RecoveryApiProcess`, which exits 0 whenever the API exits by itself;
+                // read the API's own failure (for example CONFIG_INVALID) in `_logs/hiring-platform.log`.
+                s"Isolated recovery API exited before readiness (supervisor exit status ${process.exitValue()})"
+              )
               val request =
                 HttpRequest.newBuilder(URI.create(url + "/ready")).timeout(Duration.ofSeconds(2)).GET().build()
               HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString()).statusCode() == 200
@@ -207,6 +221,9 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
             .append("state", "Retryable")
             .append("subjectIds", java.util.List.of(subjectId))
             .append("subjectRefsVersion", 1)
+            // The outbox validator requires the stored event body as binary data (`envelopeBytes`). `{}` is never
+            // decoded here: the child API runs with `kafka.enabled = false` and erasure reads only the subject references.
+            .append("envelopeBytes", new org.bson.types.Binary("{}".getBytes(StandardCharsets.UTF_8)))
         )
     }
 
@@ -290,7 +307,7 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
     graphql(
       apiBase,
       s"""mutation { signUp(input: { idempotencyKey: "${UUID
-          .randomUUID()}", name: "Recovery Candidate", role: CANDIDATE, skills: ["Scala"], password: "password-password" }) { $authFragment } }"""
+          .randomUUID()}", name: "Recovery Candidate", role: CANDIDATE, profile: { candidate: { skills: ["Scala"] } }, password: "password-password" }) { $authFragment } }"""
     ).map(authSuccess(_, "signUp"))
 
   private def deleteAccount(apiBase: String, token: String): IO[String] =
@@ -313,7 +330,7 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
     val endpoint = URI.create(apiBase.stripSuffix("/") + "/graphql")
     val body = new Document(
       "query",
-      "query($receiptId: ID!) { accountDeletionStatus(receiptId: $receiptId) }"
+      "query($receiptId: DeletionReceiptID!) { accountDeletionStatus(receiptId: $receiptId) }"
     ).append("variables", new Document("receiptId", receiptId)).toJson
     val request = HttpRequest
       .newBuilder(endpoint)
