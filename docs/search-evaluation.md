@@ -24,6 +24,26 @@ Write one JSON run record per strategy containing those inputs and measurements.
 
 The evaluation core validates typed corpus/run observations and produces an immutable numerical report; the infrastructure JSON adapter renders it. Ranking failures and exact-reference failures are separate. Recall/NDCG quality means cover successful rankings only, with explicit denominators and attempted/success/failed/unavailable counts. Fidelity requires both retrieval and exact-reference success and has its own denominator. Successful empty eligible sets or queries without positive judgments retain the zero metric convention and are counted explicitly. Missing telemetry includes a reason; absent retrieval latency or billing is never inferred from fixture replay.
 
+### Write latency option
+
+`--write-samples <n>` adds client-observed single-document write latency to a `SearchEvaluationAtlasRunner` run. `n` is an integer from 0 to 2000 (`SearchEvaluationWriteLatency.MaxSamples`). The default 0 turns the option off; the queries, explain capture and JSON records are then unchanged. A non-numeric or out-of-range value fails argument parsing before any connection is opened.
+
+When `n` is greater than 0, the runner measures writes after the query phase, the `collStats` capture and the explain capture, and before the reports are written. The extra documents therefore take part in no query or explain. The measurement uses only the runner's own disposable collection:
+
+- `n` single-document inserts, then `n` single-field `$set` updates of `embedding` on the documents just inserted. Documents have `_id` `write-NNNNN` (five-digit index), `category` 99, which no query filter matches, a `judgedTopic` value, and the run's `--vector-storage` form. Each update writes a different vector to the same document.
+- A warmup of `min(n, 10)` operations per kind runs first. Warmup operations are excluded from every figure.
+- Operations are sequential on one client, so `--concurrency` does not apply to this phase, and the record states concurrency 1. Writes use the application write concern from `MongoConcernPolicy` (majority, journaled, `wtimeout` 1500 ms). Reads of the runner's collection use `local`, as for the query phase.
+- An update is a successful sample only when it matches and modifies exactly one document. Any other result is an error.
+- Failed operations are counted in `errors` and left out of the p50, p95 and p99 figures. Percentiles use the nearest rank over successful operations and are `null` when none succeeded. `count` is the number of measured operations attempted, so it equals `n`.
+- The client's socket read timeout is 2 seconds (`MongoDatabaseProbe.effectiveSettings`). A write slower than that becomes an error rather than a latency value, so a comparison is valid only when both runs report `errors` of 0.
+- Latency is measured around the client call. It excludes asynchronous mongot vector-index ingestion, which the runner does not wait for.
+
+The figures appear as a `writeLatency` object in the `criterion-evidence-search-<concurrency>-<temperature>-<timestamp>.json` record. The `search-evaluation-*.json` report is unchanged. The object is absent when the option is 0. Its fields are `criterion` (`MVR-07.L`), `vectorStorage`, `concurrency` (always 1), `warmup`, and `insert` and `update`, each with `count`, `errors`, `p50Millis`, `p95Millis` and `p99Millis`.
+
+Checks for option parsing, the warmup bound, nearest-rank percentiles, error exclusion, the update acceptance rule and the record shape are in `SearchEvaluationWriteLatencySpec` (`src/it`, tagged `MVR-07.L`). Because the spec sits in `src/it`, it runs under `sbt 'IntegrationTest / test'`, not under the unit suite (`sbt test`). It needs no Atlas and establishes no latency result.
+
+Known limit: the criterion record's `unavailableTelemetry` list is a fixed list in `AtlasLocalCriterionEvidence` and still includes `write p95`, even when `--write-samples` is greater than 0. Records with a `writeLatency` object therefore list `write p95` as unavailable. Read `writeLatency` and ignore that entry. Follow-up: remove the entry when `--write-samples` is greater than 0. No measured write latency is recorded in this document; the MVR-07.L write-latency results, including the 2026-11-07 Atlas Local runs, are recorded in the [vector retrieval optimization specification](specs/mongodb-vector-retrieval-optimization.md#float32-binary-storage-decision-2026-11-07). The acceptance limits and the storage-form comparison procedure are owned by the [canonical job filters and binary vectors gates](specs/mongodb-vector-retrieval-optimization.md#canonical-job-filters-and-binary-vectors-atlas-local-gates-msc-08-msc-09).
+
 ## Local fixture preparation
 
 The approved local workload contains eight fabricated jobs, eight candidate summaries and twelve queries (four per use case), equally split between tuning and held-out sets. The binary rubric uses intended role and required skills. The rubric is user approved, but generated per-query labels are provisional until domain review; approving the rubric does not make these labels human reviewed. Freeze corpus/judgment digests and the split before any future tuning.

@@ -6,6 +6,7 @@ import com.example.graphQL.cats.service.search.*
 import com.example.graphQL.cats.infrastructure.search.{SearchEvaluationArtifacts, SearchEvaluationReportJson}
 import com.example.graphQL.cats.shared.crypto.SourceHash
 import com.example.graphQL.cats.domain.pagination.PageSize
+import com.mongodb.client.model.{Filters, Updates}
 import mongo4cats.client.MongoClient
 import mongo4cats.collection.MongoCollection
 import mongo4cats.database.MongoDatabase
@@ -41,7 +42,8 @@ object SearchEvaluationAtlasRunner extends IOApp {
       temperature: String,
       seed: Long,
       sourceRevision: String,
-      baseline: Option[Path]
+      baseline: Option[Path],
+      writeSamples: Int
   )
 
   private final case class TimedRanking(
@@ -132,6 +134,7 @@ object SearchEvaluationAtlasRunner extends IOApp {
             .leftMap(_ => "Invalid --baseline")
             .filterOrElse(_.startsWith(Path.of(".local/data")), "--baseline must be beneath .local/data")
         )
+      writeSamples <- SearchEvaluationWriteLatency.parseSampleCount(values.get("write-samples"))
       _ <- Either.cond(Set(1, 8).contains(concurrency), (), "--concurrency must be 1 or 8")
       _ <- Either.cond(Set("cold", "warm").contains(temperature), (), "--temperature must be cold or warm")
       _ <- Either.cond(
@@ -161,7 +164,8 @@ object SearchEvaluationAtlasRunner extends IOApp {
       temperature,
       seed,
       sourceRevision,
-      baselinePath
+      baselinePath,
+      writeSamples
     )
   }
 
@@ -235,8 +239,17 @@ object SearchEvaluationAtlasRunner extends IOApp {
                       .command(database, new Document("collStats", collectionName))
                       .map(value => Option(value.get("totalIndexSize")).collect { case size: Number => size.longValue })
                       .handleError(_ => None)
-                    _ <- writeReports(settings, version, queryResults, (ended - started).toMillis, indexBytes)
                     _ <- captureExplain(database, collectionName, settings)
+                    // After the query phase and explain so the extra documents never take part in either.
+                    writeLatency <- measureWriteLatency(collection, settings)
+                    _ <- writeReports(
+                      settings,
+                      version,
+                      queryResults,
+                      (ended - started).toMillis,
+                      indexBytes,
+                      writeLatency
+                    )
                   } yield ()
                 }
             }
@@ -280,6 +293,66 @@ object SearchEvaluationAtlasRunner extends IOApp {
       collection.insertMany(documents)
     }
   }
+
+  /** Document of the run's own shape and vector storage form; category 99 matches no query filter. */
+  private def writeDocument(settings: Settings, id: String, index: Int, vectorSeedOffset: Long): Document = {
+    val vector =
+      syntheticVector(settings.seed + vectorSeedOffset + index.toLong, settings.dimensions, index % 10, index % 7)
+    new Document("_id", id)
+      .append("category", Int.box(99))
+      .append("judgedTopic", Int.box(index % 7))
+      .append("embedding", storedVector(settings, vector))
+  }
+
+  private def storedVector(settings: Settings, vector: List[Double]): AnyRef =
+    if (settings.vectorStorage == "float64-array") vector.map(java.lang.Double.valueOf).asJava
+    else MongoEmbeddingVectors.encode(vector.map(_.toFloat))
+
+  private def timed(operation: IO[Unit]): IO[SearchEvaluationWriteLatency.Sample] =
+    for {
+      started <- IO.monotonic
+      result <- operation.attempt
+      ended <- IO.monotonic
+    } yield SearchEvaluationWriteLatency.Sample((ended - started).toNanos.toDouble / 1000000.0, result.isLeft)
+
+  /** Sequential single-document inserts then single-field vector updates; warmup operations are not reported. */
+  private def measureWriteLatency(
+      collection: MongoCollection[IO, Document],
+      settings: Settings
+  ): IO[Option[SearchEvaluationWriteLatency.Figures]] =
+    Option
+      .when(settings.writeSamples > 0) {
+        val warmup = SearchEvaluationWriteLatency.warmupCount(settings.writeSamples)
+        def insertAt(index: Int): IO[SearchEvaluationWriteLatency.Sample] =
+          IO.delay(writeDocument(settings, f"write-$index%05d", index, 1000000L))
+            .flatMap(document => timed(collection.insertOne(document).void))
+        def updateAt(index: Int): IO[SearchEvaluationWriteLatency.Sample] =
+          IO.delay {
+            val vector =
+              syntheticVector(settings.seed + 2000000L + index, settings.dimensions, index % 10, index % 7)
+            storedVector(settings, vector)
+          }.flatMap(vector =>
+            timed(
+              collection
+                .updateOne(Filters.eq("_id", f"write-$index%05d"), Updates.set("embedding", vector))
+                .flatMap(result =>
+                  IO.raiseUnless(
+                    SearchEvaluationWriteLatency.updateApplied(result.getMatchedCount, result.getModifiedCount)
+                  )(new IllegalStateException("Write-latency update did not modify exactly one document"))
+                )
+            )
+          )
+        val all = (0 until warmup + settings.writeSamples).toList
+        for {
+          inserts <- all.traverse(insertAt)
+          updates <- all.traverse(updateAt)
+        } yield SearchEvaluationWriteLatency.figures(
+          warmup,
+          inserts.drop(warmup),
+          updates.drop(warmup)
+        )
+      }
+      .sequence
 
   private def evaluateQuery(
       collection: MongoCollection[IO, Document],
@@ -394,7 +467,8 @@ object SearchEvaluationAtlasRunner extends IOApp {
       atlasVersion: String,
       results: List[PairedRanking],
       durationMillis: Long,
-      indexBytes: Option[Long]
+      indexBytes: Option[Long],
+      writeLatency: Option[SearchEvaluationWriteLatency.Figures]
   ): IO[Unit] = {
     val entityIds = (0 until settings.datasetDocuments).map(id => f"doc-$id%05d").toList
     val corpusIdentity =
@@ -503,7 +577,7 @@ object SearchEvaluationAtlasRunner extends IOApp {
           )
       }
       decision = AtlasLocalCriterionEvidence.decide(baselineFigures, figures)
-      evidence = AtlasLocalCriterionEvidence.searchEvaluationRecord(
+      baseEvidence = AtlasLocalCriterionEvidence.searchEvaluationRecord(
         com.example.hiring.testing.DisposableAtlas.deployment(settings.uri),
         atlasVersion,
         settings.sourceRevision,
@@ -512,6 +586,11 @@ object SearchEvaluationAtlasRunner extends IOApp {
         figures,
         settings.baseline.map(_.toString),
         decision
+      )
+      evidence = writeLatency.fold(baseEvidence)(latency =>
+        baseEvidence.deepMerge(
+          io.circe.Json.obj("writeLatency" -> SearchEvaluationWriteLatency.toJson(settings.vectorStorage, latency))
+        )
       )
       _ <- IO.blocking {
         Files.writeString(
@@ -606,5 +685,70 @@ object SearchEvaluationAtlasRunner extends IOApp {
     values(10 + topic) = values(10 + topic) + 1.0
     val norm = math.sqrt(values.map(value => value * value).sum)
     values.toList.map(_ / norm)
+  }
+}
+
+/** Pure aggregation of client-observed single-document write latency for the vector storage adoption limit (MVR-07.L:
+  * write p95 regression <= 10% between float64-array and float32-binary).
+  */
+private[mongo] object SearchEvaluationWriteLatency {
+  val MaxSamples = 2000
+  private val MaxWarmup = 10
+
+  final case class Sample(latencyMillis: Double, failed: Boolean)
+  final case class OperationFigures(
+      count: Int,
+      errors: Int,
+      p50: Option[Double],
+      p95: Option[Double],
+      p99: Option[Double]
+  )
+  final case class Figures(warmup: Int, insert: OperationFigures, update: OperationFigures)
+
+  /** Absent means disabled (0); otherwise an integer in 1..MaxSamples. */
+  def parseSampleCount(raw: Option[String]): Either[String, Int] =
+    raw.fold[Either[String, Int]](Right(0))(value =>
+      value.toIntOption
+        .toRight("Invalid --write-samples")
+        .filterOrElse(count => count >= 0 && count <= MaxSamples, s"--write-samples must be between 0 and $MaxSamples")
+    )
+
+  /** An update counts as a sample only when it matched and modified exactly the one document it targeted. */
+  def updateApplied(matched: Long, modified: Long): Boolean = matched == 1L && modified == 1L
+
+  def warmupCount(samples: Int): Int = samples.min(MaxWarmup).max(0)
+
+  /** Percentiles use the nearest rank over successful operations; count is attempted operations. */
+  def operationFigures(samples: List[Sample]): OperationFigures = {
+    val latencies = samples.filterNot(_.failed).map(_.latencyMillis)
+    OperationFigures(
+      samples.size,
+      samples.count(_.failed),
+      AtlasLocalCriterionEvidence.percentile(latencies, 0.50),
+      AtlasLocalCriterionEvidence.percentile(latencies, 0.95),
+      AtlasLocalCriterionEvidence.percentile(latencies, 0.99)
+    )
+  }
+
+  def figures(warmup: Int, inserts: List[Sample], updates: List[Sample]): Figures =
+    Figures(warmup, operationFigures(inserts), operationFigures(updates))
+
+  def toJson(vectorStorage: String, value: Figures): io.circe.Json = {
+    def operation(figures: OperationFigures) =
+      io.circe.Json.obj(
+        "count" -> io.circe.Json.fromInt(figures.count),
+        "errors" -> io.circe.Json.fromInt(figures.errors),
+        "p50Millis" -> figures.p50.fold(io.circe.Json.Null)(io.circe.Json.fromDoubleOrNull),
+        "p95Millis" -> figures.p95.fold(io.circe.Json.Null)(io.circe.Json.fromDoubleOrNull),
+        "p99Millis" -> figures.p99.fold(io.circe.Json.Null)(io.circe.Json.fromDoubleOrNull)
+      )
+    io.circe.Json.obj(
+      "criterion" -> io.circe.Json.fromString("MVR-07.L"),
+      "vectorStorage" -> io.circe.Json.fromString(vectorStorage),
+      "concurrency" -> io.circe.Json.fromInt(1),
+      "warmup" -> io.circe.Json.fromInt(value.warmup),
+      "insert" -> operation(value.insert),
+      "update" -> operation(value.update)
+    )
   }
 }

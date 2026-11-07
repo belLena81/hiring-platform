@@ -28,7 +28,7 @@ One line per specification, grouped by what the first `- Status:` line says (rea
 | Spec | Status |
 |---|---|
 | [agent-workflow-enforcement](agent-workflow-enforcement.md) | done for AWE-01, 02, 03, 05, 07, 08; AWE-04.1 and AWE-06.1 deferred |
-| [ai-search-resilience](ai-search-resilience.md) | done locally; AIR-07.1 unverified |
+| [ai-search-resilience](ai-search-resilience.md) | done locally; AIR-07.1 observed PASS 2026-11-07 (user run, local-container Atlas Local) |
 | [analytics-data-model-refactoring](analytics-data-model-refactoring.md) | done 2026-11-01 |
 | [analytics-erasure-completion-window](analytics-erasure-completion-window.md) | done 2026-10-23; AEC-05.1 open for an operator run |
 | [dependency-circuit-breakers](dependency-circuit-breakers.md) | done (local) |
