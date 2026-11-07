@@ -1,0 +1,398 @@
+# promtool unit tests for docker/observability/alerts.yaml (spec: docs/specs/operational-alert-verification.md, OAV-01).
+# Run with scripts/check-alert-rules.sh. Every rule has a firing and a silent case with explicit eval_time values.
+# A silent case lists no expected alerts; a firing case lists the labels and annotations the rule must produce.
+# Sample intervals: 15s for API and backlog groups (the rate windows are 1m), 1m for the Kafka groups.
+rule_files:
+  - alerts.yaml
+
+evaluation_interval: 15s
+
+tests:
+  # ---- HiringBacklogOldestPendingTooOld --------------------------------------------------------------------------
+  - name: "OAV-01.1 backlog age above 300 s for 3 minutes fires the age rule as a ticket"
+    interval: 15s
+    input_series:
+      - series: 'hiring_backlog_oldest_pending_age_seconds{hiring_capability="operational_event_outbox"}'
+        values: "301x14"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: HiringBacklogOldestPendingTooOld
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+              hiring_capability: operational_event_outbox
+            exp_annotations:
+              summary: "Oldest pending operational_event_outbox item is older than 5 minutes (provisional threshold)."
+
+  - name: "OAV-01.2 backlog age exactly 300 s for 10 minutes stays silent (strict threshold)"
+    interval: 15s
+    input_series:
+      - series: 'hiring_backlog_oldest_pending_age_seconds{hiring_capability="operational_event_outbox"}'
+        values: "300x44"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: HiringBacklogOldestPendingTooOld
+        exp_alerts: []
+
+  - name: "OAV-01.2 backlog age 301 s for only 1 m 30 s stays silent (for duration not reached)"
+    interval: 15s
+    input_series:
+      - series: 'hiring_backlog_oldest_pending_age_seconds{hiring_capability="operational_event_outbox"}'
+        values: "301x6"
+    alert_rule_test:
+      - eval_time: 1m30s
+        alertname: HiringBacklogOldestPendingTooOld
+        exp_alerts: []
+
+  # ---- HiringBacklogUnobserved -----------------------------------------------------------------------------------
+  - name: "OAV-01.3 absent backlog series for 3 minutes fires Unobserved and not the age rule"
+    interval: 15s
+    input_series:
+      # An unrelated series keeps the test data non-empty; no hiring_backlog_* series exists at all.
+      - series: 'up{job="otel-collector"}'
+        values: "1x14"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: HiringBacklogUnobserved
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+            exp_annotations:
+              summary: "Backlog sampling is stale or absent; backlog state is unknown, not zero."
+      - eval_time: 3m
+        alertname: HiringBacklogOldestPendingTooOld
+        exp_alerts: []
+
+  - name: "OAV-01.4 backlog sample age 61 s for 3 minutes fires Unobserved"
+    interval: 15s
+    input_series:
+      - series: "hiring_backlog_sample_age_seconds"
+        values: "61x14"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: HiringBacklogUnobserved
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+            exp_annotations:
+              summary: "Backlog sampling is stale or absent; backlog state is unknown, not zero."
+
+  - name: "OAV-01.4 fresh backlog sample (5 s) stays silent for Unobserved"
+    interval: 15s
+    input_series:
+      - series: "hiring_backlog_sample_age_seconds"
+        values: "5x14"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: HiringBacklogUnobserved
+        exp_alerts: []
+
+  # ---- HiringApiHighErrorRate ------------------------------------------------------------------------------------
+  - name: "OAV-01.5 total 5xx outage below the 0.1 req/s traffic floor stays silent; /health 5xx probes are excluded"
+    interval: 15s
+    input_series:
+      # 0.05 req/s of non-probe body samples, all 500: below the floor.
+      - series: 'http_server_request_duration_seconds_count{http_phase="body",classifier="/graphql",http_response_status_code="500"}'
+        values: "0+0.75x24"
+      # /health probes at 1 req/s with 500: excluded by classifier!="/health"; would exceed the floor if counted.
+      - series: 'http_server_request_duration_seconds_count{http_phase="body",classifier="/health",http_response_status_code="500"}'
+        values: "0+15x24"
+      # headers-phase samples carry no status code. They never reach the numerator, so this series does not test the
+      # body filter (the denominator case is the firing case "headers-phase samples in the denominator" below). It is kept
+      # as realistic background traffic.
+      # Detects: the traffic floor removed (100 percent 5xx would fire), or the /health exclusion removed.
+      - series: 'http_server_request_duration_seconds_count{http_phase="headers",classifier="/graphql"}'
+        values: "0+15x24"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: HiringApiHighErrorRate
+        exp_alerts: []
+
+  - name: "OAV-01.5 10 percent 5xx at 1 req/s for 3 minutes fires the error rate rule as a page"
+    interval: 15s
+    input_series:
+      - series: 'http_server_request_duration_seconds_count{http_phase="body",classifier="/graphql",http_response_status_code="500"}'
+        values: "0+1.5x16"
+      - series: 'http_server_request_duration_seconds_count{http_phase="body",classifier="/graphql",http_response_status_code="200"}'
+        values: "0+13.5x16"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: HiringApiHighErrorRate
+        exp_alerts:
+          - exp_labels:
+              severity: page
+            exp_annotations:
+              summary: "More than 5% of API requests returned 5xx for 2 minutes (provisional threshold; evaluated only at 0.1 non-probe req/s or more)."
+
+  # Body-phase traffic is 1 req/s, all 200. A headers-phase series carries 500 at 1 req/s (the real headers samples have
+  # no status code; this one is deliberately hostile). Counted, it would make the ratio 1 / (1 + 1) = 50 percent at
+  # 2 req/s and fire after 2 minutes. Arithmetic: +15 per 15 s is 1 req/s for each series.
+  # Detects ONLY: `http_phase="body"` dropped from the NUMERATOR. The denominator mutation is detected by the firing
+  # case "headers-phase samples without a status code in the denominator" below.
+  - name: "OAV-01.5 headers-phase 5xx samples are not counted in the error rate numerator"
+    interval: 15s
+    input_series:
+      - series: 'http_server_request_duration_seconds_count{http_phase="body",classifier="/graphql",http_response_status_code="200"}'
+        values: "0+15x24"
+      - series: 'http_server_request_duration_seconds_count{http_phase="headers",classifier="/graphql",http_response_status_code="500"}'
+        values: "0+15x24"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: HiringApiHighErrorRate
+        exp_alerts: []
+
+  # Real headers samples carry NO status code. Body phase: 0.08 req/s of 500 and 0.92 req/s of 200 (1.0 req/s, above the
+  # 0.1 floor); headers phase: 1 req/s with no status code, same classifier. Correct rule: 0.08 / 1.0 = 8 percent, above
+  # 5 percent, fires as a page after the 2 minute `for`. Per 15 s sample: +1.2, +13.8, +15; the [1m] window holds 4
+  # samples over 45 s, extrapolated to 60 s, which scales numerator and denominator alike.
+  # Detects: `http_phase="body"` dropped from the DENOMINATOR. The denominator then also counts the headers series:
+  # 0.08 / 2.0 = 4 percent, not above 5 percent, so the rule would stay silent and this case would fail. (8 percent, not
+  # the 10 percent of the spec example, leaves a margin on both sides of the 5 percent threshold: 10 percent over 2.0 is
+  # exactly 5 percent and a floating-point rounding could tip it either way.)
+  - name: "OAV-01.5 headers-phase samples without a status code in the denominator would hide a real 8 percent 5xx outage"
+    interval: 15s
+    input_series:
+      - series: 'http_server_request_duration_seconds_count{http_phase="body",classifier="/graphql",http_response_status_code="500"}'
+        values: "0+1.2x16"
+      - series: 'http_server_request_duration_seconds_count{http_phase="body",classifier="/graphql",http_response_status_code="200"}'
+        values: "0+13.8x16"
+      - series: 'http_server_request_duration_seconds_count{http_phase="headers",classifier="/graphql"}'
+        values: "0+15x16"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: HiringApiHighErrorRate
+        exp_alerts:
+          - exp_labels:
+              severity: page
+            exp_annotations:
+              summary: "More than 5% of API requests returned 5xx for 2 minutes (provisional threshold; evaluated only at 0.1 non-probe req/s or more)."
+
+  - name: "OAV-01.5 2 percent 5xx at 1 req/s for 5 minutes stays silent (below the ratio threshold)"
+    interval: 15s
+    input_series:
+      - series: 'http_server_request_duration_seconds_count{http_phase="body",classifier="/graphql",http_response_status_code="500"}'
+        values: "0+0.3x24"
+      - series: 'http_server_request_duration_seconds_count{http_phase="body",classifier="/graphql",http_response_status_code="200"}'
+        values: "0+14.7x24"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: HiringApiHighErrorRate
+        exp_alerts: []
+
+  # ---- HiringApiSlowRequests -------------------------------------------------------------------------------------
+  - name: "OAV-01.5 slow requests (all between 0.1 s and 0.5 s) at 1 req/s for 3 minutes fire the p95 rule"
+    interval: 15s
+    input_series:
+      - series: 'http_server_request_duration_seconds_count{http_phase="body",classifier="/graphql",http_response_status_code="200"}'
+        values: "0+15x16"
+      - series: 'http_server_request_duration_seconds_bucket{http_phase="body",classifier="/graphql",http_response_status_code="200",le="0.1"}'
+        values: "0x16"
+      - series: 'http_server_request_duration_seconds_bucket{http_phase="body",classifier="/graphql",http_response_status_code="200",le="0.5"}'
+        values: "0+15x16"
+      - series: 'http_server_request_duration_seconds_bucket{http_phase="body",classifier="/graphql",http_response_status_code="200",le="+Inf"}'
+        values: "0+15x16"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: HiringApiSlowRequests
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+            exp_annotations:
+              summary: "API p95 latency above 300 ms for 2 minutes (provisional threshold; evaluated only at 0.1 non-probe req/s or more)."
+
+  - name: "OAV-01.5 fast requests (all under 0.1 s) at 1 req/s stay silent for the p95 rule"
+    interval: 15s
+    input_series:
+      - series: 'http_server_request_duration_seconds_count{http_phase="body",classifier="/graphql",http_response_status_code="200"}'
+        values: "0+15x24"
+      - series: 'http_server_request_duration_seconds_bucket{http_phase="body",classifier="/graphql",http_response_status_code="200",le="0.1"}'
+        values: "0+15x24"
+      - series: 'http_server_request_duration_seconds_bucket{http_phase="body",classifier="/graphql",http_response_status_code="200",le="0.5"}'
+        values: "0+15x24"
+      - series: 'http_server_request_duration_seconds_bucket{http_phase="body",classifier="/graphql",http_response_status_code="200",le="+Inf"}'
+        values: "0+15x24"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: HiringApiSlowRequests
+        exp_alerts: []
+
+  - name: "OAV-01.5 slow requests below the 0.1 req/s traffic floor stay silent for the p95 rule"
+    interval: 15s
+    input_series:
+      - series: 'http_server_request_duration_seconds_count{http_phase="body",classifier="/graphql",http_response_status_code="200"}'
+        values: "0+0.75x24"
+      - series: 'http_server_request_duration_seconds_bucket{http_phase="body",classifier="/graphql",http_response_status_code="200",le="0.1"}'
+        values: "0x24"
+      - series: 'http_server_request_duration_seconds_bucket{http_phase="body",classifier="/graphql",http_response_status_code="200",le="0.5"}'
+        values: "0+0.75x24"
+      - series: 'http_server_request_duration_seconds_bucket{http_phase="body",classifier="/graphql",http_response_status_code="200",le="+Inf"}'
+        values: "0+0.75x24"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: HiringApiSlowRequests
+        exp_alerts: []
+
+  # ---- HiringKafkaConsumerLagHigh --------------------------------------------------------------------------------
+  # Silent cases are evaluated WHILE the spike is on, so they can fail. Evaluating after the spike (the earlier 12m
+  # check) is silent for any variant of the rule.
+  # Lag 5000 at minutes 0..5, then 0. At 5m the expression has been true since minute 0 (5 minutes, `for` is 10m).
+  # Detects: `for` removed or shortened below 5m (the alert would be firing at 5m).
+  # At 6m the new 0 sample is inside the 10m window, so min_over_time is 0 and the expression is false.
+  - name: "OAV-01.6 consumer lag 5000 for 5 minutes then 0 stays silent (short spike, evaluated while it is on and after)"
+    interval: 1m
+    input_series:
+      - series: 'hiring_kafka_consumer_lag{hiring_consumer_group="hiring-publisher",messaging_destination_name="hiring.events",messaging_kafka_partition="0"}'
+        values: "5000x5 0x30"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: HiringKafkaConsumerLagHigh
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: HiringKafkaConsumerLagHigh
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: HiringKafkaConsumerLagHigh
+        exp_alerts: []
+
+  # Lag 5000 at minutes 0..9 (10 samples), still on at 9m: pending for 9 minutes, `for` is 10m, so silent.
+  # Detects: `for` shortened to 9 minutes or less (it would already fire at 9m).
+  - name: "OAV-01.6 consumer lag 5000 for 9 minutes stays silent (just under the 10 minute duration)"
+    interval: 1m
+    input_series:
+      - series: 'hiring_kafka_consumer_lag{hiring_consumer_group="hiring-publisher",messaging_destination_name="hiring.events",messaging_kafka_partition="0"}'
+        values: "5000x9 0x30"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: HiringKafkaConsumerLagHigh
+        exp_alerts: []
+
+  - name: "OAV-01.6 consumer lag 2000 for 11 minutes fires the lag rule"
+    interval: 1m
+    input_series:
+      - series: 'hiring_kafka_consumer_lag{hiring_consumer_group="hiring-publisher",messaging_destination_name="hiring.events",messaging_kafka_partition="0"}'
+        values: "2000x11"
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: HiringKafkaConsumerLagHigh
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+              hiring_consumer_group: hiring-publisher
+              messaging_destination_name: hiring.events
+              messaging_kafka_partition: "0"
+            exp_annotations:
+              summary: "Consumer group hiring-publisher lags more than 1000 records on hiring.events partition 0 for 10 minutes (starting threshold)."
+
+  # ---- HiringKafkaPublisherSendFailureRatioHigh ------------------------------------------------------------------
+  - name: "OAV-01.6 20 percent producer send failures for 12 minutes fire the send failure ratio rule"
+    interval: 1m
+    input_series:
+      - series: 'hiring_kafka_producer_send_failures_total{error_type="TimeoutException"}'
+        values: "0+2x15"
+      - series: "hiring_kafka_producer_send_duration_seconds_count"
+        values: "0+10x15"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: HiringKafkaPublisherSendFailureRatioHigh
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+            exp_annotations:
+              summary: "More than 10% of Kafka producer sends failed over 5 minutes (starting threshold)."
+
+  - name: "OAV-01.6 1 percent producer send failures stay silent for the send failure ratio rule"
+    interval: 1m
+    input_series:
+      - series: 'hiring_kafka_producer_send_failures_total{error_type="TimeoutException"}'
+        values: "0+1x15"
+      - series: "hiring_kafka_producer_send_duration_seconds_count"
+        values: "0+100x15"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: HiringKafkaPublisherSendFailureRatioHigh
+        exp_alerts: []
+
+  # Failures rise by 1 per minute while the send count stays flat at 0: the ratio is rate(failures) / 0 = +Inf, which is
+  # above 0.1, so only the `and rate(sends) > 0` guard keeps the rule silent.
+  # Detects: the guard removed (the rule would fire after 5 minutes of +Inf, so by 12m).
+  - name: "OAV-01.6 failures with no send attempts recorded stay silent (the guard blocks a division by zero)"
+    interval: 1m
+    input_series:
+      - series: 'hiring_kafka_producer_send_failures_total{error_type="TimeoutException"}'
+        values: "0+1x15"
+      - series: "hiring_kafka_producer_send_duration_seconds_count"
+        values: "0x15"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: HiringKafkaPublisherSendFailureRatioHigh
+        exp_alerts: []
+
+  - name: "OAV-01.6 no sends at all stay silent for the send failure ratio rule (no data is not a failure ratio)"
+    interval: 1m
+    input_series:
+      - series: 'hiring_kafka_producer_send_failures_total{error_type="TimeoutException"}'
+        values: "0x15"
+      - series: "hiring_kafka_producer_send_duration_seconds_count"
+        values: "0x15"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: HiringKafkaPublisherSendFailureRatioHigh
+        exp_alerts: []
+
+  # ---- HiringKafkaProducerFenced ---------------------------------------------------------------------------------
+  - name: "OAV-01.6 repeated fenced failures for 30 minutes fire the producer fenced rule"
+    interval: 1m
+    input_series:
+      - series: 'hiring_kafka_producer_send_failures_total{error_type="ProducerFencedException"}'
+        values: "0+1x40"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: HiringKafkaProducerFenced
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+            exp_annotations:
+              summary: "Repeated fenced or invalid-epoch send failures within 15 minutes; a single fence after erasure or retirement is expected. Sustained repeats suggest two publishers sharing one worker id. Thresholds are starting values."
+
+  # One fence every 7 minutes, sustained: a 15 minute window (15 samples spanning 14 minutes) always holds exactly 2
+  # increments, so increase() is 2 (about 2.14 after extrapolation to the full window), below the threshold of 3, for
+  # the whole run. Unrelated TimeoutException failures rise every minute and must not match the error_type regex.
+  # Detects: the threshold lowered to >= 2 or >= 1 (increase stays above it for the 15 minute `for` by 30m), and the
+  # error_type regex widened to all failures (the Timeout series alone would give an increase of 15).
+  - name: "OAV-01.6 a sustained fence every 7 minutes and unrelated send failures stay silent for the producer fenced rule"
+    interval: 1m
+    input_series:
+      - series: 'hiring_kafka_producer_send_failures_total{error_type="ProducerFencedException"}'
+        values: "0x6 1x6 2x6 3x6 4x6 5x6 6x6"
+      - series: 'hiring_kafka_producer_send_failures_total{error_type="TimeoutException"}'
+        values: "0+1x48"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: HiringKafkaProducerFenced
+        exp_alerts: []
+
+  # ---- HiringKafkaRebalanceRateHigh ------------------------------------------------------------------------------
+  - name: "OAV-01.6 6 partition moves per minute for 30 minutes fire the rebalance rate rule"
+    interval: 1m
+    input_series:
+      - series: 'hiring_kafka_consumer_rebalances_total{hiring_consumer_group="hiring-publisher"}'
+        values: "0+6x40"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: HiringKafkaRebalanceRateHigh
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+              hiring_consumer_group: hiring-publisher
+            exp_annotations:
+              summary: "Consumer group hiring-publisher moves more than 5 partitions per minute (assigned plus revoked) for 10 minutes; members are flapping (starting threshold)."
+
+  - name: "OAV-01.6 3 partition moves per minute stay silent for the rebalance rate rule"
+    interval: 1m
+    input_series:
+      - series: 'hiring_kafka_consumer_rebalances_total{hiring_consumer_group="hiring-publisher"}'
+        values: "0+3x40"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: HiringKafkaRebalanceRateHigh
+        exp_alerts: []

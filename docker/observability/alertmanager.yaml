@@ -1,0 +1,34 @@
+# Local Alertmanager routing (spec: docs/specs/operational-alert-verification.md, OAV-02). Local drill values, not a
+# production routing design: the two receivers are labels for a local sink, not an escalation or on-call design.
+# Timings are short on purpose so the drills finish quickly; they are not delivery-latency claims.
+#   group_wait 5s       first notification of a new group goes out 5 s after the first alert arrives
+#   group_interval 10s  new alerts, resolutions and retries of a failed delivery are flushed every 10 s
+#   repeat_interval 30m an unchanged firing group is repeated rarely, so a long drill does not flood the sink
+# The alerts the drills inspected (the synthetic ones, HiringBacklogOldestPendingTooOld and HiringBacklogUnobserved) carry
+# only ten label names, the allowlist of decision D7 of the spec: alertname, severity, hiring_capability, and the scrape
+# and OpenTelemetry resource labels job, instance, exported_job, service_name, telemetry_sdk_language,
+# telemetry_sdk_name, telemetry_sdk_version. The only annotation is the rule summary. No hiring data.
+# Known gap: the Kafka alerts have not fired in a drill, and would also carry hiring_consumer_group,
+# messaging_destination_name and messaging_kafka_partition, which are outside the D7 allowlist (closed, non-personal
+# values, but not yet checked or allowed).
+route:
+  receiver: local-ticket
+  group_by: [alertname, hiring_capability]
+  group_wait: 5s
+  group_interval: 10s
+  repeat_interval: 30m
+  routes:
+    - matchers: ['severity="page"']
+      receiver: local-page
+    - matchers: ['severity="ticket"']
+      receiver: local-ticket
+
+receivers:
+  - name: local-page
+    webhook_configs:
+      - url: http://alert-sink:8080/alerts
+        send_resolved: true
+  - name: local-ticket
+    webhook_configs:
+      - url: http://alert-sink:8080/alerts
+        send_resolved: true

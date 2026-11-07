@@ -92,6 +92,66 @@ services:
     mem_limit: 512m
     restart: unless-stopped
 
+  # Local Alertmanager (OAV-02, decision D2). Image pinned by digest alone (the digest, not a tag, governs what runs): the
+  # official prom/ namespace, pulled as `latest` on 2026-11-06, Alertmanager 0.34.2 (revision e8349048265c, built and
+  # image created 2026-10-29). Gossip clustering is off. /alertmanager is the only writable path and is ephemeral (silences and notification log vanish on recreate).
+  alertmanager:
+    image: prom/alertmanager@sha256:39d8bb3966c694a124428a3a88fbcffd40bd069129ecd47c059f8a3f17c55f3b
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+      - --web.listen-address=:9093
+      - --cluster.listen-address=
+    volumes:
+      - ./docker/observability/alertmanager.yaml:/etc/alertmanager/alertmanager.yml:ro
+    tmpfs:
+      - /alertmanager:mode=1777,size=16m
+    ports:
+      - "127.0.0.1:9093:9093"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    mem_limit: 64m
+    depends_on: [alert-sink]
+    restart: unless-stopped
+
+  # Local alert sink (decision D4a): the pinned collector image logs each webhook it receives. No published port; only
+  # Alertmanager reaches it over the compose network. Verified by one user-run drill on 2026-11-06 (see alert-sink.yaml).
+  alert-sink:
+    image: otel/opentelemetry-collector-contrib:0.116.1@sha256:d0ebf65280da2e1b1491d1b93648281afd353d4b9ea19160090303cec9a233bd
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./docker/observability/alert-sink.yaml:/etc/otelcol/config.yaml:ro
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    mem_limit: 128m
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    restart: unless-stopped
+
+  # Alert rule tests (OAV-01): promtool from the pinned Prometheus image, run on demand by scripts/check-alert-rules.sh.
+  # Profile alert-tests keeps it out of the normal stack. No network, read-only rules and tests, nothing persisted.
+  alert-rules:
+    image: prom/prometheus:v3.1.0@sha256:6559acbd5d770b15bb3c954629ce190ac3cbbdb2b7f1c30f0385c4e05104e218
+    profiles: [alert-tests]
+    entrypoint: ["promtool"]
+    working_dir: /rules
+    volumes:
+      - ./docker/observability/alerts.yaml:/rules/alerts.yaml:ro
+      - ./docker/observability/alerts.test.yaml:/rules/alerts.test.yaml:ro
+    network_mode: none
+    tmpfs:
+      - /tmp:mode=1777,size=64m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    mem_limit: 256m
+    restart: "no"
+
   grafana:
     image: grafana/grafana:11.4.0@sha256:d8ea37798ccc41061a62ab080f2676dda6bf7815558499f901bdb0f533a456fb
     environment:

@@ -39,6 +39,8 @@ Parameters:
                 (credentials are sent to it, so a remote host cannot be named); no credentials in the URL
   --jobs M      number of published jobs to have (default $default_jobs)
   --candidates N  number of synthetic candidates, one bearer token each (default $default_candidates)
+  --one-fresh-job create and publish exactly one new job with random idempotency keys, ignoring --jobs and the existing
+                jobs (used by scripts/run-alert-backlog-drill.sh; it always leaves one more job and one more event)
 
 Exit codes: 0 PASS, 1 FAIL (the API refused an operation), 2 usage error or precondition not met (BLOCKED), 130 interrupted.
 The last line is "RESULT: PASS|FAIL|BLOCKED ..." with counts, duration and base URL.
@@ -57,10 +59,11 @@ usage_error() {
   exit 2
 }
 
-positional=() jobs="$default_jobs" candidates="$default_candidates"
+positional=() jobs="$default_jobs" candidates="$default_candidates" fresh_job=0
 while (( $# > 0 )); do
   case "$1" in
     -h|--help) help_text; exit 0 ;;
+    --one-fresh-job) fresh_job=1; shift ;; # exactly one new published job, random idempotency keys (alert drills)
     --jobs|--candidates)
       (( $# >= 2 )) || usage_error "$1 needs a value"
       if [[ "$1" == --jobs ]]; then jobs="$2"; else candidates="$2"; fi
@@ -94,7 +97,7 @@ trap on_interrupt INT TERM HUP
 
 umask 077
 code=0
-python3 -I "$script_dir/seed-local-jobs.py" "$base" "$jobs" "$candidates" "$repo_root" &
+python3 -I "$script_dir/seed-local-jobs.py" "$base" "$jobs" "$candidates" "$repo_root" "$fresh_job" &
 child=$!
 wait "$child" || code=$?
 case "$code" in

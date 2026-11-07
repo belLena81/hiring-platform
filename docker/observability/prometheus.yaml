@@ -2,6 +2,13 @@ global:
   scrape_interval: 5s
   evaluation_interval: 5s
 
+# Prometheus starts and evaluates rules even when Alertmanager is down; failed deliveries are only counted
+# (prometheus_notifications_errors_total) and the alert stays active in Prometheus.
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
 rule_files:
   - /etc/prometheus/alerts.yaml
 

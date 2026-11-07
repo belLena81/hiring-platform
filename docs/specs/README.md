@@ -39,6 +39,7 @@ One line per specification, grouped by what the first `- Status:` line says (rea
 | [hiring-analytics-verification](hiring-analytics-verification.md) | done 2026-10-13 |
 | [hiring-end-to-end-acceptance](hiring-end-to-end-acceptance.md) | done for MVP condition 2 (2026-11-02); F5 to F8 open |
 | [hiring-saga-orchestration](hiring-saga-orchestration.md) | done (local) 2026-10-15 |
+| [operational-alert-verification](operational-alert-verification.md) | done (MVP observability item 8, 2026-11-07); image acceptances expire 2026-11-20 (per-image rule: Alertmanager also at the first patched Alertmanager release, whichever is first); follow-ups open. Code Reviewer, Security Engineer and Final independent QA PASS (2026-11-07); acceptances are for local use, not a safety statement |
 
 ## No `- Status:` line
 

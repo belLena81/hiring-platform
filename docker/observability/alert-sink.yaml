@@ -1,0 +1,32 @@
+# Local alert sink (decision D4a of docs/specs/operational-alert-verification.md): the already pinned
+# opentelemetry-collector-contrib image receives Alertmanager webhooks (webhookevent receiver) and logs each one
+# (debug exporter, detailed). No external endpoint, no credential, nothing stored.
+#
+# Verified on 2026-11-06 by one user-run of scripts/run-alert-delivery-drill.sh and the backlog drills, on one
+# workstation (not repeated, not run elsewhere): the collector starts with this file, Alertmanager's JSON body arrives
+# at http://alert-sink:8080/alerts and appears in `docker compose logs alert-sink` with receiver and status, and a
+# stopped sink raises Alertmanager's failed-notification counter and delivery resumes when it returns. The log record
+# format (a `Body: Str({...})` line) is that of collector contrib 0.116.1; a different image version may differ.
+#
+# The sink listens on 0.0.0.0:8080 inside the compose network only, publishes no port, and has no authentication by
+# design because it only logs what it receives.
+receivers:
+  webhookevent:
+    endpoint: 0.0.0.0:8080
+    path: /alerts
+    health_path: /health
+    read_timeout: 500ms
+    write_timeout: 500ms
+
+exporters:
+  debug:
+    verbosity: detailed
+
+service:
+  telemetry:
+    metrics:
+      level: none
+  pipelines:
+    logs:
+      receivers: [webhookevent]
+      exporters: [debug]

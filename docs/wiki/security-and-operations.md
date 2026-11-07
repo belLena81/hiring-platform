@@ -80,6 +80,8 @@ Each publisher instance has a worker id (`kafka.publisher.worker-id` / `KAFKA_WO
 
 `GET /health` reports liveness. `GET /ready` returns 503 only for a failed Mongo ping or an open Mongo-writes breaker; other components, including the enabled embedding worker, stalled background workers and aged outbox or closure work, are listed in the 200 body's `degraded` array (alert on it; keep the path off the public edge). It does not prove Kafka freshness, real interview delivery, analytical retention completion or search relevance. [TelemetryRuntime](../../src/main/scala/com/example/graphQL/cats/infrastructure/telemetry/TelemetryRuntime.scala) composes OpenTelemetry tracing/metrics; [Diagnostics](../../src/main/scala/com/example/graphQL/cats/service/Diagnostics.scala) defines structured events/fields and correlation.
 
+Local alert delivery is opt-in and workstation-only: Prometheus evaluates the rules in `docker/observability/alerts.yaml`, and a local Alertmanager sends `page` and `ticket` alerts to two local receivers that only log them. The rule tests, the fault drills and their limits are in [local observability](../local-observability.md#alert-rules-routing-and-drills). Alertmanager's API and the alert sink are unauthenticated, so this is for a single-user workstation only. No production routing, on-call contact or paging provider is defined, and no rule in `alerts.yaml` reads the `degraded` list of `/ready`.
+
 Durable failure states, quarantines, revision conflicts and repair states expose recovery needs. Repair should follow the owning workflow contract rather than arbitrary document edits. Analytics persistent writer/maintenance ownership can intentionally require operator reconciliation instead of automatic takeover.
 
 ## Embedding coverage report

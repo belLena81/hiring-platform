@@ -237,17 +237,34 @@ def count_open_jobs(base, token, limit):
     return count
 
 
-def run(base, jobs, candidates, repo):
+def run(base, jobs, candidates, repo, fresh_job=False):
     path = os.path.join(repo, ENV_FILE)
     passwords = read_passwords(path)
 
     PROGRESS.phase_started("signing in the synthetic recruiter")
     recruiter_token, _ = auth(base, RECRUITER, "RECRUITER", {"recruiter": {"organizationName": "Perf Seed Organisation"}},
                               "PERF_RECRUITER_PASSWORD", passwords, path)
-    PROGRESS.phase_started("counting the recruiter's open jobs")
-    open_jobs = count_open_jobs(base, recruiter_token, jobs)
     created = 0
-    if open_jobs >= jobs:
+    if fresh_job:
+        # Always exactly one new job: both idempotency keys are random, so no expired or missing receipt of an earlier
+        # seed can turn this into a replay of many jobs or into no job. Used by the alert drills.
+        PROGRESS.phase_started("creating and publishing one fresh job")
+        fresh_input = dict(job_input(0), idempotencyKey=str(uuid.uuid4()), title="Alert drill job %s" % uuid.uuid4().hex[:8])
+        created_job = post(base, CREATE_JOB, {"input": fresh_input}, recruiter_token)["createJob"]
+        if created_job["__typename"] != "Job":
+            raise Stop(1, "create-job-refused", "createJob refused the fresh job (%s)" % str(created_job.get("code"))[:40])
+        published = post(base, PUBLISH_JOB, {"input": {"idempotencyKey": str(uuid.uuid4()), "jobId": created_job["id"]}},
+                         recruiter_token)["publishJob"]
+        if published["__typename"] != "Job":
+            raise Stop(1, "publish-job-refused", "publishJob refused the fresh job (%s)" % str(published.get("code"))[:40])
+        created = 1
+        open_jobs = jobs = 1
+    else:
+        PROGRESS.phase_started("counting the recruiter's open jobs")
+        open_jobs = count_open_jobs(base, recruiter_token, jobs)
+    if fresh_job:
+        pass
+    elif open_jobs >= jobs:
         PROGRESS.say("the recruiter already owns %d open jobs (wanted %d); creating none" % (open_jobs, jobs), True)
     else:
         for index in range(jobs):
@@ -276,6 +293,7 @@ def run(base, jobs, candidates, repo):
 
 def main(argv):
     base, jobs, candidates, repo = argv[1], int(argv[2]), int(argv[3]), argv[4]
+    fresh_job = len(argv) > 5 and argv[5] == "1"  # --one-fresh-job: exactly one new job with random idempotency keys
     started = time.monotonic()
     signal.signal(signal.SIGTERM, signal.default_int_handler)  # TERM/HUP clean up like Ctrl+C
     signal.signal(signal.SIGHUP, signal.default_int_handler)
@@ -289,7 +307,7 @@ def main(argv):
             pass  # any HTTP answer means the API is up; the first mutation reports real problems
         except (urllib.error.URLError, TimeoutError, OSError):
             raise Stop(2, "api-unreachable", "no HTTP answer from %s/health within 3s; start the API first" % base)
-        detail = run(base, jobs, candidates, repo)
+        detail = run(base, jobs, candidates, repo, fresh_job)
     except Stop as stop:
         print("seed-local-jobs: %s" % stop.message, file=sys.stderr)
         verdict = "BLOCKED" if stop.code == 2 else "FAIL"
