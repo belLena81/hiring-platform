@@ -16,6 +16,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # -I drops the script directory; review_fingerprint lives next to us
+import review_fingerprint  # noqa: E402
+
 PROJECT = Path(__file__).resolve().parent.parent
 LOG = PROJECT / ".local" / "logs" / "review-runs.jsonl"
 REVIEWERS = {"code-reviewer", "security-engineer", "qa-engineer"}
@@ -35,21 +38,22 @@ def report_text(event):
     return event.get("last_assistant_message")
 
 
-def entry_for(event, now, commit):
-    """Pure: the log entry for one hook event, or None when it is not a reviewer report with a verdict."""
+def entry_for(event, now, commit, tree=None):
+    """Pure: the log entry for one hook event, or None when it is not a reviewer report with a verdict.
+    tree is the content fingerprint of the reviewed tree (scripts/review_fingerprint.py); the verdict check compares it."""
     if event.get("agent_type") not in REVIEWERS:
         return None
     verdict = verdict_in(report_text(event))
     if verdict is None:
         return None
     return {"role": event["agent_type"], "verdict": verdict, "at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "epoch": int(now.timestamp()), "commit": commit}
+            "epoch": int(now.timestamp()), "commit": commit, **({"tree": tree} if tree else {})}
 
 
 def main():
     event = json.load(sys.stdin)
     commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=PROJECT, capture_output=True, text=True, timeout=10).stdout.strip()
-    entry = entry_for(event, datetime.datetime.now(datetime.timezone.utc), commit)
+    entry = entry_for(event, datetime.datetime.now(datetime.timezone.utc), commit, review_fingerprint.fingerprint(PROJECT))
     if entry:
         LOG.parent.mkdir(parents=True, exist_ok=True)
         # O_NOFOLLOW: this hook runs outside the sandbox, so it must not follow a link planted at the log path.

@@ -10,6 +10,9 @@ import subprocess
 import sys
 import time
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # -I drops the script directory; review_fingerprint lives next to us
+import review_fingerprint  # noqa: E402
+
 HELP = """Usage: python3 -I scripts/check-spec-verdicts.py
        python3 -I scripts/check-spec-verdicts.py --lines-only
        python3 -I scripts/check-spec-verdicts.py --help
@@ -23,9 +26,10 @@ must carry the three verdict lines of docs/templates/feature-spec.md, each endin
 reason from docs/agent-development.md (Review tiers); reviewers challenge a weak reason, this script only requires one.
 
 An uncommitted done spec is also compared with the local review log (.local/logs/review-runs.jsonl, written by the SubagentStop
-and SubagentHandback hooks): each PASS needs a logged run of that reviewer since the last commit, and the latest such run must be PASS. Committed
-specs are not compared, because older reviews predate the log and the log is local to this clone. --lines-only skips this
-comparison: the Stop hook uses it on repeated stops, because an unrelated commit can make a valid review look stale.
+and SubagentHandback hooks): each PASS needs a logged run of that reviewer on the current tree (a content fingerprint of every non-ignored file except docs/,
+README.md and ARCHITECTURE.md, so committing the reviewed work does not invalidate a review but editing it does), and the
+latest such run must be PASS. Committed specs are not compared, because older reviews predate the log and the log is local to
+this clone. --lines-only skips this comparison: the Stop hook uses it on repeated stops.
 
 Exit codes: 0 PASS, 1 FAIL (problems are listed), 2 usage error or required folder missing (BLOCKED), 130 interrupted.
 The last line is "RESULT: PASS|FAIL|BLOCKED specs=<n> done=<n> problems=<n> duration=<s>".
@@ -75,15 +79,17 @@ def problems_in(text):
 LOGGED_ROLES = {"Code Reviewer": "code-reviewer", "Security Engineer": "security-engineer", "Final independent QA": "qa-engineer"}
 
 
-def review_log_problems(text, entries, since_epoch):
-    """Pure: PASS lines of a done spec with no logged reviewer run since since_epoch, or whose latest logged run did not pass."""
+def review_log_problems(text, entries, tree):
+    """Pure: PASS lines of a done spec with no logged reviewer run of the current tree, or whose latest such run did not pass.
+    tree is the content fingerprint (scripts/review_fingerprint.py): committing the reviewed work does not change it, an edit does."""
     problems = []
     for role, pattern in VERDICT_LINES:
         if not any(PASS.match(value.strip()) for value in pattern.findall(text)):
             continue
-        runs = [e for e in entries if e.get("role") == LOGGED_ROLES[role] and e.get("epoch", 0) >= since_epoch]
+        runs = [e for e in entries if e.get("role") == LOGGED_ROLES[role] and tree is not None and e.get("tree") == tree]
         if not runs:
-            problems.append(f"'{role} verdict' says PASS but no {LOGGED_ROLES[role]} run is logged since the last commit")
+            problems.append(f"'{role} verdict' says PASS but no {LOGGED_ROLES[role]} run is logged for the current tree "
+                            "(the files changed since its review, or it did not run)")
         elif runs[-1].get("verdict") != "PASS":
             problems.append(f"'{role} verdict' says PASS but the latest logged {LOGGED_ROLES[role]} run says {runs[-1].get('verdict')}")
     return problems
@@ -107,16 +113,14 @@ def read_review_log(path):
 
 
 def uncommitted_specs(project_root):
-    """The spec paths git reports as changed or new, with the last commit's time; (None, 0) when git cannot answer."""
+    """The spec paths git reports as changed or new; None when git cannot answer."""
     try:
         # -z: paths are unquoted, so a non-ASCII spec name still matches.
         status = subprocess.run(["git", "status", "--porcelain", "-z", "--no-renames", "--untracked-files=all", "--", "docs/specs"],
                                 cwd=project_root, capture_output=True, text=True, timeout=30, check=True).stdout
-        head = subprocess.run(["git", "log", "-1", "--format=%ct"], cwd=project_root, capture_output=True, text=True,
-                              timeout=30, check=True).stdout.strip()
     except (OSError, subprocess.SubprocessError):
-        return None, 0
-    return {entry[3:] for entry in status.split("\0") if entry}, int(head or 0)
+        return None
+    return {entry[3:] for entry in status.split("\0") if entry}
 
 
 def main(compare_log=True):
@@ -132,7 +136,8 @@ def main(compare_log=True):
     specs = sorted(spec_root.glob("*.md"))
     errors = []
     done = 0
-    uncommitted, head_epoch = uncommitted_specs(project_root) if compare_log else (set(), 0)
+    uncommitted = uncommitted_specs(project_root) if compare_log else set()
+    tree = review_fingerprint.fingerprint(project_root) if uncommitted else None
     if uncommitted is None:
         print("check-spec-verdicts: git is unavailable; verdict lines are not compared with the review log")
     entries = read_review_log(project_root / ".local" / "logs" / "review-runs.jsonl")
@@ -144,7 +149,7 @@ def main(compare_log=True):
         relative = spec.relative_to(project_root)
         errors.extend(f"{relative}: {problem}" for problem in problems_in(text))
         if uncommitted and relative.as_posix() in uncommitted:
-            errors.extend(f"{relative}: {problem}" for problem in review_log_problems(text, entries, head_epoch))
+            errors.extend(f"{relative}: {problem}" for problem in review_log_problems(text, entries, tree))
     counts = f"specs={len(specs)} done={done}"
     duration = f"duration={time.monotonic() - STARTED:.1f}s"
     if errors:

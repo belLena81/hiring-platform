@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Full local verification: skills, container scripts, Java, formatting, then unit + integration suites of both builds.
+# Full local verification: skills, docs, container scripts, Java, then unit + integration suites of both builds.
+# Formatting is not checked here: the pre-commit hook formats every commit. A suite whose inputs are unchanged since its last PASS is skipped.
 # Contract: see "Operator scripts" in docs/engineering-quality.md. Run with --help for usage and exit codes.
 set -euo pipefail
 
@@ -8,8 +9,7 @@ cd "$project_root"
 # shellcheck source=scripts/operator-lib.sh
 source "$project_root/scripts/operator-lib.sh"
 
-readonly total_steps=8
-format_limit="${CHECK_LOCAL_FORMAT_TIMEOUT_SECONDS:-900}"
+readonly total_steps=6
 readonly log_dir_display=".local/logs"
 current_step="starting"
 step_number=0
@@ -23,16 +23,18 @@ Usage: scripts/check-local.sh
        scripts/check-local.sh --help
 
 Runs, in order, and stops at the first failure:
-  1/8 project skill validation        (python3 -I scripts/check-skills.py)
-  2/8 documentation currency and spec verdicts (python3 -I scripts/check-docs-current.py: uncommitted and unpushed decision changes carry docs;
-                                      python3 -I scripts/check-spec-verdicts.py: every done spec records Code, Security and QA verdicts)
-  3/8 container script checks         (scripts/check-container-runtime.sh)
-  4/8 Java 17+ check
-  5/8 root build formatting           (sbt scalafmtCheckAll scalafmtSbtCheck, limit 15 min)
-  6/8 analytics build formatting      (same, limit 15 min)
-  7/8 root unit + integration suites under JaCoCo, 85% merged coverage gate (scripts/run-local-tests.sh test)
-  8/8 analytics unit + integration suites under JaCoCo (scripts/run-local-tests.sh analytics)
-Needs Docker for steps 7-8. Recorded total for a whole run: 1h48m-2h18m. Each step's duration is printed when it ends, and a summary of
+  1/6 project skill validation        (python3 -I scripts/check-skills.py)
+  2/6 documentation currency and spec verdicts (python3 -I scripts/check-docs-current.py: unpushed decision commits carry docs, uncommitted
+                                      changes only warn; python3 -I scripts/check-spec-verdicts.py: every done spec records its verdicts)
+  3/6 container script checks         (scripts/check-container-runtime.sh)
+  4/6 Java 17+ check
+  5/6 root unit + integration suites under JaCoCo, 85% merged coverage gate (scripts/run-local-tests.sh test)
+  6/6 analytics unit + integration suites under JaCoCo (scripts/run-local-tests.sh analytics)
+Formatting is not checked: .githooks/pre-commit formats every commit, and agents may not skip it.
+Steps 5 and 6 are skipped when the content of their inputs (sources, tests, build, docker, compose, test wrapper; never docs, specs,
+.claude or other scripts) equals the content that last passed, whatever was committed in between. The fingerprints are kept in
+.local/logs/check-local-passed-root and -analytics, written only on a PASS. CHECK_LOCAL_FORCE=1 runs them regardless.
+Needs Docker for steps 5-6 when they run. Recorded total for a whole run: 1h48m-2h18m. Each step's duration is printed when it ends, and a summary of
 all step durations (including the step that failed or was blocked) is printed at the end of a PASS, FAIL or BLOCKED run, not after an interrupt. A status line is printed at least every 10 s; the test steps log to
 .local/logs/test-services/run.log and the formatting steps to .local/logs/check-local-*.log.
 
@@ -40,7 +42,7 @@ Environment:
   JAVA_HOME                          JDK used for the checks and passed to sbt (-java-home)
   HIRING_TEST_JAVA_HOME              JDK for the test wrapper (defaults to JAVA_HOME)
   HIRING_TEST_TIMEOUT_SECONDS        limit per sbt invocation of the test wrapper, 60-86400 (default 14400)
-  CHECK_LOCAL_FORMAT_TIMEOUT_SECONDS limit for each formatting step, 60-7200 (default 900)
+  CHECK_LOCAL_FORCE                  1 runs both suites even when their inputs are unchanged since the last PASS
   (the wrapper also reads HIRING_TEST_LOCK_WAIT_SECONDS and COMPOSE_TIMEOUT_SECONDS; see scripts/run-local-tests.sh --help)
 
 Exit codes: 0 PASS, 1 FAIL, 2 usage error or precondition not met (BLOCKED), 130 interrupted.
@@ -91,13 +93,8 @@ usage_error() {
 }
 if [[ "${1:-}" == -h || "${1:-}" == --help ]]; then help_text; result_done=1; exit 0; fi
 if (( $# > 0 )); then usage_error "unexpected argument: $1"; fi
-[[ "$format_limit" =~ ^[0-9]{1,5}$ ]] && (( 10#$format_limit >= 60 && 10#$format_limit <= 7200 )) ||
-  usage_error "CHECK_LOCAL_FORMAT_TIMEOUT_SECONDS must be an integer from 60 to 7200, got: $format_limit"
-format_limit=$((10#$format_limit))
-readonly format_limit
-
-printf 'check-local: runs %s checks in order (skills, documentation currency, container scripts, Java, formatting x2, tests x2); recorded total for a whole run 1h48m-2h18m; each long step bounded (formatting %s, sbt invocations HIRING_TEST_TIMEOUT_SECONDS=%s)\n' \
-  "$total_steps" "$(op_duration "$format_limit")" "${HIRING_TEST_TIMEOUT_SECONDS:-14400}"
+printf 'check-local: runs %s checks in order (skills, documentation currency, container scripts, Java, tests x2; a suite whose inputs are unchanged since its last PASS is skipped); a full run is recorded at 1h48m-2h18m; sbt invocations bounded by HIRING_TEST_TIMEOUT_SECONDS=%s\n' \
+  "$total_steps" "${HIRING_TEST_TIMEOUT_SECONDS:-14400}"
 
 begin_step() { # description
   step_number=$((step_number + 1))
@@ -143,19 +140,7 @@ run_foreground() {
   completed
 }
 
-# run_sbt_step DESCRIPTION LOGNAME COMMAND...: output to a log, heartbeat every 10 s, bounded.
-run_sbt_step() {
-  local description="$1" logname="$2" rc=0 log
-  shift 2
-  log="$project_root/.local/logs/$logname"
-  begin_step "$description"
-  op_run_logged "$description" "$format_limit" "$log" yes "$@" || rc=$?
-  if (( rc == 124 )); then step_failed 1 "formatting did not finish within $(op_duration "$format_limit"); raise CHECK_LOCAL_FORMAT_TIMEOUT_SECONDS or read $log_dir_display/$logname" "$log"; fi
-  if (( rc != 0 )); then step_failed "$rc" "run sbt scalafmtAll scalafmtSbt (in analytics/ for the analytics build) to fix formatting, or read $log_dir_display/$logname" "$log"; fi
-  completed
-}
-
-git check-ignore -q "$project_root/.local/logs/check-local-root-format.log" || {
+git check-ignore -q "$project_root/.local/logs/check-local-passed-root" || {
   printf 'check-local: .local/logs is not git-ignored; add it to .gitignore first\n' >&2
   finish BLOCKED 2 "reason=logs-not-ignored"
 }
@@ -178,21 +163,36 @@ if [[ ! "$java_major" =~ ^[0-9]+$ ]] || (( java_major < 17 )); then
 fi
 completed
 
-# The sbt launcher uses the PATH java unless told otherwise; both builds target Java 17.
-sbt_args=()
-if [[ -n "${JAVA_HOME:-}" ]]; then
-  sbt_args=(-java-home "$JAVA_HOME")
-fi
 command -v sbt >/dev/null 2>&1 || { current_step="sbt lookup"; step_failed 2 "install sbt and put it on PATH"; }
 
-# Both builds: formatting gates first, then unit and integration suites under JaCoCo.
-# The integration suites need Docker; the runner owns this workspace's test services.
-# A full run fails when merged unit + integration line coverage is below 85%.
-run_sbt_step "root build formatting" check-local-root-format.log sbt "${sbt_args[@]}" scalafmtCheckAll scalafmtSbtCheck
-run_sbt_step "analytics build formatting" check-local-analytics-format.log bash -c 'cd analytics && exec sbt "$@"' check-local "${sbt_args[@]}" scalafmtCheckAll scalafmtSbtCheck
-export HIRING_TEST_JAVA_HOME="${HIRING_TEST_JAVA_HOME:-${JAVA_HOME:-}}"
-run_foreground "root unit + integration suites with coverage gate" "read the RESULT and log excerpt above; log: .local/logs/test-services/run.log" scripts/run-local-tests.sh test
-run_foreground "analytics unit + integration suites with coverage gate" "read the RESULT and log excerpt above; log: .local/logs/test-services/run.log" scripts/run-local-tests.sh analytics
+# The fingerprint covers file content, not commits, so committing (and the pre-commit formatter) between a PASS and the next run
+# changes nothing unless a covered file's content changed. Docs, specs, .claude and the other scripts are never covered.
+fingerprint() { # PATHSPEC...
+  git ls-files -z --cached --others --exclude-standard -- "$@" ':(exclude)*.md' | sort -zu | xargs -0 -r sha256sum 2>/dev/null | sha256sum | cut -d' ' -f1
+}
+common_inputs=(test-support docker compose.yaml compose.test.yaml Dockerfile .sbtopts .jvmopts scripts/run-local-tests.sh scripts/operator-lib.sh scripts/acceptance-lib.sh)
 
-printf '%s\n' 'Formatting, unit, integration and merged coverage checks passed for the application and analytics builds. Run any additional migration, compatibility, or performance checks required by this task; see docs/engineering-quality.md.'
-finish PASS 0 "checks=formatting,unit,integration,coverage"
+# run_suite_step NAME DESCRIPTION MODE PATHSPEC...: runs the wrapper unless the inputs equal the last PASS, then records the PASS.
+# The integration suites need Docker; the runner owns this workspace's test services. A run fails when merged coverage is below 85%.
+run_suite_step() {
+  local name="$1" description="$2" mode="$3" stamp current
+  shift 3
+  stamp="$project_root/.local/logs/check-local-passed-$name"
+  current="$(fingerprint "$@")"
+  if [[ "${CHECK_LOCAL_FORCE:-0}" != 1 && -f "$stamp" && "$(cat "$stamp")" == "$current" ]]; then
+    begin_step "$description"
+    op_say "skipped: inputs unchanged since the last PASS (CHECK_LOCAL_FORCE=1 runs it anyway)"
+    completed
+    return 0
+  fi
+  rm -f "$stamp"
+  run_foreground "$description" "read the RESULT and log excerpt above; log: .local/logs/test-services/run.log" scripts/run-local-tests.sh "$mode"
+  printf '%s\n' "$current" >"$stamp"
+}
+
+export HIRING_TEST_JAVA_HOME="${HIRING_TEST_JAVA_HOME:-${JAVA_HOME:-}}"
+run_suite_step root "root unit + integration suites with coverage gate" test src build.sbt project "${common_inputs[@]}"
+run_suite_step analytics "analytics unit + integration suites with coverage gate" analytics "${common_inputs[@]}" analytics
+
+printf '%s\n' 'Unit, integration and merged coverage checks passed (or their inputs were unchanged since the last PASS) for the application and analytics builds. Run any additional migration, compatibility, or performance checks required by this task; see docs/engineering-quality.md.'
+finish PASS 0 "checks=unit,integration,coverage"

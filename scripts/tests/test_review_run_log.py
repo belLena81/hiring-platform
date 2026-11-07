@@ -31,8 +31,8 @@ ALL_PASS = ("- Code Reviewer verdict (x): PASS\n"
 DONE_SPEC = "# Spec\n\n- Status: done\n\n" + ALL_PASS
 
 
-def run(role, verdict, epoch=100):
-    return {"role": role, "verdict": verdict, "epoch": epoch}
+def run(role, verdict, tree="t1"):
+    return {"role": role, "verdict": verdict, "tree": tree}
 
 
 class RecordingARun(unittest.TestCase):
@@ -71,25 +71,29 @@ class RecordingARun(unittest.TestCase):
 
 class ComparingVerdictsWithTheLog(unittest.TestCase):
     def test_ARE_07_2_a_claimed_pass_without_a_logged_run_is_reported(self):
-        self.assertEqual(3, len(gate.review_log_problems(ALL_PASS, [], 50)))
+        self.assertEqual(3, len(gate.review_log_problems(ALL_PASS, [], "t1")))
 
-    def test_ARE_07_2_a_run_older_than_the_last_commit_does_not_count(self):
-        entries = [run("code-reviewer", "PASS", 10), run("security-engineer", "PASS"), run("qa-engineer", "PASS")]
-        problems = gate.review_log_problems(ALL_PASS, entries, 50)
+    def test_ARE_07_2_a_run_of_a_different_tree_does_not_count(self):
+        entries = [run("code-reviewer", "PASS", "old"), run("security-engineer", "PASS"), run("qa-engineer", "PASS")]
+        problems = gate.review_log_problems(ALL_PASS, entries, "t1")
         self.assertEqual(1, len(problems))
         self.assertIn("code-reviewer", problems[0])
+
+    def test_ARE_07_2_an_unknown_current_tree_matches_nothing(self):
+        entries = [run("code-reviewer", "PASS"), run("security-engineer", "PASS"), run("qa-engineer", "PASS")]
+        self.assertEqual(3, len(gate.review_log_problems(ALL_PASS, entries, None)))
 
     def test_ARE_07_2_the_latest_run_decides(self):
         entries = [run("code-reviewer", "FAIL"), run("code-reviewer", "PASS"), run("security-engineer", "PASS"),
                    run("qa-engineer", "PASS"), run("qa-engineer", "FAIL")]
-        problems = gate.review_log_problems(ALL_PASS, entries, 50)
+        problems = gate.review_log_problems(ALL_PASS, entries, "t1")
         self.assertEqual(1, len(problems))
         self.assertIn("qa-engineer", problems[0])
 
     def test_ARE_07_2_not_applicable_lines_are_not_compared(self):
         text = ALL_PASS.replace("Security Engineer verdict: PASS", "Security Engineer verdict: not applicable - tests only, no data")
         entries = [run("code-reviewer", "PASS"), run("qa-engineer", "PASS")]
-        self.assertEqual([], gate.review_log_problems(text, entries, 50))
+        self.assertEqual([], gate.review_log_problems(text, entries, "t1"))
 
     def test_damaged_and_non_object_log_lines_are_skipped_and_a_missing_log_is_empty(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -108,7 +112,7 @@ class TheScriptsAgainstARealRepository(unittest.TestCase):
         self.repo = Path(self.folder.name)
         (self.repo / "scripts").mkdir()
         (self.repo / "docs/specs").mkdir(parents=True)
-        for name in ("record-review-run.py", "check-spec-verdicts.py"):
+        for name in ("record-review-run.py", "check-spec-verdicts.py", "review_fingerprint.py"):
             shutil.copy(SCRIPTS / name, self.repo / "scripts" / name)
         self.git("init", "-q")
         self.git("add", "-A")
@@ -166,6 +170,28 @@ class TheScriptsAgainstARealRepository(unittest.TestCase):
         for role in ("code-reviewer", "security-engineer", "qa-engineer"):
             self.record(role, "PASS")
         self.assertEqual(0, self.verdicts().returncode)
+
+    def test_ARE_07_2_committing_the_reviewed_work_keeps_the_reviews_valid(self):
+        (self.repo / "Code.scala").write_text("object A")
+        self.write_spec()
+        for role in ("code-reviewer", "security-engineer", "qa-engineer"):
+            self.record(role, "PASS")
+        self.git("add", "Code.scala")
+        self.commit("code")
+        self.assertEqual(0, self.verdicts().returncode)
+
+    def test_ARE_07_2_an_edit_after_the_reviews_invalidates_them_but_a_docs_edit_does_not(self):
+        (self.repo / "Code.scala").write_text("object A")
+        self.write_spec()
+        for role in ("code-reviewer", "security-engineer", "qa-engineer"):
+            self.record(role, "PASS")
+        (self.repo / "docs").mkdir(exist_ok=True)
+        (self.repo / "docs/notes.md").write_text("docs only")
+        self.assertEqual(0, self.verdicts().returncode)
+        (self.repo / "Code.scala").write_text("object B")
+        result = self.verdicts()
+        self.assertEqual(1, result.returncode)
+        self.assertIn("current tree", result.stderr)
 
     def test_ARE_07_2_a_committed_done_spec_is_not_compared(self):
         self.write_spec()

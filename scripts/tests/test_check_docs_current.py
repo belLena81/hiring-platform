@@ -126,6 +126,23 @@ class Hook(unittest.TestCase):
         self.assertIsNotNone(self.run_hook("git commit --no-verify --amend --no-edit", code, commit_msg_hook=True))
         self.assertIsNotNone(self.run_hook("git commit -n", code, commit_msg_hook=True))
 
+    def test_skipping_the_git_hooks_is_denied_even_for_a_documented_commit(self):
+        for command in ("git commit --no-verify -m x", "git commit -n -m x", "git commit -anm x",
+                        "git -c core.hooksPath=/dev/null commit -m x", "git commit -m x --no-verify"):
+            decision = self.run_hook(command, {"README.md"})
+            self.assertEqual("deny", decision["hookSpecificOutput"]["permissionDecision"], command)
+            self.assertIn("skip the git hooks", decision["hookSpecificOutput"]["permissionDecisionReason"], command)
+
+    def test_message_text_that_mentions_a_flag_is_not_a_hook_skip(self):
+        for command in ("git commit -m 'use --no-verify never'", "git commit -m 'run -n later'", "git commit -mnone",
+                        "git commit -F notes.msg"):
+            self.assertIsNone(self.run_hook(command, {"README.md"}), command)
+
+    def test_a_multi_line_message_or_heredoc_that_names_the_flags_is_not_a_hook_skip(self):
+        for command in ('git commit -m "Title\n\nagents may not use --no-verify, -n or core.hooksPath"',
+                        "git commit -q -F - <<'EOF'\nTitle\n\nDon't use --no-verify or -n\nEOF"):
+            self.assertIsNone(self.run_hook(command, {"README.md"}), command)
+
     def test_a_message_file_outside_the_project_or_not_a_regular_file_is_ignored(self):
         self.assertEqual(gate.bounded_message_file("/etc/hostname"), "")
         self.assertEqual(gate.bounded_message_file("../outside.msg"), "")

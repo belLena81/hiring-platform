@@ -24,6 +24,7 @@ HELP = """Usage: python3 -I scripts/check-docs-current.py                  check
        python3 -I scripts/check-docs-current.py --commit-msg F   git commit-msg hook (.githooks/commit-msg): index + message F
        python3 -I scripts/check-docs-current.py --help
 
+Uncommitted changes only produce a warning in the default run; the rule is enforced when they are committed.
 A change that touches decision-bearing paths (production source, configuration, provisioning, build, operator scripts
 or the agent workflow) must also change canonical documentation: README.md, ARCHITECTURE.md, or docs/ outside
 docs/specs/ and docs/templates/ (docs/wiki/ counts). A commit that genuinely needs no canonical documentation change
@@ -33,8 +34,8 @@ says so with a trailer in its message, with a reason of at least ten characters:
   Docs-Impact: spec-only - <reason>     (the decision is recorded only in its docs/specs/ file, deliberately)
 
 The default run also checks each commit not yet on the upstream (or main) made after this script was first committed,
-so a commit that bypassed the hooks is caught before it is pushed. Working-tree changes have no message, so a change
-that legitimately needs no docs is reported until it is committed with its trailer.
+so a commit that bypassed the hooks is caught before it is pushed. Working-tree changes have no message, so they are
+only warned about; the commit hooks make the decision.
 The Claude Code hook reads -m text, heredoc messages and -F files; for a message it cannot see (editor, -C, --amend
 --no-edit) it defers to the commit-msg hook when core.hooksPath is .githooks. It recognizes direct `git commit` calls,
 including `git --no-pager commit`, a path to git and a quoted `sh -c "git commit ..."`; aliases and scripts are only
@@ -222,6 +223,36 @@ def message_file(commit_line):
 
 SKIPS_HOOKS = re.compile(r"(^|\s)(--no-verify|-[a-zA-Z]*n[a-zA-Z]*)(\s|$)")
 MAX_MESSAGE_FILE_BYTES = 64 * 1024
+_VALUE_FLAGS = {"-m", "--message", "-F", "--file", "-C", "-c", "--author", "--date", "--fixup", "--squash",
+                "--cleanup", "-t", "--template", "--trailer", "--reuse-message", "--reedit-message"}
+
+
+def skips_hooks(commit_line):
+    """Pure: does this git commit line bypass the hooks (--no-verify, a short flag group with n, or a core.hooksPath override)?
+    commit_line starts at `git` and keeps its quotes, so message text is not mistaken for a flag."""
+    try:
+        words = shlex.split(commit_line, comments=False, posix=True)
+    except ValueError:
+        try:  # e.g. a heredoc body with an apostrophe: the words before the body are what matter
+            words = shlex.split(commit_line.split("\n", 1)[0], comments=False, posix=True)
+        except ValueError:
+            return bool(re.search(r"--no-verify|core\.hooksPath", commit_line))
+    if "commit" not in words:
+        return False
+    position = words.index("commit")
+    if any("core.hookspath" in word.lower() for word in words[:position]):
+        return True
+    expecting_value = False
+    for word in words[position + 1:]:
+        if word in ("&&", "||", ";", "|") or word.startswith("<<"):
+            break
+        if expecting_value:
+            expecting_value = False
+        elif word in _VALUE_FLAGS:
+            expecting_value = True
+        elif word == "--no-verify" or re.fullmatch(r"-(?![mFCct])[a-zA-Z]*n[a-zA-Z]*", word):
+            return True
+    return False
 
 
 def bounded_message_file(named_file):
@@ -255,6 +286,12 @@ def hook():
     if found is None:
         return 0
     commit_line = command[found.start():].lstrip(";&|(\n'\"` \t").split("\n", 1)[0].rstrip("'\"`)")
+    if skips_hooks(command[found.start():]):
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                                 "permissionDecisionReason": "Agents may not skip the git hooks "
+                                                 "(--no-verify, -n, core.hooksPath): the pre-commit formatter and the "
+                                                 "documentation gate must run on every commit"}}))
+        return 0
     try:
         if merging():
             return 0
@@ -346,7 +383,15 @@ def run():
         if arguments == []:
             print("check-docs-current: checking uncommitted changes (staged, unstaged, untracked) and unpushed "
                   "commits made since this gate was introduced, for documentation; offline, under 1 s")
-            changes = [("working tree", names("HEAD") | untracked(), None)] + unpushed_gated_commits()
+            tree = ("working tree", names("HEAD") | untracked(), None)
+            commits = unpushed_gated_commits()
+            # Uncommitted changes have no message to carry a Docs-Impact trailer, and the commit hooks enforce the rule at the
+            # moment it can be satisfied, so a dirty tree is a warning here, not a failure.
+            advice = verdict(tree[1])
+            if advice is not None:
+                print(f"check-docs-current: warning (not a failure; enforced at commit): working tree: {advice}",
+                      file=sys.stderr)
+            changes = commits
         elif arguments == ["--staged"]:
             print("check-docs-current: checking staged changes for documentation; offline, under 1 s")
             changes = [("staged changes", names("--cached"), None)]
