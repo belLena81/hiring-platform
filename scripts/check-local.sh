@@ -34,9 +34,9 @@ Formatting is not checked: .githooks/pre-commit formats every commit, and agents
 Steps 5 and 6 are skipped when the content of their inputs (sources, tests, build, docker, compose, test wrapper; never docs, specs,
 .claude or other scripts) equals the content that last passed, whatever was committed in between. The fingerprints are kept in
 .local/logs/check-local-passed-root and -analytics, written only on a PASS. CHECK_LOCAL_FORCE=1 runs them regardless.
-Needs Docker for steps 5-6 when they run. Recorded total for a whole run: 1h48m-2h18m. Each step's duration is printed when it ends, and a summary of
+Needs Docker for steps 5-6 when they run. Observed on one workstation (not a guarantee): a full run with both suites took 2h41m-2h47m (2026-11-07), of which the analytics step was about 2h23m-2h29m and the root step about 17m. Each step's duration is printed when it ends, and a summary of
 all step durations (including the step that failed or was blocked) is printed at the end of a PASS, FAIL or BLOCKED run, not after an interrupt. A status line is printed at least every 10 s; the test steps log to
-.local/logs/test-services/run.log and the formatting steps to .local/logs/check-local-*.log.
+.local/logs/test-services/run.log.
 
 Environment:
   JAVA_HOME                          JDK used for the checks and passed to sbt (-java-home)
@@ -93,7 +93,7 @@ usage_error() {
 }
 if [[ "${1:-}" == -h || "${1:-}" == --help ]]; then help_text; result_done=1; exit 0; fi
 if (( $# > 0 )); then usage_error "unexpected argument: $1"; fi
-printf 'check-local: runs %s checks in order (skills, documentation currency, container scripts, Java, tests x2; a suite whose inputs are unchanged since its last PASS is skipped); a full run is recorded at 1h48m-2h18m; sbt invocations bounded by HIRING_TEST_TIMEOUT_SECONDS=%s\n' \
+printf 'check-local: runs %s checks in order (skills, documentation currency, container scripts, Java, tests x2; a suite whose inputs are unchanged since its last PASS is skipped); a full run was observed at 2h41m-2h47m on one workstation (not a guarantee); sbt invocations bounded by HIRING_TEST_TIMEOUT_SECONDS=%s\n' \
   "$total_steps" "${HIRING_TEST_TIMEOUT_SECONDS:-14400}"
 
 begin_step() { # description

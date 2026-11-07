@@ -84,7 +84,7 @@ Accumulate independent request/configuration validation with `ValidatedNec`; seq
 
 Start with in-memory synthetic input and existing read ports. Add a narrow snapshot read port only for a demonstrated missing capability. The production publisher and the verifier may share neutral report value types and validated contract constants, but must not share the aggregation implementation used to derive expected results.
 
-No public API/event shape change is required by the initial slices. If retained verification needs new analytics metadata, specify the one active pre-MVP shape and update producers/consumers/fixtures directly; do not introduce legacy readers or backfills. Incompatible local data is preserved and rejected unless exact reset is separately authorized. Any operational Mongo schema/index addition requires its own versioned, repeatable migration and recovery evidence before the affected slice is ready.
+No public API/event shape change is required by the initial slices. If retained verification needs new analytics metadata, specify it under the normal rules in [schema evolution](../schema-evolution.md), including its migration or compatibility plan, and update producers, consumers and fixtures together. Incompatible local data is preserved and rejected unless exact reset is separately authorized. Any operational Mongo schema/index addition requires its own versioned, repeatable migration and recovery evidence before the affected slice is ready.
 
 ## Decisions and alternatives
 

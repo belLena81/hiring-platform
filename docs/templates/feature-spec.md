@@ -25,7 +25,7 @@ Copy to `docs/specs/<task-slug>.md` for substantial work. This template is not a
 
 Describe actors and ownership, input/output/error semantics, validation, state transitions, and relevant side effects. Specify atomicity, idempotency, migrations/recovery, and compatibility where applicable. Define observable guarantees before choosing design patterns.
 
-Separate pure domain decisions from effectful orchestration and external adapters. For data/API/event changes, apply [schema evolution](../schema-evolution.md): record the single active pre-MVP API/analytics shape and update consumers/fixtures directly; do not add legacy compatibility or backfills for those contracts. For operational MongoDB changes, or after full MVP, record the applicable migration/concurrent-write/recovery and compatibility checks. Mark not applicable with a reason when no contract changes.
+Separate pure domain decisions from effectful orchestration and external adapters. For data, API or event changes, apply [schema evolution](../schema-evolution.md): record the migration plan (expand/backfill/verify/contract, or a justified smaller plan), old/new compatibility, concurrent-write and recovery checks, and update consumers and fixtures with the change. Mark not applicable with a reason when no contract changes.
 
 ## Domain language and examples
 

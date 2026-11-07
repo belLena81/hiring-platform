@@ -93,7 +93,7 @@ Analytics services preserve `F[_]` and their `AnalyticsError` channel; normal de
 
 Deploy/runbook scripts must validate exact environment/root/owner identities, fail closed on incomplete inventories, use bounded enumeration and sanitize diagnostics. A proof command must not create permission to delete data, revoke external accounts, rotate production credentials or buy infrastructure. Keep evidence under ignored runtime paths, with hashes/references in reviewable summaries.
 
-No blanket new abstraction, cluster operator, secret manager, cloud SDK or backup service is mandated. Add an adapter only after the chosen environment reveals a concrete capability gap. No public API change is required. New operational Mongo metadata needs versioned repeatable migrations; pre-MVP API/analytics changes update their single active shape directly. Unsupported restored shapes are preserved and rejected; no implicit backfill/reset/dual-read is authorized. See [schema evolution](../schema-evolution.md).
+No blanket new abstraction, cluster operator, secret manager, cloud SDK or backup service is mandated. Add an adapter only after the chosen environment reveals a concrete capability gap. No public API change is required. New operational Mongo metadata needs versioned repeatable migrations; API and analytics changes follow the normal rules in schema evolution. Unsupported restored shapes are preserved and rejected; no implicit backfill/reset/dual-read is authorized. See [schema evolution](../schema-evolution.md).
 
 ## Deployment decisions and alternatives
 

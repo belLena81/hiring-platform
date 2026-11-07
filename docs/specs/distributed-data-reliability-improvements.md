@@ -1,10 +1,10 @@
 # Distributed Data Reliability Improvements
 
-Status: **MVP scope complete (2026-11-01)**: items 5, 6, 1, 3 and DDR-04.1 to 04.3 are implemented and passed their review and QA gates (commits 181f5bb, 9114a87, 462aac9, a3645e0, 1363f3a and the DDR-03 test commit). Owner decision (2026-11-01, MVP condition 1): items 5, 6, 1, 3 and DDR-04.1 to DDR-04.3 land before the MVP (local) claim; items 2, 7, 8 and 9 and DDR-04.4's re-measurement are explicitly deferred as additive post-MVP work (no API or analytics shape change). Nothing here is implemented or reviewed yet. Created from a read-through of the
+Status: **MVP scope complete (2026-11-01)**: items 5, 6, 1, 3 and DDR-04.1 to 04.3 are implemented and passed their review and QA gates (commits 181f5bb, 9114a87, 462aac9, a3645e0, 1363f3a and the DDR-03 test commit). Owner decision (2026-11-01, MVP condition 1): items 5, 6, 1, 3 and DDR-04.1 to DDR-04.3 land before the MVP (local) claim; items 2, 7, 8 and 9 and DDR-04.4's re-measurement are explicitly deferred as additive post-MVP work (no API or analytics shape change). Created from a read-through of the
 codebase against *Designing Data-Intensive Applications* (Kleppmann, 1st ed., 2017). Chapter references are to that book.
 
-Pre-MVP contract policy applies (`AGENTS.md`): API and analytics schemas have one active shape, so no migration,
-backfill or dual-read/write code is added for any item below.
+Items 5, 6, 1, 3 and DDR-04.1 to 04.3 were implemented under the pre-MVP contract policy, so they add no migration,
+backfill or dual-read/write code. That policy ended with the MVP (local) claim on 2026-11-07 ([schema evolution](../schema-evolution.md)). The post-MVP items (2, 7, 8, 9 and DDR-04.4's re-measurement) follow the normal schema-evolution rules: versioned migration steps where stored data changes, and additive contract changes with deprecation.
 
 ## How to read this plan
 

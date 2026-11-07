@@ -39,8 +39,8 @@ Modes:
   analytics [suite-glob ...] analytics build. No glob: unit + integration under JaCoCo. With globs: matching integration suites only.
 
 Recorded durations: a root integration run took 566 s plus units on 2026-10-08 (docs/specs/candidate-discovery-and-interview-integrity.md);
-a whole scripts/check-local.sh (both builds, formatting, coverage) took 1h48m-2h18m. Full test/analytics runs therefore
-need well over an hour; the default per-invocation limit is 4 h.
+a whole scripts/check-local.sh (both builds, coverage) took 2h41m-2h47m on 2026-11-07, observed on one workstation and not a
+guarantee: the analytics suite step about 2h23m-2h29m, the root suites about 17m. Full test/analytics runs therefore can take hours; the default per-invocation limit is 4 h.
   interview                  the three interview Kafka integration suites (root build)
   kafka                      the Kafka transport integration suites of the root build (SCRAM authentication, producer
                              restart fencing, operational event publication, topic retention reader and quiet-topic
@@ -159,9 +159,9 @@ describe_banner() {
   case "$mode" in
     start) printf 'starts and verifies the isolated test services; expected 10 s with services up, up to 5 min on first start' ;;
     test) if [[ -n "$globs_text" ]]; then printf 'root build: all unit tests, then integration suites [%s]; recorded: units about 1 min plus the suites (a small suite took 3 s)' "$globs_text"
-          else printf 'root build: full unit + integration under JaCoCo with the 85%% coverage gate; expected well over 1 h (a whole check-local took 1h48m-2h18m)'; fi ;;
+          else printf 'root build: full unit + integration under JaCoCo with the 85%% coverage gate; observed about 17 min on one workstation, not a guarantee'; fi ;;
     analytics) if [[ -n "$globs_text" ]]; then printf 'analytics build: integration suites [%s]; no recorded duration, depends on the suites' "$globs_text"
-               else printf 'analytics build: full unit + integration under JaCoCo with the 85%% coverage gate; expected about 1 h (a whole check-local took 1h48m-2h18m)'; fi ;;
+               else printf 'analytics build: full unit + integration under JaCoCo with the 85%% coverage gate; observed about 2h23m-2h29m on one workstation, not a guarantee'; fi ;;
     interview) printf 'three interview Kafka integration suites; no recorded duration' ;;
     kafka) printf 'five Kafka transport integration suites of the root build, no unit phase; no recorded duration' ;;
     retention) printf 'KafkaTopicRetentionCheck; no recorded duration' ;;

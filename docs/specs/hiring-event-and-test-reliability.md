@@ -4,7 +4,7 @@ Status: local implementation and verification complete; independent Code, Securi
 
 ## Contracts and decisions
 
-Preserve immutable lifecycle/workflow policies, StateT, concrete IO/EitherT ports, Mongo transactions and conditional writes, Kafka native producer transactions/idempotence/fencing, and Resource ownership. Keep outbox/inbox, deletion attribution and provider reconciliation because their boundaries span systems. The operational envelope retains seven fields and one active pre-MVP shape. Minimized typed payloads replace unnecessary free text; consumers and fixtures change together, without legacy readers or automatic data reset.
+Preserve immutable lifecycle/workflow policies, StateT, concrete IO/EitherT ports, Mongo transactions and conditional writes, Kafka native producer transactions/idempotence/fencing, and Resource ownership. Keep outbox/inbox, deletion attribution and provider reconciliation because their boundaries span systems. The operational envelope retains seven fields in one active shape. Minimized typed payloads replace unnecessary free text; consumers and fixtures change together. Any compatibility reader or data reset is a scoped decision under [schema evolution](../schema-evolution.md), not an automatic step.
 
 The earlier raw-query and cleanup-starvation findings are corrected: resolvers already produce query-free telemetry, and cleanup advances a finite cursor despite row failures. Preserve and test those properties. Existing uncommitted embedding/Kafka-null/migration-014 changes are input, not permission to discard or certify them.
 
