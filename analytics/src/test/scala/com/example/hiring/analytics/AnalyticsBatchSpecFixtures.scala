@@ -16,7 +16,9 @@ import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
 abstract class AnalyticsBatchSpecFixtures extends FunSuite {
-  override val munitTimeout: FiniteDuration = 10.minutes
+  // Local Spark batch tests under JaCoCo took up to about 700 s on the reference workstation (2026-11-06), so the
+  // limit leaves headroom; `OperationalEventIngestionTimingSpec` already uses 20 minutes.
+  override val munitTimeout: FiniteDuration = 20.minutes
 
   protected val sparkExecution = SparkBlockingExecution.forTests[IO](scala.concurrent.ExecutionContext.parasitic)
   protected def hmacKey(seed: String): Array[Byte] = seed.padTo(32, 'x').getBytes("UTF-8")
