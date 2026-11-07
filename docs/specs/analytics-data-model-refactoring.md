@@ -14,7 +14,7 @@
   - enabling deletion vectors;
   - replacing the streaming batch journal with `txnAppId`/`txnVersion`;
   - deployed performance claims;
-  - legacy, dual-read or backfill code (pre-MVP contract policy).
+  - legacy, dual-read or backfill code (single-active-shape rule).
 
 ## Source context and decisions
 
@@ -132,7 +132,7 @@ Metrics, named after `ApplicationStatus` values (a "stage" is the time an applic
 - The Mongo report document gains a required `stageDurations` array: `[{ metric: "TIME_TO_HIRE", p50Hours: double, p75Hours: double, p90Hours: double, p95Hours: double, eligibleCount: long }]`. An empty array is valid.
 - Verified 2026-10-28: there is no strict validator on `analytics_report_snapshots` (`MongoHiringValidators` covers the event outbox, users and jobs), so no operational Mongo migration is needed. Its index entries are unchanged.
 - The shared fixture `test-support/.../analytics-report-snapshot-contract.json` is updated once and used by both builds.
-- Deploy order (pre-MVP, single active shape): a published document without `stageDurations` is unreadable and fails closed with the sanitized repository error `UNAVAILABLE` (the same as any other malformed snapshot field) until the next analytics publish. `ANALYTICS_UNAVAILABLE` stays reserved for "no snapshot published".
+- Deploy order (single active shape): a published document without `stageDurations` is unreadable and fails closed with the sanitized repository error `UNAVAILABLE` (the same as any other malformed snapshot field) until the next analytics publish. `ANALYTICS_UNAVAILABLE` stays reserved for "no snapshot published".
 - Admin GraphQL `AnalyticsReport` gains `stageDurations: [AnalyticsHiringStageDuration!]!`, next to `timeToHire`.
   - `AnalyticsHiringStageDuration { metric: AnalyticsHiringStageMetric!, p50Hours: Float!, p75Hours: Float!, p90Hours: Float!, p95Hours: Float!, eligibleCount: Long! }`.
   - `enum AnalyticsHiringStageMetric` lists the five metrics.

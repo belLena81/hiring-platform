@@ -8,7 +8,7 @@
 - Coordinator: Product Manager. Architect owns contracts, Data Engineer owns Mongo/Atlas access and schema, Scala Developer owns services and API. Independent Code Reviewer, Security Engineer and QA own final verdicts.
 - Dependencies: measured Phase 8 access baseline and Phase 9 held-out evaluation in [MongoDB optimization](mongodb-vector-retrieval-optimization.md) and [Hiring Search Enhancements](hiring-search-enhancements.md#search-evaluation-and-embedding-architecture).
 - Non-goals: geocoding, real resume extraction, LLM explanations/agents, automatic hiring decisions, new role/tenant model, paid provider procurement, frontend assets or replacing current search by default.
-- Completing this capability does not declare full MVP or weaken Phase 6/7 activation gates.
+- Completing this capability does not change the MVP (local) scope or weaken Phase 6/7 activation gates.
 
 ## Verified source context
 
@@ -230,7 +230,7 @@ User decisions (2026-10-13): (1) facets ignore the embedding-model predicate, so
 
 Recommendation: **(a)**. It is the only option that keeps the existing authoritative aggregation, needs no index change, composes with radius, and makes over-inclusion impossible by construction. Its cost is bounded by a fixed ID cap, and the price of that bound is that a broad query is counted over only its top-N lexical matches, which the payload labels `TOP_MATCHES` (user decision) so it is never read as a total. (b) is rejected for now because the index can lag and its counts would need reconciliation anyway; (c) is rejected by the no-unbounded-hydration rule. Revisit (b) with reconciliation if measured `TOP_MATCHES` rates make the labelled scope unhelpful.
 
-### Contract (additive, pre-MVP single active shape)
+### Contract (additive, single active shape)
 
 - GraphQL: add an optional `query: String` argument to the existing field. The sibling-field alternative would duplicate the payload type and diverge filter semantics.
 

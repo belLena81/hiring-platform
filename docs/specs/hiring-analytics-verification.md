@@ -59,6 +59,8 @@ Verified by static reading at `358aa30` (gap analysis 2026-10-12; nothing below 
 
 Criterion IDs reuse the owning specs ([HCS](continuous-hiring-analytics.md), [HAL](hiring-analytics-lakehouse.md)); example tags `HCS-nn.m` / `HAL-nn.m` appear at the start of each test name. HAV IDs cover this task's own verification rules. Outcome cells reading "Not run" are the pre-implementation state; final outcomes are in the Checkpoint: every locally provable example tag passed in the final QA run on `1834236` (113 distinct tags), except the opt-in HAL-05-FENCE-06.3 and HAL-05.4 cases (not run in that QA), HAL-05-FENCE-05 (out of scope), and the HCS-08.3 topic-identity case (gap C11). Status on 2026-11-03 (see the Checkpoint): the HAL-05.4 admin-outage case ran and passed; the HAL-05.4 transport case, HAL-05-FENCE-06.3 and C11 are accepted MVP limitations, not passes. Mechanism shorthand: COORD = `HiringAnalyticsRecoveryTestSupport` (real Delta/Mongo, synthetic source); STREAM = real Kafka via `KafkaTestNamespace` + `AppModule.streamingObserved` with `Trigger.AvailableNow`.
 
+The Status column in the tables below is the plan-time value and is not updated per row. The recorded result for each row is in the Checkpoint section of this file and in the criterion table of the [streaming specification](continuous-hiring-analytics.md#current-evidence-verification-specification-2026-10-13).
+
 ### Continuous analytics (Phase 7)
 
 | ID | Rule | Examples (tag: Given / When / Then) | Suite | Outcome |
@@ -104,7 +106,7 @@ Criterion IDs reuse the owning specs ([HCS](continuous-hiring-analytics.md), [HA
 | HAV-02 | Every locally provable example tag above names at least one passing test | `grep -rhoE '(HCS\|HAL)-[0-9]+(-FENCE-[0-9]+)?\.[0-9]+'` over test title lines only (`test(` / `TestOptions`), unanchored within the line so every tag in a multi-tag title counts; comments do not count. Compare with this table (presence), plus test reports (pass) | Not run |
 | HAV-03 | Production behaviour unchanged except seam S1 (default trigger identical) | Code review of `analytics/src/main` diff | Not run |
 | HAV-04 | README, milestones, HCS/HAL specs, big-data architecture and analytics-review-remediation cite only existing tests/scripts; harness-era evidence kept as dated history | grep deleted names; Technical Writer + QA | Not run |
-| HAV-05 | `scripts/check-local.sh` passes on Java 17 (formatting, units, integrations, 85% merged coverage), plus `run-local-tests.sh recovery` and `retention` | command output | Not run |
+| HAV-05 | `scripts/check-local.sh` passes on Java 17 (units, integrations, 85% merged coverage), plus `run-local-tests.sh recovery` and `retention` | command output | PASS, recorded in the Checkpoint (`check-local`, `recovery` and `retention` on HEAD `1834236`, 2026-10-13). The 8-step run of record at `d441472` (2026-11-07, including formatting) is in the README. HEAD `26ebc23` has a 6-step script that was not run separately. |
 
 ### Out of scope (production gates)
 

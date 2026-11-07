@@ -42,12 +42,12 @@ The post-MVP LLM option (Phase 16) is described only in that specification.
 
 ## Planned Discovery Extensions (Phase 10)
 
-The following are later extensions to structured, semantic, and hybrid discovery; they preserve the core hiring invariants described below. They are sequenced in Phase 10 after MongoDB optimization (Phase 8) and Search Evaluation (Phase 9), before further Spark work. This promotes the formerly post-MVP discovery stage without declaring full MVP complete. Establish relevance measures and a bounded, representative baseline before evaluating personalized ranking.
+The following are later extensions to structured, semantic, and hybrid discovery; they preserve the core hiring invariants described below. They are sequenced in Phase 10 after MongoDB optimization (Phase 8) and Search Evaluation (Phase 9), before further Spark work. These are Phase 10 work (Partial; see the [README roadmap](../README.md#roadmap)). Establish relevance measures and a bounded, representative baseline before evaluating personalized ranking.
 
 The [hiring discovery specification](specs/hiring-discovery-search-quality.md) owns detailed desired behavior, public-contract alternatives, boundaries and acceptance criteria. [Durable hiring workflows](specs/durable-hiring-workflows.md) separately defines conditional interview scheduling; it does not change the current `moveApplicationToInterview` contract or add application-status transitions. See the [remaining specification index](development-milestones.md#remaining-delivery-order-and-acceptance) for operational resilience and analytics delivery.
 
 - Radius-based job search combines distance with existing filters, candidate visibility, and deterministic cursor pagination. Inputs include structured coordinates; geocoding is out of scope.
-- Richer lexical search and facets use Atlas Search alongside existing vector and hybrid search. Lexical-query facets (HDQ-12) are implemented locally with `coverageLimit` labelling; Atlas Local evidence is pending. Richer analyzers and Atlas lexical/vector/hybrid validation remain open in an Atlas-capable environment.
+- Richer lexical search and facets use Atlas Search alongside existing vector and hybrid search. Lexical-query facets (HDQ-12) are implemented with `coverageLimit` labelling; the Atlas Local rows were observed on 2026-11-01. Richer analyzers and the Atlas cloud rows remain open.
 - Personalized ranking remains deferred under the conservative policy (HDQ-08).
 - MongoDB query plans and indexes are evaluated against representative queries and measured workloads, accounting for read gains and write/storage costs.
 - Personalized ranking is compared with the relevance baseline and is adopted only if evidence shows a quality improvement; otherwise, defer it.

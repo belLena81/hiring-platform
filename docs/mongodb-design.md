@@ -1,6 +1,6 @@
 # MongoDB design
 
-[Authentication receipt protection](specs/hiring-security-and-runtime-reliability.md): login/signUp receipt fingerprints are HMAC-protected; no conversion of older receipt shapes pre-MVP (receipts expire by TTL); user data and non-authentication receipts are unaffected.
+[Authentication receipt protection](specs/hiring-security-and-runtime-reliability.md): login/signUp receipt fingerprints are HMAC-protected; no conversion of older receipt shapes (receipts expire by TTL); user data and non-authentication receipts are unaffected.
 
 See the [current collection inventory](wiki/mongodb-and-analytics.md) for every operational and analytics MongoDB collection, relationships, indexes, retention and use-case links.
 
@@ -63,7 +63,7 @@ The standard is derived from the MongoDB manual's [data-modeling guidance](https
 
 - **Every application-owned collection has a strict `$jsonSchema` validator** (`validationLevel: strict`, `validationAction: error`). Use `additionalProperties: false` where the shape is closed. Startup verifies exact definitions and fails closed on drift. Migration `025_operational_collection_validators` installed them on every operational collection that lacked one; the validator text is in `MongoOperationalValidators` and `MongoHiringValidators`.
 - **Schema changes are ledgered migration steps.** Each step is restartable and batched, with a checkpoint and a read-only completion proof ([schema evolution](schema-evolution.md)). Never edit an applied step. When a validator gains a successor, completed proofs that compare validators accept the documented successor.
-- **No per-document `schemaVersion` before MVP.** One active shape is kept by migrations plus validators.
+- **No per-document `schemaVersion`.** One active shape is kept by migrations plus validators.
 - **Every migration step documents:** stop-writer preconditions, backfill bounds, restart behavior, forward-only recovery and post-verification.
 
 ### 6. Transactions and consistency

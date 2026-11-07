@@ -109,7 +109,7 @@ Paths are relative to the configured lakehouse root, from [AnalyticsLakehousePat
 
 Defaults in [analytics configuration](../../analytics/src/main/resources/application.conf) include Bronze/quarantine 7 days, Silver 30 days, application stage times 30 days after a terminal status or 180 days after the last event of an open application, published snapshots 30 days, completed deletion markers 31 days, Delta vacuum safety 7 days and Delta log retention 14 days. These are configurable policies, not evidence that old physical files have already disappeared. Mongo TTL is asynchronous and applies only where an expiry field/index is installed; business correctness does not depend on instant deletion at the deadline.
 
-Authentication receipts keep domain-separated HMAC fingerprints and expire through the receipt TTL index. Pre-MVP there is no conversion of older receipt shapes; see [receipt key](../schema-evolution.md).
+Authentication receipts keep domain-separated HMAC fingerprints and expire through the receipt TTL index. There is no conversion of older receipt shapes; see [receipt key](../schema-evolution.md).
 
 Published-report receipt maintenance scans ascending candidate pages of at most 500 IDs through a fixed initial high-water mark. Each page checks references across all Delta lineage/revision states and active Mongo replay states, then rechecks controls and deletion eligibility transactionally. Protected prefixes do not prevent later eligible receipts from being considered; one invocation deletes at most 1,000 receipts. This bounds materialization and deletions, not total scan duration. The lakehouse mutex reconciles ambiguous insertion only against its original owner token and fails closed if ownership cannot be established.
 

@@ -8,7 +8,7 @@ Run the suites with:
 
 - `scripts/run-local-tests.sh analytics '*<SuiteName>'` runs analytics integration suites by name (`it:testOnly`). Example: `'*HiringAnalyticsStreamingBoundaryRecoveryIntegrationSpec'`.
 - `cd analytics && sbt test` and `sbt test` in the root run the unit suites (no Docker).
-- `scripts/check-local.sh` runs formatting, both builds' unit and integration suites under JaCoCo with the 85% merged threshold (Docker, Java 17+).
+- `scripts/check-local.sh` runs the skill, documentation and container checks, then both builds' unit and integration suites under JaCoCo with the 85% merged threshold (Docker, Java 17+). Formatting is not a step of that script; the pre-commit hook formats staged Scala and sbt files.
 - `scripts/run-local-tests.sh retention` runs `KafkaTopicRetentionCheck` (a `runMain`, not a munit suite) for the shortened Kafka topic retention.
 
 | Criterion | Tagged tests (suite, tag) | Recorded result (verification specification) |

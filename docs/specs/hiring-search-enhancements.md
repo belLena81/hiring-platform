@@ -134,7 +134,7 @@ The durable claim loop remains the single owner of its configured bounded proces
 - Preserve existing application `IO`, `UseCaseIO` and `RepositoryIO` ports. Do not generalize the application to another effect system to share two flows. Use a concrete prepared value and effectful callback at the real persistence boundary.
 - Use exhaustive ADTs, `Option` and `Either`; accumulate independent fixture/config errors with `ValidatedNec`. Avoid partial indexing, `.get`, sentinel strings and thrown business failures.
 - Provider/Atlas/filesystem adapters own resource cleanup and sanitize failures. Use `Resource`, FS2 and bounded concurrency; tests use controlled clocks/signals instead of sleeps.
-- No public GraphQL, event, embedding metadata or Mongo shape change is required for the preparation refactor. If a report contract changes, update its one active pre-MVP shape and readers/fixtures together. Operational Mongo changes still require migration/restart verification; none is authorized merely by extracting preparation.
+- No public GraphQL, event, embedding metadata or Mongo shape change is required for the preparation refactor. If a report contract changes, update its one active shape and readers/fixtures together. Operational Mongo changes still require migration/restart verification; none is authorized merely by extracting preparation.
 - Keep the existing ranking selector. Add a new Strategy only for a concrete second algorithm that needs selection; do not build generic metric/plugin/repository frameworks.
 
 ### Decisions and cost gates

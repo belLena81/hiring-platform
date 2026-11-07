@@ -118,7 +118,7 @@ SDL, `docs/api.md`, operation fixtures and `docs/domain-language.md` change with
 
 ## Post-MVP — Phase 16: LLM-assisted drafting and triage
 
-Not authorized and not scheduled before full MVP. It needs its own scoped task, provider decision and monthly budget.
+Not authorized and not scheduled. It needs its own scoped task, provider decision and monthly budget.
 
 - **Suggested feature (4): optional draft polish.** A recruiter or candidate presses a button to make a GDF-04 draft warmer or shorter. The deterministic draft remains the default and the fallback.
 - **Application triage (advisory).** Orders the applications to one job by stored-vector similarity. It never hides, rejects or accepts. Needs a Security review of using applicant profiles for the recruiter's ordering, and HDQ-08-style evidence before adoption.

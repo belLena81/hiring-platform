@@ -127,7 +127,7 @@ Use fake providers with explicit synchronization and injected clocks for local t
 - Keep one retry owner per operation: existing repository transaction controller, durable worker, or provider caller as appropriate. Instrument physical attempts and logical calls separately to reveal SDK retries; do not multiply retries through decorators.
 - Application configuration follows typed HOCON/PureConfig ownership. Preserve the existing OpenTelemetry SDK auto-configuration boundary explicitly; do not introduce new application-level environment precedence or direct environment reads.
 - Dependencies point inward; Mongo/HTTP/Kafka/OpenTelemetry types do not enter domain types. Analytics retains its existing `F[_]` ports and isolated runtime; do not rework Spark to obtain an operational metric.
-- No public GraphQL/event schema change is required by basic instrumentation. Any later exposed diagnostic/repair API follows single-active-shape pre-MVP contract updates and authorization review. Any new operational Mongo metrics summary/index needs its own repeatable migration and query-cost justification.
+- No public GraphQL/event schema change is required by basic instrumentation. Any later exposed diagnostic/repair API follows the schema rules in [schema evolution](../schema-evolution.md) and authorization review. Any new operational Mongo metrics summary/index needs its own repeatable migration and query-cost justification.
 
 ## Decisions, alternatives and readiness
 

@@ -39,7 +39,7 @@ Re-run the tables with measured figures before any deployment decision.
 | Spark and Delta | Spark 4.2.0, Delta 4.4.1, Scala 3.7.4 with 2.13 artifacts, Java 17 (`analytics/build.sbt`); local one-shot batch over an explicit offset range; opt-in streaming with a 10 s trigger | Batch is idempotent via run manifest and mutex, so it suits spot or serverless compute. Streaming is always-on cost. |
 | Delta properties | `dataSkippingNumIndexedCols`, log and deleted-file retention, `checkpointInterval=100`; Bronze column statistics disabled for privacy | Sensible. No scheduled compaction or VACUUM was found by search; confirm in source. |
 
-The pre-MVP policy (one active schema, no migration code) makes dimension or quantization changes cheap now: the cost is re-embedding.
+Under the single-active-shape policy that applied until the MVP (local) claim, a dimension or quantization change needed no migration code, so its cost was re-embedding. After the claim such a change needs a versioned migration ([schema evolution](schema-evolution.md)).
 
 ## Search: price list
 

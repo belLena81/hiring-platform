@@ -247,7 +247,7 @@ deferred to Phase 15 until a real deployment exists.
 
 Gap analysis on HEAD `c43ac94`: the bound is the fixed 24 h `WatermarkLag` (effective tolerance 24 to 48 h depending on the clock position within the UTC day); CLOSED facts go only to `lateFacts`, FUTURE facts only to quarantine (blocking that batch's publication); the per-batch counts are measured but never emitted; replay is explicit and records `generation`, `revision` and `runId`. Owner decisions:
 
-- DDR-04.1: `analytics.streaming.allowed-lateness` (default 24 hours, `ANALYTICS_STREAMING_ALLOWED_LATENESS`), validated and part of the streaming activation identity (local grants and checkpoints are re-created; pre-MVP). Future skew and the 30-day late-fact retention stay fixed policy values.
+- DDR-04.1: `analytics.streaming.allowed-lateness` (default 24 hours, `ANALYTICS_STREAMING_ALLOWED_LATENESS`), validated and part of the streaming activation identity (local grants and checkpoints are re-created). Future skew and the 30-day late-fact retention stay fixed policy values.
 - DDR-04.2: counts are emitted as one sanitized structured log line per ingest, `STREAMING_EVENT_TIME_ADMISSION closedDay=N future=N allowedLatenessMillis=M batch=<id> generation=<g> revision=<r>` (revision added 2026-11-01: replay publishes a newer revision of the pinned generation, so generation alone cannot identify the report a late fact missed); no journal columns, no metrics dependency, no analytics table or Mongo snapshot shape change.
 - DDR-04.3: the policy is explicit operator replay by Kafka coordinate into a new generation; the log line records which published generation a late fact missed. Automatic replay is a post-MVP option.
 
