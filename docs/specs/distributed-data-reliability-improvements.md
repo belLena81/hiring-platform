@@ -4,7 +4,7 @@ Status: **MVP scope complete (2026-11-01)**: items 5, 6, 1, 3 and DDR-04.1 to 04
 codebase against *Designing Data-Intensive Applications* (Kleppmann, 1st ed., 2017). Chapter references are to that book.
 
 Items 5, 6, 1, 3 and DDR-04.1 to 04.3 were implemented under the pre-MVP contract policy, so they add no migration,
-backfill or dual-read/write code. That policy ended with the MVP (local) claim on 2026-11-07 ([schema evolution](../schema-evolution.md)). The post-MVP items (2, 7, 8, 9 and DDR-04.4's re-measurement) follow the normal schema-evolution rules: versioned migration steps where stored data changes, and additive contract changes with deprecation.
+backfill or dual-read/write code. The policy applies until the MVP is complete and the first cloud release ships (owner decision 2026-11-08; [schema evolution](../schema-evolution.md)). The post-MVP items (2, 7, 8, 9 and DDR-04.4's re-measurement) keep the versioned Mongo migration ledger where stored data changes. Their API and analytics shape changes are implemented directly under the policy, not as additive changes with deprecation; the owner decides whether that plan changes.
 
 ## How to read this plan
 

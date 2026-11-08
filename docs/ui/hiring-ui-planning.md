@@ -240,4 +240,4 @@ Each phase needs acceptance criteria tagged with stable IDs, and independent Cod
 - **Library churn and supply chain:** pin versions, commit the lockfile, review new packages. Verify all versions and framework behavior against current documentation.
 - **Over-abstraction:** extract shared components from repeated use. The list, status badge and confirm dialog are the known repeats.
 - **Contract changes touch two repos:** SDL in the backend, then a UI commit and a submodule pointer bump. Record that order in the spec.
-- **Pre-MVP policy:** until the MVP (local) claim, API and analytics schemas have one active shape, so the UI must follow schema changes without compatibility layers; afterwards the normal schema-evolution rules apply.
+- **Pre-MVP policy:** until the MVP is complete and the first cloud release ships (owner decision 2026-11-08), API and analytics schemas have one active shape, so the UI must follow schema changes without compatibility layers; afterwards the normal schema-evolution rules apply.
