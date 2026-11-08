@@ -8,9 +8,12 @@
 # only ten label names, the allowlist of decision D7 of the spec: alertname, severity, hiring_capability, and the scrape
 # and OpenTelemetry resource labels job, instance, exported_job, service_name, telemetry_sdk_language,
 # telemetry_sdk_name, telemetry_sdk_version. The only annotation is the rule summary. No hiring data.
-# Known gap: the Kafka alerts have not fired in a drill, and would also carry hiring_consumer_group,
-# messaging_destination_name and messaging_kafka_partition, which are outside the D7 allowlist (closed, non-personal
-# values, but not yet checked or allowed).
+# Known gap: of the Kafka alerts only HiringKafkaProducerFenced has been seen firing (one operator drill, 2026-11-08,
+# KFH-04.9). Its expression sums without a `by` clause, so it should carry only alertname and severity; its labels were not
+# checked against the allowlist. The other Kafka alerts have not been observed firing. By their expressions in alerts.yaml,
+# HiringKafkaConsumerLagHigh keeps hiring_consumer_group, messaging_destination_name and messaging_kafka_partition,
+# HiringKafkaRebalanceRateHigh keeps hiring_consumer_group, and HiringKafkaPublisherSendFailureRatioHigh keeps none of
+# them. Those labels are outside the D7 allowlist (closed, non-personal values, but not yet checked or allowed).
 route:
   receiver: local-ticket
   group_by: [alertname, hiring_capability]

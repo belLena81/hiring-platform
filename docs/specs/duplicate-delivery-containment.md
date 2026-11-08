@@ -1,6 +1,6 @@
 # Duplicate delivery containment
 
-Status: done (DDC-01 to DDC-05 with local evidence; deployed brokers and a re-provisioned Compose broker not verified). Context: Operational events (Kafka publication and consumption) and AI search
+Status: done (DDC-01 to DDC-05 with local evidence; deployed brokers not verified; the reader starting against a re-provisioned Compose broker not verified, see the 2026-11-08 checkpoint). Context: Operational events (Kafka publication and consumption) and AI search
 (embedding work), plus the interview provider ports of Interview scheduling.
 
 ## Problem
@@ -83,10 +83,11 @@ and paid provider work is not repeated for an outcome the platform already holds
     and never decide the readiness status code (`DegradedComponents`). The gate does not beat on failure. Before
     raising, emit one diagnostics event with the numbers (retention, segment, receipt TTL in milliseconds, so `-1` stays visible) because
     `LogFields.failure` records only the exception class and source location.
-  - Provisioning: `provision-access.sh` adds `--operation DESCRIBE_CONFIGS --topic "$topic"` for
+  - Provisioning: `provision-access.sh` adds `--operation DescribeConfigs --topic "$topic"` (the `kafka-acls.sh` spelling; the tool refuses `DESCRIBE_CONFIGS`, which stopped the first local `kafka-acl-init` start the operator observed, on 2026-11-08 per the operator's terminal output; see [Kafka flow hardening](kafka-flow-hardening.md)) for
     `User:analytics_reader` (the principal the application consumer uses through `KAFKA_READER_USERNAME`; analytics
     shares it, which is acceptable because the grant is on this one topic) and sets the segment default to
-    `86400000`. `KafkaTestNamespace` grants DESCRIBE_CONFIGS on the events topic and sets `segment.ms` there (it sets
+    `86400000`. The spelling dates from commit `7ac0bf1` (2026-11-03), so earlier local starts since then probably
+    failed the same way silently (an inference: only the analytics workers wait on `kafka-acl-init`). `KafkaTestNamespace` grants DESCRIBE_CONFIGS on the events topic and sets `segment.ms` there (it sets
     only `retention.ms`, so the broker's 7 day roll would make every integration consumer refuse to start).
 - **DDC-03** No `ConsumedEventEffect` type now. Architecture review (2026-11-03) found it speculative and not an
   enforcement: with one case it forces nothing, and a developer adding an effect would add a repository method or a
@@ -180,7 +181,7 @@ Residuals and contract impact (architecture review 2026-11-03):
 | DDC-02.3 | Retention `-1`: the consumer does not start | ConsumerReceiptWindowSpec, OperationalEventConsumerReceiptWindowSpec (unit, passing) |
 | DDC-02.4 | The topic config cannot be read (missing ACL, broker unreachable): the consumer does not start and retries with the existing restart backoff; no offset is committed | OperationalEventConsumerReceiptWindowSpec: TopicConfigUnreadable, no beat, read again on restart (unit, passing; no consumer exists so no offset commits) |
 | DDC-02.5 | Shipped defaults (application.conf, provisioning script, analytics config) satisfy the rule: a test parses the shipped files and applies `ConsumerReceiptWindow.check` | ShippedConsumerReceiptWindowSpec (unit, passing) |
-| DDC-02.6 | Against real Kafka with the provisioned ACLs (script and `KafkaTestNamespace`), the reader reads its topic's config and starts; describing another topic is denied | KafkaTopicRetentionReaderIntegrationSpec against isolated Kafka (3 tests, passing in run-local-tests.sh); provision-access.sh itself is covered by DDC-02.5 static parse only, not run against a re-provisioned Compose broker |
+| DDC-02.6 | Against real Kafka with the provisioned ACLs (script and `KafkaTestNamespace`), the reader reads its topic's config and starts; describing another topic is denied | KafkaTopicRetentionReaderIntegrationSpec against isolated Kafka (3 tests, passing in run-local-tests.sh); provision-access.sh is covered by DDC-02.5 static parse and by two starts of the local Compose broker's `kafka-acl-init` on 2026-11-08, both reported by the operator: the first stopped at the `DESCRIBE_CONFIGS` spelling (`kafka-acls.sh` wants `DescribeConfigs`); after the correction the rerun exited 0. The rerun's grant list comes from the operator's terminal output (a git-ignored transcript, not an independent capture). "Every grant applied" is an inference from exit 0 under `set -euo pipefail` plus the printed output (one workstation; see [Kafka flow hardening](kafka-flow-hardening.md)) |
 | DDC-02.7 | Margin: receipt TTL 8 days with retention 7 days and segment 23 hours 30 minutes (margin 30 minutes): the consumer does not start; with segment 23 hours it starts | ConsumerReceiptWindowSpec, OperationalEventConsumerReceiptWindowSpec (unit, passing) |
 | DDC-02.8 | A refusal followed by a corrected topic config (fake reader changes answer): the consumer starts on a later restart without a process restart | OperationalEventConsumerReceiptWindowSpec (unit, passing) |
 | DDC-02.9 | Quiet topic: retention 1.5 s, segment roll 1 day, two records and no further append: the earliest offset passes both records | KafkaQuietTopicRetentionIntegrationSpec against the isolated `apache/kafka:3.9.2` broker (PASS, run-local-tests 1823/1823, 2026-11-03) |
@@ -228,9 +229,10 @@ Residuals and contract impact (architecture review 2026-11-03):
   gate-script limits), Security FAIL (refusal fields filtered in the real log sink; `.githooks/` unguarded), QA PASS
   with minor findings (DDC-03.1 untagged). All fixed: `windowRefusal` field with sink allow-listing and a
   `SafeDiagnostics` test, DDC-03.1 tag, guard protects `.githooks/`, spec and AEC-02.3 corrected, jitter stated.
-- Not verified: `provision-access.sh` against a re-provisioned Compose broker (static parse and the equivalent
-  `KafkaTestNamespace` grant only); the whole `scripts/check-local.sh`; deployed brokers; which two analytics tests
-  are skipped.
+- Not verified: the reader starting against a re-provisioned Compose broker (the 2026-11-08 `kafka-acl-init` starts
+  are operator-reported, see the 2026-11-08 entry at the end; before that, only the static parse and the equivalent
+  `KafkaTestNamespace` grant); the whole `scripts/check-local.sh`; deployed brokers; which two analytics tests are
+  skipped.
 - 2026-11-03: re-review of the fixes. Code Review PASS, Security PASS (two Low gate-script items then fixed: `-F`
   files read only inside the project up to 64 KiB, and `--no-verify` commits never deferred), QA PASS (root unit
   1820/1820, receipt-window and Kafka integration run 1830/1830, gate tests 29/29). Closed.
@@ -244,3 +246,4 @@ Residuals and contract impact (architecture review 2026-11-03):
   DDC-02.11; re-review PASS. QA PASS on the final state: docs gate PASS; all unit tests plus the quiet-topic,
   retention-reader, receipt-expiry, embedding-work, erasure-index and Compose integration suites 1859/1859, 0 skipped;
   `scalafmtCheckAll` clean. Not verified: deployed brokers (quiet-topic deletion shown on `apache/kafka:3.9.2` only).
+- 2026-11-08 (Technical Writer, documentation only; operator-reported facts). The 2026-11-03 provisioning change in commit `7ac0bf1` (the DDC change) wrote `--operation DESCRIBE_CONFIGS` for the topic grant in `docker/kafka/provision-access.sh`. `kafka-acls.sh` on `apache/kafka:3.9.2` refuses that spelling for a topic, so the first local `kafka-acl-init` start the operator observed stopped at that grant with the container exiting with code 1. Under `set -euo pipefail` the grants after it were not applied by that start, and every local start since 2026-11-03 probably failed at that grant after the grants above it were applied, without a visible signal (an inference: only the analytics workers wait on `kafka-acl-init`). The line is now `DescribeConfigs` (`provision-access.sh` line 98); the operator's rerun exited 0. The evidence is the operator's terminal output only, transcribed into a git-ignored file, not an independent capture. The 2026-11-03 PASS verdicts and the Closed entry above predate the fix and do not cover it. Not verified: the reader starting against a re-provisioned Compose broker. The Status line keeps `done`; whether the defect reopens DDC-02.6 is a Product Manager decision. Cross-reference: [Kafka flow hardening checkpoint](kafka-flow-hardening.md#checkpoint-and-review).

@@ -93,7 +93,9 @@ acls --add --allow-principal User:analytics_fencer --operation IdempotentWrite -
 acls --add --allow-principal User:analytics_reader --operation READ --operation DESCRIBE --topic "$topic"
 acls --add --allow-principal User:analytics_reader --operation DESCRIBE --cluster
 # The application consumer reads retention.ms and segment.ms of this one topic before it consumes (DDC-02).
-acls --add --allow-principal User:analytics_reader --operation DESCRIBE_CONFIGS --topic "$topic"
+# kafka-acls.sh (3.9) accepts DescribeConfigs and refuses DESCRIBE_CONFIGS for a topic (the broker's DESCRIBE_CONFIGS
+# operation is this one), and set -e would stop the script before the groups and interview grants below.
+acls --add --allow-principal User:analytics_reader --operation DescribeConfigs --topic "$topic"
 for group in hiring-analytics-batch hiring-analytics-streaming-v1 hiring-operational-events-local hiring-operational-events-integration; do
   acls --add --allow-principal User:analytics_reader --operation READ --group "$group"
 done

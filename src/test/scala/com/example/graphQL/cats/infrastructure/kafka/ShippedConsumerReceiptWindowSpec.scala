@@ -34,13 +34,19 @@ final class ShippedConsumerReceiptWindowSpec extends FunSuite {
     assertEquals(retention.getDuration("kafka-segment-roll").toMillis, segmentMs)
   }
 
-  test("DDC-02.5 the provisioning script grants DESCRIBE_CONFIGS on the events topic only") {
-    val grants = shipped("docker/kafka/provision-access.sh").linesIterator
-      .filter(_.contains("DESCRIBE_CONFIGS"))
-      .toList
+  test("DDC-02.5 the provisioning script grants DescribeConfigs on the events topic only") {
+    // The kafka-acls.sh spelling is DescribeConfigs; the tool refuses DESCRIBE_CONFIGS (observed on apache/kafka:3.9.2).
+    val script = shipped("docker/kafka/provision-access.sh")
+    val commands = script.linesIterator.filterNot(_.trim.startsWith("#")).toList
+    // Any spelling of the operation, whatever its case or underscore.
+    val describeConfigs = commands.filter(_.toLowerCase.replace("_", "").contains("describeconfigs"))
     assertEquals(
-      grants,
-      List("""acls --add --allow-principal User:analytics_reader --operation DESCRIBE_CONFIGS --topic "$topic"""")
+      describeConfigs,
+      List("""acls --add --allow-principal User:analytics_reader --operation DescribeConfigs --topic "$topic"""")
+    )
+    assert(
+      !commands.exists(_.contains("DESCRIBE_CONFIGS")),
+      "kafka-acls.sh rejects the DESCRIBE_CONFIGS spelling"
     )
   }
 }
