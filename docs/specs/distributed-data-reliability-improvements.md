@@ -1,10 +1,10 @@
 # Distributed Data Reliability Improvements
 
-Status: **MVP scope complete (2026-11-01)**: items 5, 6, 1, 3 and DDR-04.1 to 04.3 are implemented and passed their review and QA gates (commits 181f5bb, 9114a87, 462aac9, a3645e0, 1363f3a and the DDR-03 test commit). Owner decision (2026-11-01, MVP condition 1): items 5, 6, 1, 3 and DDR-04.1 to DDR-04.3 land before the MVP (local) claim; items 2, 7, 8 and 9 and DDR-04.4's re-measurement are explicitly deferred as additive post-MVP work (no API or analytics shape change). Created from a read-through of the
+Status: **MVP scope complete (2026-11-01)**: items 5, 6, 1, 3 and DDR-04.1 to 04.3 are implemented and passed their review and QA gates (commits 181f5bb, 9114a87, 462aac9, a3645e0, 1363f3a and the DDR-03 test commit). Owner decision (2026-11-01, MVP condition 1): items 5, 6, 1, 3 and DDR-04.1 to DDR-04.3 land before the MVP (local) claim; items 2, 7, 8 and 9 and DDR-04.4's re-measurement are explicitly deferred as post-MVP work (no API or analytics shape change in the MVP scope). Created from a read-through of the
 codebase against *Designing Data-Intensive Applications* (Kleppmann, 1st ed., 2017). Chapter references are to that book.
 
 Items 5, 6, 1, 3 and DDR-04.1 to 04.3 were implemented under the pre-MVP contract policy, so they add no migration,
-backfill or dual-read/write code. The policy applies until the MVP is complete and the first cloud release ships (owner decision 2026-11-08; [schema evolution](../schema-evolution.md)). The post-MVP items (2, 7, 8, 9 and DDR-04.4's re-measurement) keep the versioned Mongo migration ledger where stored data changes. Their API and analytics shape changes are implemented directly under the policy, not as additive changes with deprecation; the owner decides whether that plan changes.
+backfill or dual-read/write code. The policy applies until the owner explicitly asks to start versioning and migration scripts for schema changes (owner decision 2026-11-08; the owner calls that point the first cloud release; [schema evolution](../schema-evolution.md)). The post-MVP items (2, 7, 8, 9 and DDR-04.4's re-measurement) keep the versioned Mongo migration ledger where stored data changes. Their API and analytics shape changes are implemented directly under the policy, with no deprecation window or compatibility code.
 
 ## How to read this plan
 
