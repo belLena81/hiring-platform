@@ -8,7 +8,6 @@ One line per specification, grouped by what the first `- Status:` line says (rea
 
 | Spec | Status |
 |---|---|
-| [kafka-flow-hardening](kafka-flow-hardening.md) | in review; publication waves, batched commits, tolerant wire reader with headers, stable producer identity with generations (migration 036), SCRAM-SHA-512, Kafka client metrics |
 | [analytics-mongo-persistence](analytics-mongo-persistence.md) | in progress; no final QA PASS recorded after the integration regressions were fixed |
 | [hiring-container-runtime](hiring-container-runtime.md) | in review |
 | [hiring-discovery-search-quality](hiring-discovery-search-quality.md) | in progress; Phase 10 partial, `.C` cloud rows open |
@@ -39,6 +38,7 @@ One line per specification, grouped by what the first `- Status:` line says (rea
 | [hiring-analytics-verification](hiring-analytics-verification.md) | done 2026-10-13 |
 | [hiring-end-to-end-acceptance](hiring-end-to-end-acceptance.md) | done for MVP condition 2 (2026-11-02); F5 to F8 open |
 | [hiring-saga-orchestration](hiring-saga-orchestration.md) | done (local) 2026-10-15 |
+| [kafka-flow-hardening](kafka-flow-hardening.md) | done (local) 2026-11-08; check-local PASS at HEAD `012e921`, final QA PASS; KFH-04.9 drill evidence git-ignored and operator-run |
 | [operational-alert-verification](operational-alert-verification.md) | done (MVP observability item 8, 2026-11-07); image acceptances expire 2026-11-20 (per-image rule: Alertmanager also at the first patched Alertmanager release, whichever is first); follow-ups open. Code Reviewer, Security Engineer and Final independent QA PASS (2026-11-07); acceptances are for local use, not a safety statement |
 
 ## No `- Status:` line
