@@ -39,7 +39,7 @@ Re-run the tables with measured figures before any deployment decision.
 | Spark and Delta | Spark 4.2.0, Delta 4.4.1, Scala 3.7.4 with 2.13 artifacts, Java 17 (`analytics/build.sbt`); local one-shot batch over an explicit offset range; opt-in streaming with a 10 s trigger | Batch is idempotent via run manifest and mutex, so it suits spot or serverless compute. Streaming is always-on cost. |
 | Delta properties | `dataSkippingNumIndexedCols`, log and deleted-file retention, `checkpointInterval=100`; Bronze column statistics disabled for privacy | Sensible. No scheduled compaction or VACUUM was found by search; confirm in source. |
 
-The pre-MVP single-active-shape policy applies until the owner explicitly asks to start versioning and migration scripts for schema changes (owner decision 2026-11-08; the owner calls that point the first cloud release). It covers API and analytics shapes only. A dimension or quantization change to stored Mongo vectors is an operational change, so it uses the versioned migration ledger ([schema evolution](schema-evolution.md)); its cost includes re-embedding.
+The pre-MVP single-active-shape policy applies until the owner explicitly asks to start versioning (including API versioning) and migration scripts for schema changes (database, Kafka and so on) (owner decision 2026-11-08; the owner calls that point the first cloud release). It covers API and analytics shapes only. A dimension or quantization change to stored Mongo vectors is an operational change, so it uses the versioned migration ledger ([schema evolution](schema-evolution.md)); its cost includes re-embedding.
 
 ## Search: price list
 
