@@ -96,7 +96,7 @@ acls --add --allow-principal User:analytics_reader --operation DESCRIBE --cluste
 # kafka-acls.sh (3.9) accepts DescribeConfigs and refuses DESCRIBE_CONFIGS for a topic (the broker's DESCRIBE_CONFIGS
 # operation is this one), and set -e would stop the script before the groups and interview grants below.
 acls --add --allow-principal User:analytics_reader --operation DescribeConfigs --topic "$topic"
-for group in hiring-analytics-batch hiring-analytics-streaming-v1 hiring-operational-events-local hiring-operational-events-integration; do
+for group in hiring-analytics-batch hiring-analytics-streaming-v1 hiring-operational-events-local; do
   acls --add --allow-principal User:analytics_reader --operation READ --group "$group"
 done
 
