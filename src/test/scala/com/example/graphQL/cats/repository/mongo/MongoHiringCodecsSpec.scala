@@ -119,7 +119,7 @@ class MongoHiringCodecsSpec extends FunSuite {
     assert(!document.containsKey("recruiterProfile"))
   }
 
-  test("candidate private search profile round-trips with canonical location sidecars") {
+  test("HSE-01 candidate private search profile round-trips with canonical location sidecars") {
     val profile = CandidateProfile(
       Set("Scala"),
       Some("Builds backend services"),

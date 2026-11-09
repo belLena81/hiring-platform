@@ -629,7 +629,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     }
   }
 
-  test("candidate private matching fields are visible to their owner and hidden from recruiters") {
+  test("HSE-01 candidate private matching fields are visible to their owner and hidden from recruiters") {
     val ownerQuery =
       """query { myApplications(first: 10) { edges { node { candidate { profile { ... on CandidateProfile { currentResidence { country city } availabilityStatus recruiterSearchOptIn } } } } } } }"""
     val recruiterQuery =
@@ -661,6 +661,42 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       assertEquals(privateView.get[Option[Json]]("currentResidence"), Right(None))
       assertEquals(privateView.get[Option[Json]]("availabilityStatus"), Right(None))
       assertEquals(privateView.get[Boolean]("recruiterSearchOptIn"), Right(false))
+    }
+  }
+
+  test("HSE-01 me returns the candidate's own residence, availability and recruiter search consent") {
+    val otherId = UserId(UUID.fromString("10000000-0000-0000-0000-000000000008"))
+    val other = candidate.copy(
+      id = otherId,
+      email = Some(email("me-other@example.com")),
+      name = "Other",
+      profile = Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None)))
+    )
+    val users = List(candidate, recruiter, other)
+    val query =
+      """query { me { id profile { ... on CandidateProfile { currentResidence { country city } availabilityStatus recruiterSearchOptIn } } } }"""
+    def profileOf(json: Json) = json.hcursor.downField("data").downField("me").downField("profile")
+    for {
+      own <- executeWithUsers(query, Some(candidateActor), users, new ProfileEchoAccountService(users))
+      another <- executeWithUsers(
+        query,
+        Some(ActorContext(otherId, UserRole.Candidate)),
+        users,
+        new ProfileEchoAccountService(users)
+      )
+    } yield {
+      val ownProfile = profileOf(own)
+      assert(ownProfile.succeeded, own.noSpaces)
+      assertEquals(ownProfile.downField("currentResidence").get[String]("country"), Right("Cyprus"))
+      assertEquals(ownProfile.downField("currentResidence").get[Option[String]]("city"), Right(Some("Nicosia")))
+      assertEquals(ownProfile.get[String]("availabilityStatus"), Right("AVAILABLE_NOW"))
+      assertEquals(ownProfile.get[Boolean]("recruiterSearchOptIn"), Right(true))
+      // A different actor's `me` is that actor's own profile: none of the first candidate's private values appear.
+      val otherProfile = profileOf(another)
+      assertEquals(otherProfile.get[Option[Json]]("currentResidence"), Right(None))
+      assertEquals(otherProfile.get[Option[Json]]("availabilityStatus"), Right(None))
+      assertEquals(otherProfile.get[Boolean]("recruiterSearchOptIn"), Right(false))
+      assert(!another.noSpaces.contains("Cyprus"), another.noSpaces)
     }
   }
 
@@ -1779,7 +1815,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     }
   }
 
-  test("AC-05.4 a residence with only a country stores no city, and omitting residence clears it") {
+  test("HSE-01 AC-05.4 a residence with only a country stores no city, and omitting residence clears it") {
     val withCountry = updateProfileQuery("""{ candidate: { skills: ["Scala"], residence: { country: "DE" } } }""")
     val withoutResidence = updateProfileQuery("""{ candidate: { skills: ["Scala"] } }""")
     withCapturingService { (service, _, updates) =>
@@ -2300,6 +2336,27 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
 
     override def listUsers(actor: ActorContext, page: UserPageRequest): UseCaseF[IO, List[User]] =
       EitherT.leftT(unsupported)
+  }
+
+  /** `me` resolves the calling user from the given users; every other operation is unsupported. */
+  private final class ProfileEchoAccountService(users: List[User]) extends AccountUseCases[IO] {
+    private def unsupported[A]: UseCaseF[IO, A] =
+      EitherT.leftT(UseCaseError.Account(com.example.graphQL.cats.service.AccountError.ProfileUnsupportedForRole))
+    override def signUp(request: IdempotencyRequest, input: SignUpInput): UseCaseF[IO, (User, AccountToken)] =
+      unsupported
+    override def login(request: IdempotencyRequest, input: LoginInput): UseCaseF[IO, (User, AccountToken)] =
+      unsupported
+    override def me(actor: ActorContext): UseCaseF[IO, User] =
+      users.find(_.id == actor.userId).fold(unsupported[User])(user => EitherT.rightT(user))
+    override def updateMyProfile(
+        request: IdempotencyRequest,
+        actor: ActorContext,
+        input: AccountProfileInput
+    ): UseCaseF[IO, User] = unsupported
+    override def deleteMyAccount(request: IdempotencyRequest, actor: ActorContext): UseCaseF[IO, String] = unsupported
+    override def accountDeletionStatus(actor: ActorContext, receiptId: String): UseCaseF[IO, AccountDeletionStatus] =
+      EitherT.rightT(AccountDeletionStatus.NotFound)
+    override def listUsers(actor: ActorContext, page: UserPageRequest): UseCaseF[IO, List[User]] = unsupported
   }
 
   private object SignUpReturningCandidateService extends AccountUseCases[IO] {

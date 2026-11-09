@@ -243,7 +243,9 @@ final class MongoCandidateResidenceIntegrityIntegrationSpec extends MongoIntegra
   )
 
   malformedProfiles.foreach { case (name, corrupt) =>
-    test(s"existing profile migration retains an interrupted checkpoint for malformed $name and resumes after repair") {
+    test(
+      s"HSE-01 existing profile migration retains an interrupted checkpoint for malformed $name and resumes after repair"
+    ) {
       mongoResource.use { fixture =>
         val rows = (0 until 501).toList.map(candidate)
         val _ = rows.head.get("profile", classOf[Document]).remove("recruiterSearchOptIn")

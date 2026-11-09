@@ -13,7 +13,7 @@ One line per specification, grouped by what the first `- Status:` line says (rea
 | [hiring-discovery-search-quality](hiring-discovery-search-quality.md) | in progress; Phase 10 partial, `.C` cloud rows open |
 | [hiring-mongo-schema-consolidation](hiring-mongo-schema-consolidation.md) | in progress |
 | [hiring-platform-refinements](hiring-platform-refinements.md) | in progress; each item carries its own status |
-| [hiring-search-enhancements](hiring-search-enhancements.md) | in progress; Phase 9 partial |
+| [hiring-search-enhancements](hiring-search-enhancements.md) | in progress; Phase 9 Completed (local), cloud rows in Phase 9C deferred, SEB-02.H pending |
 | [mongodb-vector-retrieval-optimization](mongodb-vector-retrieval-optimization.md) | in progress; `.C` rows deferred, overall partial |
 | [analytics-reconciliation-recovery](analytics-reconciliation-recovery.md) | draft |
 | [deployed-analytics-performance](deployed-analytics-performance.md) | draft |

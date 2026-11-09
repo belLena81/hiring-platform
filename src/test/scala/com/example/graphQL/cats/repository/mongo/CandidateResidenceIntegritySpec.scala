@@ -10,7 +10,7 @@ final class CandidateResidenceIntegritySpec extends FunSuite {
   private def residence: Document =
     new Document("country", " Cyprus ").append("countryCanonical", "cyprus")
 
-  test("absent residence and absent city preserve legitimate optional values") {
+  test("HSE-01 absent residence and absent city preserve legitimate optional values") {
     assertEquals(CandidateResidenceIntegrity.validate(new Document()), Right(()))
     assertEquals(CandidateResidenceIntegrity.validate(new Document("profile", new Document())), Right(()))
     assertEquals(CandidateResidenceIntegrity.validate(user(residence)), Right(()))
@@ -21,7 +21,7 @@ final class CandidateResidenceIntegritySpec extends FunSuite {
     assertEquals(CandidateResidenceIntegrity.validate(user(value)), Right(()))
   }
 
-  test("city and canonical city must both exist and match") {
+  test("HSE-01 city and canonical city must both exist and match") {
     List(
       residence.append("city", "Nicosia"),
       residence.append("cityCanonical", "nicosia"),
@@ -31,7 +31,7 @@ final class CandidateResidenceIntegritySpec extends FunSuite {
     ).foreach(value => assert(CandidateResidenceIntegrity.validate(user(value)).isLeft))
   }
 
-  test("malformed residence, wrong types, country mismatches and oversized values fail typed validation") {
+  test("HSE-01 malformed residence, wrong types, country mismatches and oversized values fail typed validation") {
     List(
       new Document("profile", new Document("currentResidence", "invalid")),
       new Document("profile", new Document("currentResidence", null)),

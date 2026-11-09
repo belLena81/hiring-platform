@@ -170,7 +170,7 @@ final class SemanticSearchLexicalFallbackSpec extends CatsEffectSuite {
     Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), Some("Backend engineer"), None)))
   )
 
-  test("AIR-05.1 provider failure answers from lexical retrieval: only open jobs, filter honoured, degraded") {
+  test("HSE-03 AIR-05.1 provider failure answers from lexical retrieval: only open jobs, filter honoured, degraded") {
     val kyiv = jobIn(1, "Kyiv")
     val lviv = jobIn(2, "Lviv")
     val closed = jobIn(3, "Kyiv", JobStatus.Closed)
@@ -348,7 +348,7 @@ final class SemanticSearchLexicalFallbackSpec extends CatsEffectSuite {
     }
   }
 
-  test("AIR-05.2 a recruiter who does not own the job or a closed job gets no provider call and no fallback") {
+  test("HSE-02 AIR-05.2 a recruiter who does not own the job or a closed job gets no provider call and no fallback") {
     val other = recruiter.copy(id = userNumber(90))
     val owned = jobWithEmbedding(jobIn(1, "Kyiv"))
     val closed = jobWithEmbedding(jobIn(2, "Kyiv", JobStatus.Closed))
@@ -389,7 +389,9 @@ final class SemanticSearchLexicalFallbackSpec extends CatsEffectSuite {
   private def profileIn(residence: CandidateResidence, optIn: Boolean) =
     CandidateProfile(Set("Scala"), Some("Backend engineer"), None, Some(residence), None, optIn)
 
-  test("AIR-05.2 candidate fallback excludes deleted and non-Candidate users and honours consent-gated filters") {
+  test(
+    "HSE-02 AIR-05.2 candidate fallback excludes deleted and non-Candidate users and honours consent-gated filters"
+  ) {
     val job = jobWithEmbedding(jobIn(1, "Kyiv"))
     val matching = candidateUser(1, profileIn(cyprus, optIn = true))
     val elsewhere = candidateUser(2, profileIn(sweden, optIn = true))

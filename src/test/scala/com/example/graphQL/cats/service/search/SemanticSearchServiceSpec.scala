@@ -81,7 +81,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
     }
   }
 
-  test("recruiter candidate matching normalizes direct service filters before retrieval") {
+  test("HSE-02 recruiter candidate matching normalizes direct service filters before retrieval") {
     val filters =
       CandidateMatchFilters(
         List(" Scala ", "MongoDB", "SCALA"),
@@ -275,7 +275,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
     }
   }
 
-  test("VHS-AC04 candidate matching requires recruiter ownership before exposing candidates") {
+  test("HSE-02 VHS-AC04 candidate matching requires recruiter ownership before exposing candidates") {
     val owned = openJob.copy(embedding = Some(jobEmbedding))
     val otherRecruiter = Identifiers.UserId(UUID.fromString("00000000-0000-0000-0000-000000000088"))
     val otherRecruiterUser = recruiter.copy(id = otherRecruiter, email = Some(email("other-recruiter@example.com")))
@@ -321,7 +321,9 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
     }
   }
 
-  test("forbidden actors, unowned jobs and closed jobs reject query matching before provider or retrieval work") {
+  test(
+    "HSE-02 forbidden actors, unowned jobs and closed jobs reject query matching before provider or retrieval work"
+  ) {
     val owned = openJob.copy(embedding = Some(jobEmbedding))
     val unowned = owned.copy(recruiterId = candidateId)
     val scenarios: List[(ActorContext, Job, DomainError)] = List(
@@ -460,7 +462,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
     } yield assertEquals(result.left.toOption, Some(UseCaseError.Domain(DomainError.JobMustBeOpen)))
   }
 
-  test("MVR-05 candidate hit validation applies consent and private filters while preserving survivor order") {
+  test("HSE-02 MVR-05 candidate hit validation applies consent and private filters while preserving survivor order") {
     val owned = openJob.copy(embedding = Some(jobEmbedding))
     val country = CandidateResidence("Cyprus", Some("Nicosia"))
     val optedOut = profile.copy(currentResidence = None, availabilityStatus = None, recruiterSearchOptIn = false)

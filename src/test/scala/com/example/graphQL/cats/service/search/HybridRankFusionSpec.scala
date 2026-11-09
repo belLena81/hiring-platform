@@ -47,7 +47,7 @@ final class HybridRankFusionSpec extends FunSuite {
     assertEquals(HybridRankFusion.jobs(jobs, Nil, limit = 2).size, 2)
   }
 
-  test("candidate fusion combines three ranks deterministically and matched skills preserve job spelling") {
+  test("HSE-03 candidate fusion combines three ranks deterministically and matched skills preserve job spelling") {
     def candidate(id: Int): RankedCandidate = RankedCandidate(
       CandidateSearchHit(
         UserId(UUID.fromString(f"00000000-0000-0000-0000-0000000009${id}%02d")),

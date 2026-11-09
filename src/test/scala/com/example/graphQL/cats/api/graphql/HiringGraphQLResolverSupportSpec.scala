@@ -6,7 +6,7 @@ import cats.syntax.all.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLResolverSupport.*
 import com.example.graphQL.cats.domain.error.{DomainError as DomainFailure, DomainValidationError}
-import com.example.graphQL.cats.domain.model.{ApplicationStatus, JobStatus, UserRole}
+import com.example.graphQL.cats.domain.model.{ApplicationStatus, CandidateAvailabilityStatus, JobStatus, UserRole}
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId}
 import com.example.graphQL.cats.domain.workflow.InterviewWorkflowError
 import com.example.graphQL.cats.service.port.{MutationReceiptFingerprint, RepositoryF}
@@ -29,7 +29,7 @@ import java.util.UUID
 final class HiringGraphQLResolverSupportSpec extends CatsEffectSuite {
   private val canonicalJsonPrinter = Printer.noSpaces.copy(sortKeys = true)
 
-  test("encodes mutation input values and fingerprints sorted compact JSON") {
+  test("HSE-01 encodes mutation input values and fingerprints sorted compact JSON") {
     val idempotencyKey = UUID.fromString("00000000-0000-0000-0000-000000000001")
     val input = SignUpGraphQLInput(
       idempotencyKey,
@@ -105,6 +105,52 @@ final class HiringGraphQLResolverSupportSpec extends CatsEffectSuite {
       idempotencyRequest(idempotencyKey, firstObject).fingerprint,
       idempotencyRequest(idempotencyKey, reorderedObject).fingerprint
     )
+  }
+
+  test("HSE-01 fingerprints change with each private matching value and repeat for identical input") {
+    val idempotencyKey = UUID.fromString("00000000-0000-0000-0000-000000000001")
+    def fingerprint(
+        residence: Option[ResidenceGraphQLInput],
+        availability: Option[CandidateAvailabilityStatus],
+        consent: Option[Boolean]
+    ) = {
+      val input = SignUpGraphQLInput(
+        idempotencyKey,
+        "Candidate",
+        UserRole.Candidate,
+        "secret",
+        Some(
+          ProfileGraphQLInput(
+            Some(CandidateProfileGraphQLInput(Some(List("Scala")), None, None, residence, availability, consent)),
+            None
+          )
+        )
+      )
+      idempotencyRequest(idempotencyKey, input.idempotencyPayload).fingerprint
+    }
+    val cyprus = Some(ResidenceGraphQLInput("Cyprus", Some("Nicosia")))
+    val base = fingerprint(cyprus, Some(CandidateAvailabilityStatus.AVAILABLE_NOW), Some(true))
+
+    assertEquals(base, fingerprint(cyprus, Some(CandidateAvailabilityStatus.AVAILABLE_NOW), Some(true)))
+    assertNotEquals(
+      base,
+      fingerprint(
+        Some(ResidenceGraphQLInput("Cyprus", Some("Limassol"))),
+        Some(CandidateAvailabilityStatus.AVAILABLE_NOW),
+        Some(true)
+      )
+    )
+    assertNotEquals(
+      base,
+      fingerprint(
+        Some(ResidenceGraphQLInput("Greece", Some("Nicosia"))),
+        Some(CandidateAvailabilityStatus.AVAILABLE_NOW),
+        Some(true)
+      )
+    )
+    assertNotEquals(base, fingerprint(cyprus, Some(CandidateAvailabilityStatus.UNAVAILABLE), Some(true)))
+    assertNotEquals(base, fingerprint(cyprus, Some(CandidateAvailabilityStatus.AVAILABLE_NOW), Some(false)))
+    assertNotEquals(base, fingerprint(None, Some(CandidateAvailabilityStatus.AVAILABLE_NOW), Some(true)))
   }
 
   test("encodes application status actions as structured canonical JSON") {

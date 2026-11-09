@@ -270,7 +270,7 @@ final class AtlasHiringSearchBoundsIntegrationSpec extends CatsEffectSuite {
     }
   }
 
-  test("SEB-04.L a recruiter who does not own the job and a candidate are denied before any retrieval") {
+  test("HSE-02 SEB-04.L a recruiter who does not own the job and a candidate are denied before any retrieval") {
     live { (db, policy, _) =>
       for {
         _ <- MongoHiringSetup.initialize(db, Some(indexes), Diagnostics.noop[IO])

@@ -134,6 +134,74 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
     }
   }
 
+  test("HSE-01 signup persists residence, availability and consent, and absent consent defaults to false") {
+    val fullProfile = CandidateProfile(
+      Set("Scala"),
+      None,
+      None,
+      Some(CandidateResidence("Cyprus", Some("Nicosia"))),
+      Some(CandidateAvailabilityStatus.AVAILABLE_NOW),
+      recruiterSearchOptIn = true
+    )
+    def signUp(name: String, profile: CandidateProfile) =
+      for {
+        accounts <- TestAccounts.create(initialized = true)
+        service = accountService(new TestUsers(Map.empty), accounts)
+        result <- service
+          .signUp(
+            request,
+            SignUpInput(name, UserRole.Candidate, "password-password", Some(UserProfile.Candidate(profile)))
+          )
+          .value
+        stored <- accounts.values.get
+      } yield (result, stored.values.toList.flatMap(_.user.candidateProfile))
+    for {
+      explicit <- signUp("Candidate", fullProfile)
+      defaults <- signUp("Defaulted", CandidateProfile(Set("Scala"), None, None))
+    } yield {
+      assert(explicit._1.isRight, clue(explicit._1))
+      assertEquals(explicit._2, List(fullProfile))
+      assert(defaults._1.isRight, clue(defaults._1))
+      assertEquals(defaults._2.map(_.recruiterSearchOptIn), List(false))
+      assertEquals(defaults._2.map(_.availabilityStatus), List(None))
+      assertEquals(defaults._2.map(_.currentResidence), List(None))
+    }
+  }
+
+  test("HSE-01 signup and profile update reject a blank residence country with a typed validation error") {
+    val blankCountry = CandidateProfile(Set("Scala"), None, None, Some(CandidateResidence("  ", None)))
+    for {
+      accounts <- TestAccounts.create(initialized = true)
+      candidateUser = User(
+        userId,
+        None,
+        "Candidate",
+        UserRole.Candidate,
+        Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None))),
+        now
+      )
+      service = accountService(new TestUsers(Map(candidateUser.id -> candidateUser)), accounts)
+      signedUp <- service
+        .signUp(
+          request,
+          SignUpInput("Candidate", UserRole.Candidate, "password-password", Some(UserProfile.Candidate(blankCountry)))
+        )
+        .value
+      updated <- service
+        .updateMyProfile(
+          request,
+          ActorContext(candidateUser.id, UserRole.Candidate),
+          AccountProfileInput(UserProfile.Candidate(blankCountry))
+        )
+        .value
+      stored <- accounts.values.get
+    } yield {
+      assert(signedUp.left.exists(_.isInstanceOf[UseCaseError.ValidationFailed]), clue(signedUp))
+      assert(updated.left.exists(_.isInstanceOf[UseCaseError.ValidationFailed]), clue(updated))
+      assertEquals(stored, Map.empty)
+    }
+  }
+
   test("signup replay reissues an access token for the active account") {
     for {
       accounts <- TestAccounts.create(initialized = true)

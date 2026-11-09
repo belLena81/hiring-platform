@@ -221,7 +221,7 @@ final class HiringSearchAcceptanceIntegrationSpec extends munit.CatsEffectSuite 
     }
   }
 
-  storyTest("HEA-06.1 Ana's recommendations contain only open, visible jobs and put J1 first") {
+  storyTest("HSE-03 HEA-06.1 Ana's recommendations contain only open, visible jobs and put J1 first") {
     eventually("recommendations", indexLagDeadline)(
       search(recommendationsDocument, "recommendedJobs", Json.obj("first" -> 10.asJson), anaActor)
         .flatTap(answer => IO(leakGuard(hitJobKeys(answer), "recommendedJobs")))
@@ -235,7 +235,9 @@ final class HiringSearchAcceptanceIntegrationSpec extends munit.CatsEffectSuite 
     }
   }
 
-  storyTest("HEA-10.1 Rita's matches for J1 rank Ana first with matched skills, and reveal no private profile data") {
+  storyTest(
+    "HSE-03 HEA-10.1 Rita's matches for J1 rank Ana first with matched skills, and reveal no private profile data"
+  ) {
     val jobId = ids(story.j1.key)
     def matches(filter: Option[Json]): IO[GraphQLResponse] =
       operations.run(

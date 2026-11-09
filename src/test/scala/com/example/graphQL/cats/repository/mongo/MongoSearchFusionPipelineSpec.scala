@@ -117,7 +117,9 @@ class MongoSearchFusionPipelineSpec extends FunSuite {
     assertEquals(stages(4).get("$rerank", classOf[Document]).getInteger("numDocsToRerank").intValue(), 30)
   }
 
-  test("MVR-04 production candidate fusion branches apply account, skill and opt-in private filters before ranking") {
+  test(
+    "HSE-02 MVR-04 production candidate fusion branches apply account, skill and opt-in private filters before ranking"
+  ) {
     val repo = repository(branchLimit = 30)
     val filter = repo.candidateFilter(searchQuery, includeEmbeddingModel = true)
     val stages = repo.nativeCandidateFusionStages(searchQuery, List(0.3f, 0.4f), filter)
@@ -283,7 +285,7 @@ class MongoSearchFusionPipelineSpec extends FunSuite {
     assert(!stages.head.toJson.contains("availability"))
   }
 
-  test("indexed eligibility keeps exact job skills conjunctive and explicit consent bypass alternatives") {
+  test("HSE-02 indexed eligibility keeps exact job skills conjunctive and explicit consent bypass alternatives") {
     val repo = repository()
     val query = searchQuery.copy(filter = searchQuery.filter.copy(skills = Set("Scala", "Kafka")))
     val job = repo.jobLexicalFilter(query, query.filter)

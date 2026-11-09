@@ -68,7 +68,10 @@ final class HiringGraphQLSearchOutcomeSpec extends CatsEffectSuite {
   }
 
   /** Returns no vector hits; lexical hits are the given jobs (eligible for Candidates) or a store failure. */
-  private final class FakeRepository(lexical: Either[RepositoryError, List[Job]]) extends SemanticSearchRepository[IO] {
+  private final class FakeRepository(
+      lexical: Either[RepositoryError, List[Job]],
+      lexicalCandidateUsers: List[User] = Nil
+  ) extends SemanticSearchRepository[IO] {
     override def authorizedJobEligibility(
         scope: com.example.graphQL.cats.service.read.HiringReadScope,
         ids: List[JobId],
@@ -90,7 +93,13 @@ final class HiringGraphQLSearchOutcomeSpec extends CatsEffectSuite {
     ) =
       RepositoryF
         .at[IO]
-        .fromEither(Right(List.empty[com.example.graphQL.cats.service.search.CandidateSearchEligibility]))
+        .fromEither(
+          Right(
+            lexicalCandidateUsers
+              .filter(user => ids.contains(user.id))
+              .map(com.example.graphQL.cats.service.search.CandidateSearchEligibility.fromUser)
+          )
+        )
     override def searchJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
       RepositoryF.at[IO].fromEither(Right(Nil))
     override def recommendedJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
@@ -102,7 +111,9 @@ final class HiringGraphQLSearchOutcomeSpec extends CatsEffectSuite {
         .at[IO]
         .fromEither(lexical.map(_.map(job => LexicalRetrievalHit(job.id, 1.5d, query.searchId))))
     override def lexicalCandidates(query: LexicalSearchQuery): RepositoryF[IO, List[LexicalCandidateHit]] =
-      RepositoryF.at[IO].fromEither(Right(Nil))
+      RepositoryF
+        .at[IO]
+        .fromEither(Right(lexicalCandidateUsers.map(user => LexicalRetrievalHit(user.id, 1.5d, query.searchId))))
   }
 
   private def run(
@@ -113,7 +124,8 @@ final class HiringGraphQLSearchOutcomeSpec extends CatsEffectSuite {
       job: Job = freshJob,
       searchConfigured: Boolean = true,
       lexical: Either[RepositoryError, List[Job]] = Right(Nil),
-      costSink: Option[AtomicInteger] = None
+      costSink: Option[AtomicInteger] = None,
+      lexicalCandidateUsers: List[User] = Nil
   ): IO[Json] =
     for {
       usersRef <- Ref.of[IO, Map[UserId, User]](users.map(user => user.id -> user).toMap)
@@ -124,7 +136,13 @@ final class HiringGraphQLSearchOutcomeSpec extends CatsEffectSuite {
       userRepository = new InMemoryUsers(usersRef)
       jobRepository = new InMemoryJobs(jobsRef)
       applications = new InMemoryApplications(applicationsRef, eventsRef, createError)
-      service = SemanticSearchService(userRepository, jobRepository, embeddings, new FakeRepository(lexical), model)
+      service = SemanticSearchService(
+        userRepository,
+        jobRepository,
+        embeddings,
+        new FakeRepository(lexical, lexicalCandidateUsers),
+        model
+      )
       services = TestGraphQLSupport.emptyServices.copy(
         readModel = new HiringReadService(userRepository, jobRepository, applications),
         semanticSearchService = Option.when(searchConfigured)(service)
@@ -358,6 +376,94 @@ final class HiringGraphQLSearchOutcomeSpec extends CatsEffectSuite {
       assertEquals(alone, 100 + 5 * (1 + 2))
       assertEquals(withErrors, alone)
       assertEquals(withAllAlternatives, alone)
+    }
+  }
+
+  test("HSE-02 candidateMatches for an owned but closed job is a sanitized DomainError with no provider call") {
+    val embeddings = new CountingEmbeddings(Right(vector))
+    val closedJob = freshJob.copy(state = JobState.Closed(now))
+    run(
+      s"""query { sibling: accountDeletionStatus(receiptId: "00000000-0000-0000-0000-000000000001") candidateMatches(jobId: "${closedJob.id.value}", query: "scala", first: 5) { $outcome } }""",
+      candidateActor(recruiter),
+      embeddings,
+      job = closedJob
+    ).map { json =>
+      assert(!json.hcursor.downField("errors").succeeded, clue(json))
+      val matches = field(json, "candidateMatches")
+      assertEquals(matches.get[String]("__typename"), Right("DomainError"))
+      assertEquals(matches.get[String]("code"), Right("JOB_MUST_BE_OPEN"))
+      assert(!json.noSpaces.contains("Exception"), clue(json))
+      assertEquals(field(json, "sibling").focus.flatMap(_.asString), Some("NOT_FOUND"))
+      assertEquals(embeddings.calls.get, 0)
+    }
+  }
+
+  private val matchingJob = ServiceFixtures.openJob.copy(skills = Set("Scala", "JavaScript", "java"))
+  private val matchingFreshJob = matchingJob.copy(embedding =
+    Some(
+      EntityEmbedding(List(0.1f, 0.2f), EmbeddingMeta(model, SourceHash.sha256(SearchableText.job(matchingJob)), now))
+    )
+  )
+  private def candidateWithSkills(skills: Set[String]) =
+    candidate.copy(profile = Some(UserProfile.Candidate(CandidateProfile(skills, None, None))))
+
+  test("HSE-03 ranked job results expose matchedSkills as the trimmed case-insensitive intersection in job spelling") {
+    val searcher = candidateWithSkills(Set(" scala ", "JAVA", "Rust"))
+    run(
+      s"""query { semanticJobSearch(query: "scala", first: 5) {
+         |  __typename ... on RankedJobResults { results { searchMode matchedSkills } } } }""".stripMargin,
+      candidateActor(searcher),
+      new CountingEmbeddings(Left(EmbeddingError.ProviderUnavailable)),
+      users = List(searcher, recruiter),
+      job = matchingFreshJob,
+      lexical = Right(List(matchingFreshJob))
+    ).map { json =>
+      assert(!json.hcursor.downField("errors").succeeded, clue(json))
+      val hit = field(json, "semanticJobSearch").downField("results").downArray
+      assertEquals(hit.get[String]("searchMode"), Right("LEXICAL"))
+      assertEquals(hit.get[List[String]]("matchedSkills"), Right(List("java", "Scala")))
+    }
+  }
+
+  test("HSE-03 ranked job results expose an empty matchedSkills list when no skill intersects") {
+    val searcher = candidateWithSkills(Set("Rust"))
+    run(
+      s"""query { semanticJobSearch(query: "scala", first: 5) {
+         |  __typename ... on RankedJobResults { results { matchedSkills } } } }""".stripMargin,
+      candidateActor(searcher),
+      new CountingEmbeddings(Left(EmbeddingError.ProviderUnavailable)),
+      users = List(searcher, recruiter),
+      job = matchingFreshJob,
+      lexical = Right(List(matchingFreshJob))
+    ).map { json =>
+      val hit = field(json, "semanticJobSearch").downField("results").downArray
+      assertEquals(hit.get[List[String]]("matchedSkills"), Right(Nil))
+    }
+  }
+
+  test("HSE-03 candidate match results expose matchedSkills as the trimmed case-insensitive intersection") {
+    val matched = candidateWithSkills(Set(" scala ", "JAVA", "Rust")).copy(
+      profile = Some(
+        UserProfile.Candidate(
+          CandidateProfile(Set(" scala ", "JAVA", "Rust"), None, None, recruiterSearchOptIn = true)
+        )
+      )
+    )
+    run(
+      s"""query { candidateMatches(jobId: "${matchingFreshJob.id.value}", query: "scala", first: 5) {
+         |  __typename ... on RankedCandidateResults { results { searchMode matchedSkills } } } }""".stripMargin,
+      candidateActor(recruiter),
+      new CountingEmbeddings(Left(EmbeddingError.ProviderUnavailable)),
+      users = List(matched, recruiter),
+      job = matchingFreshJob,
+      lexicalCandidateUsers = List(matched)
+    ).map { json =>
+      assert(!json.hcursor.downField("errors").succeeded, clue(json))
+      val results = field(json, "candidateMatches")
+      assertEquals(results.get[String]("__typename"), Right("RankedCandidateResults"))
+      val hit = results.downField("results").downArray
+      assertEquals(hit.get[String]("searchMode"), Right("LEXICAL"))
+      assertEquals(hit.get[List[String]]("matchedSkills"), Right(List("java", "Scala")))
     }
   }
 

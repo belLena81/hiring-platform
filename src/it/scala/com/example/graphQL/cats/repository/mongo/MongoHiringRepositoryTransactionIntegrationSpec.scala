@@ -138,7 +138,7 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends MongoIntegrationSu
     }
   }
 
-  test("startup backfills revisions and skips scans after the migration is complete") {
+  test("HSE-01 startup backfills revisions and skips scans after the migration is complete") {
     replicaSet.use { instance =>
       MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
         LocalTestServices.database(client).use { database =>

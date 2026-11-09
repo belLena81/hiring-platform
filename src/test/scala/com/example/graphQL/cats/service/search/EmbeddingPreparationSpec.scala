@@ -41,7 +41,7 @@ final class EmbeddingPreparationSpec extends FunSuite {
     )
   }
 
-  test("private candidate attributes never alter prepared searchable source") {
+  test("HSE-01 private candidate attributes never alter prepared searchable source") {
     val profile = CandidateProfile(Set("Scala", "Kafka"), Some("Hiring platform engineer"), None)
     val changed = profile.copy(
       currentResidence = Some(CandidateResidence("Cyprus", Some("Nicosia"))),

@@ -14,7 +14,7 @@ final class ValidatedCandidateMatchFiltersSpec extends FunSuite {
   private def errors(request: CandidateMatchFilters): List[SearchError] =
     ValidatedCandidateMatchFilters.from(request).fold(_.toList, _ => Nil)
 
-  test("canonical criteria preserve AND matching and the typed availability state") {
+  test("HSE-02 canonical criteria preserve AND matching and the typed availability state") {
     val filters = validated(
       CandidateMatchFilters(
         List(" MongoDB ", "SCALA", "Scala"),
@@ -100,7 +100,7 @@ final class ValidatedCandidateMatchFiltersSpec extends FunSuite {
     assert(!eligible(CandidateMatchFilters(List("İ", "scala"), None, None, None)))
   }
 
-  test("consent bypasses private criteria while public skill criteria always apply") {
+  test("HSE-02 consent bypasses private criteria while public skill criteria always apply") {
     val profile = CandidateProfile(Set(" Scala "), Some("Engineer"), None)
     val meta = EmbeddingMeta("model", SourceHash.sha256(SearchableText.candidate(profile)), now)
     val current =
