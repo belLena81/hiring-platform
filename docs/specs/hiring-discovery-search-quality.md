@@ -856,7 +856,7 @@ These verdicts do not make slice 1 done. Reviews for slice 1 are now Security En
 
 **Not evidenced:**
 
-- The Atlas Local parts of HDQ-07.8 and HDQ-07.9. The Atlas-gated spec is written and compiles but has not run, so no Atlas Local result exists for either criterion (see the [Atlas Local subsection](#atlas-local-spec-2026-11-10)).
+- The Atlas Local parts of HDQ-07.8 and HDQ-07.9. The Atlas-gated spec is written and has not run on Atlas (QA's `scripts/run-local-tests.sh` run on a31be45 compiled the reformatted file, loaded its 5 tests and skipped them without `ATLAS_TEST_URI`), so no Atlas Local result exists for either criterion (see the [Atlas Local subsection](#atlas-local-spec-2026-11-10)).
 - "Zero ranker calls" and "never reaches the ranker" are shown by composition only: the ranker input equals the service's authoritative output. There is no production seam, so placement inside the service is unevidenced until adoption.
 - The Q3 latency rules are unit-checked only. No Atlas or provider capture has run with them, and the allowance and budget values are open, so no assessment has applied a chosen value. The Atlas runner's 0.0 allowance is a placeholder, not an owner value.
 - The truncation guard covers only the path through `SkillEvidenceRankedEvaluation.rankedRun`. `SearchEvaluationHarness.report` does not check it, so a hand-built ranked run that skips `rankedRun` is not checked. `captureAuthoredRun` with a `SkillEvidenceRanked` strategy calls `observation` directly and does not run the guard. The guard trusts the declared `captureBound`; beyond the length check it does not verify that a captured list is the whole eligible set.
@@ -967,7 +967,7 @@ These verdicts do not make slice 2 done. The owner's full `scripts/check-local.s
 - Latency: the queries are embedded once before the Atlas capture, so the captured Atlas latency includes no provider time. The absolute budget therefore measures Atlas Local retrieval only in this mode.
 - Assessment: the runner passes the owner's allowance and budget in provider mode, and `None` for the observed evidence and the label attestation. The synthetic path is unchanged (allowance 0.0, no budget, no provider flag).
 
-**Tests:** QA's own `sbt test` on `f2e7517` passed 2005 tests, 0 failed, as reported to the Technical Writer by the coordinator. The included suites are `SkillEvidenceRankingSpec` (24), `SkillEvidenceRankedEvaluationSpec` (17), `DiscoveryAccessSpec` (7), `SearchEvaluationAssessmentSpec` (19), `ProviderEmbeddingCaptureSpec` (21) and `VoyageEmbeddingServiceSpec` (23). The developer reported the same command passing before the commit. The IntegrationTest sources compiled (OK) before the commit hook's reformatting; the IntegrationTest compile of the reformatted Atlas spec is not evidenced. `scripts/check-local.sh` has not been run on HEAD `f2e7517`; the last full gate recorded is `bbd4f67`, and the Phase 10 closure run is `0e10cc7`. The pure IT suite `HiringSearchEvaluationCaptureIntegrationSpec` passes 5 of 5. Nothing was run against Atlas or the provider. The unit tests carry the tags `HDQ-08 G2` (the pause), `G4` (refusals, mismatch, failure, record ordering), `G6` (attestation, endpoint, key handling), `G8` (records and tokens) and `G9` (budget, allowance and pause ranges).
+**Tests:** QA's own `sbt test` on `f2e7517` passed 2005 tests, 0 failed, as reported to the Technical Writer by the coordinator. The included suites are `SkillEvidenceRankingSpec` (24), `SkillEvidenceRankedEvaluationSpec` (17), `SkillEvidenceRankedDiscoveryAccessSpec` (7), `SearchEvaluationAssessmentSpec` (19), `ProviderEmbeddingCaptureSpec` (21) and `VoyageEmbeddingServiceSpec` (23). The developer reported the same command passing before the commit. The IntegrationTest sources compiled (OK) before the commit hook's reformatting; the IntegrationTest compile of the reformatted Atlas spec is not evidenced. `scripts/check-local.sh` has not been run on HEAD `f2e7517`; the last full gate recorded is `bbd4f67`, and the Phase 10 closure run is `0e10cc7`. The pure IT suite `HiringSearchEvaluationCaptureIntegrationSpec` passes 5 of 5. Nothing was run against Atlas or the provider. The unit tests carry the tags `HDQ-08 G2` (the pause), `G4` (refusals, mismatch, failure, record ordering), `G6` (attestation, endpoint, key handling), `G8` (records and tokens) and `G9` (budget, allowance and pause ranges).
 
 **Reviews (final recorded state, 2026-11-10):**
 
@@ -978,7 +978,7 @@ These verdicts do not make slice 2 done. The owner's full `scripts/check-local.s
   - A cancellation or client-close error after all inputs were answered writes no record, although the provider may have billed those tokens (see [search evaluation](../search-evaluation.md#provider-generated-embedding-mode)).
   - The truncation-guard test uses a plain `RuntimeException`.
   - One test is tagged `HDQ-08 G2`, although G2 is the reviewed corpus gate (known gap 1).
-- QA: not run on slice 4. No QA verdict exists for this slice.
+- QA: FAIL on the first documentation pass (f2e7517) and FAIL on the narrow re-check (a31be45): stale status lines, all documentation. The code and tests passed (`sbt test` 2005 passed, 0 failed). No QA PASS exists for this slice yet.
 
 **Not evidenced:**
 
