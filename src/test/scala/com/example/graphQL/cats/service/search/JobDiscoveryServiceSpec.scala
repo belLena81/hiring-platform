@@ -12,7 +12,7 @@ final class JobDiscoveryServiceSpec extends CatsEffectSuite {
   private val filter = JobSearchFilter(None, Set.empty, None)
   private val query = NearbyJobsQuery(GeoPoint(35d, 33d), 20d, filter)
 
-  test("direct invalid cursor distances reject before discovery repository calls") {
+  test("HDQ-02 direct invalid cursor distances reject before discovery repository calls") {
     JobDiscoveryTestSupport.fixture(List(candidate)).flatMap { fixture =>
       List(-1d, Double.NaN, Double.PositiveInfinity).traverse_ { distance =>
         val cursor = NearbyJobCursor(distance, ServiceFixtures.jobId, query.fingerprint)
@@ -77,7 +77,7 @@ final class JobDiscoveryServiceSpec extends CatsEffectSuite {
     }
   }
 
-  test("recruiters and deleted accounts cannot execute discovery") {
+  test("HDQ-02 HDQ-05 recruiters and deleted accounts cannot execute discovery") {
     val actors = List(ServiceFixtures.recruiter, candidate.copy(state = AccountState.Deleted(java.time.Instant.EPOCH)))
     actors.traverse_ { user =>
       JobDiscoveryTestSupport.fixture(List(user)).flatMap { fixture =>
@@ -95,7 +95,7 @@ final class JobDiscoveryServiceSpec extends CatsEffectSuite {
     }
   }
 
-  test("valid candidate and singleton admin requests return empty results and facets") {
+  test("HDQ-02 valid candidate and singleton admin requests return empty results and facets") {
     List(candidate, ServiceFixtures.admin).traverse_ { user =>
       JobDiscoveryTestSupport.fixture(List(user)).flatMap { fixture =>
         val authorized = ActorContext(user.id, user.role)
@@ -113,7 +113,7 @@ final class JobDiscoveryServiceSpec extends CatsEffectSuite {
     }
   }
 
-  test("direct invalid geographic, page and mismatched cursor inputs never execute discovery") {
+  test("HDQ-02 direct invalid geographic, page and mismatched cursor inputs never execute discovery") {
     val mismatched = NearbyJobCursor(1d, ServiceFixtures.jobId, "wrong")
     val invalid = List(
       query.copy(center = GeoPoint(91d, 0d)) -> 20,

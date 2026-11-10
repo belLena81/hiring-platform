@@ -156,7 +156,7 @@ final class HiringGraphQLDiscoveryContractSpec extends CatsEffectSuite {
   }
 
   test(
-    "AC-04.1 AC-06.1 discovery resolvers execute authorized hits, facets and cursor encoding with normalized filters"
+    "HDQ-01 HDQ-05 AC-04.1 AC-06.1 discovery resolvers execute authorized hits, facets and cursor encoding with normalized filters"
   ) {
     val query = """query($filter: JobFilter) {
       nearbyJobs(center: {latitude: 35, longitude: 33}, radiusKm: 20, first: 1, filter: $filter) {
@@ -202,7 +202,9 @@ final class HiringGraphQLDiscoveryContractSpec extends CatsEffectSuite {
     }
   }
 
-  test("ARR-01.1 ARR-01.3 executed invalid geographic, page and pairing inputs never call discovery repositories") {
+  test(
+    "HDQ-02 ARR-01.1 ARR-01.3 executed invalid geographic, page and pairing inputs never call discovery repositories"
+  ) {
     val cases = List(
       "nearbyJobs(center: {latitude: 91, longitude: 33}, radiusKm: 20, first: 1) { pageInfo { hasNextPage } }" -> "INVALID_SEARCH_FILTER",
       "nearbyJobs(center: {latitude: 35, longitude: 33}, radiusKm: 501, first: 1) { pageInfo { hasNextPage } }" -> "INVALID_SEARCH_FILTER",
@@ -242,7 +244,7 @@ final class HiringGraphQLDiscoveryContractSpec extends CatsEffectSuite {
     }
   }
 
-  test("executed malformed and wrong-bound cursors preserve sanitized cursor errors") {
+  test("HDQ-02 executed malformed and wrong-bound cursors preserve sanitized cursor errors") {
     val query = NearbyJobsQuery(center, 20d, JobSearchFilter(None, Set.empty, None))
     def nearbyCursor(distance: Double, bound: NearbyJobsQuery): String =
       CursorCodec.encode(NearbyJobCursor(distance, pointJob.id, bound.fingerprint), cursorNow)
@@ -274,7 +276,9 @@ final class HiringGraphQLDiscoveryContractSpec extends CatsEffectSuite {
     }
   }
 
-  test("executed discovery authorizes active candidates and singleton admin and denies restricted accounts") {
+  test(
+    "HDQ-02 HDQ-05 executed discovery authorizes active candidates and singleton admin and denies restricted accounts"
+  ) {
     val operation = "query { jobDiscoveryFacets { ... on JobDiscoveryFacets { truncated } ... on UserError { code } } }"
     val active = List(candidate, ServiceFixtures.admin)
     val denied = List(ServiceFixtures.recruiter, candidate.copy(state = AccountState.Deleted(java.time.Instant.EPOCH)))
@@ -297,6 +301,26 @@ final class HiringGraphQLDiscoveryContractSpec extends CatsEffectSuite {
       execute(operation, Json.obj(), fixture, None)
         .map(result => assertEquals(errorCode(result), Right("UNAUTHORIZED"))) *>
         fixture.calls.get.map(calls => assertEquals(calls, JobDiscoveryTestSupport.Calls()))
+    }
+  }
+
+  test("HDQ-02 executed nearbyJobs allows Candidate and Admin and denies Recruiter before any discovery storage call") {
+    val operation = """query {
+      nearbyJobs(center: {latitude: 35, longitude: 33}, radiusKm: 20, first: 1) { pageInfo { hasNextPage } }
+    }"""
+    List(candidate, ServiceFixtures.admin).traverse_ { user =>
+      JobDiscoveryTestSupport.fixture(List(user)).flatMap { fixture =>
+        execute(operation, Json.obj(), fixture, Some(ActorContext(user.id, user.role))).flatMap { result =>
+          assert(!result.hcursor.downField("errors").succeeded, result.noSpaces)
+          fixture.calls.get.map(calls => assertEquals(calls.nearby.size, 1))
+        }
+      }
+    } *> JobDiscoveryTestSupport.fixture(List(ServiceFixtures.recruiter)).flatMap { fixture =>
+      val recruiter = ServiceFixtures.recruiter
+      execute(operation, Json.obj(), fixture, Some(ActorContext(recruiter.id, recruiter.role))).flatMap { result =>
+        assertEquals(errorCode(result), Right("FORBIDDEN"))
+        fixture.calls.get.map(calls => assertEquals(calls, JobDiscoveryTestSupport.Calls()))
+      }
     }
   }
 

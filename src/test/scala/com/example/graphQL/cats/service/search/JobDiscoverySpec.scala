@@ -21,13 +21,13 @@ class JobDiscoverySpec extends FunSuite {
     now
   )
 
-  test("nearby criteria reject invalid centers and radii above the bound") {
+  test("HDQ-02 nearby criteria reject invalid centers and radii above the bound") {
     assert(!NearbyJobsQuery(GeoPoint(91d, 0d), 10d, JobSearchFilter(None, Set.empty, None)).isValid)
     assert(!NearbyJobsQuery(GeoPoint(35d, 33d), 501d, JobSearchFilter(None, Set.empty, None)).isValid)
     assert(NearbyJobsQuery(GeoPoint(35d, 33d), 500d, JobSearchFilter(None, Set.empty, None)).isValid)
   }
 
-  test("facets count each job skill once and sort count then value") {
+  test("HDQ-05 facets count each job skill once and sort count then value") {
     val result = JobDiscoveryFacets.fromJobs(
       List(
         job(1, Set("Scala", "Cats"), "Nicosia"),
@@ -40,14 +40,14 @@ class JobDiscoverySpec extends FunSuite {
     assert(!result.truncated)
   }
 
-  test("AC-09.3 city facet counts exclude jobs without a city") {
+  test("HDQ-05 AC-09.3 city facet counts exclude jobs without a city") {
     val cityless = job(4, Set("Scala"), "Nicosia").copy(location = Location("Cyprus", None, remote = false))
     val result = JobDiscoveryFacets.fromJobs(List(job(1, Set("Scala"), "Nicosia"), cityless))
     assertEquals(result.cities, List(JobFacetBucket("Nicosia", 1L)))
     assertEquals(result.countries, List(JobFacetBucket("Cyprus", 2L)))
   }
 
-  test("nearby cursors are bound to center, radius, normalized filters and ordering") {
+  test("HDQ-02 nearby cursors are bound to center, radius, normalized filters and ordering") {
     val query = NearbyJobsQuery(GeoPoint(35d, 33d), 20d, JobSearchFilter(Some(" Nicosia "), Set("Scala"), Some(now)))
     val cursor = NearbyJobCursor(1.234567890123456d, JobId(new UUID(0L, 1L)), query.fingerprint)
     assert(cursor.isBoundTo(query))
@@ -58,7 +58,7 @@ class JobDiscoverySpec extends FunSuite {
     assert(cursor.isBoundTo(query.copy(filter = query.filter.copy(city = Some("Nicosia")))))
   }
 
-  test("nearby cursor distances must be finite and non-negative") {
+  test("HDQ-02 nearby cursor distances must be finite and non-negative") {
     val identity = JobId(new UUID(0L, 1L))
     assert(NearbyJobCursor(0d, identity, "f").hasValidDistance)
     List(-1d, Double.NaN, Double.PositiveInfinity).foreach(invalid =>
@@ -66,7 +66,7 @@ class JobDiscoverySpec extends FunSuite {
     )
   }
 
-  test("non-finite coordinates and radii fail closed") {
+  test("HDQ-02 non-finite coordinates and radii fail closed") {
     List(Double.NaN, Double.PositiveInfinity, Double.NegativeInfinity).foreach { value =>
       assert(!NearbyJobsQuery(GeoPoint(value, 0d), 10d, JobSearchFilter(None, Set.empty, None)).isValid)
       assert(!NearbyJobsQuery(GeoPoint(0d, value), 10d, JobSearchFilter(None, Set.empty, None)).isValid)
@@ -74,7 +74,7 @@ class JobDiscoverySpec extends FunSuite {
     }
   }
 
-  test("structured cursor fingerprints distinguish delimiter-bearing facet values") {
+  test("HDQ-02 structured cursor fingerprints distinguish delimiter-bearing facet values") {
     val query = NearbyJobsQuery(GeoPoint(35d, 33d), 20d, JobSearchFilter(Some("Nicosia"), Set("Scala,Cats"), None))
     assertNotEquals(
       query.fingerprint,
@@ -121,7 +121,7 @@ class JobDiscoverySpec extends FunSuite {
     )
   }
 
-  test("facet dimensions preserve empty results and each dimension's count and order") {
+  test("HDQ-05 facet dimensions preserve empty results and each dimension's count and order") {
     assertEquals(JobDiscoveryFacets.fromJobs(Nil), JobDiscoveryFacets(Nil, Nil, Nil, Nil, truncated = false))
     val result = JobDiscoveryFacets.fromJobs(
       List(
@@ -142,7 +142,7 @@ class JobDiscoverySpec extends FunSuite {
     )
   }
 
-  test("facet bucket bounds preserve tied value order and report truncation only above twenty") {
+  test("HDQ-05 facet bucket bounds preserve tied value order and report truncation only above twenty") {
     val jobs = (1 to 21).toList.map { index =>
       job(index, Set(f"Skill$index%02d"), f"City$index%02d")
         .copy(location = Location(f"Country$index%02d", Some(f"City$index%02d"), remote = false))

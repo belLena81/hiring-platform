@@ -464,7 +464,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
     }
   }
 
-  test("VHS-AC05 embedding pipeline ignores stale in-flight job writes after version changes") {
+  test("HDQ-09 VHS-AC05 embedding pipeline ignores stale in-flight job writes after version changes") {
     for {
       usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map.empty)
       jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> openJob))
@@ -510,7 +510,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
     } yield ()
   }
 
-  test("VHS-AC05 embedding pipeline ignores stale in-flight candidate writes after profile changes") {
+  test("HDQ-09 VHS-AC05 embedding pipeline ignores stale in-flight candidate writes after profile changes") {
     val changedProfile = CandidateProfile(Set("Scala", "Kafka"), Some("Updated profile"), None)
     for {
       usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map(candidateId -> candidate))
@@ -549,7 +549,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
     } yield ()
   }
 
-  test("job and candidate deletion during provider work cannot restore deleted entities") {
+  test("HDQ-09 HRP-01 job and candidate deletion during provider work cannot restore deleted entities") {
     List(
       EmbeddingWork.JobChanged(jobId) -> false,
       EmbeddingWork.CandidateProfileChanged(candidateId) -> false,
@@ -772,7 +772,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
     }
   }
 
-  test("cancelled provider calls keep unpersisted claims replayable for both entity types") {
+  test("HDQ-09 cancelled provider calls keep unpersisted claims replayable for both entity types") {
     List(EmbeddingWork.JobChanged(jobId), EmbeddingWork.CandidateProfileChanged(candidateId)).traverse_ { changed =>
       for {
         usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map(candidateId -> candidate))
@@ -825,7 +825,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
     }
   }
 
-  test("acknowledged embedding writes replay after interruption without another provider call") {
+  test("HDQ-09 acknowledged embedding writes replay after interruption without another provider call") {
     List(EmbeddingWork.JobChanged(jobId), EmbeddingWork.CandidateProfileChanged(candidateId)).traverse_ { changed =>
       for {
         usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map(candidateId -> candidate))
@@ -1081,7 +1081,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
     } yield ()
   }
 
-  test("failed authoritative conflict reread retains uncharged durable work") {
+  test("HDQ-09 HRP-02 failed authoritative conflict reread retains uncharged durable work") {
     List(false, true).traverse_ { thrown =>
       for {
         usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map.empty)
@@ -1123,7 +1123,9 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
     }
   }
 
-  test("conflict reread completes current metadata and removed profiles, and rejects oversized current sources") {
+  test(
+    "HDQ-09 HRP-02 conflict reread completes current metadata and removed profiles, and rejects oversized current sources"
+  ) {
     List(false, true).traverse_ { candidateWork =>
       List("current", "oversized", "no-profile").filter(mode => candidateWork || mode != "no-profile").traverse_ {
         mode =>
@@ -1209,7 +1211,9 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
     }
   }
 
-  test("more than eight text-changing conflicts preserve provider failure budget and eventually embed current source") {
+  test(
+    "HDQ-09 HRP-02 more than eight text-changing conflicts preserve provider failure budget and eventually embed current source"
+  ) {
     for {
       usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map(candidateId -> candidate))
       jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> openJob))
@@ -1302,7 +1306,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
     } yield assertEquals(count, 6)
   }
 
-  test("transient provider exhaustion is retried durably and converges without another mutation") {
+  test("HDQ-09 HRP-14 transient provider exhaustion is retried durably and converges without another mutation") {
     for {
       usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map.empty)
       jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> openJob))
@@ -1340,7 +1344,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
     } yield assertEquals(count, 4)
   }
 
-  test("provider work renews its lease while active and abandoned claims remain recoverable") {
+  test("HDQ-09 HRP-14 provider work renews its lease while active and abandoned claims remain recoverable") {
     for {
       usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map.empty)
       jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> openJob))
@@ -1376,7 +1380,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
     } yield ()
   }
 
-  test("unexpected claim and completion failures are observed and restart an owned worker") {
+  test("HDQ-09 HRP-14 unexpected claim and completion failures are observed and restart an owned worker") {
     List(true, false).traverse_ { failClaim =>
       for {
         usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map.empty)

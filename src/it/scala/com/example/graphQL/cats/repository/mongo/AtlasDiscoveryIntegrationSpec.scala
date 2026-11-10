@@ -536,6 +536,151 @@ final class AtlasDiscoveryIntegrationSpec extends CatsEffectSuite {
     }
   }
 
+  test(
+    "HDQ-06.L consent and private-field counterfactuals hold on the Atlas Local lexical candidate branch with minimized output and denied non-owners"
+  ) {
+    live() { (db, policy, commands, _) =>
+      val matchJob = job(1, embedded = true)
+      def candidate(name: String, residence: Option[CandidateResidence], optIn: Boolean): User = {
+        val profile = CandidateProfile(
+          Set("scala"),
+          Some("Scala hiring evaluation"),
+          None,
+          residence,
+          Some(CandidateAvailabilityStatus.AVAILABLE_NOW),
+          optIn
+        )
+        User(
+          UserId(UUID.nameUUIDFromBytes(s"hdq06-lexical-$name".getBytes("UTF-8"))),
+          None,
+          name,
+          UserRole.Candidate,
+          Some(UserProfile.Candidate(profile)),
+          now
+        )
+      }
+      val canada = Some(CandidateResidence("Canada", Some("Toronto")))
+      val elsewhere = Some(CandidateResidence("Elsewhere", Some("Toronto")))
+      val matching = candidate("match", canada, optIn = true)
+      val optedOut = candidate("opted-out", elsewhere, optIn = false)
+      val absent = candidate("absent", elsewhere, optIn = false)
+      val mismatch = candidate("mismatch", elsewhere, optIn = true)
+      val all = List(matching, optedOut, absent, mismatch)
+      // The lexical branch needs no embedding, so other seeded Active Candidates with the skill (the shared viewer)
+      // are legitimate hits. The consent counterfactuals concern only this test's own four candidates.
+      val fixtureIds = all.map(_.id).toSet
+      val filters = CandidateMatchFilters(List("scala"), Some("canada"), Some("toronto"), Some("AVAILABLE_NOW"))
+      val validated = ValidatedCandidateMatchFilters.from(filters).fold(e => fail(e.toString), identity)
+      val repo = new MongoSemanticSearchRepository(
+        db,
+        indexes.jobVectorIndex,
+        indexes.candidateVectorIndex,
+        indexes.jobLexicalIndex,
+        indexes.candidateLexicalIndex,
+        100,
+        100,
+        diagnostics = Diagnostics.noop[IO],
+        discoveryPolicy = Some(policy)
+      )
+      // The vector branch is unavailable, so the service answers from the lexical candidate branch (degraded).
+      val lexicalOnly = new SemanticSearchRepository[IO] {
+        export repo.{
+          authorizedJobEligibility,
+          authorizedCandidateEligibility,
+          searchJobs,
+          recommendedJobs,
+          lexicalJobs,
+          lexicalCandidates
+        }
+        def candidateMatches(query: VectorSearchQuery): RepositoryF[IO, List[CandidateRetrievalHit]] =
+          RepositoryF.at[IO].raise(RepositoryError.VectorSearchUnavailable)
+      }
+      val service = new SemanticSearchService(
+        users(db),
+        new MongoJobRepository(
+          db,
+          MongoRepositoryTestSupport.noTransaction,
+          MongoEmbeddingWorkEnqueuer.disabled,
+          Diagnostics.noop[IO]
+        ),
+        new EmbeddingService[IO] {
+          def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] =
+            IO.raiseError(new IllegalStateException("Synthetic lexical gate must not call an embedding provider"))
+        },
+        lexicalOnly,
+        model
+      )
+      def matches(actor: User) =
+        service.candidateMatches(
+          ActorContext(actor.id, actor.role),
+          matchJob.id,
+          None,
+          filters,
+          pageOf(7),
+          UUID.randomUUID()
+        )
+      def ids(actor: User) =
+        matches(actor).value.map(_.map(_.hits.map(_.candidate.id).toSet.intersect(fixtureIds)))
+      for {
+        _ <- MongoHiringSetup.initialize(db, Some(indexes), Diagnostics.noop[IO])
+        _ <- seedUsers(db, all) *> seedJobs(db, List(matchJob))
+        usersCollection <- MongoRepositoryTestSupport.collection(db, MongoCollections.Users)
+        // The absent opt-in fixture: the field is physically missing, not false.
+        _ <- usersCollection.updateOne(
+          Filters.eq(MongoFields.Id, absent.id.value.toString),
+          Updates.unset("profile.recruiterSearchOptIn")
+        )
+        expected = Set(matching.id, optedOut.id, absent.id)
+        _ <- eventually(240)(
+          repo.lexicalCandidates(LexicalSearchQuery("scala", noFilter, pageOf(7), UUID.randomUUID(), validated)).value
+        )(_.map(_.id).toSet.intersect(fixtureIds) == expected)
+        baseline <- matches(owner).value
+        // Counterfactual 1 (live recheck, immediate): the opted-out candidate opts in while living elsewhere.
+        _ <- usersCollection.updateOne(
+          Filters.eq(MongoFields.Id, optedOut.id.value.toString),
+          Updates.set("profile.recruiterSearchOptIn", true)
+        )
+        afterOptIn <- ids(owner)
+        // Counterfactual 2 (index path): the mismatching opted-in candidate opts out, so private predicates no
+        // longer apply; it reappears once the index reflects the change. Timing dependent.
+        _ <- usersCollection.updateOne(
+          Filters.eq(MongoFields.Id, mismatch.id.value.toString),
+          Updates.set("profile.recruiterSearchOptIn", false)
+        )
+        reappeared <- (0 until 120).toList.foldLeftM(false) { (seen, _) =>
+          if (seen) IO.pure(true)
+          else
+            ids(owner).flatMap { found =>
+              if (found.exists(_.contains(mismatch.id))) IO.pure(true) else IO.sleep(500.millis).as(false)
+            }
+        }
+        // Authorization: a recruiter who does not own the job and a candidate are denied before any retrieval.
+        _ = commands.clear()
+        nonOwner <- matches(otherRecruiter).value
+        asCandidate <- matches(viewer).value
+        retrievalsAfterDenied = commands.retrievals(db.underlying.getName, MongoCollections.Users)
+      } yield {
+        val first = baseline.fold(error => fail(s"owner search failed: $error"), identity)
+        assert(first.degraded.isDefined, clue(first.degraded))
+        assertEquals(first.hits.map(_.mode).distinct, List(SearchMode.LEXICAL))
+        assertEquals(first.hits.map(_.candidate.id).toSet.intersect(fixtureIds), expected)
+        // Minimized output: only id, name, skills and experience summary; no residence, availability or consent.
+        first.hits.foreach(hit =>
+          assertEquals(
+            hit.candidate.productElementNames.toList,
+            List("id", "name", "skills", "experienceSummary"),
+            clue(hit.candidate)
+          )
+        )
+        assertEquals(afterOptIn, Right(Set(matching.id, absent.id)))
+        assertEquals(nonOwner.map(_ => ()), Left(UseCaseError.Domain(DomainError.NotFound("job"))))
+        assertEquals(asCandidate.map(_ => ()), Left(UseCaseError.Domain(DomainError.RecruiterRequired)))
+        assertEquals(retrievalsAfterDenied, Nil)
+        assume(reappeared, "Inconclusive: the opt-out change was not reflected by the index within 60 s")
+      }
+    }
+  }
+
   // ---------------------------------------------------------------- HDQ-11.L
 
   private val radiiKm = List(1d, 3d, 5d, 10d, 20d, 50d)

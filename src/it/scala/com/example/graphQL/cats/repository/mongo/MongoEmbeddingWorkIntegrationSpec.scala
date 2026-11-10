@@ -41,7 +41,7 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
       .findOne(db, MongoCollections.EmbeddingWork, Filters.eq(MongoFields.Id, key.value))
       .flatMap(IO.fromOption(_)(new AssertionError("Expected stored work")))
 
-  test("deletion removes candidate embeddings and rejects stale and fresh deleted-account writes") {
+  test("HDQ-09 HRP-01 deletion removes candidate embeddings and rejects stale and fresh deleted-account writes") {
     database.use { case (db, transactions) =>
       val users = new MongoUserRepository(db, transactions, MongoEmbeddingWorkEnqueuer.disabled, Diagnostics.noop[IO])
       val id = UserId(UUID.randomUUID())
@@ -75,7 +75,7 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
     }
   }
 
-  test("deletion during an in-flight provider call leaves a raw embedding-free tombstone") {
+  test("HDQ-09 HRP-01 deletion during an in-flight provider call leaves a raw embedding-free tombstone") {
     database.use { case (db, transactions) =>
       val users = new MongoUserRepository(db, transactions, MongoEmbeddingWorkEnqueuer.disabled, Diagnostics.noop[IO])
       val jobs = new MongoJobRepository(db, transactions, MongoEmbeddingWorkEnqueuer.disabled, Diagnostics.noop[IO])
@@ -131,7 +131,7 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
   }
 
   test(
-    "MSC-01.3 in-flight embeddings complete after real interview scheduling, which advances fences but no content revision"
+    "HDQ-09 HRP-02 MSC-01.3 in-flight embeddings complete after real interview scheduling, which advances fences but no content revision"
   ) {
     List(false, true).traverse_ { candidateWork =>
       mongoResource.use { fixture =>
@@ -275,7 +275,9 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
         case Some(record)             => IO.raiseError(new AssertionError(s"Work did not complete: $record"))
       }
 
-  test("singleton Admin can inspect and CAS-repair failed work; other actors and stale generations cannot") {
+  test(
+    "HDQ-09 HRP-14 singleton Admin can inspect and CAS-repair failed work; other actors and stale generations cannot"
+  ) {
     database.use { case (db, transactions) =>
       val users = new MongoUserRepository(db, transactions, MongoEmbeddingWorkEnqueuer.disabled, Diagnostics.noop[IO])
       val work = new MongoEmbeddingWorkRepository(db, Diagnostics.noop[IO])
@@ -312,7 +314,7 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
     }
   }
 
-  test("renewal requires a live matching generation and token") {
+  test("HDQ-09 HRP-14 renewal requires a live matching generation and token") {
     database.use { case (db, _) =>
       val work = new MongoEmbeddingWorkRepository(db, Diagnostics.noop[IO])
       val key = EmbeddingWorkKey(EmbeddingWorkKind.Job, UUID.randomUUID().toString)
@@ -470,7 +472,7 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
     }
   }
 
-  test("generation and reclaimed lease token fence old completion retry and failure") {
+  test("HDQ-09 generation and reclaimed lease token fence old completion retry and failure") {
     database.use { case (db, _) =>
       val repository = new MongoEmbeddingWorkRepository(db, Diagnostics.noop[IO])
       val key = EmbeddingWorkKey(EmbeddingWorkKind.CandidateProfile, UUID.randomUUID().toString)
@@ -538,7 +540,7 @@ final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
     }
   }
 
-  test("job and candidate mutations commit newer source and work while provider claims remain active") {
+  test("HDQ-09 job and candidate mutations commit newer source and work while provider claims remain active") {
     database.use { case (db, transactions) =>
       val work = new MongoEmbeddingWorkRepository(db, Diagnostics.noop[IO])
       val jobs = new MongoJobRepository(db, transactions, work, Diagnostics.noop[IO])

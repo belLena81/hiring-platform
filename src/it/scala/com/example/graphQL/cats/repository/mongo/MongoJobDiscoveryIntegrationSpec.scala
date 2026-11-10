@@ -15,7 +15,7 @@ import scala.jdk.CollectionConverters.*
 final class MongoJobDiscoveryIntegrationSpec extends MongoJobDiscoveryFixture {
 
   test(
-    "authoritative discovery distinguishes empty jobs from a revoked cached actor, including cursors beyond radius"
+    "HDQ-05 authoritative discovery distinguishes empty jobs from a revoked cached actor, including cursors beyond radius"
   ) {
     discoveryResource.use { case (fixture, policy, scope) =>
       val repository = MongoJobRepository.transactional(
@@ -46,7 +46,9 @@ final class MongoJobDiscoveryIntegrationSpec extends MongoJobDiscoveryFixture {
     }
   }
 
-  test("radius query excludes remote, missing, closed and deleted jobs; full precision tie pagination is complete") {
+  test(
+    "HDQ-01 HDQ-03 radius query excludes remote, missing, closed and deleted jobs; full precision tie pagination is complete"
+  ) {
     discoveryResource.use { case (fixture, policy, scope) =>
       val repository = MongoJobRepository.transactional(
         fixture.database,
@@ -94,7 +96,9 @@ final class MongoJobDiscoveryIntegrationSpec extends MongoJobDiscoveryFixture {
     }
   }
 
-  test("facets count the complete filtered corpus and bound buckets; radius facets exclude remote and absent points") {
+  test(
+    "HDQ-05 facets count the complete filtered corpus and bound buckets; radius facets exclude remote and absent points"
+  ) {
     discoveryResource.use { case (fixture, policy, scope) =>
       val repository = MongoJobRepository.transactional(
         fixture.database,
@@ -149,7 +153,9 @@ final class MongoJobDiscoveryIntegrationSpec extends MongoJobDiscoveryFixture {
       } yield ()
     }
   }
-  test("Mongo maximum distance observes its measured boundary within one metre and excludes two metres outside") {
+  test(
+    "HDQ-01 Mongo maximum distance observes its measured boundary within one metre and excludes two metres outside"
+  ) {
     discoveryResource.use { case (fixture, policy, scope) =>
       val repository = MongoJobRepository.transactional(
         fixture.database,
@@ -181,7 +187,7 @@ final class MongoJobDiscoveryIntegrationSpec extends MongoJobDiscoveryFixture {
     ("north pole", GeoPoint(90d, 0d), GeoPoint(89.9d, 180d), GeoPoint(89d, 0d), 20d),
     ("negative longitude", GeoPoint(51.5d, -0.12d), GeoPoint(51.51d, -0.12d), GeoPoint(51.7d, -0.12d), 2d)
   ).foreach { case (name, origin, inside, outside, radius) =>
-    test(s"nearby jobs and exact facets agree across $name") {
+    test(s"HDQ-01 HDQ-05 nearby jobs and exact facets agree across $name") {
       discoveryResource.use { case (fixture, policy, scope) =>
         val repository = MongoJobRepository.transactional(
           fixture.database,
@@ -220,7 +226,7 @@ final class MongoJobDiscoveryIntegrationSpec extends MongoJobDiscoveryFixture {
     }
   }
 
-  test("zero-distance ties survive encoded cursor pagination to exhaustion without gaps or duplicates") {
+  test("HDQ-03 zero-distance ties survive encoded cursor pagination to exhaustion without gaps or duplicates") {
     discoveryResource.use { case (fixture, policy, scope) =>
       val repository = MongoJobRepository.transactional(
         fixture.database,
@@ -256,7 +262,7 @@ final class MongoJobDiscoveryIntegrationSpec extends MongoJobDiscoveryFixture {
   }
 
   test(
-    "geo cutover fails on incompatible legacy coordinates, rejects concurrent invalid writes and resumes after repair"
+    "HDQ-10 geo cutover fails on incompatible legacy coordinates, rejects concurrent invalid writes and resumes after repair"
   ) {
     mongoResource.use { fixture =>
       val existing = MongoHiringCodecs.job(job(1))

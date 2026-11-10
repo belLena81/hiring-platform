@@ -51,7 +51,7 @@ final class InterviewKafkaProducerResourceSpec extends CatsEffectSuite {
     }
   }
 
-  test("failed transactional initialization closes the allocated producer") {
+  test("HDQ-09 HRP-04 failed transactional initialization closes the allocated producer") {
     IO(new Client(true)).flatMap { client =>
       GuardedTransactionalProducer.resource(settings, factory(client)).use(_ => IO.unit).attempt.map { result =>
         assert(result.isLeft)
@@ -75,7 +75,9 @@ final class InterviewKafkaProducerResourceSpec extends CatsEffectSuite {
     }
   }
 
-  test("cancellation during blocked transactional initialization closes exactly once without entering use") {
+  test(
+    "HDQ-09 HRP-04 cancellation during blocked transactional initialization closes exactly once without entering use"
+  ) {
     val started = new CountDownLatch(1)
     val release = new CountDownLatch(1)
     (for {

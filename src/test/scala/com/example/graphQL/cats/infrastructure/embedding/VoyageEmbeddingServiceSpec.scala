@@ -171,7 +171,7 @@ final class VoyageEmbeddingServiceSpec extends CatsEffectSuite {
     }
   }
 
-  test("maps client timeouts to provider unavailability") {
+  test("HDQ-09 maps client timeouts to provider unavailability") {
     val app: HttpApp[IO] = Kleisli { (_: Request[IO]) => IO.never[Response[IO]] }
     val client = Client.fromHttpApp[IO](app)
     val service = new VoyageEmbeddingService(
@@ -187,7 +187,7 @@ final class VoyageEmbeddingServiceSpec extends CatsEffectSuite {
     service.embed(input).map(result => assertEquals(result, Left(EmbeddingError.ProviderUnavailable)))
   }
 
-  test("reports a provider exception with sanitized failure fields") {
+  test("HDQ-09 reports a provider exception with sanitized failure fields") {
     val app: HttpApp[IO] = Kleisli { (_: Request[IO]) =>
       IO.raiseError[Response[IO]](new IllegalStateException("private provider detail"))
     }
