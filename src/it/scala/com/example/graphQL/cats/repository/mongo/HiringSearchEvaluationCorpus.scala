@@ -19,40 +19,61 @@ private[mongo] object HiringSearchEvaluationCorpus {
     val norm = math.sqrt(values.map(value => value.toDouble * value.toDouble).sum).toFloat
     values.map(_ / norm)
   }
-  def embedding(text: String, skills: Set[String], stale: Boolean): EntityEmbedding =
+  def embedding(vector: List[Float], model: String, text: String, stale: Boolean): EntityEmbedding =
     EntityEmbedding(
-      vector(skills),
-      EmbeddingMeta(Model, SourceHash.sha256(if (stale) "genuinely outdated source" else text), ServiceFixtures.now)
+      vector,
+      EmbeddingMeta(model, SourceHash.sha256(if (stale) "genuinely outdated source" else text), ServiceFixtures.now)
     )
-  val jobs: List[Job] = SearchEvaluationFixtures.jobs.map { entity =>
-    val job = ServiceFixtures.openJob.copy(
-      id = JobId(UUID.fromString(entity.id)),
-      recruiterId = recruiter.id,
-      title = entity.intendedRole,
-      description = entity.summary,
-      requirements = entity.skills.toList.sorted,
-      skills = entity.skills,
-      state = if (entity.active && !entity.deleted) JobState.Open else JobState.Closed(ServiceFixtures.now)
-    )
-    job.copy(embedding = Some(embedding(SearchableText.job(job), job.skills, entity.stale)))
+  private val unembeddedJobs: List[(SearchEvaluationFixtures.Entity, Job)] = SearchEvaluationFixtures.jobs.map {
+    entity =>
+      entity -> ServiceFixtures.openJob.copy(
+        id = JobId(UUID.fromString(entity.id)),
+        recruiterId = recruiter.id,
+        title = entity.intendedRole,
+        description = entity.summary,
+        requirements = entity.skills.toList.sorted,
+        skills = entity.skills,
+        state = if (entity.active && !entity.deleted) JobState.Open else JobState.Closed(ServiceFixtures.now)
+      )
   }
-  val candidates: List[User] = SearchEvaluationFixtures.candidates.map { entity =>
-    val profile = CandidateProfile(
-      entity.skills,
-      Some(entity.summary),
-      None,
-      Option.when(entity.privateAttributesPresent)(CandidateResidence("Canada", Some("Toronto"))),
-      Option.when(entity.privateAttributesPresent)(CandidateAvailabilityStatus.AVAILABLE_NOW),
-      entity.optIn.contains(true)
+  private val unembeddedCandidates: List[(SearchEvaluationFixtures.Entity, CandidateProfile, User)] =
+    SearchEvaluationFixtures.candidates.map { entity =>
+      val profile = CandidateProfile(
+        entity.skills,
+        Some(entity.summary),
+        None,
+        Option.when(entity.privateAttributesPresent)(CandidateResidence("Canada", Some("Toronto"))),
+        Option.when(entity.privateAttributesPresent)(CandidateAvailabilityStatus.AVAILABLE_NOW),
+        entity.optIn.contains(true)
+      )
+      (
+        entity,
+        profile,
+        ServiceFixtures.candidate.copy(
+          id = UserId(UUID.fromString(entity.id)),
+          email = None,
+          name = "Fabricated candidate",
+          profile = Some(UserProfile.Candidate(profile))
+        )
+      )
+    }
+
+  /** The document texts a provider embeds, keyed by entity id; the same texts the embedding hashes cover. */
+  def documentTexts: List[(String, String)] =
+    unembeddedJobs.map((entity, job) => entity.id -> SearchableText.job(job)) ++
+      unembeddedCandidates.map((entity, profile, _) => entity.id -> SearchableText.candidate(profile))
+
+  /** The corpus with the given per-entity vectors (by entity id) under `model`. */
+  def jobsWith(model: String, vectorOf: SearchEvaluationFixtures.Entity => List[Float]): List[Job] =
+    unembeddedJobs.map((entity, job) =>
+      job.copy(embedding = Some(embedding(vectorOf(entity), model, SearchableText.job(job), entity.stale)))
     )
-    ServiceFixtures.candidate.copy(
-      id = UserId(UUID.fromString(entity.id)),
-      email = None,
-      name = "Fabricated candidate",
-      profile = Some(UserProfile.Candidate(profile)),
-      embedding = Some(embedding(SearchableText.candidate(profile), entity.skills, entity.stale))
+  def candidatesWith(model: String, vectorOf: SearchEvaluationFixtures.Entity => List[Float]): List[User] =
+    unembeddedCandidates.map((entity, profile, user) =>
+      user.copy(embedding = Some(embedding(vectorOf(entity), model, SearchableText.candidate(profile), entity.stale)))
     )
-  }
+  val jobs: List[Job] = jobsWith(Model, entity => vector(entity.skills))
+  val candidates: List[User] = candidatesWith(Model, entity => vector(entity.skills))
   def jobDocument(job: Job): Document = MongoHiringCodecs.job(job)
   def candidateDocument(user: User): Document = {
     val document = MongoHiringCodecs.user(user)

@@ -38,12 +38,16 @@ final class VoyageEmbeddingService(
     tracer: Tracer[IO] = Tracer.noop[IO],
     diagnostics: Diagnostics[IO],
     breaker: CircuitBreaker[IO] = CircuitBreaker.disabled[IO]
-) extends EmbeddingService[IO] {
+) extends EmbeddingService[IO]
+    with MeteredEmbeddingService {
   private given TextMapUpdater[Headers] with
     def updated(headers: Headers, key: String, value: String): Headers =
       headers.put(org.http4s.Header.Raw(CIString(key), value))
 
-  override def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] = {
+  override def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] =
+    embedMetered(input).map(_.map(_.vector))
+
+  override def embedMetered(input: EmbeddingInput): IO[Either[EmbeddingError, MeteredEmbedding]] = {
     val request = Request[IO](Method.POST, endpoint)
       .withHeaders(Authorization(Credentials.Token(AuthScheme.Bearer, apiKey)))
       .withEntity(
@@ -96,13 +100,13 @@ final class VoyageEmbeddingService(
   // Headroom over ~25 JSON characters per float for the single embedding plus response metadata.
   private val maximumResponseBytes: Long = 64L * 1024L + 32L * dimension.toLong
 
-  private def validate(response: VoyageEmbeddingResponse): Either[EmbeddingError, EmbeddingVector] =
+  private def validate(response: VoyageEmbeddingResponse): Either[EmbeddingError, MeteredEmbedding] =
     response.data match {
       case item :: Nil =>
         val values = item.embedding
         Either.cond(
           values.size == dimension && values.forall(_.isFinite) && response.model.forall(_ == model),
-          EmbeddingVector(values, response.model.getOrElse(model), values.size),
+          MeteredEmbedding(EmbeddingVector(values, response.model.getOrElse(model), values.size), response.totalTokens),
           EmbeddingError.InvalidResponse
         )
       case _ => Left(EmbeddingError.InvalidResponse)
@@ -128,8 +132,26 @@ private final case class VoyageEmbeddingItem(embedding: List[Float]) derives Dec
 
 private final case class VoyageEmbeddingResponse(
     data: List[VoyageEmbeddingItem],
-    model: Option[String]
-) derives Decoder
+    model: Option[String],
+    totalTokens: Option[Long]
+)
+
+private object VoyageEmbeddingResponse {
+
+  /** `usage.total_tokens` is metadata: a missing, malformed or negative value is read as absent and never fails the
+    * embedding, which keeps the worker contract unchanged.
+    */
+  given Decoder[VoyageEmbeddingResponse] = Decoder.instance { cursor =>
+    for {
+      data <- cursor.get[List[VoyageEmbeddingItem]]("data")
+      model <- cursor.get[Option[String]]("model")
+    } yield VoyageEmbeddingResponse(
+      data,
+      model,
+      cursor.downField("usage").downField("total_tokens").as[Long].toOption.filter(_ >= 0L)
+    )
+  }
+}
 
 object VoyageEmbeddingService {
 
@@ -146,6 +168,19 @@ object VoyageEmbeddingService {
       diagnostics: Diagnostics[IO],
       breaker: CircuitBreaker[IO] = CircuitBreaker.disabled[IO]
   ): Resource[IO, EmbeddingService[IO]] =
+    meteredResource(apiKey, endpoint, model, dimension, timeout, tracer, diagnostics, breaker)
+
+  /** The same provider client, also exposing the token counts (`MeteredEmbeddingService`). */
+  def meteredResource(
+      apiKey: String,
+      endpoint: Uri,
+      model: String,
+      dimension: Int,
+      timeout: FiniteDuration,
+      tracer: Tracer[IO] = Tracer.noop[IO],
+      diagnostics: Diagnostics[IO],
+      breaker: CircuitBreaker[IO] = CircuitBreaker.disabled[IO]
+  ): Resource[IO, VoyageEmbeddingService] =
     EmberClientBuilder
       .default[IO]
       .withTimeout(timeout)

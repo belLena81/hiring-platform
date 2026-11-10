@@ -380,6 +380,49 @@ final class VoyageEmbeddingServiceSpec extends CatsEffectSuite {
     }
   }
 
+  private def meteredFor(body: String): IO[Either[EmbeddingError, MeteredEmbedding]] =
+    provider(Client.fromHttpApp[IO](Kleisli { (_: Request[IO]) => IO.pure(jsonResponse(Status.Ok, body)) }))
+      .embedMetered(input)
+
+  private val expectedVector = Right(EmbeddingVector(List(0.1f, 0.2f), "voyage-4-lite", 2))
+
+  test("HDQ-08 G8 reads usage.total_tokens from a successful response") {
+    meteredFor(
+      """{"data":[{"embedding":[0.1,0.2]}],"model":"voyage-4-lite","usage":{"total_tokens":13}}"""
+    ).map(result => assertEquals(result, expectedVector.map(MeteredEmbedding(_, Some(13L)))))
+  }
+
+  test("HDQ-08 G8 tolerates a missing, malformed or negative usage field without failing the embedding") {
+    List(
+      """{"data":[{"embedding":[0.1,0.2]}],"model":"voyage-4-lite"}""",
+      """{"data":[{"embedding":[0.1,0.2]}],"model":"voyage-4-lite","usage":"many"}""",
+      """{"data":[{"embedding":[0.1,0.2]}],"model":"voyage-4-lite","usage":{"total_tokens":-1}}""",
+      """{"data":[{"embedding":[0.1,0.2]}],"model":"voyage-4-lite","usage":{}}"""
+    ).traverse(meteredFor).map(_.foreach(result => assertEquals(result, expectedVector.map(MeteredEmbedding(_, None)))))
+  }
+
+  test("HDQ-08 G8 the lenient usage reader takes whole numbers, including 7.0 and the string 7, and drops 7.5") {
+    def tokens(value: String) =
+      meteredFor(s"""{"data":[{"embedding":[0.1,0.2]}],"model":"voyage-4-lite","usage":{"total_tokens":$value}}""")
+        .map(_.toOption.flatMap(_.totalTokens))
+    for {
+      whole <- tokens("7.0")
+      fractional <- tokens("7.5")
+      text <- tokens("\"7\"")
+    } yield {
+      assertEquals(whole, Some(7L))
+      assertEquals(fractional, None)
+      assertEquals(text, Some(7L))
+    }
+  }
+
+  test("HDQ-08 G8 the worker port returns the same vector with or without usage") {
+    val app: HttpApp[IO] = Kleisli { (_: Request[IO]) =>
+      IO.pure(jsonResponse(Status.Ok, """{"data":[{"embedding":[0.1,0.2]}],"usage":{"total_tokens":5}}"""))
+    }
+    provider(Client.fromHttpApp[IO](app)).embed(input).map(result => assertEquals(result, expectedVector))
+  }
+
   private def provider(client: Client[IO]): VoyageEmbeddingService =
     new VoyageEmbeddingService(
       client,

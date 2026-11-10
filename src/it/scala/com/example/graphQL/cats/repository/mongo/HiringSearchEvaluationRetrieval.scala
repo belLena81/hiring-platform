@@ -15,10 +15,28 @@ import org.bson.Document
 import java.util.UUID
 import scala.jdk.CollectionConverters.*
 
+/** How query vectors are produced and which model and index dimension they belong to. */
+private[mongo] final case class RetrievalEmbeddings(
+    model: String,
+    dimension: Int,
+    queryVector: SearchEvaluationFixtureQuery => List[Float]
+)
+
+private[mongo] object RetrievalEmbeddings {
+  val synthetic: RetrievalEmbeddings = RetrievalEmbeddings(
+    HiringSearchEvaluationCorpus.Model,
+    HiringSearchEvaluationCorpus.Dimensions,
+    query => HiringSearchEvaluationCorpus.vector(HiringSearchEvaluationCorpus.querySkills(query))
+  )
+}
+
 /** Captures IDs through real service authorization and current Mongo eligibility, never fixture prefiltering. */
-private[mongo] final class HiringSearchEvaluationRetrieval(database: MongoDatabase[IO], policy: DiscoveryQueryPolicy)
-    extends SearchEvaluationCapture.Retrieval {
-  private val indexes = HiringSearchEvaluationAtlasRunner.indexes
+private[mongo] final class HiringSearchEvaluationRetrieval(
+    database: MongoDatabase[IO],
+    policy: DiscoveryQueryPolicy,
+    embedding: RetrievalEmbeddings = RetrievalEmbeddings.synthetic,
+    indexes: AtlasSearchIndexConfig = HiringSearchEvaluationAtlasRunner.indexes
+) extends SearchEvaluationCapture.Retrieval {
   private val repository = new MongoSemanticSearchRepository(
     database,
     indexes.jobVectorIndex,
@@ -43,7 +61,7 @@ private[mongo] final class HiringSearchEvaluationRetrieval(database: MongoDataba
     Diagnostics.noop[IO]
   )
   private val page = PageSize
-    .fromInt(SearchEvaluationFixtures.K)
+    .fromInt(HiringSearchEvaluationAtlasRunner.captureBound)
     .fold(_ => throw new IllegalStateException("Invalid fixed fixture page size"), identity)
 
   private def documents(collection: String, pipeline: List[Document]): RepositoryF[IO, List[Document]] =
@@ -117,16 +135,12 @@ private[mongo] final class HiringSearchEvaluationRetrieval(database: MongoDataba
     val embeddings = new EmbeddingService[IO] {
       def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] = IO.pure(
         Right(
-          EmbeddingVector(
-            HiringSearchEvaluationCorpus.vector(HiringSearchEvaluationCorpus.querySkills(query)),
-            HiringSearchEvaluationCorpus.Model,
-            HiringSearchEvaluationCorpus.Dimensions
-          )
+          EmbeddingVector(embedding.queryVector(query), embedding.model, embedding.dimension)
         )
       )
     }
     val service =
-      new SemanticSearchService(users, jobs, embeddings, branch(strategy), HiringSearchEvaluationCorpus.Model)
+      new SemanticSearchService(users, jobs, embeddings, branch(strategy), embedding.model)
     val id = UUID.nameUUIDFromBytes(query.queryId.getBytes(java.nio.charset.StandardCharsets.UTF_8))
     val result = query.useCase match {
       case SearchEvaluationUseCase.JobSearch =>

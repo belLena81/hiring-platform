@@ -48,6 +48,41 @@ class HiringSearchEvaluationCaptureIntegrationSpec extends munit.FunSuite {
     assertNotEquals(first, second)
   }
 
+  test("HDQ-08 provider flags mix into the base arguments and a provider option needs the authorization flag") {
+    val base = List(
+      "--authorize-disposable-atlas",
+      "--output",
+      ".local/data/search",
+      "--source-revision",
+      "revision",
+      "--concurrency",
+      "8"
+    )
+    val provider = List(
+      "--authorize-provider-embeddings",
+      "--absolute-p95-budget-ms",
+      "3000",
+      "--latency-noise-allowance-ms",
+      "5",
+      "--embedding-pause-ms",
+      "100"
+    )
+    val mixed = base.take(3) ++ provider.take(3) ++ base.drop(3) ++ provider.drop(3)
+    val parsed = HiringSearchEvaluationAtlasRunner.parse(mixed)
+    assertEquals(parsed.map(_.concurrency), Right(8))
+    assertEquals(parsed.map(_.revision), Right("revision"))
+    assertEquals(
+      parsed.toOption
+        .flatMap(_.provider)
+        .map(o => (o.absoluteP95Budget.toMillis, o.latencyNoiseAllowanceMillis, o.requestPause.toMillis)),
+      Some((3000L, 5.0, 100L))
+    )
+    assertEquals(HiringSearchEvaluationAtlasRunner.parse(base).map(_.provider), Right(None))
+    val unauthorized = HiringSearchEvaluationAtlasRunner.parse(base ++ provider.drop(1))
+    assertEquals(unauthorized, Left(ProviderEmbeddingRefusal.NotAuthorized.message))
+    assert(HiringSearchEvaluationAtlasRunner.parse(base ++ provider.updated(2, "1999")).isLeft)
+  }
+
   test("curated stale retrieval metadata fails authoritative job and candidate eligibility") {
     def scored(document: Document): Document = new Document(document).append(MongoFields.Score, 1.0d)
     val jobs = HiringSearchEvaluationCorpus.jobs
