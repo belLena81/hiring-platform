@@ -80,7 +80,7 @@ The assessment policy has two required latency fields with no defaults, so each 
 - **Outcome of a budget breach.** The outcome is chosen in one place, `absoluteBudgetBreachOutcome` in `SearchEvaluationAssessment` (test sources), which currently holds `Defer`. The recorder proposed Defer and the owner has not decided it; the open item is in [hiring discovery search quality](specs/hiring-discovery-search-quality.md#open-items-after-2026-11-10). Changing it to `Reject` is a one-line change that needs an explicit owner decision.
 - **Why the budget is separate.** The budget never enters the relative rule. Free-tier network latency can exceed any fixed bound without the ranker being slower, so letting the budget reject would fail the ranker for the provider's network time. The relative rule compares the ranker's added time against the same capture's baseline: in a ranked run each query's latency is its baseline latency plus the ranker time measured for that query (the `RankerTimer` seam: `RankerTimer.live`, which reads `System.nanoTime`, by default and fixed values in tests), and the ranked p95 is taken over those values. The ranked latency adds only the ranker's own measured time. It does not include any extra retrieval cost from asking the service for `PageSize.Max` rather than K; any latency evidence must restate that assumption.
 - **Reporting.** The assessment result and the report JSON carry `latencyNoiseAllowanceMillis` and `absoluteP95BudgetMillis`. The second is `null` when no budget is set.
-- **Current values.** The curated Atlas runner in `src/it` passes an allowance of 0.0 and no budget. Its captures are not provider-generated, so the budget rule does not apply to them. A provider-embedding capture must supply both owner values. None of these values has been run against Atlas or a provider.
+- **Current values.** In synthetic mode the curated Atlas runner in `src/it` passes an allowance of 0.0 and no budget, so the budget rule does not apply to its captures. Provider mode passes the owner's two values, which are required flags with no default (see [provider-generated embedding mode](#provider-generated-embedding-mode)). The author has not run a provider-embedding capture, and no value has been run against Atlas or a provider.
 
 The checks are unit tests on fabricated reports (tagged HDQ-08 and SEB-08 in `SearchEvaluationAssessmentSpec`). They confirm the arithmetic and the typed failures. They establish no observed latency.
 
@@ -94,6 +94,14 @@ The composition is in test sources under `src/test/.../service/search/`:
 - `SkillEvidenceRankedEvaluation` applies that composition over a baseline for Recommendations and RecruiterMatching. JobSearch and unavailable queries pass through unchanged, and the record names the ranker, its tie rule, the underlying strategy and the basis counts.
 
 The ranker is pure and has no production caller. The live search path is unchanged, and nothing here is adopted. No Atlas or provider run has used this strategy. The curated labels are synthetic, so a comparison here checks the mechanics, not relevance.
+
+The Atlas Local gate for the ranker's candidate matching and recommendation paths is `AtlasSkillEvidenceRankingIntegrationSpec` (`src/it`, five tests tagged HDQ-07.8 and HDQ-07.9). It runs the real service over the Atlas Local indexes, with a recording ranker. It checks that deleted and opted-in non-matching candidates do not reach the ranker on the lexical matching path, that closed, deleted and stale-source jobs do not reach it on recommendations, and that stale-source and deleted candidates do not reach it on the vector candidate branch. It also checks that forbidden and ineligible callers get the plain service's typed error with zero ranker invocations, and that changing only consent, residence, availability and name leaves the candidate matching ranker input unchanged. Without `ATLAS_TEST_URI` the five tests skip, which is not a pass. Each test uses a `search_evaluation_ranking_` nonce database. No test calls an embedding provider. Start the container first with `docker compose -f compose.atlas-local.yaml up -d --wait`, then run:
+
+```bash
+ATLAS_TEST_URI='mongodb://127.0.0.1:27018/?directConnection=true' ATLAS_TEST_DISPOSABLE=true ATLAS_TEST_ALLOWED_HOSTS=127.0.0.1:27018 sbt 'IntegrationTest / testOnly com.example.graphQL.cats.repository.mongo.AtlasSkillEvidenceRankingIntegrationSpec'
+```
+
+Status: written and compiled, not yet run on Atlas Local. Until the owner reports a run, no Atlas Local result exists for the ranker. Security Engineer and Code Reviewer PASS (static re-review of the fixed version, 2026-11-10) are not Atlas evidence; QA has not run. Three tests (the first, fourth and fifth) use the lexical candidate branch for matching, the second covers recommendations, and the third uses the vector candidate branch. Not covered on Atlas: the Admin clause, HDQ-07.8 for recommendations (in-memory spec only), the inactive actor clause, stale-source candidates on the lexical path, and the consent bypass under a private filter on the vector candidate branch (the third test passes no filter). The [discovery specification](specs/hiring-discovery-search-quality.md#atlas-local-spec-2026-11-10) lists the limits and the owner's first-run checks.
 
 ## Curated judgment review and retrieval capture
 
@@ -113,7 +121,55 @@ sbt 'IntegrationTest / runMain com.example.graphQL.cats.repository.mongo.HiringS
 
 Use concurrency 8 for the paired execution. The runner owns a generated `search_evaluation_` nonce database and its cleanup, verifies four production index definitions/readiness, and seeds closed/deleted/inactive/stale-source and consent/private-filter fixtures. Supported job-search and recruiter combinations capture lexical, vector and application RRF results; recommendations support only broad vector queries because their current API has no filters. Unsupported modes and filtered recommendation cases stay explicit in the twelve-query corpus.
 
-These are **observed retrieval with synthetic embeddings** when actually executed. They do not constitute semantic relevance acceptance, human signoff, production activation or billing observations. Provider requests are zero; Atlas cost remains unknown. Local compilation and controlled adapter tests are preparation evidence; absence of an executed live run remains unverified.
+In synthetic mode, the runs are **observed retrieval with synthetic embeddings** when actually executed. They do not constitute semantic relevance acceptance, human signoff, production activation or billing observations. Synthetic mode makes no provider request; Atlas cost remains unknown. Provider mode is described below. Local compilation and controlled adapter tests are preparation evidence; absence of an executed live run remains unverified.
+
+### Provider-generated embedding mode
+
+Provider mode is implemented in source and test sources (2026-11-10). The author has not run it, so this page records no provider or Atlas result. The owner starts it, and no test or API path does.
+
+Flags, added to the synthetic command above. A repeated or invalid option is refused. A provider option without `--authorize-provider-embeddings` is refused with no network call.
+
+- `--authorize-provider-embeddings`: required for any provider option.
+- `--absolute-p95-budget-ms N`: required, whole milliseconds, 2000 to 5000 inclusive. No default.
+- `--latency-noise-allowance-ms N`: required, whole milliseconds, 0 to 60000 inclusive. No default.
+- `--embedding-pause-ms N`: optional, whole milliseconds, 0 to 600000 inclusive. Default 0. The pause runs between two requests, not after the last one.
+
+Order: the arguments are parsed, then the Atlas authorization is checked, then the provider configuration is read, then the embeddings run, and only then is the database created. A refusal before the first request makes no provider call and writes no record.
+
+Configuration (never on the command line, and never logged or written):
+
+- `vector-search.voyage.api-key`: read from the `VOYAGE_API_KEY` substitution in `application.conf`, or from the owner's local file, which takes precedence.
+- `vector-search.voyage.endpoint`: `https` only, host `ai.mongodb.com` or `api.voyageai.com`. The host and scheme compare case-insensitively, ASCII only, and an explicit port is accepted. User information and a raw `%` in the authority are refused. The packaged default is `https://api.voyageai.com/v1/embeddings`.
+- `vector-search.voyage.data-collection-attestation`: `on` or `off`, required, no default, and absent from `application.conf`. It is the owner's attestation of the Atlas organization's Voyage data-collection setting. It is recorded in the evidence record, not verified by the system.
+- `vector-search.voyage.model` (`voyage-4-lite` by default; `VOYAGE_MODEL` may override it) and `vector-search.voyage.dimension` (1024), and `vector-search.embedding.timeout-ms`.
+
+Provider mode reads one explicit file, `src/main/resources/local.conf`, relative to the working directory, so start sbt from the repository root. It falls back to `application.conf` and the environment. The file is gitignored and not packaged into images.
+
+What is sent: 28 requests per invocation, one input each, shared by the three strategies. These are the 16 corpus documents (8 jobs and 8 candidates, including the closed, deleted and stale fixtures) and 12 query texts. The 12 queries contain only 2 distinct texts, and they are deliberately not deduplicated. The Recommendations query vectors are not used by the service. Requests run one at a time, and the adapter does not retry. A 429 or 5xx answer is a failed capture.
+
+Capture bound and truncation guard: the capture is taken with K = 7, not `PageSize.Max`. On the Vector and ApplicationRrf captures, a non-JobSearch list that reaches K stops the run with the fixed message "Possibly truncated capture; no report was written.", and no report is written. The Lexical capture is not guarded. Eligible sets in this corpus hold at most 5 entities. The guard checks only the length of a list against K. It does not verify that a list is the whole eligible set.
+
+Latency: queries are embedded once before the Atlas capture, so the captured latency in the Atlas phase includes no provider time. The absolute budget therefore measures Atlas Local retrieval in this mode.
+
+Outputs, written to `--output` (under `.local/data/search-evaluation/`):
+
+- `provider-embedding-evidence-<concurrency>-<timestamp>.json`, outcome `Completed`. It is written right after the last embedding and before any database work. If that write fails, the run stops with a fixed message that tells the owner to check the provider usage dashboard, and no Atlas work runs.
+- `provider-embedding-evidence-failed-<concurrency>-<timestamp>.json`. It is written when the embedding stage fails after at least one request. Its outcome is the refusal name (for example `EmbeddingFailed` or `DimensionMismatch`), with the fixed failure message, the requests made (including the failing one) and the tokens counted so far. It is not written for refusals before any request. Cancellation writes nothing. An exception that escapes the embedding stage prints a fixed message and writes no failure record. A cancellation or client-close error that arrives after every input was answered also writes no record, although the provider may have billed those tokens; for such a run the billed amount is visible only in the provider usage dashboard.
+- Both records hold the outcome, the embedding provenance, the endpoint host, the model, the dimension, the attestation value and its kind, the budget, the allowance, the pause, the capture bound, K, the request count, the total tokens, the count of inputs without usage, and the tokens per document and per query id. They never hold the key, a vector, an input text or an exception text.
+- `totalTokens` is provider-reported. After a failure it is a lower bound, because a response the adapter refuses (a dimension or model mismatch, `InvalidResponse`) has its tokens dropped. A null token count for an input means the response carried no usable `usage.total_tokens`.
+- The curated report files (`curated-<strategy>-<concurrency>-<timestamp>.json`) and the criterion record are written as in synthetic mode. The report's run coordinates carry `ProviderGenerated`. The criterion record does not carry the provider options, so the provider embedding evidence record is the only record of the options and the request counts.
+
+Not delivered: `SearchEvaluationObservedEvidence`, the observed privacy and eligibility evidence (G5). The runner passes none, so the assessment runs without observed evidence. Ranked-versus-baseline assessments are not written by this mode (G9). The attestation is recorded, not verified.
+
+The owner-run command, not executed by the author. It needs the owner's run authorization (G6), and the attestation must be set in configuration first:
+
+```bash
+sbt 'IntegrationTest / runMain com.example.graphQL.cats.repository.mongo.HiringSearchEvaluationAtlasRunner --authorize-disposable-atlas --output .local/data/search-evaluation --source-revision REV --concurrency 1 --authorize-provider-embeddings --absolute-p95-budget-ms N --latency-noise-allowance-ms N [--embedding-pause-ms N]'
+```
+
+Replace `N` with whole milliseconds: the budget from 2000 to 5000, the allowance from 0 to 60000, and the pause from 0 to 600000. Use `--concurrency 8` for the paired run. The Atlas environment variables are those of the [Atlas Local run](#local-atlas-compatible-run) (`ATLAS_TEST_URI`, `ATLAS_TEST_DISPOSABLE` and `ATLAS_TEST_ALLOWED_HOSTS`).
+
+Tests for this mode are unit tests in `ProviderEmbeddingCaptureSpec` (`src/test`) and parse tests in `HiringSearchEvaluationCaptureIntegrationSpec` (`src/it`). Neither calls Atlas or a provider.
 
 ## Automated Embedding comparison
 

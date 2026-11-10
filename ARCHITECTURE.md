@@ -244,6 +244,8 @@ trait EmbeddingService[F[_]]:
   def embed(input: EmbeddingInput): F[Either[EmbeddingError, EmbeddingVector]]
 ```
 
+The Voyage adapter (`infrastructure/embedding/VoyageEmbeddingService.scala`) implements `EmbeddingService[IO]` and also `MeteredEmbeddingService`. `embedMetered` returns a `MeteredEmbedding`: the same vector that `embed` returns, plus the provider-reported `usage.total_tokens`. The token count is metadata. It is absent, never zero, when the field is missing, malformed or negative, and it never fails an embedding. The worker-facing port is unchanged, so the embedding workers and the search services do not read the count. Only the owner-started search evaluation runner calls `embedMetered`, through `VoyageEmbeddingService.meteredResource`, which applies the same request, response-size limit and single-vector validation as `embed`. Reason: the count is billing evidence for the evaluation, and adding it to `EmbeddingService.embed` would change every caller of the port. Each `meteredResource` opens its own Ember client, as `resource` does.
+
 Application services depend on these interfaces. `RepositoryError` belongs to this service boundary; adapters translate driver failures into it.
 
 ---
