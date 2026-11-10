@@ -3,7 +3,7 @@
 ## Identity and scope
 
 - Roadmap: Phase 10 in [development milestones](../development-milestones.md).
-- Status: in progress. Phase 10 local scope is Completed (local) by owner decision of 2026-11-09, kept by owner decision of 2026-11-10. The HDQ-06.L lexical-branch Atlas Local run was observed PASS on 2026-11-10 (see [owner decisions](#owner-decisions-2026-11-09), item 4). Independent verdicts on the final tree (2026-11-10, the 2026-11-09 change plus the four new test files) are recorded in [traceability](#traceability-2026-11-09): Security Engineer PASS, Code Reviewer PASS on narrow re-review, QA PASS for diff scope (all given before the HDQ-06.L test correction). Formatting has not run and the full `scripts/check-local.sh` has not run on the final tree, so the spec stays in progress. The cloud rows HDQ-01.C, 04.C, 05.C, 06.C, 11.C and 12.C are Phase 10C, Not done and deferred until the first cloud release; HDQ-07 and HDQ-08 stay deferred (HDQ-08 is also blocked by SEB-02.H). The HDQ-06.L lexical branch has an observed Atlas Local PASS (2026-11-10, `local-container`) after a test-only correction that was narrowly reviewed after the fact: the test correction was found sound and the documentation findings were fixed; no reviewer PASS is recorded for the corrected text yet. HDQ-03, HDQ-09 and HDQ-10 are closed by real-Mongo tests recorded on 2026-11-10, with depth limits in [traceability](#traceability-2026-11-09). The `.L` rows for HDQ-01, 04, 05, 06 (vector branch) and 11 were observed on 2026-11-01, and the HDQ-06.L lexical branch on 2026-11-10 (`local-container`, not Atlas acceptance); `HDQ-12.L` was observed 5 of 5 on Atlas Local on 2026-11-01 (HEAD c5af728); the 2026-11-09 Atlas Local rerun reconfirmed the existing discovery specs. The [owner decisions, traceability and verdicts (2026-11-09)](#owner-decisions-2026-11-09) are at the end of this document, with the 2026-10-13 closure split (`.L`/`.C` rows) and lexical-query facets HDQ-12.
+- Status: in progress. Phase 10 local scope is Completed (local) by owner decision of 2026-11-09, kept by owner decision of 2026-11-10. The HDQ-06.L lexical-branch Atlas Local run was observed PASS on 2026-11-10 (see [owner decisions](#owner-decisions-2026-11-09), item 4). Independent verdicts on the final tree (2026-11-10, the 2026-11-09 change plus the four new test files) are recorded in [traceability](#traceability-2026-11-09): Security Engineer PASS, Code Reviewer PASS on narrow re-review, QA PASS for diff scope (all given before the HDQ-06.L test correction). Formatting has not run and the full `scripts/check-local.sh` has not run on the final tree, so the spec stays in progress. The cloud rows HDQ-01.C, 04.C, 05.C, 06.C, 11.C and 12.C are Phase 10C, Not done and deferred until the first cloud release; HDQ-07 slices 1 and 2 are implemented (slice 1 in source, slice 2 in test sources) and not adopted. HDQ-07 slice 2 verdicts on the corrected tree (2026-11-10): Security Engineer PASS, Code Reviewer PASS and QA PASS, the Code Reviewer and QA each after a FAIL on the first review. Slice 2 is NOT done until scalafmt (pre-commit hook) and the full `scripts/check-local.sh` have run; minor comment and assertion cleanup made after the reviews is not re-reviewed. HDQ-07 and HDQ-08 stay deferred (HDQ-08 is also blocked by SEB-02.H). The HDQ-06.L lexical branch has an observed Atlas Local PASS (2026-11-10, `local-container`) after a test-only correction that was narrowly reviewed after the fact: the test correction was found sound and the documentation findings were fixed; no reviewer PASS is recorded for the corrected text yet. HDQ-03, HDQ-09 and HDQ-10 are closed by real-Mongo tests recorded on 2026-11-10, with depth limits in [traceability](#traceability-2026-11-09). The `.L` rows for HDQ-01, 04, 05, 06 (vector branch) and 11 were observed on 2026-11-01, and the HDQ-06.L lexical branch on 2026-11-10 (`local-container`, not Atlas acceptance); `HDQ-12.L` was observed 5 of 5 on Atlas Local on 2026-11-01 (HEAD c5af728); the 2026-11-09 Atlas Local rerun reconfirmed the existing discovery specs. The [owner decisions, traceability and verdicts (2026-11-09)](#owner-decisions-2026-11-09) are at the end of this document, with the 2026-10-13 closure split (`.L`/`.C` rows) and lexical-query facets HDQ-12.
 - Outcome: candidates find relevant eligible jobs through structured geographic discovery and richer lexical/hybrid search; recruiters improve matching within their existing authorization and privacy boundaries.
 - Coordinator: Product Manager. Architect owns contracts, Data Engineer owns Mongo/Atlas access and schema, Scala Developer owns services and API. Independent Code Reviewer, Security Engineer and QA own final verdicts.
 - Dependencies: measured Phase 8 access baseline and Phase 9 held-out evaluation in [MongoDB optimization](mongodb-vector-retrieval-optimization.md) and [Hiring Search Enhancements](hiring-search-enhancements.md#search-evaluation-and-embedding-architecture).
@@ -121,8 +121,8 @@ Compare query plans/counts, keys/documents examined, latency percentiles, throug
 | HDQ-04 | Given lexical/vector/hybrid cases, when executed in Atlas, then the accepted analyzer/filter semantics and bounded branch limits hold. | Atlas integration plus held-out comparison records. | Atlas execution pending; fixed-field lexical adapter and bounded authorized capture tooling covered by the 9-test fusion pipeline suite. |
 | HDQ-05 | Given facets and stale/restricted records, when counted, then counts follow accepted semantics without leaking ineligible/private data or silently approximating totals. | Authorized-count oracle, Atlas lag/deletion scenarios, forbidden-access tests. | Local structured-facet contract PASS: complete filtered counts, skill deduplication, 20-bucket bounds/truncation, radius exclusions, city/skill/date conjunction; real-service Recruiter and Deleted candidate denials. Lexical-query facets are a separate open capability; Atlas lag scenarios remain pending live Atlas execution. |
 | HDQ-06 | Given consent/private-field counterfactuals and non-owner requests, when matching/ranking runs, then existing consent rules, minimized DTOs and authorization remain unchanged. | Service, GraphQL and real branch tests. | Local service/GraphQL/authoritative Mongo checks PASS. The vector candidate branch was observed on Atlas Local (HDQ-06.L, 2026-11-01, `local-container`). The lexical candidate branch test was written on 2026-11-09 and observed PASS on Atlas Local on 2026-11-10 (HDQ-06.L, `local-container`, after a test-only correction; see [`.L` table](#criteria) and Traceability). Cloud HDQ-06.C is deferred. See [HRP-07–09](hiring-retrieval-publication-reliability.md). |
-| HDQ-07 | Given permitted features and tied scores, when a proposed ranker runs, then pure deterministic ordering and cold/missing-feature baseline behavior are reproducible. | Pure ranking/property examples and evaluation fixtures. | Deferred by approved conservative policy; no new ranker adopted. |
-| HDQ-08 | Given held-out baseline and pre-agreed thresholds, when personalization is evaluated, then an evidence-backed adopt/defer decision is recorded without weakening other criteria. | Relevance/latency/privacy/resource reports and independent reviews. | Decision: defer personalization. Human relevance labels and Atlas comparison remain pending review/execution; no adoption claim. |
+| HDQ-07 | Given permitted features and tied scores, when a proposed ranker runs, then pure deterministic ordering and cold/missing-feature baseline behavior are reproducible. | Pure ranking/property examples and evaluation fixtures. | Adoption deferred by approved conservative policy; no ranker adopted. Slices 1 and 2 are implemented, neither is adopted, and neither has a production caller. Slice 1 is the pure ranker (unit-tested). Slice 2 is its test-source evaluation composition (unit, service and replay tests). Unit-evidenced: HDQ-07.1 to 07.5, 07.6 (unit part), 07.7 and 07.8 (structural and unit part). Test-source evidence, 2026-11-10 (developer's run; no Atlas run): 07.6 replay part, 07.8 service part, 07.9 service part and 07.11 (the paired ranked latency and the truncation guard are tagged 07.11). Slice 2 verdicts on the corrected tree (2026-11-10): Security Engineer PASS, Code Reviewer PASS and QA PASS, the last two each after a FAIL on the first review. Slice 2 is not done until scalafmt and the full `scripts/check-local.sh` have run. Open: the Atlas Local parts of 07.8 and 07.9; placement inside the service until adoption; the slice 2 formatting and full local check; the HDQ-08 gates G1 to G12. 07.10's static check passed (QA, 2026-11-10). Owner decision 2026-11-10: build a pure ranker for both sides, not adopted. Design, contract and criteria HDQ-07.1 to HDQ-07.11 are in [Candidate ranker and personalization adoption path](#candidate-ranker-and-personalization-adoption-path-hdq-07-hdq-08); checkpoints in the [slice 1 checkpoint](#slice-1-checkpoint-2026-11-10) and the [slice 2 checkpoint](#slice-2-checkpoint-2026-11-10). |
+| HDQ-08 | Given held-out baseline and pre-agreed thresholds, when personalization is evaluated, then an evidence-backed adopt/defer decision is recorded without weakening other criteria. | Relevance/latency/privacy/resource reports and independent reviews. | Decision: defer personalization. Human relevance labels and Atlas comparison remain pending review/execution; no adoption claim. Owner decision 2026-11-10: the full adoption path, with gates G1 to G12 in [Candidate ranker and personalization adoption path](#candidate-ranker-and-personalization-adoption-path-hdq-07-hdq-08). Not run. |
 | HDQ-09 | Given timeout, cancellation, stale embedding or restart, when provider/index work fails or resumes, then failures sanitize, resources close and durable repair cannot restore stale/deleted data. | Worker/service resource tests and Mongo restart/race integration. | Local worker/resource/Mongo recovery checks PASS. On 2026-11-10 `MongoEmbeddingWorkRestartIntegrationSpec` (5 real-Mongo tests) PASS: a pipeline cancelled mid provider call leaves the work Processing with its lease and nothing persisted; a new repository and pipeline does not steal a live lease and, after expiry, completes with exactly one provider call and the correct source hash; an entity deleted while a claim is held completes with zero provider calls and restores nothing; a displaced worker's stale complete, retry and fail return Conflict and renew returns false after reclaim. Depth limits are in Traceability. Real-provider acceptance remains external. See [HRP-01/02/04/14](hiring-retrieval-publication-reliability.md). |
 | HDQ-10 | Given accepted location/index schema changes, when migration is interrupted or writers race, then restart/verification converges without invented coordinates or constraint loss. | Disposable Mongo migration tests; actual Atlas index readiness checks. | Local PASS: incompatible legacy point fails cutover with Running ledger; invalid writer rejected by installed validator; exact point repair followed by repeated setup reaches Complete and verifies the geo index. On 2026-11-10 `MongoJobGeoCutoverWritersIntegrationSpec` (1 real-Mongo test) PASS for the concurrent-writer case: behind one barrier, a repeated failing setup runs with 9 valid writers (all succeed, stored points byte-identical to what was sent) and 12 invalid writers (all rejected with Mongo error 121); the ledger stays Running until exact repair, then reaches Complete with the geo index present, and invalid writers are rejected again. Depth limits are in Traceability. Production writer cutover and Atlas deployment remain pending. |
 | HDQ-11 | Given an adopted query/index change, when paired workloads execute, then agreed read/relevance gains and write/storage/cost limits are met. | Source-qualified before/after plans and measurements. | Local measured workload recorded below, including actual GEO_NEAR_2DSPHERE, sort/limit, commands, latency and flushed index/storage growth. No before/after latency improvement or SLO is claimed; Atlas relevance/cost acceptance remains pending. |
@@ -415,6 +415,504 @@ Narrow reviews of the 2026-11-10 HDQ-06.L test correction (after the fact; the r
 The documentation findings listed above were fixed in this tree. No reviewer PASS is recorded for the corrected text. A PASS line is added here only if a final re-check returns PASS.
 
 These verdicts do not make the spec `done`. The spec stays in progress while the Phase 10C cloud rows and HDQ-07/08 are open, and while the formatting gate and the full `scripts/check-local.sh` run on the final tree are not done.
+
+## Candidate ranker and personalization adoption path (HDQ-07, HDQ-08)
+
+Status: design, written 2026-11-10 by the Software Architect; owner answers Q1 to Q8 recorded 2026-11-10. Nothing in this section is run or adopted. HDQ-07 and HDQ-08 stay deferred and not adopted. The pure ranker (slice 1) is implemented and unit-tested, and its test-source evaluation composition (slice 2) is implemented with unit, replay and service tests. Neither has a production caller or adoption. Their status and open items are in the [slice 1 checkpoint](#slice-1-checkpoint-2026-11-10) and the [slice 2 checkpoint](#slice-2-checkpoint-2026-11-10). Its source is `SkillEvidenceRanking.scala`, and the sections below describe that source as read on 2026-11-10. The live default ranking, `SearchFusionStrategy`, `vector-search.fusion-strategy` and the GraphQL contract are unchanged. Slice 1 is production code that ranks candidate data, so it takes the full review tier: Code Reviewer, Security Engineer and QA (see [Slices, ownership and order](#slices-ownership-and-order)). The documentation changes for slice 1 are reviewed with the code, and no review verdict is implied by this text.
+
+### Owner decisions (2026-11-10)
+
+The owner gave the selections only. Each reason below is the recorder's rationale, not an owner statement.
+
+1. **HDQ-07: build a pure, deterministic candidate ranker for both sides.** The two sides are jobs recommended to a candidate, and candidates matched to a recruiter's owned job. The ranker is not adopted into the live default, and no selector or configuration entry is added until evaluation justifies it. Reason (recorder's): this makes HDQ-07 testable and gives HDQ-08 a concrete algorithm to evaluate, without changing any user's results.
+2. **Ranking score in the API (Q2 and Q7 option B, 2026-11-10).** No new score field is exposed (Q2). On adoption, `score` and `retrievalScore` keep their current meaning, and the ranker's fused value is mapped to no API field (Q7, option B). For ranked results the list order is authoritative, so `score` need not decrease down the list. No ranker-derived number reaches API clients. Until adoption the ranker has no API path, so nothing is exposed now. The risks and mitigations are in [Decision record: ranking score in the API](#decision-record-ranking-score-in-the-api).
+3. **HDQ-08: the full adoption path (the owner's option C for SEB-08).** It has five parts:
+   - Human-reviewed labels (SEB-02.H). The owner exported the review packet for corpus digest `1a7103c7c364ccadaec9c3203b92cbb4067175bfcc087539bfcf27f861645c2a`, and a human review is in progress.
+   - Genuine semantic embeddings from the existing Voyage adapter on the owner's free tier (Q6: free allowance and data-use terms read from vendor pages on 2026-11-10; the endpoint and key type are confirmed by the owner's smoke request, and the owner's Atlas data-collection setting is recorded in configuration as an owner attestation, see G6). The owner's endpoint is the Atlas endpoint, set through the owner's gitignored local configuration, not through a code or `application.conf` change. The default `api-key` reads `VOYAGE_API_KEY` from the environment (`application.conf`); the owner's local configuration sets `api-key` itself, which overrides that default.
+   - Paired observed privacy, latency and billing evidence.
+   - An independent Security privacy review.
+   - An explicit adopt or defer decision under the approved conservative thresholds. The relevance, privacy and provider-request thresholds stay unchanged; latency follows the Q3 rules (2026-11-10). Q1 (2026-11-10) accepts the `.L` local-container run for application-side ranking as SEB-08 evidence; the other parts still apply.
+
+   Only the fabricated corpus goes to the provider: 8 jobs, 8 candidates and 12 queries, with no real personal data. If any gate fails, the outcome is defer. Reason (recorder's): adoption stays evidence-gated, and the provider receives nothing that is not fabricated.
+
+### Source facts (inspected 2026-11-10)
+
+- **How the existing order and ties work:**
+  - `HybridRankFusion.retrieval` is the application RRF, with `RankConstant` 60. It orders by fused score, highest first. On equal scores it compares branch ranks in branch order: the first branch where the two hits differ decides, and a hit absent from that branch loses (`Int.MaxValue`). The last tie-breaker is the identifier string in ascending order (UUID text). `fuseJobs` (vector, then lexical) and `fuseCandidates` (job vector, then query vector, then lexical) use it.
+  - The vector-only paths are `recommendedJobs`, and `candidateMatches` without query text. They return the order in which `$vectorSearch` emits hits. `jobVectorPipeline` and `candidateVectorPipeline` run `$vectorSearch`, `$set score` and `$project`, with no `$sort` and no application tie-breaker. Native fusion sorts by score (highest first), then by `_id` ascending.
+  - `SemanticSearchService` keeps the retrieval order through the authoritative recheck. `liveHits` removes duplicates and drops hits that are gone or no longer eligible. The service then applies `take(first)` and sets `matchedSkills = SkillMatching.matched(candidateSkills, jobSkills)`, which uses the job's spelling and `SearchTerm.canonical`.
+- **Public contract.** The `ScoredHit` interface on `RankedJob` and `RankedCandidate` already exposes three fields: `score` (the retrieval, fusion or rerank score), `retrievalScore` (the fusion score, kept when rerank reorders) and `matchedSkills`. Under Q7 option B (2026-11-10), adoption changes none of these fields: `score` and `retrievalScore` keep their current meanings, `matchedSkills` keeps its meaning, and the ranker's fused value is mapped to no field. The decision record below gives the reasons.
+- **Bounds.** `PageSize.Max` is 100. The repository branch limit is `branch-result-limit`, or `num-candidates` (100) when that is unset.
+- **Evaluation code.** `SearchEvaluationAssessment`, `SearchEvaluationHarness`, `SearchEvaluationMetrics`, `SearchEvaluationCapture` and the fixtures are test sources under `src/test/.../service/search/`, not `src/main`. `SearchEvaluationStrategy` is a parameterized enum. Its four retrieval cases are `Lexical`, `Vector`, `ApplicationRrf` and `AtlasAnn`. Slice 2 adds `SkillEvidenceRanked(underlying)`, which names the retrieval strategy it ranks over. It is not a retrieval branch: the integration retrieval raises `Unavailable` for it. `SearchEvaluationStrategy.values` no longer exists, and nothing used it. The assessment returns `Recommend`, `Defer` or `Reject`:
+  - `Reject` on a privacy, eligibility or retrieval failure, a relevance regression, a candidate p95 above the paired baseline p95 plus `latencyNoiseAllowanceMillis` (`LatencyRegression`), a provider-request increase or a cost-limit breach. With an allowance of 0 the relative rule is the strict `>`. An absolute-budget breach (`AbsoluteLatencyBudgetExceeded`) is a `Defer` reason, not a `Reject` reason (see [Latency](#outcomes)). The Q3 rules are in source as of 2026-11-10 (developer's run; reviews pending).
+  - `Defer` when evidence is missing.
+
+  It counts a Recommendations query as supported only when its filter group is `Broad` and its retrieval is `Vector`. That covers the `Vector` strategy and `SkillEvidenceRanked(Vector)`, whose retrieval is `Vector`. The harness's report check (`SearchEvaluationHarness`) also accepts `AtlasAnn` retrieval for Recommendations, but this assessment rule does not count it, so a policy that selects Recommendations on `AtlasAnn` fails coverage with `IncompleteCoverage`.
+- **Curated runner.** `HiringSearchEvaluationAtlasRunner` hard-codes `SyntheticFixture` provenance and 17-dimension synthetic vectors (`HiringSearchEvaluationCorpus`). It uses policy `conservative-no-regression-20261006` (Agreed) with a `Vector` baseline. It passes no label attestation and no observed evidence, so none of its assessments can be `Recommend`. A recorded failure can still make one `Reject`. No capture mode with provider-generated embeddings exists.
+- **Voyage adapter.** `VoyageEmbeddingService` sends one input per request, with model `voyage-4-lite` and dimension 1024 (`application.conf`). A 429 or 5xx response is raised inside the breaker and mapped to `ProviderUnavailable`. The adapter does not retry, and it does not decode the response's `usage` field, so it records no token counts.
+- **Corpus digest.** The digest covers the rubric (origin and note) and each query's `labelReview`. Recording reviewed labels therefore produces a new digest, different from packet digest `1a7103c7…`.
+- **Corpus shape:**
+  - Held-out queries are index 2 (`Broad`) and index 3 (`Selective`) of each use case.
+  - Recommendations support `Broad` only. The ranker's scope therefore has 3 supported held-out queries (Recommendations 1, RecruiterMatching 2) and 2 nonempty supported tuning queries.
+  - Every eligible set has at most 5 entities, which is less than K = 7.
+
+### Problem and non-goals
+
+Both sides rank by retrieval similarity alone. A hit that covers more of the job's listed skills can rank below one that covers fewer. HDQ-07 defines a ranker that may promote visible skill coverage within the authorized retrieved list. HDQ-08 decides from evidence whether that ranker replaces the default.
+
+Non-goals:
+
+- Behavioral tracking: search sessions, clicks, views, applications, dwell time, or recruiter decisions.
+- Private residence, availability or consent, protected attributes, and any proxy for them (including name) as features.
+- A probability of hiring success, or any calibrated likelihood.
+- Model-generated rationale, an LLM or a learned model.
+- Native `$rerank` (HSE-05.C).
+- A selector or configuration entry, or a Strategy, before adoption.
+- Any change to retrieval, eligibility, authorization or the GraphQL schema.
+- `semanticJobSearch`, whose intent is the caller's query, not the profile. Outside the ranker (Q8, 2026-11-10).
+- The degraded lexical fallback, which is not evaluated and keeps its order. Outside the ranker (Q8, 2026-11-10).
+- Automatic hiring decisions.
+
+### Allowed features
+
+A feature must be authorized, necessary and available at ranking time.
+
+| Feature | Recommendations (candidate to jobs) | Matching (recruiter to candidates of an owned open job) | Why allowed |
+|---|---|---|---|
+| Retrieval rank | 1-based position of the job in the `recommendedJobs` list after the authoritative recheck | 1-based position of the candidate in the `candidateMatches` list after the authoritative recheck | Already computed. The ranker uses rank rather than raw score because vector, lexical and RRF scores are not comparable across modes or models. |
+| Skill evidence | Distinct canonical job skills covered by the caller's own profile skills, out of the job's distinct canonical skills | Distinct canonical skills of the owned job covered by the candidate's profile skills, which the minimized DTO already returns, out of the job's distinct canonical skills | The caller can already see both inputs, and the normalization is the same as `matchedSkills`. With distinct canonical counts it equals matched / (matched + missing) in the planned `missingSkills` field of [GDF-02](guided-discovery-and-followup.md). |
+
+The retrieval score is not a ranker input. The ranker reads only the retrieval rank and the evidence.
+
+| Excluded | Reason |
+|---|---|
+| Residence, availability, consent | These are private, owner-only values (see [Actors and authorization](#actors-and-authorization)). Consent decides eligibility only. |
+| Name, email, ID text | A name can be a proxy for a protected attribute, and IDs carry no relevance. The ID text is used only for validation. |
+| Protected attributes or inferences about them | Not stored. Inferring them is a non-goal. |
+| Experience summary text | Scoring free text needs a language model. |
+| Sessions, applications, clicks, views, recruiter decisions | This would be behavioral tracking, or learning from human decisions. It needs its own purpose, consent and retention specification. |
+| Job recency, city, country, remote | Not needed for this problem. Recency needs an injected clock, and a location preference would need private residence. A later experiment may take these up. |
+| Raw retrieval score, embedding vectors | Retrieval rank already expresses them, and raw scores are not comparable. |
+| Number of candidate skills | It would reward skill stuffing. Evidence counts the job's skills only. |
+
+### Ranker contract
+
+The ranker lives in `com.example.graphQL.cats.domain.search`, beside `SearchFusionStrategy`, in `SkillEvidenceRanking.scala` (slice 1). Its unit tests are in `src/test/scala/com/example/graphQL/cats/domain/search/SkillEvidenceRankingSpec.scala`.
+
+- **Dependencies:** it depends only on `domain.model` (`SearchTerm`) and cats data types. It uses no Mongo, Circe, GraphQL, provider, clock, configuration, logging or `IO`.
+- **Callers:** none in production until adoption. No service, resolver, repository or runtime file references it. Its callers are test sources only: its unit tests, and the slice 2 evaluation composition `SkillEvidenceRankedComposition.scala` under `src/test/.../service/search/`.
+
+Signatures to implement (names are final unless the Code Reviewer finds a glossary conflict):
+
+```scala
+final case class SkillEvidence private (covered: Int, required: Int)
+object SkillEvidence {
+  /** None when the job lists no skill or no job skill is covered: no evidence, never an invented zero. */
+  def of(candidateSkills: Set[String], jobSkills: Set[String]): Option[SkillEvidence]
+}
+final case class RankingHit[Id](id: Id, retrievalRank: Int, evidence: Option[SkillEvidence])
+// Output element. fusedValue is internal: no API field maps it, on adoption or otherwise (Q7, option B).
+final case class RankedHit[Id](id: Id, retrievalRank: Int, evidence: Option[SkillEvidence], fusedValue: Double)
+enum RankingBasis { case RetrievalOrder, SkillEvidence }
+final case class RankingOutcome[Id](basis: RankingBasis, hits: List[RankedHit[Id]])
+enum RankingInputError {
+  case InvalidLimit(limit: Int); case TooManyHits(limit: Int)
+  case NonPositiveRetrievalRank(rank: Int); case DuplicateRetrievalRank(rank: Int)
+  case BlankKey; case DuplicateHit(key: String)
+}
+object SkillEvidenceRanking {
+  val RankConstant: Int = 60 // the HybridRankFusion constant, reused, not tuned
+  def rank[Id](hits: List[RankingHit[Id]], maxHits: Int)(key: Id => String)
+      : Either[NonEmptyChain[RankingInputError], RankingOutcome[Id]]
+}
+```
+
+1. **Validation.** Errors accumulate (`ValidatedNec`), then convert to `Either`. The rules:
+   - `maxHits` must be at least 1.
+   - `hits.size` must be at most `maxHits`. An oversized input fails with `TooManyHits`; it is never truncated silently.
+   - Each `retrievalRank` must be at least 1 and unique.
+   - Each `key(id)` must be non-blank and unique.
+2. **Skill evidence.**
+   - `required` is the number of distinct non-blank canonical job skills.
+   - `covered` is the size of the intersection with the candidate's canonical skills.
+   - The result is `None` when `required` or `covered` is 0. Candidate skills outside the job's set add nothing.
+3. **Evidence rank.** Hits with evidence get a competition rank: 1 plus the number of hits whose coverage is strictly greater. Coverage is compared exactly: `covered_a * required_b` against `covered_b * required_a`.
+4. **Internal fused value.** The value is `1/(60 + retrievalRank)`, plus `1/(60 + evidenceRank)` when the hit has evidence. It is a two-term Double sum, so the order of addition cannot change it. Each output hit carries it as `fusedValue`, for the evaluation and tests. The value is internal: no GraphQL field or response maps it (Q7, option B, 2026-11-10). No log or metric maps it either; any such use needs a separate decision and review.
+5. **Order.** Hits are sorted by `fusedValue`, highest first, then by `retrievalRank` ascending. Retrieval ranks are unique, so this is a total order, and the result does not depend on the order of the input list.
+6. **Baseline.** When no hit has evidence, `basis = RetrievalOrder` and the order is ascending `retrievalRank`, which is today's order exactly. This covers a cold profile with no skills, a job with no skills, no overlap at all, and an empty list. Hits without evidence keep their relative retrieval order in every case.
+7. **Output.** The output is a permutation of the input: no hit is added or dropped. It carries the basis, each hit's evidence and the internal `fusedValue`. The `fusedValue` is not a probability, a hiring-success measure or a display score.
+8. **Adoption placement (future, not part of HDQ-07).** On adoption, the ranker would run in `recommendedJobs` and in the normal path of `candidateMatches`, after `liveHits` and before `take(first)`. `retrievalRank` would be the 1-based position in the `liveHits` list. Until then, the evaluation gets the same effect by requesting the service with `first` equal to the bound, ranking the result, and then taking K. That equals ranking the captured top-K list only while every eligible set is at most K. The truncation guard in `SkillEvidenceRankedEvaluation.rankedRun` refuses a possibly truncated ranked run with `PossiblyTruncatedCapture(queryId)`; the rule is under [Pairing](#personalization-adoption-path-hdq-08).
+   - **Fallback (Q8, 2026-11-10).** The ranker never blocks a response. If it is disabled, returns an error (for example `TooManyHits` at the bound) or fails internally, the response keeps the retrieval order, which is the previous result. This applies to `recommendedJobs` and recruiter matching only. `semanticJobSearch` and the degraded lexical fallback stay outside the ranker and keep their order.
+   - **Visibility (owner answer 'yes' to the Q8 follow-up, 2026-11-10).** A fallback is visible operationally: it is logged and counted as a metric by error kind and by counts only. The log and metric never carry the `Left` contents, a key text, a `RankedHit` or a `RankingOutcome` (the Security note in the [slice 1 checkpoint](#slice-1-checkpoint-2026-11-10)). No API field or flag reports it. Recorder's reading: 'yes' means operational visibility, consistent with Q2 and Q7 option B; to be corrected if the owner meant an API-visible flag. Recorder's reason: the fallback rate becomes observable without changing any response, which controls the risk of a silently degraded ranking going unnoticed. `score` has the same meaning on ranked and fallback responses (Q7, option B); only the order differs. Implementation belongs to the adoption slice; nothing is wired now.
+
+Alternatives compared:
+
+| Option | Assessment | Decision |
+|---|---|---|
+| Baseline only | Simplest option, but it gives HDQ-08 nothing to evaluate | Stays the live default; owner decision 1 asks for a ranker |
+| RRF of retrieval rank and skill-evidence rank | No tuned weight, reuses the existing constant and tie conventions, and degrades exactly to today's order | **Chosen** |
+| Weighted blend of normalized score and coverage | Needs a tuned weight, but only 2 nonempty tuning queries exist, so the weight would overfit. Scores are also not comparable across modes. | Rejected |
+| Partition by coverage, then retrieval rank | Skill overlap fully overrides semantic relevance, which maximizes the gain from skill stuffing | Rejected |
+| Learned model, LLM rerank, native `$rerank` | Non-goals; `$rerank` is HSE-05.C | Out of scope |
+
+### Acceptance (HDQ-07)
+
+Each test name carries its ID. The test types are:
+
+- **Unit:** pure MUnit tests in `src/test/.../domain/search/`.
+- **Service:** `SemanticSearchService` with recording fakes, plus the test-source evaluation composition.
+- **Replay:** fixture replay.
+- **Atlas Local:** the curated runner on `.L`.
+
+Values are given to 5 or 6 significant figures.
+
+| ID | Given / When / Then | Test type |
+|---|---|---|
+| HDQ-07.1 cold profile | Given a candidate with no profile skills and hits r1..r5, when ranked, then every evidence is `None`, `basis = RetrievalOrder` and the order is r1..r5. The same holds for an owned job with no skills on the matching side. | Unit |
+| HDQ-07.2 missing evidence | Given r1 (the job lists no skills), r2 (no overlap) and r3 (1 of 2 covered), then the order is r3 (1/63 + 1/61 = 0.032266), r1 (0.016393), r2 (0.016129). Missing evidence and zero overlap are treated alike. | Unit |
+| HDQ-07.3 sparse match | Given five hits where only r5 has evidence (1 of 3), then the order is r5 (1/65 + 1/61 = 0.031778), r1, r2, r3, r4. | Unit |
+| HDQ-07.4 coverage, not count | Given job skills {Scala, cats, Kafka} and three candidates: c1 at r1 {java}, c2 at r2 {scala}, c3 at r3 {" SCALA ", "Cats", "kafka"} plus 47 skills outside the job. Then the order is c3 (3/3, 0.032266), c2 (1/3, 1/62 + 1/62 = 0.032258), c1. c3's evidence equals that of {scala, cats, kafka}, and `covered` equals the distinct canonical size of `SkillMatching.matched`. | Unit |
+| HDQ-07.5 ties | (a) r1 and r2 each cover 1 of 2: they share evidence rank 1, and the order is r1, r2. (b) A hit at retrievalRank 62 with evidence rank 62 has value 1/122 + 1/122, which equals r1 without evidence (1/61) exactly in Double. r1 comes first because its retrieval rank is lower. | Unit |
+| HDQ-07.6 permutation determinism | All 720 permutations of a 6-hit mixed input give one outcome. Fixed-seed shuffles of a 100-hit input give one outcome. Replay at concurrency 1 and 8 gives identical orderings. No new dependency (no ScalaCheck). | Unit, Replay |
+| HDQ-07.7 validation and bounds | 101 hits with `maxHits` 100 fail with `TooManyHits`, with no truncation. `maxHits` 0 fails with `InvalidLimit`. A rank of 0, a duplicate rank, a blank key and a duplicate key are accumulated together. An empty input gives an empty outcome with `RetrievalOrder`. The output is always a permutation of the input. | Unit |
+| HDQ-07.8 private-attribute counterfactual | Take two candidates that are identical except for residence, availability, consent and name, with no private filter supplied, so both are eligible. Their evidence and the outcome are identical, on both sides (for recommendations, the caller's own residence and availability change). `RankingHit` has no field that could carry these values, which is a structural check for review. | Unit, Service; Atlas Local over the SEB-04.L consent fixtures |
+| HDQ-07.9 authorization and eligibility unaffected | A non-owner Recruiter, a Candidate calling `candidateMatches`, a closed owned job, and a Deleted or inactive actor each return today's typed error, with zero ranker invocations. Closed, deleted, inactive and stale entities never reach ranker input or output. Consent keeps its existing rule, which is eligibility by bypass, not exclusion: an opted-in candidate who fails a supplied private filter is excluded before the ranker, while an opted-out candidate bypasses the private filters (`SearchEligibilityPolicy.candidateLexical`, `SemanticSearchService`). So an opted-out candidate passes a private-attribute filter and can reach the ranker, which ranks it like any other eligible candidate. Admin behavior is unchanged. | Service; Atlas Local (SEB-04.L fixtures) |
+| HDQ-07.10 not adopted | No `src/main` file outside `domain/search` references `SkillEvidenceRanking`. `SearchFusionStrategy`, `vector-search.fusion-strategy` and the SDL fixture are unchanged. The existing `recommendedJobs` and `candidateMatches` tests pass unchanged. | Static check by QA, plus the existing SDL fixture test |
+| HDQ-07.11 evaluation record | Replay and capture records name the ranker and its tie rule: "skill-evidence RRF k=60 over retrieval rank and coverage competition rank; then retrieval rank ascending". They also name the underlying retrieval strategy and the number of queries whose basis was `RetrievalOrder`. | Replay |
+
+### Personalization adoption path (HDQ-08)
+
+**Thresholds.** The relevance, privacy and provider-request thresholds stay unchanged. Quoted from [Hiring Search Enhancements](hiring-search-enhancements.md#curated-retrieval-and-ranking-assessment--october-6-follow-up), with the p95 clause removed (see Q3): "no held-out Recall/NDCG regression in any selected use-case/filter group, no failed supported queries or privacy violations, and provider requests no greater than the paired baseline. Provider counts are a workload proxy, not observed billing cost; comparable observed billing remains separately required, with no increase and optional absolute ceilings." No absolute billing ceiling has been chosen. Latency is judged by the two rules under [Latency](#outcomes), not by a p95 no-increase rule.
+
+**Assessment scope.** There are two scoped assessments under `conservative-no-regression-20261006`, one for each use case the ranker changes:
+
+- Recommendations, with the `Vector` baseline.
+- RecruiterMatching, with the production default strategy for the captured query shape as the baseline.
+
+JobSearch is not selected, because the ranker does not touch it. Narrowing the selected use cases does not change any threshold.
+
+**Pairing.** The ranker report comes from the same capture as its baseline: the ranker is applied to the service's authoritative eligible list. Embeddings, retrieval and provider requests are therefore identical by construction, and any change in relevance comes from the ranker alone. The composition requests the bound (`PageSize.Max`), ranks the returned list and takes K; the evaluation ranks only the K captured items. The two are equivalent only while every eligible set is at most K. This holds for the current corpus, where each eligible set has at most 5 entities and K is 7. The truncation guard is in `SkillEvidenceRankedEvaluation.rankedRun` (test sources). Rule, recorded 2026-11-10: a ranked query (Recommendations or RecruiterMatching with a succeeded ranking) is accepted only if its captured list is strictly shorter than the declared `captureBound` (the K the capture was taken with), or `captureBound` is at least `PageSize.Max`. Otherwise `rankedRun` returns `Left` with `PossiblyTruncatedCapture(queryId)`, so a list of exactly K is refused. JobSearch is not checked. The provider capture (G4) must therefore declare `PageSize.Max` as its bound, or keep every ranked query's result count strictly below its declared bound. The evaluation code (test sources) has two additions (implemented in slice 2):
+
+- A strategy case for the ranker that records its underlying retrieval strategy.
+- An assessment rule that treats that case as supported exactly where its underlying retrieval is supported.
+
+#### Gates
+
+| ID | Gate | Kind and owner | Required input or evidence | State |
+|---|---|---|---|---|
+| G1 | SEB-02.H label review | Human domain reviewer | The reviewer records approval, or adjudicated label changes, against packet digest `1a7103c7…` and judgment identity `binary-intended-role-required-skills`, in [Hiring Search Enhancements](hiring-search-enhancements.md). | In progress (human) |
+| G2 | Reviewed corpus | Agent: Scala Developer; QA verifies | 1. Update the fixtures: set origin `HumanReviewedFabricated` and `Reviewed`, and apply the adjudications. 2. Record the new reviewed digest beside the packet digest. 3. QA diffs the canonical strings: only the review status, the origin and note, and the recorded adjudications may differ. | Not started; needs G1 |
+| G3 | Ranker and evaluation composition | Agent: Scala Developer | HDQ-07.1 to HDQ-07.11 | Slices 1 and 2 implemented in source and test sources (see the [slice 2 checkpoint](#slice-2-checkpoint-2026-11-10)); not closed: the Atlas Local parts of HDQ-07.8 and HDQ-07.9, the placement inside the service until adoption, and the slice 2 scalafmt and full `scripts/check-local.sh` run are open (slice 2 reviews recorded 2026-11-10: PASS) |
+| G4 | Capture with provider-generated embeddings | Agent: Scala Developer; Data Engineer reviews the index dimension and readiness | The runner embeds the 16 fabricated entities (document input) and the captured query texts (query input) through `VoyageEmbeddingService.resource`. The key comes from `VOYAGE_API_KEY` in the test entrypoint only, and is never logged or written. The run records provenance `ProviderGenerated`, the model and dimension 1024, and builds the vector indexes with `numDimensions` 1024. A request-counting decorator records provider requests. Requests are paced below the owner-verified limit. The adapter's no-retry behavior is kept, so a 429 is a failed query. The capture declares `PageSize.Max` as its bound, or every ranked query returns fewer results than its declared bound, the condition under which the truncation guard accepts the ranked report (see Pairing). Records hold no vectors and no key. | Not started; needs G3 |
+| G5 | Observed privacy and eligibility evidence | Agent: Scala Developer | `SearchEvaluationObservedEvidence` for the baseline and the ranker, bound to the exact corpus and run. It is built from the SEB-04.L fixtures (consent truth table; closed, deleted, inactive and stale) and the HDQ-07.8 counterfactual. | Not started; needs G4 |
+| G6 | Run authorization | Human: owner | Before the run, the owner confirms in this spec: the endpoint and key type; that the key belongs to the owner's account, with a billed ceiling of 0; the owner's Atlas organization data-collection setting for Voyage AI model training, recorded as an owner attestation in configuration (decision 2, 2026-11-10); and the per-minute limits. The vendor facts read on 2026-11-10 are recorded under Q6 in [Owner answers](#owner-answers-to-the-questions-recorded-2026-11-10), with the open verification points. **Confirmed by the owner's smoke test (2026-11-10):** the endpoint is `https://ai.mongodb.com/v1/embeddings` with an unscoped Atlas model API key (scoped keys need a paid tier); the key sits in the owner's gitignored `src/main/resources/local.conf`, which is not packaged into images (`.dockerignore` excludes `**/local.conf`) and is not recorded here. The owner ran one request in their own terminal with the client's exact fields (input as a single string, model `voyage-4-lite`, `input_type` document, `output_dimension` 1024, `output_dtype` float, `truncation` true). The response had model `voyage-4-lite`, an embedding of length 1024, and `usage` `{'total_tokens': 1}`. This shows that the endpoint accepts the client request body and returns a 1024-dimension vector. It was one request. It is not the evaluation run, not billing evidence and not an adoption claim. The response reports `usage.total_tokens`, which the client does not read today (no `usage` or `total_tokens` reference under `src/main/scala`); G8 needs token counts, so slice 4 records them. **Still to confirm:** the owner's data-collection setting, stated in configuration at run time as an owner attestation (decision 2, 2026-11-10; the vendor default and eligibility are open, see Q6), that the billed amount stays 0 within the free allowance (G8), and the per-minute limits. The attestation records the owner's choice; it is not enforced and not verified by the system, and a missing attestation leaves G6 not confirmed. The config key is named in slice 4. The application must never log the key. **Observation (not fixed):** `application.conf` has no environment override for the endpoint, though `AppConfigModels.scala` names `VOYAGE_ENDPOINT` in its `InvalidVoyageEndpoint` error. The endpoint is set only through configuration files. | Endpoint and key type confirmed by the owner's smoke test (2026-11-10, one request, not a run). Data-collection attestation (config key named in slice 4), billed amount (G8) and per-minute limits still open. Provider evaluation run not started. |
+| G7 | Run at concurrency 1 and 8 | Human: owner terminal; agents prepare | The commands below. The project hook rejected the Atlas Local URI in agent sandboxes on 2026-11-01, so the owner runs them, as in the 2026-11-01 and 2026-11-10 runs. | Not run; needs G2, G4 to G6 |
+| G8 | Billing evidence | Human: owner | Provider usage and the billed amount for the run window, with the billing identity and currency. Q4 answered 2026-11-10: the owner-recorded figures are accepted and shared between baseline and ranker as one capture (the owner confirmed the "split" reading on 2026-11-10). The provider response reports `usage.total_tokens`, which the client does not read today; slice 4 must record token counts for this gate | Pending the run |
+| G9 | Assessment and evidence record | Agent: Big Data Engineer | Run one assessment per use case and write the record described below, including the owner's data-collection attestation (G6), the absolute p95 budget and the ranker's noise allowance (Q3), all fixed before the run | Not run; needs G6 (attestation), G7, G8, and the owner's budget value and noise allowance (both open). The assessment form takes both as required fields with no defaults. The ranked latency for a ranked query is the baseline latency plus only the ranker's own measured time (`RankerTimer`). It does not include any extra retrieval cost from asking the service for `PageSize.Max` rather than K. The record must restate this assumption wherever it reports ranked latency. |
+| G10 | Security privacy review | Independent Security Engineer | What was sent to the provider, key handling, the artifacts, the feature set and the counterfactuals | Not run |
+| G11 | Code Reviewer and QA | Independent | Source, records and documentation against this section | Not run |
+| G12 | Adopt or defer | Human: owner | Adoption is possible only with `Recommend` in both assessments, PASS on G10 and G11, and an explicit owner adopt. Q1 answered A (2026-11-10) for application-side ranking. Any other result is defer. | Pending |
+
+#### Evidence record
+
+The record is one ignored JSON file per concurrency, `criterion-evidence-ranking-<concurrency>-<timestamp>.json`, under `.local/data/search-evaluation/`, plus a checkpoint row in this spec. It contains:
+
+- **Criteria and environment:** the criterion IDs (HDQ-08, SEB-08); the environment label (`local-container` or cloud) and the Atlas version; the source revision and Scala source fingerprint.
+- **Corpus and labels:** the packet digest and the reviewed digest; the judgment identity; a reference to the label attestation.
+- **Attestation and latency rules:** the owner's Atlas data-collection setting (on or off), recorded as an owner attestation (not enforced, not verified by the system) and the config key that carries it; the absolute p95 budget in milliseconds; the ranker's noise allowance in milliseconds. Each value names the owner as its source. The key itself is never recorded.
+- **Embeddings:** provenance `ProviderGenerated`, the model, the dimensions, and provider requests and failures for the baseline and the ranker.
+- **Assessment:** the policy identity and agreement; the selected use cases; the number of held-out queries per group; held-out Recall@K, NDCG@K and p95 per group; the decision and reasons from each assessment.
+- **Observed evidence:** privacy and eligibility outcomes with fixture tags; the billing identity, currency and observed cost, or their absence with a reason.
+- **Ranking:** the ranker's tie rule and its `RetrievalOrder` counts.
+
+The record must not contain the API key, vectors, or anything beyond fabricated text.
+
+#### Run commands
+
+Existing commands, from [search evaluation](../search-evaluation.md):
+
+```bash
+sbt 'Test / runMain com.example.graphQL.cats.service.search.SearchEvaluationJudgmentReview'   # packet export, done by the owner
+docker compose -f compose.atlas-local.yaml up -d --wait
+# ATLAS_TEST_URI='mongodb://127.0.0.1:27018/?directConnection=true' ATLAS_TEST_DISPOSABLE=true ATLAS_TEST_ALLOWED_HOSTS=127.0.0.1:27018
+sbt 'IntegrationTest/runMain com.example.graphQL.cats.repository.mongo.HiringSearchEvaluationAtlasRunner --authorize-disposable-atlas --output .local/data/search-evaluation --source-revision REV --concurrency 1'   # and 8
+sbt 'Test / runMain com.example.graphQL.cats.service.search.SearchEvaluationRecordTable --input .local/data/search-evaluation'
+docker compose -f compose.atlas-local.yaml down --volumes
+```
+
+Proposed in G4, not implemented: a runner option that selects provider-generated embeddings (working name `--embeddings provider`). `VOYAGE_API_KEY` must be set in the owner's environment, never on the command line. The ranker capture writes `curated-<ranker strategy>-<concurrency>-<timestamp>.json` and the record above. G4 finalizes the names and adds them to [search evaluation](../search-evaluation.md).
+
+#### Evidence environment (Q1)
+
+Two existing rules conflict with a local run:
+
+- The [Phase 9 closure split](hiring-search-enhancements.md#local-closure-split-2026-10-13), decision 3, classes SEB-08 adoption as a single `.C` row, cloud or provider only ("needs genuine semantic embeddings from a paid provider plus reviewed labels").
+- The [Phase 10 closure split](#decisions), decision 2, and the glossary entry for the Atlas-compatible local gate both say that no `.L` outcome adopts a change.
+
+A free-tier Voyage run on Atlas Local is labelled `local-container` with `ProviderGenerated` embeddings.
+
+**Answer Q1 (2026-11-10): option A.** The owner accepts the free-tier real-embedding run on Atlas Local as SEB-08 evidence, and allows adoption on it. This amends Phase 9 decision 3 and the Atlas-compatible local gate glossary entry, for application-side ranking only. Phase 10 decision 2 in [Local closure split (2026-10-13)](#decisions) still states the earlier rule; it is outside the section this record covers and is unreconciled (see the report). Adoption still needs every other gate: the reviewed labels (SEB-02.H, G1 and G2), observed privacy, latency and billing evidence, the Security Engineer privacy review (G10), independent Code Reviewer and QA verdicts (G11), and an assessment result of `Recommend` in both assessments. The owner gave the selection only; no rationale was recorded. The latency of this run stays a `local-container` figure and is not a cloud figure.
+
+#### Outcomes
+
+| Condition | Assessment result | HDQ-08 record |
+|---|---|---|
+| G1 or G2 missing | `Defer` (`LabelsUnreviewed`, `MissingLabelAttestation`) | Defer; no run needed |
+| G6 not confirmed, or the owner declines | No run | Defer |
+| A 429, timeout or provider failure during capture | `Reject` (`RetrievalFailure`) | Defer. A rerun after a pacing fix is a new run, and both records are kept. |
+| Privacy or eligibility failure | `Reject` | Defer, plus a Security finding against the ranker |
+| Held-out NDCG or Recall regression in any group | `Reject` | Defer |
+| Candidate p95 above the baseline p95 plus the noise allowance (Q3 b; allowance open, owner) | `Reject` (`LatencyRegression`) | Defer |
+| Paired p95 above the absolute budget on a provider-generated capture (Q3 a; budget value open, owner) | `Defer` (`AbsoluteLatencyBudgetExceeded`). The outcome is chosen in one place in source (`absoluteBudgetBreachOutcome`). Recorder's reading: free-tier network latency cannot fail the ranker, so the breach is recorded and does not attribute a failure to the ranker. | Defer for the run (recorder's proposal; the outcome is open for the owner, open item 5). |
+| Billing missing or not comparable | `Defer` (`MissingComparableBilling`) | Defer (see Q4) |
+| `Recommend` in both assessments | `Recommend` | Adoption is still open: it needs G10 and G11 PASS, the owner's explicit adopt, and a separately scoped adoption slice (service wiring, a selector or configuration value, the API documentation that list order is authoritative and that `score` need not decrease down the list (Q7, option B), the fallback behavior (Q8; logged and counted by error kind, per the fallback visibility decision), documentation, and all review tiers). The Q1 environment is accepted (option A) for application-side ranking. |
+
+**Latency (Q3, owner selection 2026-11-10: "Latency tolerance: 2-5 seconds for free tiers").** Two rules apply.
+
+- **(a) Absolute budget, provider-generated capture.** An absolute p95 budget between 2 and 5 seconds applies to captures whose embeddings are provider-generated (`embeddingProvenance == ProviderGenerated` on either report). The value is open: the owner fixes one number before the run, and the recorder suggests one number rather than a range so that the gate is testable. In source (2026-11-10): the assessment requires `absoluteP95Budget` for such a capture (a missing budget returns `InvalidField("assessmentPolicy.absoluteP95Budget")`, a typed failure, not a pass). Any paired baseline or candidate success-latency p95 above the budget raises `AbsoluteLatencyBudgetExceeded`, and that breach resolves to `Defer`. The check covers both the baseline and the candidate p95; a candidate-only check is a one-line change if the owner asks for it. The budget never feeds the relative rule, so free-tier network latency alone cannot `Reject` the ranker.
+- **(b) Relative rule, ranker's own added time.** The ranker's added time is measured per query, not estimated: the ranker call is timed with an injectable `RankerTimer` (`RankerTimer.live`, which reads `System.nanoTime`, is the default; tests pass `RankerTimer.fixed`; the ranker has no production caller), and that measured time is added to the baseline latency of the same query. The added time is judged against the same-capture baseline: a candidate p95 above the baseline p95 plus `latencyNoiseAllowanceMillis` raises `LatencyRegression`, which rejects. The allowance is a required policy field with no default, and its value is open for the owner. An allowance of 0 reproduces the strict `>`. Recorder's reason: the ranker is an in-memory function over the bounded hit list (at most 100 hits, see Bounds), so its added time is expected to be milliseconds or less (an estimate, not measured). The allowance exists to absorb measurement noise. A negative, NaN or infinite allowance is an `InvalidField("assessmentPolicy")` error.
+
+The ranker report shares its retrieval with the baseline. The ranked run's latency is the baseline latency plus the measured ranker time (the `RankerTimer` seam): for each query, the ranked latency is that query's baseline latency plus the ranker time measured for it, and the ranked p95 is taken over those values. Independent captures would not help: on one query per group, noise would decide the outcome.
+
+Recorder's consequence: with an allowance of 0 the strict rule rejects any measured added time. With an allowance, the ranker passes this rule only when its measured added time stays within it. The owner's value decides how much added time is tolerated. Thresholds other than latency are unchanged.
+
+#### Statistical limits
+
+What the assessment can conclude:
+
+- Whether a privacy or eligibility violation was observed on these fixtures.
+- Whether any supported query failed.
+- Whether provider requests changed.
+- The ranker's ordering effect on 3 labelled held-out queries.
+- Whether a free-tier real-embedding run is operationally feasible.
+
+What it cannot conclude:
+
+- **Statistical significance.** Each selected held-out group holds one query, so a group "mean" is a single value.
+- **Recall@7.** No eligible set is larger than 5, so when retrieval returns every eligible entity, Recall@7 is the same for any ordering. Only NDCG@7 can move.
+- **Independence from the rubric.** The rubric labels by intended role and required skills, and skill evidence measures required-skill coverage. Part of any NDCG gain is therefore expected by construction.
+- **Generalization, subgroup or fairness effects, user benefit, and cloud latency.**
+
+Limit on this corpus (recorder's statement, 2026-11-10): a `Recommend` rests on 3 labelled held-out queries and cannot by itself establish a general ranking improvement. The owner's Q1 answer allows adoption on the local run with the other gates in place, so the adoption record must state this limit.
+
+**Enlarged corpus (Q5 answered 2026-11-10: run on the current 12-query corpus first; no enlargement before the first run).** The following is deferred and not authorized. It would add:
+
+- more held-out queries per use case and filter group;
+- eligible sets larger than K;
+- recommendation queries for several candidate profiles;
+- adversarial cases where skill overlap and intended role disagree, and skill-stuffed profiles.
+
+It needs a new packet and a new human review against the new digest, plus more provider requests. The HSE ceilings (10,000 entities, 100 queries) still apply. No size is proposed as sufficient.
+
+### Decision record: ranking score in the API
+
+- **Status (2026-11-10):** Q2 answered yes: no new score field is exposed. Q7 answered, option B (owner selection 'b'): on adoption `score` and `retrievalScore` keep their current meaning, the ranker's fused value is mapped to no API field, and list order is authoritative for ranked results. Q2 and Q7 are consistent: no ranker-derived number reaches API clients. No legal check is recorded for either answer. History: the first Q7 answer, the same day, was that `score` carries the ranker value. It was revised after the Q2/Q7 tension was raised, and the decision is in [Owner decisions](#owner-decisions-2026-11-10), item 2.
+- **Context:** before adoption the ranker returns order, basis, evidence and an internal `fusedValue`, and the API maps none of them. The existing `score`, `retrievalScore` and `matchedSkills` fields keep their current meaning on adoption too (Q7, option B).
+- **Options considered:**
+  - (1) Keep the ranker value unexposed, and let list order carry the ranking. Selected by Q7 (option B, 2026-11-10).
+  - (2) Add a new field. Rejected by Q2.
+  - (3) Carry the ranker value in `score`, following the rerank precedent. Not chosen: it exposes a ranker-derived number through a public field, the tension with Q2 that was raised on 2026-11-10.
+
+| Risk, through list order only (Q7 option B) | Why it matters |
+|---|---|
+| Read as a probability of hiring success, or as an automated decision | Search is advisory. A top position invites reading the order as a decision, which conflicts with the non-goals. No number is shown, so the risk comes through order only. |
+| A recruiter-side ranking of candidates | It may bring the employment-screening rules of the owner's jurisdictions into play, whether shown as a number or as order. The owner or legal counsel must check this; this record asserts no law. |
+| Probing hidden attributes | A caller can vary queries and observe order changes to infer values that the ranker or retrieval uses. Order-only output leaks less than a number, but not nothing. |
+| Non-comparability of `score` | `score` stays the retrieval, fusion or rerank score, which differs across queries, retrieval modes, models and embedding versions. Clients must not compare it across lists. |
+| `score` read as a monotone rank | For ranked results `score` need not decrease down the list, so a client that sorts or thresholds by `score` undoes the ranking. The API reference must say so at adoption. |
+| Gaming by skill stuffing | Order changes show a caller which listed skills move a hit up. Coverage limits the job side, but not the candidate side. |
+| Contract lock-in and cursor or tie semantics | Under the single-active-shape policy, list order for ranked results becomes a contract that clients page, cache or display by. A later change to the ranker or its tie rule changes that contract. |
+| Explanation requirement | A shown order must be explained. The only explanation allowed here is deterministic evidence (`matchedSkills`, and the planned `missingSkills`), not a model rationale. |
+
+**Consequences of Q7, option B (recorder's analysis; owner selection 2026-11-10):**
+
+- `score` keeps its meaning on adoption: the retrieval, fusion or rerank score. The order of `recommendedJobs` and recruiter matching results changes on adoption, which is a behavior change for the list. The [API reference](../api.md) must document, at adoption, that list order is authoritative for ranked results and that `score` need not decrease down the list, and the change goes through [schema evolution](../schema-evolution.md) review.
+- No ranker-derived number is exposed, so the ranker value is not comparable across responses. `score` remains a retrieval, fusion or rerank score and is not comparable across queries or modes (an existing condition). A client that sorts a ranked list by `score` replaces the ranked order with the retrieval order.
+- A fallback response (Q8) and a ranked response carry `score` with the same meaning; only the order differs. A client cannot observe the fallback: no field or flag reports it (fallback visibility, see [adoption placement](#ranker-contract)).
+
+**Mitigations (recorded with Q2 and Q7; the owner or a legal check may revise them):**
+
+- Ordering is documented as authoritative, in the API reference and the SDL description, with `score` described as a retrieval score that need not decrease down the list. Neither is described as a probability, a hiring-success measure or an automated decision.
+- No new field. The public shape stays as it is.
+- The ranker's order is a deterministic function of the caller-visible skill coverage and the retrieval rank. The HDQ-07.8 counterfactual requires that residence, availability, consent and name do not change it.
+- The value is not model-derived and generates no rationale. Explanation remains `matchedSkills` and the planned `missingSkills`.
+
+**Residual risks the mitigations do not remove:** clients may still read the list order as a probability or a decision; skill stuffing on the candidate side still raises rank (coverage limits only the job side); and a caller can infer relative coverage by varying listed skills and watching the order. Each of these needs the adoption review to accept it or to change the design.
+
+**Revisit trigger:** the owner or a legal check requires a different exposure, or a concrete client need arrives with an explanation design.
+
+### Slices, ownership and order
+
+| Order | Slice | Owner | Review tier | Depends on |
+|---|---|---|---|---|
+| 1 | Pure ranker in `domain/search` and its unit tests (HDQ-07.1 to 07.8, 07.10) | Scala Developer | Production code with candidate data in ranking, so Code Reviewer, Security Engineer and QA | None; can start now |
+| 2 | Evaluation composition, strategy case, assessment support and replay (HDQ-07.6 replay, 07.8 service part, 07.9, 07.11) | Scala Developer; Big Data Engineer advises | Tests only, with data-access fixtures, so Code Reviewer, Security Engineer and QA | 1 |
+| 3 | SEB-02.H review (G1), then the reviewed corpus (G2) | Human reviewer; Scala Developer; Technical Writer records | Tests or fixtures, so Code Reviewer and QA | Human |
+| 4 | Capture with provider-generated embeddings (G4, G5) | Scala Developer; Data Engineer | External integration and secrets, so Code Reviewer, Security Engineer and QA | 2 |
+| 5 | Owner authorization and run (G6 to G8) | Owner | Not applicable | 3, 4 |
+| 6 | Assessment, record and reviews (G9 to G11) | Big Data Engineer; independent reviewers | All three | 5 |
+| 7 | Adopt or defer (G12) | Owner | Not applicable | 6 |
+
+**Slice notes (2026-11-10):**
+
+- The assessment form for the ranker's noise allowance (Q3 b) and the absolute-budget check for provider-generated captures (Q3 a) are in source as of 2026-11-10 (see the [slice 2 checkpoint](#slice-2-checkpoint-2026-11-10)). Neither value is set.
+- Slice 4 names the config key for the owner's Atlas data-collection attestation (decision 2) and records it in the evidence record. Security review covers the config and secrets; the key is never logged. Slice 4 also records provider `usage.total_tokens` for G8.
+- The owner sets, before slice 5, the absolute budget value within 2 to 5 seconds, the noise allowance, and the data-collection setting stated at run time. The form requires the first two and gives no defaults.
+- The fallback logging and error-kind counter (fallback visibility decision) belong to the adoption slice, which is scoped separately before adoption (row 7 is the owner's decision). Slices 1 to 6 do not wire them; slice 1 has no caller.
+
+**Cost:**
+
+- Atlas Local is $0, and agent cost is small: slices 1 and 2 are local unit work.
+- Provider cost is the free tier (200 million free tokens per model, read from the vendor pages on 2026-11-10; see Q6), with an expected billed amount of 0 that the owner must confirm in the provider dashboard (G8).
+- Provider requests (an estimate, not an observation): tens of short single-input requests per runner invocation. That is 16 document texts plus one per captured query text per embedding strategy, times two concurrencies. The request counter supplies the exact counts.
+
+### Slice 1 checkpoint (2026-11-10)
+
+**Status: implemented, not adopted.** Source: `SkillEvidenceRanking.scala` (pure; depends only on `SearchTerm` and cats). Unit tests: `SkillEvidenceRankingSpec`, 24 tests (24 of 24 passed on 2026-11-10; the count is the file's `test(` blocks). A grep of `src/` on 2026-11-10 finds `SkillEvidence` and `SkillEvidenceRanking` only in `domain/search`, so there is no production caller. The live path (`SemanticSearchService`, `SearchFusionStrategy`, `vector-search.fusion-strategy`, the GraphQL schema) is unchanged. Adoption is not decided.
+
+Types as implemented: `SkillEvidence` (private constructor; `SkillEvidence.of` returns `Option`), `RankingHit(id, retrievalRank, evidence)`, `RankedHit(id, retrievalRank, evidence, fusedValue)`, `RankingBasis` with `RetrievalOrder` and `SkillEvidence`, `RankingOutcome`, `RankingInputError`, and `SkillEvidenceRanking.rank(hits, maxHits)(key)`, which returns `Either[NonEmptyChain[RankingInputError], RankingOutcome]`. `fusedValue` is internal and maps to no API field. The reciprocal is computed in `Double` (`1.0 / (RankConstant.toDouble + rank.toDouble)`; adding in `Int` first would overflow for ranks near `Int.MaxValue`), which is the overflow fix the Code Reviewer required and confirmed on re-review.
+
+**Criteria evidence after slice 1 (the current state is in the [slice 2 checkpoint](#slice-2-checkpoint-2026-11-10)):**
+
+- Unit-evidenced: HDQ-07.1 to HDQ-07.5; HDQ-07.6 (unit part); HDQ-07.7; HDQ-07.8 (structural and unit part).
+- Open at that point: HDQ-07.6 replay part; HDQ-07.8 Service and Atlas Local parts; HDQ-07.9 and HDQ-07.11. (HDQ-07.10's static check was run by QA on 2026-11-10 and passed: no reference outside the new file, no GraphQL exposure; it is repeated at adoption.) All HDQ-08 gates G1 to G12 stay open.
+
+**Deviations and notes to resolve before adoption:**
+
+- Blank keys: the blank check uses `trim`, while the duplicate-key check ignores blank keys. Two blank keys therefore produce one `BlankKey` and no `DuplicateHit`. The contract says each key must be non-blank and unique. Duplicates are compared on the exact key, so "a" and " a" are distinct (documented in a source comment); the Code Reviewer confirmed this reading as acceptable for opaque UUID keys.
+- `DuplicateHit` carries the key text. Adoption must not log that text (Security Engineer).
+- `RankingBasis.SkillEvidence` has the same name as the class `SkillEvidence`, so a wildcard import shadows the class (Code Reviewer, non-blocking).
+- The evidence rank is O(n²) over hits with evidence. At the bound of 100 this is acceptable (Code Reviewer, non-blocking).
+- Fixture shape for HDQ-07.5(b), suggested by the Code Reviewer and implemented in `SkillEvidenceRankingSpec` (test "HDQ-07.5b equal fused value goes to the better retrieval rank"): 63 hits at retrieval ranks 1..63, with r1 having no evidence, r62 covering 1 of 3, and 61 full-coverage hits at ranks 2..61 and 63. Under this shape the r62 value 1/122 + 1/122 equals the r1 value 1/61 exactly in Double, and r1 comes first.
+
+**Verdicts (2026-11-10):**
+
+- Security Engineer: PASS on the first version, and PASS on the re-check after the `Double` reciprocal fix and the test rewrite (no blockers). Notes: the Id-payload test is a regression guard on top of parametricity (the order function never receives the key); the structural test does not cover new parameters on `rank` (re-check the signature at adoption); at adoption, do not log `DuplicateHit` key text or `RankedHit` or `RankingOutcome` values, the key must be an opaque ID, and `maxHits` must be a fixed constant.
+- Code Reviewer: FAIL on the first review (overflow, tautological tests, an unasserted HDQ-07.4 clause, stale documentation). On the re-review the code and test blockers were confirmed fixed (the overflow test would fail on the old `Int` addition) and the verdict was FAIL only on three specification texts that contradicted the final source (the reciprocal formula, the HDQ-07.5(b) fixture "not yet implemented", and a present-tense "evaluation composes it in test sources"). Those texts, the key-comparison sentence, the matched/missing wording, the garbled sentence, one tautological assertion and one test name were then corrected. A narrow re-check of those corrections returned FAIL on one glossary sentence (`docs/domain-language.md`, "Skill evidence", missing the distinct-canonical qualifier) plus stale status wording; after that was fixed, a further narrow re-check returned PASS (2026-11-10): no contradiction remains between the slice-1 documents and the source. History: FAIL, FAIL (specification text), FAIL (glossary wording), PASS.
+- QA: FAIL on one text (the HDQ-07.5(b) "not yet implemented" note, now corrected). QA otherwise confirmed: no change to existing production files, 24 of 24 ranker tests and `sbt test` 1949 passed, both documentation gates pass, and its HDQ-07.10 static check (no reference outside the new file, no GraphQL exposure, fusion strategy and config unchanged) passed. QA's sandbox refused the integration compile (the coordinator's compile succeeded). QA narrow re-check of the corrected texts and tests (2026-11-10): PASS (24 of 24 ranker tests, `sbt test` 1949 passed, both documentation gates, the HDQ-07.10 static check); a slice-1 close still needs the Code Reviewer PASS, scalafmt (pre-commit hook) and the full `scripts/check-local.sh`, none of which has run.
+
+These verdicts do not make slice 1 done. Reviews for slice 1 are now Security Engineer PASS, QA narrow re-check PASS and Code Reviewer PASS (all 2026-11-10). Slice 1 still needs scalafmt (the pre-commit hook formats at commit) and the full `scripts/check-local.sh`, neither of which has run, and it remains unadopted.
+
+### Slice 2 checkpoint (2026-11-10)
+
+**Status: implemented in test and evaluation sources; reviewed on the corrected tree (Security Engineer, Code Reviewer and QA PASS, 2026-11-10; see Verdicts); NOT done until scalafmt and the full `scripts/check-local.sh` have run; not adopted; no production caller.** Slice 2 changes no production behavior under `src/main`; the developer reports one comment-only edit in `SkillEvidenceRanking.scala`. The live path (`SemanticSearchService`, `SearchFusionStrategy`, `vector-search.fusion-strategy`, the GraphQL schema) is unchanged. Slice 2 is test-only, so its tier is Code Reviewer, Security Engineer (data-access fixtures) and QA, as in the [slices table](#slices-ownership-and-order).
+
+**Files (test sources under `src/test/.../service/search/`, unless stated):**
+
+- `SkillEvidenceRankedComposition.scala`: the ranker composed around the public output of `SemanticSearchService`. It asks the real service for `PageSize.Max`, ranks that list with retrieval rank equal to the 1-based position, then takes K. On `Left` it keeps retrieval order (Q8). It holds the `EvidenceRanker` seam and the `RecordingEvidenceRanker` spy.
+- `SkillEvidenceRankedEvaluation.scala`: applies the ranker over a baseline for Recommendations and RecruiterMatching. JobSearch and unavailable queries pass through unchanged. The ranker call is timed by a `RankerTimer`, and its milliseconds are added to each in-scope query's baseline latency (an absent baseline latency stays absent). `rankedRun(baseline, captureBound, ...)` returns `Either[NonEmptyChain[SearchEvaluationError], RankedRun]` and applies the truncation guard (see Pairing). It builds the HDQ-07.11 record.
+- `SkillEvidenceRankedEvaluationSpec.scala` (17 tests: the 8 of the first version, and 9 added by the corrections below) and `SkillEvidenceRankedDiscoveryAccessSpec.scala` (7 tests).
+- Edited: `SearchEvaluationTypes`, `SearchEvaluationHarness`, `SearchEvaluationAssessment`, `SearchEvaluationCapture`, `SearchEvaluationFixtures`, `SearchEvaluationFixtureReplay`; and `src/it/.../repository/mongo/HiringSearchEvaluationRetrieval.scala`, where the new strategy case raises `Unavailable`, because the ranker is never a retrieval branch.
+- Latency rules (2026-11-10): `SearchEvaluationAssessment` (the two policy fields, the reasons, the single breach outcome), `SearchEvaluationReportJson` (the policy fields in the assessment JSON), `SearchEvaluationAssessmentSpec` (19 tests; 7 of them are the latency-rule tests tagged HDQ-08 and SEB-08), and `src/it/.../repository/mongo/HiringSearchEvaluationAtlasRunner.scala`, which passes a noise allowance of 0.0 and no absolute budget. Its captures are not provider-generated, so the budget rule does not apply to them today.
+
+**Corrections after the first Code Reviewer and QA reviews (2026-11-10; re-reviewed on the corrected tree, see Verdicts):**
+
+- *Ranked latency (Code Reviewer B1):* `observation` and `rankedRun` take a `RankerTimer`. `RankerTimer.live` (`System.nanoTime`) is the default; `RankerTimer.fixed(ms)` serves tests. The timed span is the ranker call (`SkillEvidenceRankedComposition.select`), which includes the test-only `arrange` hook. Ranked latency is the baseline latency plus the measured milliseconds, for in-scope queries only. An absent baseline latency stays absent.
+- *Truncation guard (Code Reviewer B2):* the rule is under [Pairing](#personalization-adoption-path-hdq-08). `SearchEvaluationFixtureReplay` passes `SearchEvaluationFixtures.K` to `rankedRun` and fails the IO if the guard refuses. `SearchEvaluationFixtures.observation` calls the ranker per query without the guard; its eligible sets have at most 5 entities, below K.
+- *Harness and types:* `SearchEvaluationHarness.compare` requires a ranked alternative to carry the ranker's tie rule, else `InconsistentCoordinates("tieRule")`. `report` rejects a nested ranked strategy with `InvalidField("strategy")`. `SearchEvaluationTypes` adds `PossiblyTruncatedCapture(queryId)`.
+- *Opted-out fixture (Code Reviewer B4):* see the HDQ-07.9 bullet below.
+- *Documentation (Code Reviewer and QA):* a stale glossary sentence and a garbled test count were corrected.
+
+**Test runs (2026-11-10):** the developer's `sbt test` gave 1980 passed, 0 failed. The count is 1949 (the slice 1 total), plus 15 slice 2 tests from the first version (`SkillEvidenceRankedEvaluationSpec` 8, `SkillEvidenceRankedDiscoveryAccessSpec` 7), gives 1964; plus 7 latency-rule tests (`SearchEvaluationAssessmentSpec`), gives 1971; plus 9 tests added by the corrections (`SkillEvidenceRankedEvaluationSpec` now 17 tests), gives 1980. The IntegrationTest sources compile. The coordinator re-ran `sbt test` (1980 passed, 0 failed) and the IntegrationTest compile (OK) on 2026-11-10. QA's `sbt test` also reported 1980 passed, 0 failed; QA's integration-compile gate was BLOCKED in its sandbox, so the compile is evidenced by the coordinator's run only. scalafmt and the full `scripts/check-local.sh` have not run (the pre-commit hook formats at commit). No real-Mongo spec was added and no Atlas run was made. Two Kafka specs, `OperationalEventConsumerReceiptWindowSpec` and `KafkaPartitionProcessingSpec` (KFH-02.2), were each seen to fail once in a full run and passed when run alone. They are unrelated to this change and were not investigated.
+
+**Q3 latency rules, criteria evidenced in test sources (developer's run, included in the coordinator's and QA's `sbt test` counts above):** tagged HDQ-08 and SEB-08 in `SearchEvaluationAssessmentSpec`: a zero allowance keeps the strict relative rule; a 5 ms allowance passes exactly baseline plus allowance and rejects one millisecond more; an absolute budget passes at the budget and defers above it with `AbsoluteLatencyBudgetExceeded`, without rejecting; the budget alone does not trigger `LatencyRegression`; a provider-generated capture without a budget is a typed `InvalidField` failure; a negative allowance or a non-positive budget is `InvalidField("assessmentPolicy")`; the report JSON carries the reason and the two policy fields (`absoluteP95BudgetMillis` is null when no budget is set). These are unit checks on fabricated reports. They show the rules' arithmetic, not any observed latency.
+
+**Criteria evidenced in test sources (unit, service or replay, as stated):**
+
+- **HDQ-07.6 (replay part):** two replays give identical records; 25 fixed-seed shuffles of the list handed to the ranker, with ranks fixed, give the same report; concurrency 1 and 8 give identical records.
+- **HDQ-07.8 (service part):** two worlds that differ only in consent, residence, availability and name give identical ranker input and identical positions, for matching and for recommendations.
+- **HDQ-07.9 (service part):** closed, deleted and stale entities never reach ranker input or output. A forbidden caller gets the same typed `Left` as the plain service, with zero ranker calls. Admin matching returns the same set, only reordered. A refusing ranker leaves retrieval order (Q8). An opted-out candidate whose residence does not match the supplied private filter still passes it, as the service does. The tests assert this. The opted-out fixture has a Canada residence against the Cyprus filter, so the bypass is exercised, while an opted-in Canada candidate is excluded by the same filter.
+- **HDQ-07.11 latency and guard (tests tagged HDQ-07.11 or HDQ-08 in `SkillEvidenceRankedEvaluationSpec`):** with a fixed 2.5 ms ranker time, in-scope ranked latencies are the 10 ms baseline plus 2.5 ms (12.5 ms), and JobSearch keeps 10 ms; a baseline without latency stays absent; the live timer returns at least the baseline. A 6 ms ranker time over a 5 ms allowance is `LatencyRegression` and `Reject`; 5 ms is not a `LatencyRegression`. A list of exactly K is refused with `PossiblyTruncatedCapture`; a shorter list and a bound of `PageSize.Max` are accepted; a JobSearch list of exactly K is not refused; a nested ranked strategy is invalid; a ranked run carrying the retrieval's tie rule does not pair. These are fabricated-fixture checks of the arithmetic and the refusals, not observed latency.
+- **HDQ-07.11:** the record names the ranker, the exact tie-rule string, the underlying retrieval strategy, and the basis counts. Of the 12 curated queries, 2 are `RetrievalOrder`, 6 are `SkillEvidence`, 0 are fallback and 4 are out of scope (JobSearch). `assess` on the pair returns a non-`Recommend` decision with no `IncompleteCoverage`, `RetrievalFailure` or `RelevanceRegression`. Recall is unchanged and NDCG does not fall on the held-out queries. The labels are synthetic, so this is not relevance evidence.
+
+**Not evidenced:**
+
+- The Atlas Local parts of HDQ-07.8 and HDQ-07.9 (no real-Mongo spec, no Atlas run).
+- "Zero ranker calls" and "never reaches the ranker" are shown by composition only: the ranker input equals the service's authoritative output. There is no production seam, so placement inside the service is unevidenced until adoption.
+- The Q3 latency rules are unit-checked only. No Atlas or provider capture has run with them, and the allowance and budget values are open, so no assessment has applied a chosen value. The Atlas runner's 0.0 allowance is a placeholder, not an owner value.
+- The truncation guard covers only the path through `SkillEvidenceRankedEvaluation.rankedRun`. `SearchEvaluationHarness.report` does not check it, so a hand-built ranked run that skips `rankedRun` is not checked. `captureAuthoredRun` with a `SkillEvidenceRanked` strategy calls `observation` directly and does not run the guard. The guard trusts the declared `captureBound`; beyond the length check it does not verify that a captured list is the whole eligible set.
+- Ranker time has been measured only in test sources, in process, on fabricated lists. No capture has recorded ranker time, and the 2.5 ms and 6 ms values are injected, not measured.
+- Formatting: scalafmt and the full `scripts/check-local.sh` have not run on the slice 2 tree, so slice 2 is not done. The reviewer verdicts under Verdicts cover the corrected tree before the minor test-source comment and assertion cleanup, which is not re-reviewed.
+
+**Assumptions (for the owner and reviewers to confirm):**
+
+1. The "inactive" actor is covered through `Deleted`, because the in-memory model has only `Active` and `Deleted`.
+2. The curated corpus has no per-query profile skills or job skills. Each query intent's `requiredSkills` is used as the caller's profile (Recommendations) or as the owned job's skills (RecruiterMatching).
+3. "Shuffled retrieval order" in HDQ-07.6 is read as shuffling the list given to the ranker while the ranks stay fixed. Shuffling the ranks would change the ranking by design.
+4. `SearchEvaluationStrategy.values` no longer exists. It was a parameterized case, and nothing used it.
+5. The curated labels are synthetic, so the HDQ-07.11 comparison is a mechanics check, not relevance evidence.
+
+**Verdicts (2026-11-10):**
+
+Verdicts on the corrected tree, dated 2026-11-10, as reported to the Technical Writer by the coordinator from the reviewers' reports:
+
+- Security Engineer: PASS on the corrected tree (slice 2 follow-up fixes: ranker timer, truncation guard, opted-out consent fixture, compare tie rule, assessment policy validation). Non-blocking: `captureBound` is declared by the caller, so a provider capture that claims `PageSize.Max` while capturing only K would pass the guard; this is the G4 honest-declaration duty, to be rechecked at the slice 4 and slice 5 reviews. The observation path builds ranked observations without the guard; it is test-only, and its fixtures have at most 5 eligible entities, below K = 7.
+- Code Reviewer: PASS on the corrected-tree re-review. The first review was FAIL; the blockers fixed were ranker time not measured, top-K versus bound, a stale glossary line and the opted-out fixture. The split between the Recommendations-on-`AtlasAnn` case in `SearchEvaluationHarness.validate` (accepts it) and the assessment `supportedQuery` rule (does not) predates slice 2. It fails closed with `IncompleteCoverage`, which resolves to `Defer`; no capture can produce it. The reviewer accepts it as a documented split.
+- QA: PASS on the corrected tree. The first review was FAIL (a stale sentence and a garbled count). Recorded runs: `sbt test` 1980 passed, 0 failed; 67 of 67 across `SkillEvidenceRankedEvaluationSpec` (17), `SkillEvidenceRankedDiscoveryAccessSpec` (7), `SearchEvaluationAssessmentSpec` (19) and `SkillEvidenceRankingSpec` (24). QA's integration-compile gate was BLOCKED in its sandbox; the coordinator's own run succeeded. scalafmt and the full `scripts/check-local.sh` were not run.
+
+**Review history (slice 2, 2026-11-10):**
+
+- Security Engineer: PASS for slice 2 and the latency rules. Non-blocking notes: the matching counterfactual's retrieval order already equals the coverage order; the composition takes profile and job skills from the caller, so at adoption they must come from the authenticated actor's stored profile and the authorized job record; `latencyNoiseAllowanceMillis` has no upper bound and is sized by the owner.
+- Code Reviewer: FAIL on the first review, with four findings. (B1) The ranked run's latency did not include the ranker's own time; fix: measured ranker time with an injectable timer, added to the baseline latency. (B2) The equivalence between ranking the top K and ranking the bound was undocumented and unguarded; fix: a typed rejection of a possibly truncated ranked report, and the Pairing text above. (B4) The opted-out consent fixture used a matching residence; fix: a non-matching residence. (Documentation) An open glossary item that the glossary already resolves, and a garbled test-count sentence; both are corrected here. Fixed in the corrected tree (see Corrections above); the corrected tree was re-reviewed PASS (see Verdicts).
+- QA: FAIL on the first review, on a stale glossary sentence and a garbled test count. Both are fixed; the corrected tree was re-verified PASS (see Verdicts).
+
+These verdicts do not make slice 2 done. Slice 2 is NOT done until scalafmt (pre-commit hook) and the full `scripts/check-local.sh` have run on the final tree. Minor comment and assertion cleanup after the reviews is not re-reviewed, and the verdicts above do not cover it. Nothing is adopted. HDQ-07.8 and HDQ-07.9 stay open until their Atlas Local parts run, and HDQ-07 and HDQ-08 stay deferred and not adopted.
+
+### Owner answers to the questions (recorded 2026-11-10)
+
+The owner gave selections only. Reasons are the recorder's, and each is labelled as such.
+
+- **Q1, evidence environment: answered A (2026-11-10).** Accept the free-tier real-embedding run on Atlas Local (`local-container`, `ProviderGenerated`) as SEB-08 evidence, and allow adoption on it, for application-side ranking only. Every other gate still applies. See [Evidence environment (Q1)](#evidence-environment-q1). Phase 10 decision 2 is not yet amended; this conflict is open in [Documentation impact](#documentation-impact).
+- **Q2, score exposure: answered yes (2026-11-10): no new score field is exposed.** Consistent with Q7 option B: no ranker-derived number reaches API clients. No legal check is recorded.
+- **Q3, latency: owner selection (2026-11-10): an absolute p95 budget of 2 to 5 seconds for provider-backed requests, plus the strict relative rule for the ranker's own added time with a noise allowance.** The rules, reasons and open values are in [Latency](#outcomes). Open items are listed in [Open items after 2026-11-10](#open-items-after-2026-11-10).
+- **Q4, billing: answered (2026-11-10): accept the usage and billed amount the owner records for the run window, attributed equally to the baseline and the ranker, because they come from one capture.** The record is labelled shared-capture attribution and is not treated as missing. The owner confirmed the reading "split" on 2026-11-10, so this question is closed.
+- **Q5, corpus: answered (2026-11-10): run on the current 12-query corpus first; no enlargement before the first run.**
+- **Q6, free tier (G6): answered from vendor pages (2026-11-10); the endpoint and key type are confirmed by the owner's smoke request (2026-11-10); the data-collection setting is an owner attestation in configuration (open item 4), the billed amount is open (G8); the evaluation run is not started.** The owner pointed to the Voyage AI pages on the MongoDB docs site. The coordinator read them on 2026-11-10. Everything below is recorded as read from the vendor pages on 2026-11-10, except the endpoint and key type, which the owner's smoke request confirms (see G6). The pages can change, so the owner re-reads them before the run.
+  - **Free tier.** "All models include a free tier. Get started with 200 million free tokens for most models" ([models page](https://www.mongodb.com/docs/voyageai/models/)). The [rate-limit page](https://www.mongodb.com/docs/voyageai/management/rate-limits/) states 200 million free tokens per model.
+  - **voyage-4-lite.** 32,000-token context; output dimensions 1024 (default), 256, 512 and 2048; $0.02 per 1M tokens after the free allowance. The app is configured for `voyage-4-lite` at dimension 1024 (`src/main/resources/application.conf`, `vector-search.voyage`), so the dimension matches.
+  - **Expected billed amount.** The fabricated corpus (8 jobs, 8 candidates, 12 queries) is a few thousand tokens at most. This is a coordinator estimate, not a measurement. It is far under the allowance, so the expected billed amount is 0 beyond the free allowance. The owner confirms 0 billed tokens beyond the allowance in the provider dashboard (G8).
+  - **Rate limits.** Enforced per model API key, as requests per minute and tokens per minute; HTTP 429 when exceeded. For voyage-4-lite, Tier 1 is 16,000,000 TPM and 2,000 RPM; Tier 2 is twice that and Tier 3 three times. The tier is qualified by billed usage excluding free tokens. The page does not state the limits for an account that only uses free tokens, whether that account maps to Tier 1, the window type, or the Retry-After behavior. The expected load of the run (tens of requests) is far below the Tier 1 figures.
+  - **Data use.** "MongoDB can collect the data that you send to the Atlas Embedding and Reranking API and use it to improve Voyage AI models." The setting is managed per organization in the Atlas UI (Organization Settings, "Manage Data Collection for Voyage AI Model Training"). The page does not state the default, eligibility, retention period, whether free-tier use differs, or whether outputs are used. For this run only the fabricated corpus is sent, so the privacy risk of the run is low. The owner still checks the organization setting and opts out if the option exists. Production use with real candidate profiles is a separate privacy and data-processing decision for the adoption Security review (G10); it is not settled here.
+  - **Open verification points (owner, before the run).**
+    1. **Endpoint and key type: confirmed by the owner (2026-11-10).** The owner uses `https://ai.mongodb.com/v1/embeddings` with an unscoped Atlas model API key; scoped keys need a paid tier. The key is in the owner's gitignored `src/main/resources/local.conf`, which includes `application.conf` and overrides `vector-search.voyage.endpoint` and `api-key`. The key is not recorded here. `application.conf` keeps `https://api.voyageai.com/v1/embeddings` as its default, and no code change is made for this. The owner's one smoke request is recorded under G6. It does not confirm that the free allowance applies to this key; that is shown only by the billed amount (G8).
+    2. The organization data-collection default (still open). The owner states the chosen setting in configuration at run time (decision 2, 2026-11-10; see G6).
+    3. Whether the owner is eligible to opt out (still open).
+- **Q7, `score` meaning on adoption: answered (2026-11-10), option B: `score` and `retrievalScore` keep their current meaning on adoption, the ranker's fused value is mapped to no API field, and list order is authoritative for ranked results (so `score` need not decrease down the list).** The first answer that day put the ranker value in `score`; it was revised after the Q2/Q7 tension was raised. The risks, consequences and mitigations are in [Decision record: ranking score in the API](#decision-record-ranking-score-in-the-api).
+- **Q8, scope: answered (2026-11-10): fall back to the previous result, which is the retrieval order, when the ranker is disabled, errors (for example `TooManyHits`) or fails internally. The ranker never blocks a response.** This applies to recommendations and recruiter matching. `semanticJobSearch` and the degraded lexical fallback stay outside the ranker and keep their order. Visibility is decided: a fallback is logged and counted by error kind and counts only, with no API field or flag (owner answer 'yes' to the follow-up; see [adoption placement](#ranker-contract)).
+
+### Open items after 2026-11-10
+
+Open (each needs the named owner before the dependent step):
+
+1. **Absolute p95 budget value** for provider-generated captures, between 2 and 5 seconds, one number (Q3 a). Owner, before the run (slice 5). The assessment requires a value for such a capture; none is set.
+2. **Noise allowance** in milliseconds for the ranker's relative latency rule (Q3 b). Owner sizes it. The assessment requires a value with no default. None is set: the Atlas runner passes 0.0, which is the strict rule and not an owner choice.
+3. **Config key name** for the Atlas data-collection attestation (decision 2). Scala Developer in slice 4, with Security review for config and secrets.
+4. **Atlas data-collection default and eligibility** (Q6 open points 2 and 3). The owner states the chosen setting in configuration at run time; a missing attestation leaves G6 not confirmed.
+5. **Outcome for an absolute-budget breach.** The owner's decision does not state it. Source sets it to `Defer` in one place (`absoluteBudgetBreachOutcome` in `SearchEvaluationAssessment`, with a comment pointing here). Recorder proposes Defer for the run (see Latency). Changing it to `Reject` is a one-line change that needs an explicit owner decision.
+6. **Label review SEB-02.H** (G1). Human domain reviewer; G2 waits on it.
+
+Closed (owner selections recorded; no further owner action in this section):
+
+- Q2 (no new score field), Q4 (shared-capture billing attribution), Q7 (option B), Q8 (scope and fallback visibility), and fallback visibility (logged and counted by error kind; no API field or flag).
+- Q6 is closed for the vendor terms read and the endpoint confirmation. Its data-collection items are open item 4.
+- Q1 (option A) and Q5 (current 12-query corpus) stay as recorded above.
+
+### Documentation impact
+
+- **Done 2026-11-10 with the Q1 to Q8 answers:** this section; the HDQ-07 and HDQ-08 rows (status unchanged: deferred, not adopted); [Hiring Search Enhancements](hiring-search-enhancements.md) (Phase 9 decision 3, the SEB-08.L row, and the two stale test-source links); the [domain language](../domain-language.md) (the Atlas-compatible local gate rule, and the terms "skill evidence", "skill-evidence ranking" and "retrieval order (ranking basis)", with skill evidence derived from the GDF-02 fit reason).
+- **Still open for this record:** the Phase 10 decision 2 wording in [Local closure split (2026-10-13)](#local-closure-split-2026-10-13) of this file (outside this section). Done: the [specifications index](README.md) entry is updated for the slice 1 status (2026-11-10).
+- **With slice 1 (done 2026-11-10):**
+  - [ARCHITECTURE.md](../../ARCHITECTURE.md): the candidate matching search section notes the pure ranker in `domain/search` and that it has no production caller.
+- **With slice 2 (documentation done 2026-11-10; reviews in the slice 2 checkpoint):** this section (the ranker contract's callers, the evaluation strategy cases, the HDQ-07.9 consent rule, the G3 state and the slice 2 checkpoint); the [domain language](../domain-language.md) (the "Skill evidence", "Skill-evidence ranking" and "Retrieval order (ranking basis)" rows, and a row for the skill-evidence ranked evaluation strategy). [ARCHITECTURE.md](../../ARCHITECTURE.md) is not changed: its candidate matching section states no evaluation composition, and its statement of no production caller stays accurate. The specification index row is updated.
+- **With the Q3 latency rules (2026-11-10, developer's run; reviews in the slice 2 checkpoint's review history):** this section (the source facts, the Latency rules, the outcomes table, the slice notes, the slice 2 checkpoint and open items 1, 2 and 5); [search evaluation](../search-evaluation.md) (the latency rules and the slice 2 strategy case); [Hiring Search Enhancements](hiring-search-enhancements.md) (the threshold text and Phase 9 decision 3 note); the [specifications index](README.md). The [domain language](../domain-language.md) rows Latency noise allowance and Absolute p95 budget define the two terms.
+- **With slices 2 and 4:**
+  - [search evaluation](../search-evaluation.md): the ranker capture, the provider-generated mode and its commands, the scoped assessment, the latency rules (Q3), the attestation config key and the fallback counter names.
+  - [Hiring Search Enhancements](hiring-search-enhancements.md): the SEB-02.H record with the packet and reviewed digests, and the SEB-08 evidence row.
+  - [infrastructure cost and sizing](../infrastructure-cost-and-sizing.md): the provider free-tier facts from Q6, recorded as read from vendor pages on 2026-11-10 and marked unverified by a run, with the open verification points.
+- **With the slice 2 corrections (2026-11-10; re-review pending):** this section (the Pairing truncation guard, the Latency timer text, the Vector-support wording, the slice 2 checkpoint and open items); [search evaluation](../search-evaluation.md) (the timer seam, the truncation guard, the tie-rule and nested-strategy checks); the [domain language](../domain-language.md) (the Truncation guard row); the [specifications index](README.md) row. No production behavior changed, so [ARCHITECTURE.md](../../ARCHITECTURE.md) and the [API reference](../api.md) are unchanged.
+- **On the HDQ-08 decision:**
+  - [README](../../README.md) phase table, [development milestones](../development-milestones.md) Phase 10, [use cases](../use-cases.md) (personalized ranking) and [wiki: domain and use cases](../wiki/domain-and-use-cases.md).
+  - [API reference](../api.md): required on adoption, because list order becomes authoritative for ranked results and `score` need not decrease down the list (Q7, option B).
 
 ## Cloud runbook pointer for `.C` rows (deferred)
 

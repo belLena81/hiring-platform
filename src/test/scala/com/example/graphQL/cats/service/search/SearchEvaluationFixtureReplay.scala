@@ -69,6 +69,27 @@ object SearchEvaluationFixtureReplay extends IOApp {
               .map(_ => new IllegalArgumentException("Inconsistent fixture comparisons"))
           )
         )
+      rankedBaseline <- IO.fromOption(reports.find(_.run.strategy == SearchEvaluationStrategy.Vector))(
+        new IllegalArgumentException("Missing vector baseline")
+      )
+      ranked <- IO.fromEither(
+        SkillEvidenceRankedEvaluation
+          .rankedRun(rankedBaseline.run, SearchEvaluationFixtures.K)
+          .left
+          .map(errors => new IllegalArgumentException(s"Ranked replay refused: ${errors.toNonEmptyList.toList}"))
+      )
+      rankedReport <- IO.fromEither(
+        SearchEvaluationHarness
+          .report(SearchEvaluationFixtures.corpus, ranked.run, SearchEvaluationFixtures.K)
+          .left
+          .map(_ => new IllegalArgumentException("Invalid ranked fixture replay"))
+      )
+      _ <- IO.fromEither(
+        SearchEvaluationHarness
+          .compare(rankedBaseline, rankedReport)
+          .left
+          .map(_ => new IllegalArgumentException("Ranked replay does not pair with its baseline"))
+      )
       output <- IO.blocking {
         val output = Path
           .of(".local/data/search-evaluation")
@@ -78,6 +99,14 @@ object SearchEvaluationFixtureReplay extends IOApp {
           val path = output.resolve(s"fixture-${report.run.strategy.toString}.json")
           val _ = Files.writeString(path, SearchEvaluationReportJson.render(report).spaces2, StandardCharsets.UTF_8)
         })
+        val rankedPath = output.resolve("fixture-SkillEvidenceRanked-Vector.json")
+        val _ = Files.writeString(
+          rankedPath,
+          SkillEvidenceRankedEvaluation
+            .renderReport(rankedReport, SkillEvidenceRankedEvaluation.record(ranked))
+            .spaces2,
+          StandardCharsets.UTF_8
+        )
         output
       }
       _ <- IO.println(

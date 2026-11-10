@@ -64,8 +64,20 @@ object SearchEvaluationHarness {
       check(baseline.k == alternative.k, InconsistentCoordinates("k")),
       check(baseline.corpus == alternative.corpus, InconsistentCoordinates("corpus")),
       check(
-        left.copy(sourceRevision = right.sourceRevision, sourceFingerprint = right.sourceFingerprint) == right,
+        left.copy(
+          sourceRevision = right.sourceRevision,
+          sourceFingerprint = right.sourceFingerprint,
+          tieRule = pairedTieRule(baseline.run.strategy, alternative.run.strategy, left.tieRule, right.tieRule)
+        ) == right,
         InconsistentCoordinates("workload")
+      ),
+      check(
+        alternative.run.strategy match {
+          case SearchEvaluationStrategy.SkillEvidenceRanked(_) =>
+            right.tieRule == SkillEvidenceRankedComposition.TieRule
+          case _ => true
+        },
+        InconsistentCoordinates("tieRule")
       ),
       check(
         baseline.run.concurrency == alternative.run.concurrency &&
@@ -78,6 +90,21 @@ object SearchEvaluationHarness {
         InconsistentCoordinates("environment")
       )
     ).sequence_.toEither
+  }
+
+  /** A ranked run pairs with its own underlying retrieval and names the ranker's tie rule; any other difference in tie
+    * rule still breaks the pairing.
+    */
+  private def pairedTieRule(
+      baseline: SearchEvaluationStrategy,
+      alternative: SearchEvaluationStrategy,
+      baselineRule: String,
+      alternativeRule: String
+  ): String = alternative match {
+    case SearchEvaluationStrategy.SkillEvidenceRanked(underlying)
+        if underlying == baseline && alternativeRule == SkillEvidenceRankedComposition.TieRule =>
+      alternativeRule
+    case _ => baselineRule
   }
 
   private def check(condition: Boolean, error: SearchEvaluationError): ValidatedNec[SearchEvaluationError, Unit] =
@@ -129,6 +156,13 @@ object SearchEvaluationHarness {
         InconsistentCoordinates("corpusIdentity")
       ),
       check(Set(1, 8).contains(run.concurrency), InvalidField("concurrency")),
+      check(
+        run.strategy match {
+          case SearchEvaluationStrategy.SkillEvidenceRanked(_: SearchEvaluationStrategy.SkillEvidenceRanked) => false
+          case _                                                                                             => true
+        },
+        InvalidField("strategy")
+      ),
       check(run.warmupQueries >= 0, InvalidField("warmupQueries")),
       check(run.durationMillis.forall(_ > 0L), InvalidField("durationMillis")),
       check(coordinates.pageSize <= PageSize.Max, InvalidField("pageSize")),
@@ -181,7 +215,7 @@ object SearchEvaluationHarness {
       val fixture = fixtures.get(observation.queryId)
       val supported = fixture.forall(value =>
         value.useCase != SearchEvaluationUseCase.Recommendations ||
-          run.strategy == SearchEvaluationStrategy.Vector || run.strategy == SearchEvaluationStrategy.AtlasAnn
+          run.strategy.retrieval == SearchEvaluationStrategy.Vector || run.strategy.retrieval == SearchEvaluationStrategy.AtlasAnn
       )
       val modeCheck = check(
         supported || (observation.ranking match {

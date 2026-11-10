@@ -90,7 +90,9 @@ private[mongo] final class HiringSearchEvaluationRetrieval(database: MongoDataba
           documents(MongoCollections.Jobs, pipeline).subflatMap(
             MongoSemanticSearchResult.jobHits(_, query).map(_.flatten)
           )
-        case SearchEvaluationStrategy.AtlasAnn => RepositoryF.at[IO].raise(RepositoryError.Unavailable)
+        case SearchEvaluationStrategy.AtlasAnn | SearchEvaluationStrategy.SkillEvidenceRanked(_) =>
+          // The ranker is applied over captured results in test sources, never as a retrieval branch.
+          RepositoryF.at[IO].raise(RepositoryError.Unavailable)
       }
       def candidateMatches(query: VectorSearchQuery): RepositoryF[IO, List[CandidateRetrievalHit]] = strategy match {
         case SearchEvaluationStrategy.ApplicationRrf => repository.candidateMatches(query)
@@ -102,7 +104,9 @@ private[mongo] final class HiringSearchEvaluationRetrieval(database: MongoDataba
           documents(MongoCollections.Users, pipeline).subflatMap(
             MongoSemanticSearchResult.candidateHits(_, query).map(_.flatten)
           )
-        case SearchEvaluationStrategy.AtlasAnn => RepositoryF.at[IO].raise(RepositoryError.Unavailable)
+        case SearchEvaluationStrategy.AtlasAnn | SearchEvaluationStrategy.SkillEvidenceRanked(_) =>
+          // The ranker is applied over captured results in test sources, never as a retrieval branch.
+          RepositoryF.at[IO].raise(RepositoryError.Unavailable)
       }
     }
 

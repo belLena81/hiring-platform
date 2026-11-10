@@ -176,7 +176,9 @@ object HiringSearchEvaluationAtlasRunner extends IOApp {
     policy = SearchEvaluationAssessmentPolicy(
       "conservative-no-regression-20261006",
       SearchEvaluationPolicyAgreement.Agreed,
-      SearchEvaluationUseCase.values.toList.map(_ -> SearchEvaluationUseCasePolicy()).toMap
+      SearchEvaluationUseCase.values.toList.map(_ -> SearchEvaluationUseCasePolicy()).toMap,
+      latencyNoiseAllowanceMillis = 0.0,
+      absoluteP95Budget = None
     )
     _ <- reports.traverse_ { report =>
       for {

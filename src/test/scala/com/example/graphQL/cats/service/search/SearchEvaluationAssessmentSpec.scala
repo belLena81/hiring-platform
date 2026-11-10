@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.service.search
 
-import java.time.Instant
+import java.time.{Duration, Instant}
 import com.example.graphQL.cats.infrastructure.search.SearchEvaluationReportJson
 
 class SearchEvaluationAssessmentSpec extends munit.FunSuite {
@@ -33,8 +33,24 @@ class SearchEvaluationAssessmentSpec extends munit.FunSuite {
   private val policy = SearchEvaluationAssessmentPolicy(
     "conservative",
     SearchEvaluationPolicyAgreement.Agreed,
-    Map(SearchEvaluationUseCase.JobSearch -> SearchEvaluationUseCasePolicy(Some(BigDecimal(1))))
+    Map(SearchEvaluationUseCase.JobSearch -> SearchEvaluationUseCasePolicy(Some(BigDecimal(1)))),
+    latencyNoiseAllowanceMillis = 0.0,
+    absoluteP95Budget = Some(Duration.ofSeconds(5))
   )
+
+  /** Same relevant results as the baseline, only the observed latency differs. */
+  private def withLatency(ms: Double) =
+    report(
+      observed.copy(queries =
+        corpus.queries.map(q =>
+          SearchEvaluationQuery(
+            q.queryId,
+            SearchEvaluationRanking.Succeeded(q.relevantIds.toList.sorted, Some(ms)),
+            SearchEvaluationRanking.Unavailable(SearchEvaluationUnavailable.NotCaptured)
+          )
+        )
+      )
+    )
   private val labels = Some(
     SearchEvaluationLabelAttestation(corpus.digest, corpus.rubric.identity, "independent-reviewer")
   )
@@ -110,6 +126,73 @@ class SearchEvaluationAssessmentSpec extends munit.FunSuite {
     )
     val expensive = report(observed.copy(environment = observed.environment.copy(providerRequests = Some(3L))))
     assert(assess(expensive).reasons.contains(ProviderRequestRegression))
+  }
+  test("HDQ-08 SEB-08 zero noise allowance keeps the strict relative p95 rule") {
+    assert(!assess(withLatency(10.0)).reasons.contains(LatencyRegression))
+    assert(assess(withLatency(11.0)).reasons.contains(LatencyRegression))
+    assertEquals(assess(withLatency(11.0)).decision, SearchEvaluationDecision.Reject)
+  }
+  test("HDQ-08 SEB-08 five millisecond noise allowance passes exactly baseline plus allowance and rejects one more") {
+    val allowed = policy.copy(latencyNoiseAllowanceMillis = 5.0)
+    val within = assess(withLatency(15.0), p = allowed)
+    assert(!within.reasons.contains(LatencyRegression))
+    assertEquals(within.decision, SearchEvaluationDecision.Recommend)
+    val beyond = assess(withLatency(16.0), p = allowed)
+    assert(beyond.reasons.contains(LatencyRegression))
+    assertEquals(beyond.decision, SearchEvaluationDecision.Reject)
+  }
+  test("HDQ-08 SEB-08 absolute p95 budget passes at the budget and defers above it without rejecting") {
+    val atBudget = assess(p = policy.copy(absoluteP95Budget = Some(Duration.ofMillis(10))))
+    assert(!atBudget.reasons.contains(AbsoluteLatencyBudgetExceeded))
+    assertEquals(atBudget.decision, SearchEvaluationDecision.Recommend)
+    val above = assess(p = policy.copy(absoluteP95Budget = Some(Duration.ofMillis(9))))
+    assertEquals(above.reasons, List(AbsoluteLatencyBudgetExceeded))
+    assertEquals(above.decision, SearchEvaluationDecision.Defer)
+  }
+  test("HDQ-08 SEB-08 absolute budget never decides the relative rule and does not reject on its own") {
+    val p = policy.copy(latencyNoiseAllowanceMillis = 5.0, absoluteP95Budget = Some(Duration.ofMillis(10)))
+    val result = assess(withLatency(14.0), p = p)
+    assert(!result.reasons.contains(LatencyRegression))
+    assert(result.reasons.contains(AbsoluteLatencyBudgetExceeded))
+    assertEquals(result.decision, SearchEvaluationDecision.Defer)
+  }
+  test("HDQ-08 SEB-08 provider-generated capture without an absolute budget is a typed validation failure") {
+    val missing = policy.copy(absoluteP95Budget = None)
+    val result = SearchEvaluationAssessment.assess(report(), report(), missing, labels, Some(evidence), Some(evidence))
+    assertEquals(
+      result.left.map(_.toNonEmptyList.toList),
+      Left(List(SearchEvaluationError.InvalidField("assessmentPolicy.absoluteP95Budget")))
+    )
+  }
+  test("HDQ-08 SEB-08 non-finite or negative allowance and non-positive budget are invalid policy") {
+    List(
+      policy.copy(latencyNoiseAllowanceMillis = Double.NaN),
+      policy.copy(latencyNoiseAllowanceMillis = Double.PositiveInfinity),
+      policy.copy(latencyNoiseAllowanceMillis = Double.NegativeInfinity),
+      policy.copy(latencyNoiseAllowanceMillis = -1.0),
+      policy.copy(absoluteP95Budget = Some(Duration.ZERO)),
+      policy.copy(absoluteP95Budget = Some(Duration.ofMillis(-1)))
+    ).foreach(p =>
+      assertEquals(
+        SearchEvaluationAssessment
+          .assess(report(), report(), p, labels, Some(evidence), Some(evidence))
+          .left
+          .map(_.toNonEmptyList.toList),
+        Left(List(SearchEvaluationError.InvalidField("assessmentPolicy"))),
+        clue(p)
+      )
+    )
+  }
+  test("HDQ-08 SEB-08 report JSON renders the budget breach reason and the latency policy fields") {
+    val p = policy.copy(latencyNoiseAllowanceMillis = 5.0, absoluteP95Budget = Some(Duration.ofMillis(9)))
+    val result = assess(p = p)
+    val json = SearchEvaluationReportJson.renderAssessment(result)
+    assertEquals(json.hcursor.get[Double]("latencyNoiseAllowanceMillis"), Right(5.0))
+    assertEquals(json.hcursor.get[Double]("absoluteP95BudgetMillis"), Right(9.0))
+    assertEquals(json.hcursor.get[List[String]]("reasons"), Right(List("AbsoluteLatencyBudgetExceeded")))
+    assertEquals(json.hcursor.get[String]("decision"), Right("Defer"))
+    val none = SearchEvaluationReportJson.renderAssessment(assess().copy(absoluteP95BudgetMillis = None))
+    assertEquals(none.hcursor.downField("absoluteP95BudgetMillis").focus.exists(_.isNull), true)
   }
   test("failed unavailable and missing held-out groups cannot pass coverage") {
     val unavailable = report(

@@ -52,6 +52,8 @@ object SearchEvaluationReportJson {
     "decision" -> text(value.decision.toString),
     "policyIdentity" -> text(value.policyIdentity),
     "evaluatedUseCases" -> Json.arr(value.evaluatedUseCases.map(useCase => text(useCase.toString))*),
+    "latencyNoiseAllowanceMillis" -> number(value.latencyNoiseAllowanceMillis),
+    "absoluteP95BudgetMillis" -> optional(value.absoluteP95BudgetMillis)(number),
     "reasons" -> Json.arr(value.reasons.map(reason => text(reason.toString))*)
   )
 

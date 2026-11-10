@@ -1,15 +1,29 @@
 package com.example.graphQL.cats.service.search
 
+import java.time.Duration
+
 import cats.data.NonEmptyChain
 
 enum SearchEvaluationPolicyAgreement { case Proposed, Agreed }
 enum SearchEvaluationDecision { case Recommend, Defer, Reject }
 enum SearchEvaluationEvidenceOutcome { case Passed, Failed }
 final case class SearchEvaluationUseCasePolicy(maximumCost: Option[BigDecimal] = None)
+
+/** Latency rules (owner decisions of 2026-11-10, Q3). Neither latency field has a default: the owner sizes them.
+  *
+  * @param latencyNoiseAllowanceMillis
+  *   relative rule: the candidate's p95 may exceed the same-capture baseline p95 by at most this many milliseconds.
+  *   Zero is legal and reproduces the strict `>` comparison.
+  * @param absoluteP95Budget
+  *   absolute p95 budget for provider-generated captures; required when either report is provider-generated. It never
+  *   applies to the relative rule.
+  */
 final case class SearchEvaluationAssessmentPolicy(
     identity: String,
     agreement: SearchEvaluationPolicyAgreement = SearchEvaluationPolicyAgreement.Proposed,
-    useCases: Map[SearchEvaluationUseCase, SearchEvaluationUseCasePolicy]
+    useCases: Map[SearchEvaluationUseCase, SearchEvaluationUseCasePolicy],
+    latencyNoiseAllowanceMillis: Double,
+    absoluteP95Budget: Option[Duration]
 )
 final case class SearchEvaluationLabelAttestation(corpusDigest: String, judgmentIdentity: String, reviewer: String)
 
@@ -29,17 +43,28 @@ enum SearchEvaluationAssessmentReason {
   case MissingObservedEvidence, PrivacyFailure, EligibilityFailure, IncompleteCoverage, RetrievalFailure
   case MissingRelevance, RelevanceRegression, MissingLatency, LatencyRegression
   case MissingProviderMeasurements, ProviderRequestRegression, MissingComparableBilling, CostLimitExceeded
+  case AbsoluteLatencyBudgetExceeded
 }
 final case class SearchEvaluationAssessmentResult(
     decision: SearchEvaluationDecision,
     policyIdentity: String,
     reasons: List[SearchEvaluationAssessmentReason],
-    evaluatedUseCases: List[SearchEvaluationUseCase]
+    evaluatedUseCases: List[SearchEvaluationUseCase],
+    latencyNoiseAllowanceMillis: Double,
+    absoluteP95BudgetMillis: Option[Double]
 )
 
 /** Conservative recommendation policy: zero regressions and complete observed held-out evidence. */
 object SearchEvaluationAssessment {
   import SearchEvaluationAssessmentReason.*
+
+  /** The single place where an absolute-budget breach chooses its outcome. Defer is the recorder's proposal and is OPEN
+    * for the owner (spec hiring-discovery-search-quality.md, "Open items after 2026-11-10", item 5). Free-tier network
+    * latency alone must not Reject the ranker, so changing this to Reject needs an explicit owner decision.
+    */
+  private val absoluteBudgetBreachOutcome: SearchEvaluationDecision = SearchEvaluationDecision.Defer
+
+  private def budgetToMillis(budget: Duration): Double = budget.toNanos.toDouble / 1000000.0
 
   def assess(
       baseline: SearchEvaluationReport,
@@ -72,7 +97,12 @@ object SearchEvaluationAssessment {
     val corpusUseCases = baseline.corpus.queries.map(_.useCase).toSet
     val supported = policy.useCases.keySet
     val invalidPolicy = policy.identity.trim.isEmpty || supported.isEmpty || !supported.subsetOf(corpusUseCases) ||
-      policy.useCases.values.exists(_.maximumCost.exists(_ < 0))
+      policy.useCases.values.exists(_.maximumCost.exists(_ < 0)) ||
+      policy.latencyNoiseAllowanceMillis.isNaN || policy.latencyNoiseAllowanceMillis.isInfinite ||
+      policy.latencyNoiseAllowanceMillis < 0 || policy.absoluteP95Budget.exists(b => b.isZero || b.isNegative)
+    val providerGenerated = List(baseline, candidate).exists(
+      _.run.coordinates.embeddingProvenance == SearchEvaluationEmbeddingProvenance.ProviderGenerated
+    )
     val evidenceMatches = List(baseline -> baselineEvidence, candidate -> candidateEvidence).forall {
       case (report, evidence) =>
         evidence.forall(value =>
@@ -81,6 +111,8 @@ object SearchEvaluationAssessment {
         )
     }
     if (invalidPolicy) Left(NonEmptyChain.one(SearchEvaluationError.InvalidField("assessmentPolicy")))
+    else if (providerGenerated && policy.absoluteP95Budget.isEmpty)
+      Left(NonEmptyChain.one(SearchEvaluationError.InvalidField("assessmentPolicy.absoluteP95Budget")))
     else if (!evidenceMatches)
       Left(NonEmptyChain.one(SearchEvaluationError.InconsistentCoordinates("observedEvidence")))
     else
@@ -89,7 +121,7 @@ object SearchEvaluationAssessment {
         def supportedQuery(query: SearchEvaluationFixtureQuery, strategy: SearchEvaluationStrategy): Boolean =
           query.useCase != SearchEvaluationUseCase.Recommendations ||
             (query.filterGroup == SearchEvaluationFilterGroup.Broad &&
-              strategy == SearchEvaluationStrategy.Vector)
+              strategy.retrieval == SearchEvaluationStrategy.Vector)
         val allSupported = baseline.corpus.queries.filter(q =>
           supported.contains(q.useCase) &&
             supportedQuery(q, baseline.run.strategy) && supportedQuery(q, candidate.run.strategy)
@@ -195,11 +227,20 @@ object SearchEvaluationAssessment {
           (
             paired.exists { case (_, a, b) =>
               (a.successLatency, b.successLatency) match {
-                case (Some(x), Some(y)) => y.p95 > x.p95
+                case (Some(x), Some(y)) => y.p95 > x.p95 + policy.latencyNoiseAllowanceMillis
                 case _                  => false
               }
             },
             LatencyRegression
+          ),
+          (
+            providerGenerated && policy.absoluteP95Budget.exists { budget =>
+              val budgetMillis = budgetToMillis(budget)
+              paired.exists { case (_, a, b) =>
+                List(a.successLatency, b.successLatency).flatten.exists(_.p95 > budgetMillis)
+              }
+            },
+            AbsoluteLatencyBudgetExceeded
           ),
           (reports.exists(_.run.environment.providerRequests.isEmpty), MissingProviderMeasurements),
           (
@@ -229,12 +270,20 @@ object SearchEvaluationAssessment {
           LatencyRegression,
           ProviderRequestRegression,
           CostLimitExceeded
-        )
+        ) ++ (if (absoluteBudgetBreachOutcome == SearchEvaluationDecision.Reject) Set(AbsoluteLatencyBudgetExceeded)
+              else Set.empty[SearchEvaluationAssessmentReason])
         val decision =
           if (reasons.exists(failures.contains)) SearchEvaluationDecision.Reject
           else if (reasons.nonEmpty) SearchEvaluationDecision.Defer
           else SearchEvaluationDecision.Recommend
-        SearchEvaluationAssessmentResult(decision, policy.identity, reasons, supported.toList.sortBy(_.ordinal))
+        SearchEvaluationAssessmentResult(
+          decision,
+          policy.identity,
+          reasons,
+          supported.toList.sortBy(_.ordinal),
+          policy.latencyNoiseAllowanceMillis,
+          policy.absoluteP95Budget.map(budgetToMillis)
+        )
       }
   }
 }

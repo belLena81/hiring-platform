@@ -183,7 +183,10 @@ object SearchEvaluationFixtures {
       8,
       8,
       K,
-      "RRF score descending, branch ranks ascending, UUID ascending",
+      strategy match {
+        case SearchEvaluationStrategy.SkillEvidenceRanked(_) => SkillEvidenceRankedComposition.TieRule
+        case _ => "RRF score descending, branch ranks ascending, UUID ascending"
+      },
       SearchEvaluationEmbeddingProvenance.AuthoredFixture
     )
     SearchEvaluationRun(strategy, coordinates, 1, 0, false, timestamp, None, environment, Nil)
@@ -197,15 +200,26 @@ object SearchEvaluationFixtures {
   ): SearchEvaluationRun =
     emptyRun(strategy, revision, fingerprint, timestamp).copy(queries = queries.map(observation(_, strategy)))
 
-  def observation(fixture: SearchEvaluationFixtureQuery, strategy: SearchEvaluationStrategy): SearchEvaluationQuery = {
+  def observation(fixture: SearchEvaluationFixtureQuery, strategy: SearchEvaluationStrategy): SearchEvaluationQuery =
+    strategy match {
+      case SearchEvaluationStrategy.SkillEvidenceRanked(underlying) =>
+        SkillEvidenceRankedEvaluation.observation(fixture, observation(fixture, underlying)).query
+      case other => retrievalObservation(fixture, other)
+    }
+
+  private def retrievalObservation(
+      fixture: SearchEvaluationFixtureQuery,
+      strategy: SearchEvaluationStrategy
+  ): SearchEvaluationQuery = {
 
     val vector = fixture.eligibleIds.reverse
     val lexical = fixture.eligibleIds
     val ids = strategy match {
-      case SearchEvaluationStrategy.Lexical        => lexical.take(K)
-      case SearchEvaluationStrategy.Vector         => vector.take(K)
-      case SearchEvaluationStrategy.ApplicationRrf => fuse(fixture, vector, lexical)
-      case SearchEvaluationStrategy.AtlasAnn       => Nil
+      case SearchEvaluationStrategy.Lexical                => lexical.take(K)
+      case SearchEvaluationStrategy.Vector                 => vector.take(K)
+      case SearchEvaluationStrategy.ApplicationRrf         => fuse(fixture, vector, lexical)
+      case SearchEvaluationStrategy.AtlasAnn               => Nil
+      case SearchEvaluationStrategy.SkillEvidenceRanked(_) => Nil // handled by `observation`, never reached
     }
     val unavailable = strategy == SearchEvaluationStrategy.AtlasAnn ||
       (fixture.useCase == SearchEvaluationUseCase.Recommendations && strategy != SearchEvaluationStrategy.Vector)

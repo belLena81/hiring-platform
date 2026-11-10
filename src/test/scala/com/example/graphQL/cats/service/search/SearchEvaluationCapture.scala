@@ -14,9 +14,9 @@ object SearchEvaluationCapture {
   }
 
   def supported(query: SearchEvaluationFixtureQuery, strategy: SearchEvaluationStrategy): Boolean =
-    strategy != SearchEvaluationStrategy.AtlasAnn &&
+    strategy.retrieval != SearchEvaluationStrategy.AtlasAnn &&
       (query.useCase != SearchEvaluationUseCase.Recommendations ||
-        (strategy == SearchEvaluationStrategy.Vector && query.filterGroup == SearchEvaluationFilterGroup.Broad))
+        (strategy.retrieval == SearchEvaluationStrategy.Vector && query.filterGroup == SearchEvaluationFilterGroup.Broad))
 
   def capture(
       corpus: SearchEvaluationCorpus,

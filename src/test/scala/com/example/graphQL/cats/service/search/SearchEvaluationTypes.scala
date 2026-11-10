@@ -7,7 +7,18 @@ enum SearchEvaluationFilterGroup { case Broad, Selective, Empty }
 enum SearchEvaluationSplit { case Tuning, HeldOut }
 enum SearchEvaluationJudgmentOrigin { case Synthetic, ProvisionalFabricated, HumanReviewedFabricated }
 enum SearchEvaluationLabelReview { case Pending, Reviewed }
-enum SearchEvaluationStrategy { case Lexical, Vector, ApplicationRrf, AtlasAnn }
+enum SearchEvaluationStrategy {
+  case Lexical, Vector, ApplicationRrf, AtlasAnn
+
+  /** The skill-evidence ranker applied over the captured results of `underlying`; never nested. Test sources only. */
+  case SkillEvidenceRanked(underlying: SearchEvaluationStrategy)
+
+  /** The retrieval that produced the entities: the ranker adds no retrieval of its own. */
+  def retrieval: SearchEvaluationStrategy = this match {
+    case SkillEvidenceRanked(underlying) => underlying.retrieval
+    case other                           => other
+  }
+}
 enum SearchEvaluationRankingOrigin { case AuthoredFixture, ObservedAtlas, ObservedApplication }
 enum SearchEvaluationEmbeddingProvenance { case AuthoredFixture, SyntheticFixture, ProviderGenerated }
 enum SearchEvaluationFailure { case RetrievalFailed, ReferenceFailed, TimedOut }
@@ -96,6 +107,9 @@ enum SearchEvaluationError {
   case DuplicateRanking(queryId: String)
   case IneligibleRanking(queryId: String)
   case UnreviewedJudgments(queryId: String)
+
+  /** A ranked run whose captured list may have been cut before the ranker saw the whole eligible set. */
+  case PossiblyTruncatedCapture(queryId: String)
 }
 final case class SearchEvaluationQuality(recallAtK: Double, ndcgAtK: Double)
 final case class SearchEvaluationQueryResult(
