@@ -43,6 +43,21 @@ trait InterviewCalendarProviderContract { self: CatsEffectSuite =>
   private def success[A](value: InterviewProviderF[IO, A]): IO[A] =
     value.value.flatMap(_.fold(error => IO.raiseError(new AssertionError(s"Provider failure: $error")), IO.pure))
 
+  /** `Unavailable` is the contract's retryable outcome: a store whose transactions contend (eight callers on one
+    * workflow's fence and participant locks) may exhaust its own bounded retries for one caller. A caller retries it,
+    * as the scheduling command does; any other error, and an `Unavailable` that outlasts the bound, still fails.
+    */
+  private def reserveRetryingUnavailable[A](
+      call: => InterviewProviderF[IO, A],
+      attemptsLeft: Int = 5
+  ): IO[A] =
+    call.value.flatMap {
+      case Right(value)                                                 => IO.pure(value)
+      case Left(InterviewProviderError.Unavailable) if attemptsLeft > 1 =>
+        reserveRetryingUnavailable(call, attemptsLeft - 1)
+      case Left(error) => IO.raiseError(new AssertionError(s"Provider failure: $error"))
+    }
+
   private def reserve(subject: InterviewCalendarContractSubject, workflow: InterviewWorkflow, generation: Int) =
     subject.provider.reserve(
       workflow.id,
@@ -161,7 +176,7 @@ trait InterviewCalendarProviderContract { self: CatsEffectSuite =>
         workflow <- subject.newWorkflow(user(), user(), slot(0))
         at = Instant.now().truncatedTo(ChronoUnit.MILLIS)
         reservations <- (0 until 8).toList.parTraverse(attempt =>
-          success(
+          reserveRetryingUnavailable(
             subject.provider.reserve(
               workflow.id,
               InterviewWorkflow.reservationKey(workflow.id, 0),

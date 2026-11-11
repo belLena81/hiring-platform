@@ -22,6 +22,11 @@ import com.example.graphQL.cats.service.port.{
   InterviewProviderF
 }
 import cats.data.EitherT
+import cats.syntax.all.*
+import com.example.graphQL.cats.domain.model.Identifiers.UserId
+import com.example.graphQL.cats.domain.workflow.{InterviewNotificationKind, InterviewParticipant, InterviewWorkflowId}
+import java.time.Instant
+import java.util.UUID
 import cats.effect.Resource
 import io.github.iltotore.iron.autoRefine
 import munit.CatsEffectSuite
@@ -105,9 +110,36 @@ class InterviewNotificationProviderSelectionSpec extends CatsEffectSuite {
   }
 
   test("DHW-26 the default provider is the receipt ledger: it answers lookups from the ledger, not from SES") {
-    InterviewNotificationProviderSelection
-      .resource(InterviewNotificationConfig(), ledger, Diagnostics.noop[IO], SesProviderWiring.notAvailableInThisBuild)
-      .use(provider => provider.lookup("absent").value)
-      .map(found => assertEquals(found, Right(None)))
+    val stored = InterviewNotificationReceipt(
+      InterviewWorkflowId(UUID.fromString("00000000-0000-0000-0000-000000000c26")),
+      UserId(UUID.fromString("00000000-0000-0000-0000-000000000d26")),
+      InterviewParticipant.Candidate,
+      InterviewNotificationKind.RescheduleProposed,
+      "ledger-key",
+      Instant.parse("2026-11-10T10:00:00Z")
+    )
+    val storingLedger = new InterviewNotificationReceiptLedger[IO] {
+      def deliverOnce(
+          receipt: InterviewNotificationReceipt,
+          execution: Option[ClaimedInterviewWorkflowCommand]
+      ): InterviewProviderF[IO, InterviewNotificationReceipt] = EitherT.rightT(receipt)
+      def find(idempotencyKey: String): InterviewProviderF[IO, Option[InterviewNotificationReceipt]] =
+        EitherT.rightT(Some(stored).filter(_.idempotencyKey == idempotencyKey))
+    }
+    for {
+      sesClients <- Ref.of[IO, Int](0)
+      wiring = SesProviderWiring(
+        _ => Resource.eval(sesClients.update(_ + 1).as(noopClient)),
+        SesNotificationLookups.awaitingWiring
+      )
+      result <- InterviewNotificationProviderSelection
+        .resource(InterviewNotificationConfig(), storingLedger, Diagnostics.noop[IO], wiring)
+        .use(provider => (provider.lookup("ledger-key").value, provider.lookup("absent").value).tupled)
+      builtClients <- sesClients.get
+    } yield {
+      assertEquals(result._1, Right(Some(stored)))
+      assertEquals(result._2, Right(None))
+      assertEquals(builtClients, 0)
+    }
   }
 }

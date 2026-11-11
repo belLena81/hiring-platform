@@ -79,13 +79,22 @@ final class KafkaPartitionProcessingSpec extends CatsEffectSuite {
     final case class RecordNotDurable(offset: Int) extends RuntimeException(s"record $offset is not durable")
     for {
       observed <- commits
+      // Commits run in a stage concurrent with record processing, so the failure of record 3 would race the commit of
+      // record 2. Record 3 therefore fails only after record 2's commit was observed, which fixes the order.
+      secondCommitted <- Deferred[IO, Unit]
       result <- KafkaPartitionProcessing(
         Stream.emit(Stream.range(1, 11).map(offset => 0 -> offset).covary[IO]).covary[IO],
         4,
         CommitBatching(1, 1.hour),
         ignoreDropped
-      ) { case record @ (_, offset) =>
-        if (offset == 3) IO.raiseError(RecordNotDurable(offset)) else process(observed)(record)
+      ) { case (partition, offset) =>
+        if (offset == 3) secondCommitted.get.timeout(10.seconds) *> IO.raiseError(RecordNotDurable(offset))
+        else
+          IO.pure(
+            KafkaFixtures.offset(topic, partition, offset.toLong, "g") { offsets =>
+              observed.commit(offsets) *> (if (offset == 2) secondCommitted.complete(()).void else IO.unit)
+            }
+          )
       }.compile.drain.attempt
       positions <- observed.positions
     } yield {

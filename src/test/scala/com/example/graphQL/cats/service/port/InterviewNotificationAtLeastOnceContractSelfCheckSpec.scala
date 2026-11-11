@@ -18,6 +18,9 @@ class InterviewNotificationAtLeastOnceContractSelfCheckSpec extends CatsEffectSu
   private val workflowId = InterviewWorkflowId(UUID.fromString("00000000-0000-0000-0000-000000000a02"))
   private val recipientId = UserId(UUID.fromString("00000000-0000-0000-0000-000000000b02"))
 
+  // The clue of the contract assertion that detects a retry answered without sending.
+  private val silentLossClue = "the retry must call the provider again"
+
   private def subject(deduplicateByKey: Boolean): InterviewNotificationAtLeastOnceSubject = {
     val lose = new AtomicBoolean(false)
     val delivered = new AtomicInteger(0)
@@ -59,9 +62,9 @@ class InterviewNotificationAtLeastOnceContractSelfCheckSpec extends CatsEffectSu
       .retryAfterLostOutcomeSendsAgain(subject(deduplicateByKey = true))
       .attempt
       .map {
-        case Left(_: AssertionError) => ()
-        case Left(other)             => fail(s"Expected an assertion failure, got $other")
-        case Right(_)                => fail("A key-deduplicating provider must not satisfy the at-least-once contract")
+        case Left(failure: AssertionError) if Option(failure.getMessage).exists(_.contains(silentLossClue)) => ()
+        case Left(other) => fail(s"Expected the silent-loss assertion to fail, got $other")
+        case Right(_)    => fail("A key-deduplicating provider must not satisfy the at-least-once contract")
       }
   }
 }
