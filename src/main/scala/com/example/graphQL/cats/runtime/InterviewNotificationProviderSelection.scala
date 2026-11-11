@@ -13,11 +13,17 @@ import com.example.graphQL.cats.infrastructure.ses.{
   SesRecipient
 }
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
-import com.example.graphQL.cats.domain.workflow.InterviewWorkflowId
+import com.example.graphQL.cats.domain.workflow.{
+  InterviewNotificationKind,
+  InterviewNotificationSendRefusal,
+  InterviewWorkflowId
+}
 import com.example.graphQL.cats.service.Diagnostics
 import com.example.graphQL.cats.service.port.{
+  ClaimedInterviewWorkflowCommand,
   InterviewNotificationProvider,
   InterviewNotificationReceiptLedger,
+  InterviewNotificationSendFence,
   LedgerInterviewNotificationProvider
 }
 
@@ -27,10 +33,13 @@ import com.example.graphQL.cats.service.port.{
   */
 final class SesClientNotAvailableError extends IllegalStateException("SES client not available in this build")
 
-/** The narrow user-store and workflow projections the SES provider reads at send time. */
+/** The narrow user-store and workflow projections the SES provider reads at send time, and the required pre-send fence
+  * (the notification send fence). The fence has no default: a wiring cannot be built without one.
+  */
 final case class SesNotificationLookups(
     recipient: UserId => IO[SesRecipient],
-    context: InterviewWorkflowId => IO[Option[InterviewNotificationContext]]
+    context: InterviewWorkflowId => IO[Option[InterviewNotificationContext]],
+    fence: InterviewNotificationSendFence[IO]
 )
 
 object SesNotificationLookups {
@@ -41,8 +50,22 @@ object SesNotificationLookups {
     */
   val awaitingWiring: SesNotificationLookups = SesNotificationLookups(
     _ => IO.raiseError(new SesClientNotAvailableError),
-    _ => IO.raiseError(new SesClientNotAvailableError)
+    _ => IO.raiseError(new SesClientNotAvailableError),
+    SendFences.refuseEverything
   )
+}
+
+object SendFences {
+
+  /** Fail-closed placeholder: every check reports that it could not run, so nothing can be sent through it. */
+  val refuseEverything: InterviewNotificationSendFence[IO] = new InterviewNotificationSendFence[IO] {
+    def verify(
+        workflowId: InterviewWorkflowId,
+        kind: InterviewNotificationKind,
+        execution: Option[ClaimedInterviewWorkflowCommand]
+    ): IO[Either[InterviewNotificationSendRefusal, Unit]] =
+      IO.pure(Left(InterviewNotificationSendRefusal.CheckUnavailable))
+  }
 }
 
 /** How the SES client is built. */
@@ -91,7 +114,13 @@ private[runtime] object InterviewNotificationProviderSelection {
         ses
           .client(settings)
           .map(client =>
-            new SesInterviewNotificationProvider(client, ses.lookups.recipient, ses.lookups.context, diagnostics)
+            new SesInterviewNotificationProvider(
+              client,
+              ses.lookups.recipient,
+              ses.lookups.context,
+              ses.lookups.fence,
+              diagnostics
+            )
           )
     }
 }

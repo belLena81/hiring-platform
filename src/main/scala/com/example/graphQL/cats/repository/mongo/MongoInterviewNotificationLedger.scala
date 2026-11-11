@@ -41,7 +41,7 @@ final class MongoInterviewNotificationLedger(store: MongoInterviewWorkflowStore)
               // Only the scheduling notification requires the hiring commit; later kinds follow other durable events.
               _ <- MongoF.fromEither(
                 Either.cond(
-                  receipt.kind != InterviewNotificationKind.Scheduled || hiringCommitted,
+                  !InterviewNotificationFence.requiresHiringCommit(receipt.kind) || hiringCommitted,
                   (),
                   RepositoryError.Conflict
                 )

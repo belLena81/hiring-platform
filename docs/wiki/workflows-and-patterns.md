@@ -65,6 +65,7 @@ Four mechanisms are often conflated. Each guarantees one thing and no more:
 | Fencing (token or revision compared at write) | A stale holder's store write is rejected | A Kafka send or provider call, which the store cannot reject | Store writes made under a lease |
 | Dedupe (unique key in the store) | The first insert wins and a duplicate is refused | Anything once the key has expired: the key must outlive every redelivery. A consumer receipt's expiry is extended by each duplicate delivery and never shortened | Consumer receipts, idempotency keys |
 | Provider idempotency (provider key, platform receipt or durable send intent) | One external effect per key | A provider with none of these is at least once: an unknown outcome with no receipt may be sent again (SES email) | External notifications and calendar reservations |
+| Pre-send check (read-only; the same predicates as the ledger, run immediately before the one external call) | A refused or stale state (lost claim, cancelled phase, inactive participant, uncommitted hiring) makes no call | A change committed between the check and the call, and a crash after a successful call (an unknown outcome): the window stays open for any external send | SES email (the notification send fence) |
 
 Receipt and effect ordering for one consumed event:
 

@@ -8,6 +8,7 @@ import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.domain.workflow.{
   InterviewInterval,
   InterviewNotificationKind,
+  InterviewNotificationSendRefusal,
   InterviewParticipant,
   InterviewWorkflowId
 }
@@ -17,6 +18,7 @@ import com.example.graphQL.cats.service.port.{
   ClaimedInterviewWorkflowCommand,
   InterviewNotificationProvider,
   InterviewNotificationReceipt,
+  InterviewNotificationSendFence,
   InterviewProviderError,
   InterviewProviderF
 }
@@ -49,6 +51,14 @@ enum SesNotificationFailure(val code: String, val error: InterviewProviderError)
   case SendingPaused extends SesNotificationFailure("SES_SENDING_PAUSED", InterviewProviderError.Unavailable)
   case ClientFailed extends SesNotificationFailure("SES_CLIENT_FAILED", InterviewProviderError.Unavailable)
   case LookupFailed extends SesNotificationFailure("SES_LOOKUP_FAILED", InterviewProviderError.Unavailable)
+  case ClaimNotHeld extends SesNotificationFailure("SES_FENCE_CLAIM_NOT_HELD", InterviewProviderError.Conflict)
+  case ParticipantInactive
+      extends SesNotificationFailure("SES_FENCE_PARTICIPANT_INACTIVE", InterviewProviderError.Conflict)
+  case KindNotAllowed extends SesNotificationFailure("SES_FENCE_KIND_NOT_ALLOWED", InterviewProviderError.Conflict)
+  case HiringNotCommitted
+      extends SesNotificationFailure("SES_FENCE_HIRING_NOT_COMMITTED", InterviewProviderError.Conflict)
+  case WorkflowNotFound extends SesNotificationFailure("SES_FENCE_WORKFLOW_NOT_FOUND", InterviewProviderError.Conflict)
+  case FenceUnavailable extends SesNotificationFailure("SES_FENCE_UNAVAILABLE", InterviewProviderError.Unavailable)
 }
 
 /** Interview notifications sent as email through SES.
@@ -57,6 +67,16 @@ enum SesNotificationFailure(val code: String, val error: InterviewProviderError)
   * adapter keeps no receipt, so `lookup` always answers "no known delivery". An unknown outcome (timeout, lost
   * response, crash after the service accepted) therefore leads the interpreter to send again: a duplicate message is
   * possible, a silent loss is not. The ledger provider keeps its exactly-once receipts.
+  *
+  * Notification send fence: immediately before the one client call, `fence` checks that the caller still holds its
+  * claim, the candidate, the recruiter and the initiating actor are active, the kind is allowed in the workflow phase
+  * and hiring is committed before `Scheduled` (the ledger's four checks, without recording a delivery). Any failed
+  * check, an absent claim or a failing check is a typed refusal with a safe code and zero client calls, so a replay, a
+  * lost claim or a cancellation never sends a stale notice. The fence is a required constructor parameter; there is no
+  * way to build the provider without it. Remaining gaps, which no external send can close: (1) a cancellation, deletion
+  * or lost claim committed between the check and the client call can still produce one message; (2) the send can
+  * succeed and the process die before the receipt or acknowledgement is recorded, so the interpreter sends again after
+  * recovery: a duplicate is possible, a silent loss is not.
   *
   * Privacy: the recipient address is resolved from the user store at send time through `recipient`, used for the one
   * client call and never stored, returned, logged, tagged or placed in a header. Neither the body nor the message id is
@@ -70,6 +90,7 @@ final class SesInterviewNotificationProvider(
     client: SesEmailClient,
     recipient: UserId => IO[SesRecipient],
     context: InterviewWorkflowId => IO[Option[InterviewNotificationContext]],
+    fence: InterviewNotificationSendFence[IO],
     diagnostics: Diagnostics[IO]
 ) extends InterviewNotificationProvider[IO] {
 
@@ -85,7 +106,9 @@ final class SesInterviewNotificationProvider(
     for {
       address <- resolveAddress(recipientId)
       facts <- resolveContext(workflowId)
-      outcome <- send(SesInterviewMessage.render(kind, facts, address))
+      request = SesInterviewMessage.render(kind, facts, address)
+      _ <- verifyBeforeSend(workflowId, kind, execution)
+      outcome <- send(request)
       _ <- classify(outcome)
     } yield InterviewNotificationReceipt(workflowId, recipientId, participant, kind, idempotencyKey, now)
 
@@ -120,6 +143,29 @@ final class SesInterviewNotificationProvider(
       case Some(facts) => EitherT.rightT(facts)
       case None        => fail(SesNotificationFailure.NoContext)
     }
+
+  /** The last step before the client call; a refusal or a failure of the check itself sends nothing. */
+  private def verifyBeforeSend(
+      workflowId: InterviewWorkflowId,
+      kind: InterviewNotificationKind,
+      execution: Option[ClaimedInterviewWorkflowCommand]
+  ): InterviewProviderF[IO, Unit] =
+    guarded(fence.verify(workflowId, kind, execution), SesNotificationFailure.FenceUnavailable).flatMap {
+      case Right(())     => EitherT.rightT(())
+      case Left(refusal) => fail(refused(refusal))
+    }
+
+  private def refused(refusal: InterviewNotificationSendRefusal): SesNotificationFailure = {
+    import InterviewNotificationSendRefusal as R
+    refusal match {
+      case R.ClaimNotHeld          => SesNotificationFailure.ClaimNotHeld
+      case R.ParticipantInactive   => SesNotificationFailure.ParticipantInactive
+      case R.KindNotAllowedInPhase => SesNotificationFailure.KindNotAllowed
+      case R.HiringNotCommitted    => SesNotificationFailure.HiringNotCommitted
+      case R.WorkflowNotFound      => SesNotificationFailure.WorkflowNotFound
+      case R.CheckUnavailable      => SesNotificationFailure.FenceUnavailable
+    }
+  }
 
   private def send(request: SesEmailRequest): InterviewProviderF[IO, SesSendOutcome] =
     // IO.blocking cannot be cancelled: after the provider timeout the send may still complete, so a message can be

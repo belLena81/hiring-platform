@@ -38,6 +38,9 @@ final class MongoInterviewWorkflowRepository(
   import MongoInterviewWorkflowCodec.*
   import store.*
 
+  /** Read-only pre-send check for external notification providers; it records no delivery. */
+  val notificationSendFence: InterviewNotificationSendFence[IO] = new MongoInterviewNotificationSendFence(store)
+
   export commandQueue.{
     attemptCount,
     authorizePublication,

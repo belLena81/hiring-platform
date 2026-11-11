@@ -7,6 +7,7 @@ import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.domain.workflow.{
   InterviewInterval,
   InterviewNotificationKind,
+  InterviewNotificationSendRefusal,
   InterviewParticipant,
   InterviewWorkflowId
 }
@@ -15,6 +16,8 @@ import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFie
 import com.example.graphQL.cats.service.port.{
   InterviewNotificationAtLeastOnceContract,
   InterviewNotificationAtLeastOnceSubject,
+  InterviewNotificationSendFence,
+  ClaimedInterviewWorkflowCommand,
   InterviewNotificationTarget,
   InterviewProviderError
 }
@@ -24,17 +27,39 @@ import scala.jdk.CollectionConverters.*
 import munit.CatsEffectSuite
 
 /** In-memory stand-in for the SES client: scripted outcomes, a call counter and the requests it received. */
-final class StubSesEmailClient(script: List[SesSendOutcome], failure: Option[Throwable] = None) extends SesEmailClient {
+final class StubSesEmailClient(
+    script: List[SesSendOutcome],
+    failure: Option[Throwable] = None,
+    order: java.util.concurrent.ConcurrentLinkedQueue[String] = new java.util.concurrent.ConcurrentLinkedQueue[String]()
+) extends SesEmailClient {
   private val outcomes = new java.util.concurrent.ConcurrentLinkedQueue[SesSendOutcome](script.asJava)
   private val calls = new java.util.concurrent.CopyOnWriteArrayList[SesEmailRequest]()
 
   def send(request: SesEmailRequest): SesSendOutcome = {
+    order.add("client")
     calls.add(request)
     failure.foreach(throw _)
     Option(outcomes.poll()).getOrElse(SesSendOutcome.Accepted("stub-message-id"))
   }
 
   def received: IO[Vector[SesEmailRequest]] = IO(calls.asScala.toVector)
+}
+
+/** Scripted pre-send fence that records when it ran; `verdict` is what the durable checks would have answered. */
+final class StubSendFence(
+    verdict: IO[Either[InterviewNotificationSendRefusal, Unit]],
+    order: java.util.concurrent.ConcurrentLinkedQueue[String]
+) extends InterviewNotificationSendFence[IO] {
+  private val seen = new java.util.concurrent.atomic.AtomicReference(Vector.empty[(InterviewNotificationKind, Boolean)])
+
+  def verify(
+      workflowId: InterviewWorkflowId,
+      kind: InterviewNotificationKind,
+      execution: Option[ClaimedInterviewWorkflowCommand]
+  ): IO[Either[InterviewNotificationSendRefusal, Unit]] =
+    IO(order.add("fence")) *> IO(seen.updateAndGet(_ :+ (kind -> execution.nonEmpty))) *> verdict
+
+  def calls: Vector[(InterviewNotificationKind, Boolean)] = seen.get
 }
 
 class SesInterviewNotificationProviderSpec extends CatsEffectSuite with InterviewNotificationAtLeastOnceContract {
@@ -48,6 +73,8 @@ class SesInterviewNotificationProviderSpec extends CatsEffectSuite with Intervie
   private final class Harness(
       val provider: SesInterviewNotificationProvider,
       val client: StubSesEmailClient,
+      val fence: StubSendFence,
+      val order: java.util.concurrent.ConcurrentLinkedQueue[String],
       logs: Ref[IO, Vector[(LogEvent, Map[LogField, String])]]
   ) {
     def received: IO[Vector[SesEmailRequest]] = client.received
@@ -60,7 +87,8 @@ class SesInterviewNotificationProviderSpec extends CatsEffectSuite with Intervie
       outcomes: List[SesSendOutcome] = Nil,
       recipient: IO[SesRecipient] = IO.pure(deliverable),
       context: IO[Option[InterviewNotificationContext]] = IO.pure(Some(InterviewNotificationContext(interval, None))),
-      clientFailure: Option[Throwable] = None
+      clientFailure: Option[Throwable] = None,
+      verdict: IO[Either[InterviewNotificationSendRefusal, Unit]] = IO.pure(Right(()))
   ): IO[Harness] =
     for {
       logs <- Ref.of[IO, Vector[(LogEvent, Map[LogField, String])]](Vector.empty)
@@ -68,10 +96,14 @@ class SesInterviewNotificationProviderSpec extends CatsEffectSuite with Intervie
         def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]): IO[Unit] =
           logs.update(_ :+ (event, fields))
       }
-      client = new StubSesEmailClient(outcomes, clientFailure)
+      order = new java.util.concurrent.ConcurrentLinkedQueue[String]()
+      client = new StubSesEmailClient(outcomes, clientFailure, order)
+      fence = new StubSendFence(verdict, order)
     } yield new Harness(
-      new SesInterviewNotificationProvider(client, _ => recipient, _ => context, diagnostics),
+      new SesInterviewNotificationProvider(client, _ => recipient, _ => context, fence, diagnostics),
       client,
+      fence,
+      order,
       logs
     )
 
@@ -308,6 +340,120 @@ class SesInterviewNotificationProviderSpec extends CatsEffectSuite with Intervie
     }
   }
 
+  // DHW-26 / Security finding F1: the pre-send fence. Each refusal is a definitive no-send (Conflict) except a check that
+  // could not run (Unavailable); in every case the client is never called and no recipient or content is logged.
+  private val refusals: List[(InterviewNotificationSendRefusal, InterviewProviderError, String, String)] = List(
+    (
+      InterviewNotificationSendRefusal.ClaimNotHeld,
+      InterviewProviderError.Conflict,
+      "SES_FENCE_CLAIM_NOT_HELD",
+      "a lost or replaced claim"
+    ),
+    (
+      InterviewNotificationSendRefusal.ParticipantInactive,
+      InterviewProviderError.Conflict,
+      "SES_FENCE_PARTICIPANT_INACTIVE",
+      "a deleted other participant"
+    ),
+    (
+      InterviewNotificationSendRefusal.KindNotAllowedInPhase,
+      InterviewProviderError.Conflict,
+      "SES_FENCE_KIND_NOT_ALLOWED",
+      "a stale kind after a cancellation"
+    ),
+    (
+      InterviewNotificationSendRefusal.HiringNotCommitted,
+      InterviewProviderError.Conflict,
+      "SES_FENCE_HIRING_NOT_COMMITTED",
+      "Scheduled before the hiring commit"
+    ),
+    (
+      InterviewNotificationSendRefusal.WorkflowNotFound,
+      InterviewProviderError.Conflict,
+      "SES_FENCE_WORKFLOW_NOT_FOUND",
+      "a missing workflow"
+    ),
+    (
+      InterviewNotificationSendRefusal.CheckUnavailable,
+      InterviewProviderError.Unavailable,
+      "SES_FENCE_UNAVAILABLE",
+      "a check that could not run"
+    )
+  )
+
+  refusals.foreach { case (refusal, expected, code, label) =>
+    test(s"DHW-26 F1 $label ($refusal) sends nothing: $expected with the safe code $code and zero client calls") {
+      for {
+        h <- harness(verdict = IO.pure(Left(refusal)))
+        result <- h.deliver()
+        sent <- h.received
+        logs <- h.emitted
+      } yield {
+        assertEquals(result.swap.toOption, Some(expected))
+        assertEquals(sent.size, 0)
+        assertEquals(logs.map(_._2.get(LogField.ErrorCode)), Vector(Some(code)))
+        assert(!logs.toString.contains(secretAddress), clues(logs))
+      }
+    }
+  }
+
+  test("DHW-26 F1 when every check passes exactly one client call is made, after the fence ran for that kind") {
+    for {
+      h <- harness(List(SesSendOutcome.Accepted("message-1")))
+      result <- h.deliver("key-fenced", InterviewNotificationKind.Cancelled)
+      sent <- h.received
+    } yield {
+      assert(result.isRight, clues(result))
+      assertEquals(sent.size, 1)
+      assertEquals(h.fence.calls.map(_._1), Vector(InterviewNotificationKind.Cancelled))
+    }
+  }
+
+  test("DHW-26 F1 the fence runs before the client call, never after") {
+    for {
+      h <- harness()
+      _ <- h.deliver()
+    } yield assertEquals(h.order.toArray.toList, List("fence", "client"))
+  }
+
+  test("DHW-26 F1 a fence that throws is Unavailable, sends nothing and logs no message or recipient") {
+    for {
+      h <- harness(verdict =
+        IO.raiseError(new IllegalStateException(s"fence store down for $secretAddress SECRET-TOKEN"))
+      )
+      result <- h.deliver()
+      sent <- h.received
+      logs <- h.emitted
+    } yield {
+      assertEquals(result.swap.toOption, Some(InterviewProviderError.Unavailable))
+      assertEquals(sent.size, 0)
+      assertEquals(logs.flatMap(_._2).toMap.get(LogField.ErrorCode), Some("SES_FENCE_UNAVAILABLE"))
+      assert(!logs.toString.contains("SECRET-TOKEN"), clues(logs))
+      assert(!logs.toString.contains(secretAddress), clues(logs))
+    }
+  }
+
+  test("DHW-26 F1 a retry after a refusal re-checks: once the check passes the message is sent, never earlier") {
+    for {
+      verdicts <- Ref.of[IO, List[Either[InterviewNotificationSendRefusal, Unit]]](
+        List(Left(InterviewNotificationSendRefusal.ClaimNotHeld), Right(()))
+      )
+      h <- harness(verdict = verdicts.modify {
+        case head :: tail => (tail, head)
+        case Nil          => (Nil, Right(()))
+      })
+      first <- h.deliver("key-retry-fence")
+      afterFirst <- h.received
+      second <- h.deliver("key-retry-fence")
+      afterSecond <- h.received
+    } yield {
+      assert(first.isLeft, clues(first))
+      assertEquals(afterFirst.size, 0)
+      assert(second.isRight, clues(second))
+      assertEquals(afterSecond.size, 1)
+    }
+  }
+
   test("DHW-26 lookup never claims a delivery: SES has no remote lookup and keeps no receipt") {
     for {
       h <- harness()
@@ -316,7 +462,7 @@ class SesInterviewNotificationProviderSpec extends CatsEffectSuite with Intervie
     } yield assertEquals(found, Right(None))
   }
 
-  // DDC-04.3 at-least-once contract variant, run against a counting in-memory client.
+  // DDC-04.6 at-least-once contract variant, run against a counting in-memory client.
   protected def withAtLeastOnceSubject[A](use: InterviewNotificationAtLeastOnceSubject => IO[A]): IO[A] = {
     val lose = new java.util.concurrent.atomic.AtomicBoolean(false)
     val delivered = new java.util.concurrent.atomic.AtomicInteger(0)
@@ -331,6 +477,7 @@ class SesInterviewNotificationProviderSpec extends CatsEffectSuite with Intervie
         counting,
         _ => IO.pure(deliverable),
         _ => IO.pure(Some(InterviewNotificationContext(interval, None))),
+        new StubSendFence(IO.pure(Right(())), new java.util.concurrent.ConcurrentLinkedQueue[String]()),
         Diagnostics.noop[IO]
       )
       def newTarget: IO[InterviewNotificationTarget] = IO.pure(InterviewNotificationTarget(workflowId, recipientId))
