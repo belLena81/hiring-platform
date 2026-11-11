@@ -194,6 +194,39 @@ enum ConfigError(val key: String, val paths: Set[String] = Set.empty) {
       )
   case InvalidInterviewEnabled extends ConfigError("INTERVIEW_ENABLED", Set("kafka.interview.enabled"))
   case InvalidInterviewPrincipals extends ConfigError("INTERVIEW_PRINCIPALS")
+  case InvalidInterviewNotificationProvider
+      extends ConfigError(
+        "INTERVIEW_NOTIFICATION_PROVIDER",
+        Set("kafka.interview.notifications.provider")
+      )
+  case InvalidInterviewSesEnabled
+      extends ConfigError("INTERVIEW_SES_ENABLED", Set("kafka.interview.notifications.ses.enabled"))
+  case InvalidInterviewSesRegion
+      extends ConfigError("INTERVIEW_SES_REGION", Set("kafka.interview.notifications.ses.region"))
+  case InvalidInterviewSesFromAddress
+      extends ConfigError("INTERVIEW_SES_FROM_ADDRESS", Set("kafka.interview.notifications.ses.from-address"))
+  case InvalidInterviewSesConfigurationSet
+      extends ConfigError(
+        "INTERVIEW_SES_CONFIGURATION_SET",
+        Set("kafka.interview.notifications.ses.configuration-set")
+      )
+
+  /** `provider = ses` and `ses.enabled = true` must agree; a mismatch never falls back to the other provider. */
+  case InvalidInterviewSesSelection extends ConfigError("INTERVIEW_SES_SELECTION")
+
+  /** Credentials and endpoints are not configuration: they come only from the runtime credential chain. */
+  case ForbiddenInterviewSesSetting
+      extends ConfigError(
+        "INTERVIEW_SES_FORBIDDEN_SETTING",
+        Set(
+          "kafka.interview.notifications.ses.access-key-id",
+          "kafka.interview.notifications.ses.secret-access-key",
+          "kafka.interview.notifications.ses.session-token",
+          "kafka.interview.notifications.ses.profile",
+          "kafka.interview.notifications.ses.credentials",
+          "kafka.interview.notifications.ses.endpoint"
+        )
+      )
   case InvalidInterviewMaxAttempts extends ConfigError("INTERVIEW_MAX_ATTEMPTS", Set("kafka.interview.max-attempts"))
   case InvalidInterviewRetryBase
       extends ConfigError("INTERVIEW_RETRY_BASE_SECONDS", Set("kafka.interview.retry-base-seconds"))
@@ -541,6 +574,47 @@ type InterviewProposalTtlSeconds = Int :| Interval.Closed[3600, 1209600]
 type InterviewTopicName = String :| (Match["[A-Za-z0-9._-]{1,249}"] & Not[StrictEqual["."]] & Not[StrictEqual[".."]])
 type InterviewGroupName = String :| Match["[A-Za-z0-9._-]{1,200}"]
 
+/** An AWS region name such as `eu-west-1`; SES is never addressed through a default region chain. */
+type SesRegion = String :| Match["[a-z]{2}(-[a-z]+){1,2}-[0-9]{1,2}"]
+type SesConfigurationSetName = String :| Match["[A-Za-z0-9_-]{1,64}"]
+
+/** Which interview notification provider the configuration names. */
+enum InterviewNotificationProviderKind(val wire: String) {
+  case Ledger extends InterviewNotificationProviderKind("ledger")
+  case Ses extends InterviewNotificationProviderKind("ses")
+}
+
+/** Validated SES settings. There is deliberately no credential, token, profile or endpoint field. */
+final case class SesNotificationSettings(
+    region: SesRegion,
+    fromAddress: com.example.graphQL.cats.domain.model.EmailAddress,
+    configurationSet: Option[SesConfigurationSetName]
+) {
+  override def toString: String = s"SesNotificationSettings($region, [REDACTED])"
+}
+
+/** The selected notification provider; `Ses` exists only when the provider and the explicit enable flag agree. */
+enum InterviewNotificationSelection {
+  case Ledger
+  case Ses(settings: SesNotificationSettings)
+}
+
+final case class InterviewNotificationConfig(
+    selection: InterviewNotificationSelection = InterviewNotificationSelection.Ledger
+) {
+  override def toString: String = "InterviewNotificationConfig([REDACTED])"
+}
+
+object SesMailboxAddress {
+  // Excludes every Unicode separator (Z: space, NBSP, U+2028/2029), control (Cc: CR, LF, TAB, U+0085) and format (Cf: bidi
+  // overrides such as U+202E, zero-width) character, which Java's ASCII-only `\s` and `\p{Cntrl}` would miss.
+  private val Pattern =
+    "[^\\p{Z}\\p{Cc}\\p{Cf}@<>,;\"]{1,64}@[^\\p{Z}\\p{Cc}\\p{Cf}@<>,;\"]{1,255}".r
+
+  /** One plain `local@domain` mailbox, safe to use as a sender or recipient. */
+  def matches(value: String): Boolean = Pattern.matches(value)
+}
+
 final case class InterviewRuntimeConfig(
     enabled: Boolean = false,
     orchestratorUsername: Option[String] = None,
@@ -570,7 +644,8 @@ final case class InterviewRuntimeConfig(
     maxPollRecords: Int = KafkaConsumerConfig.DefaultMaxPollRecords,
     maxPollIntervalSeconds: Int = KafkaConsumerConfig.DefaultMaxPollIntervalSeconds,
     commitBatchSize: Int = KafkaConsumerConfig.DefaultCommitBatchSize,
-    commitBatchIntervalMillis: Int = KafkaConsumerConfig.DefaultCommitBatchIntervalMillis
+    commitBatchIntervalMillis: Int = KafkaConsumerConfig.DefaultCommitBatchIntervalMillis,
+    notifications: InterviewNotificationConfig = InterviewNotificationConfig()
 ) {
 
   override def toString: String = s"InterviewRuntimeConfig($enabled, $workerId, [REDACTED])"

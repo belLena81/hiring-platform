@@ -1,6 +1,6 @@
 # Duplicate delivery containment
 
-- Status: done (DDC-01 to DDC-05 with local evidence; the DDC-02.6 reader check was run once by the owner on 2026-11-08, from the owner's terminal output on one workstation; the "describing another topic is denied" half rests on the isolated-Kafka test and the static parse; deployed brokers not verified; the 2026-11-03 provisioning change shipped a spelling the CLI refuses, fixed 2026-11-08, and the 2026-11-08 verdicts cover that fix statically only). Context: Operational events (Kafka publication and consumption) and AI search
+- Status: **reopened 2026-11-10 for DDC-04 only: the owner decided that notification providers without a remote lookup (SES) are at least once, so the DDC-04 wording and its contract variant changed in place. The verdicts below cover the earlier text; they are re-obtained when the Phase 11 SES preparation closes ([durable hiring workflows](durable-hiring-workflows.md)).** Previously: done (DDC-01 to DDC-05 with local evidence; the DDC-02.6 reader check was run once by the owner on 2026-11-08, from the owner's terminal output on one workstation; the "describing another topic is denied" half rests on the isolated-Kafka test and the static parse; deployed brokers not verified; the 2026-11-03 provisioning change shipped a spelling the CLI refuses, fixed 2026-11-08, and the 2026-11-08 verdicts cover that fix statically only). Context: Operational events (Kafka publication and consumption) and AI search
 (embedding work), plus the interview provider ports of Interview scheduling.
 
 ## Problem
@@ -19,8 +19,9 @@ correctness hole after a later change:
 4. Real notification and calendar providers are planned. "Look up, then send" is safe only because today's provider
    is a local ledger keyed by the idempotency key.
 
-Invariant touched: an operational event or provider request is applied at most once per consumer or idempotency key,
-and paid provider work is not repeated for an outcome the platform already holds.
+Invariant touched: an operational event is applied at most once per consumer, and a provider request is applied at most
+once per idempotency key when the provider or a platform receipt answers repeats. Paid provider work is not repeated for
+an outcome the platform already holds. A provider with neither (SES email) is at least once for an unknown outcome (DDC-04).
 
 ## Source facts (verified 2026-11-03)
 
@@ -100,11 +101,14 @@ and paid provider work is not repeated for an outcome the platform already holds
   transaction (`MongoTransactionRunner.sessions`) and a crash/duplicate test of the atomic write; if a closed type is
   wanted then, it is `enum ConsumedEventEffect { case ReceiptOnly }`, passed as `record(consumerGroup, event, effect,
   now, expiresAt)` and matched without a wildcard so `-Werror` rejects an unhandled case.
-- **DDC-04** Provider adapters follow one written contract and prove it with shared contract suites. An adapter uses
-  the provider's own idempotency mechanism (an idempotency header or a client-assigned id), or, when the provider has
-  none, records a durable send intent per idempotency key before the call and resolves an unknown outcome through
-  `lookup`, never by resending blindly. The suites run against the ledger providers now and against every future
-  adapter.
+- **DDC-04** Provider adapters follow one written contract and prove it with shared contract suites. An adapter with
+  the provider's own idempotency mechanism (an idempotency header or a client-assigned id) or a platform receipt keyed
+  by the idempotency key applies each call at most once per key, and a repeat returns the first outcome. An adapter
+  without either (Amazon SES for email, owner decision 2026-11-10) is at least once: an unknown outcome (timeout, lost
+  response, crash after acceptance) with no receipt is sent again, so a duplicate is possible and a silent loss is not.
+  `lookup` is the only evidence that suppresses a resend. The platform ledger keeps exactly-once receipts. The suites
+  run against the ledger providers now (`InterviewNotificationProviderContract`) and against every future adapter; an
+  adapter in the at-least-once group proves the weaker rule with `InterviewNotificationAtLeastOnceContract`.
 
 - **DDC-02 (recheck, 2026-11-03 follow-up)** The gate also runs on a running consumer every 5 minutes
   (`ReceiptWindowRecheck`), concurrently with the heartbeat. A refusal or an unreadable configuration fails the
@@ -195,9 +199,10 @@ Residuals and contract impact (architecture review 2026-11-03):
 | DDC-03.2 | The rule lives in the `ConsumerReceiptRepository` scaladoc and `recordDurably` refers to it; no effect type is added; the revisit trigger is recorded here | ConsumerReceiptRepository scaladoc (OperationalEventRepositories.scala) and recordDurably comment; no effect type added (static) |
 | DDC-04.1 | Contract: the same notification idempotency key twice gives one delivery and the same receipt | InterviewNotificationProviderContract `DDC-04.1`, run by MongoInterviewNotificationContractIntegrationSpec on the Mongo ledger (PASS) |
 | DDC-04.2 | Contract: concurrent calls with one key give one delivery | InterviewNotificationProviderContract `DDC-04.2` (8 concurrent calls, one receipt), Mongo ledger (PASS) |
-| DDC-04.3 | Contract: after an unknown outcome, `lookup` returns the recorded effect | Notification and calendar contracts `DDC-04.3` lookup after an unseen outcome, Mongo ledgers (PASS) |
-| DDC-04.4 | Contract: the same for calendar reserve and cancel keys; different keys stay independent | InterviewCalendarProviderContract `DDC-04.4` concurrent reserve, concurrent cancel, independent keys; notification `DDC-04.4` independent keys; Mongo ledgers (PASS) |
-| DDC-04.5 | Port documentation states the adapter rule of DDC-04 | Scaladoc on InterviewCalendarProvider and InterviewNotificationProvider in InterviewProviders.scala (static review) |
+| DDC-04.3 | Exactly-once ledger contract: after an unknown outcome, `lookup` returns the recorded effect (applies to providers with a platform receipt or idempotency mechanism, not to SES) | `InterviewNotificationProviderContract` `DDC-04.3` (lookup after an unseen outcome) and `InterviewCalendarProviderContract` `DDC-04.3`, Mongo ledgers (PASS) |
+| DDC-04.4 | Contract: the same for calendar reserve and cancel keys; different keys stay independent | InterviewCalendarProviderContract `DDC-04.4` concurrent reserve, concurrent cancel, independent keys; notification `DDC-04.4` independent keys; Mongo ledgers (PASS). At-least-once variant: `DDC-04.4 at-least-once: different notification keys stay independent` in `InterviewNotificationAtLeastOnceContract`, run by `SesInterviewNotificationProviderSpec` (Code Reviewer PASS and Security Engineer PASS for the preparation code, 2026-11-11; owner `scripts/check-local.sh` PASS 6/6 on 2026-11-11) |
+| DDC-04.5 | Port documentation states the adapter rule of DDC-04, both the exactly-once rule and the at-least-once rule for a provider without a receipt or idempotency mechanism | Scaladoc on InterviewCalendarProvider and InterviewNotificationProvider in InterviewProviders.scala (static review) |
+| DDC-04.6 | Contract, at-least-once (SES notification provider, owner decision 2026-11-10): after an unknown outcome with no receipt, `lookup` answers no delivery and the call may be sent again, so a duplicate is possible and a silent loss is not; a repeated key may deliver a duplicate, and each call still answers a receipt | `InterviewNotificationAtLeastOnceContract`, run by `SesInterviewNotificationProviderSpec` against the stub client. Tests: `DDC-04.6 at-least-once: an unknown outcome with no receipt is resolved by sending again, so nothing is lost` and `DDC-04.6 at-least-once: a repeated key may deliver a duplicate but each call still answers a receipt` in `InterviewNotificationProviderContract.scala`; `DDC-04.6 a retry with the same key after TimedOut calls the client again` and `DDC-04.6 a retry with the same key after InvalidReceipt (2xx without a message id) calls the client again` in `SesInterviewNotificationProviderSpec`; and the two `DDC-04.6 self-check` tests in `InterviewNotificationAtLeastOnceContractSelfCheckSpec`, which prove the contract fails a key-deduplicating provider (a provider that answers a retry without sending, the silent loss this decision forbids) and passes one that sends again. The self-check accepts any `AssertionError`, so it is not pinned to the delivery-count assertion. Unit tests passed in the author's run (2057 passed, 0 failed). Code Reviewer PASS on 2026-11-11, after one FAIL and its fixes; owner `scripts/check-local.sh` PASS 6/6 on 2026-11-11 (the root step reused an unchanged-input PASS stamp). |
 | DDC-05.1 | A claim that took over an expired lease emits one `EMBEDDING_LEASE_RECLAIMED`; a fresh claim emits none | EmbeddingPipelineSpec `DDC-05.1 ...` (unit, PASS) |
 | DDC-05.2 | Against Mongo, claiming an expired `Processing` lease reports a reclaim; claiming a `Ready` row does not | MongoEmbeddingWorkIntegrationSpec `DDC-05.2 ...`: also checks the returned token equals the stored one, generation and attempts unchanged (integration, PASS) |
 

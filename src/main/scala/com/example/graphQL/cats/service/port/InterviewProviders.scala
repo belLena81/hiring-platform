@@ -170,11 +170,15 @@ trait InterviewNotificationReceiptLedger[F[_]] {
 
 /** The notification effect of interview scheduling: one delivery per `idempotencyKey`, returned as a receipt.
   *
-  * Adapter rule: every call is applied at most once per `idempotencyKey`, and a repeated key returns the first outcome.
-  * An adapter uses the provider's own idempotency mechanism (an idempotency header or a client-assigned id), or, when
-  * the provider has none, records a durable send intent per key before the call and resolves an unknown outcome
-  * (timeout, crash, lost response) through `lookup`, never by resending blindly. `lookup` answers whether an effect for
-  * the key exists, whatever the caller saw. Adapters prove the rule with the shared provider contract suite.
+  * Delivery guarantee (owner decision 2026-11-10), by provider kind:
+  *   - Exactly-once receipts: a provider with a durable receipt per key (the platform ledger) or its own idempotency
+  *     mechanism (an idempotency header or a client-assigned id) applies a call at most once per `idempotencyKey` and
+  *     returns the first outcome for every repeat. `lookup` answers whether an effect for the key exists, whatever the
+  *     caller saw. The shared contract suite proves this.
+  *   - At-least-once: a provider with neither a remote lookup nor a local receipt (email through SES) cannot tell an
+  *     unknown outcome (timeout, lost response, crash after acceptance) from a failure, so `lookup` reports no known
+  *     delivery and the interpreter may send again. A duplicate message is allowed; a silent loss is not. Such a
+  *     provider proves the weaker rule with the at-least-once variant of the contract suite.
   */
 trait InterviewNotificationProvider[F[_]] {
   def notify(

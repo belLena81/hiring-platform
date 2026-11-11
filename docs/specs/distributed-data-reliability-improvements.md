@@ -133,7 +133,7 @@ Engineer (lease and fencing semantics) and QA. Run `sbt test` and the integratio
 
 The interview saga (`domain/workflow/InterviewSchedulingSaga.scala`) models `OutcomeUnknown` and lookup events, but
 evidence comes only from fake providers. `docs/development-milestones.md` (Phase 11) records DHW-26, DHW-32 and the SES
-part of DHW-24 as deferred to the real-provider slice.
+part of DHW-24 as deferred to the real-provider slice (as of 2026-10-13; the 2026-11-10 SES preparation is stub-tested and not activatable, see the milestones).
 
 ### Risk
 

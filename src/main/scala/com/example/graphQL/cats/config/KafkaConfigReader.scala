@@ -165,5 +165,6 @@ private[config] final case class RawInterviewRuntimeConfig(
     maxPollRecords: Option[KafkaPollCount] = None,
     maxPollIntervalSeconds: Option[KafkaPollIntervalSeconds] = None,
     commitBatchSize: Option[KafkaPollCount] = None,
-    commitBatchIntervalMillis: Option[KafkaCommitIntervalMillis] = None
+    commitBatchIntervalMillis: Option[KafkaCommitIntervalMillis] = None,
+    notifications: RawInterviewNotificationConfig = RawInterviewNotificationConfig()
 ) derives ConfigReader

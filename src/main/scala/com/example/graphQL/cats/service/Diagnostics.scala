@@ -126,6 +126,13 @@ enum LogEvent(val category: String, val component: String, val message: String, 
         "A write was refused as a conflict; the source says which step",
         LogLevel.Warn
       )
+  case InterviewNotificationFailed
+      extends LogEvent(
+        "INTERVIEW_NOTIFICATION_FAILED",
+        "INTERVIEW",
+        "An interview notification was not delivered; the reason is a safe classification code",
+        LogLevel.Warn
+      )
   case LocalUnmasked
       extends LogEvent("LOCAL_UNMASKED", "SECURITY", "Diagnostic metadata masking is disabled", LogLevel.Warn)
 

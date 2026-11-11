@@ -71,8 +71,9 @@ private[config] object KafkaConfigValidation {
         raw.commitBatchIntervalMillis.getOrElse(defaults.commitBatchIntervalMillis),
         ConfigError.InvalidInterviewCommitBatchSize,
         ConfigError.InvalidInterviewCommitBatchWindow
-      )
-    ).mapN { (_, _, _, _, _, _, _, topics, _, _) =>
+      ),
+      validNotifications(raw.notifications)
+    ).mapN { (_, _, _, _, _, _, _, topics, _, _, notifications) =>
       InterviewRuntimeConfig(
         raw.enabled,
         raw.orchestratorUsername,
@@ -101,9 +102,31 @@ private[config] object KafkaConfigValidation {
         raw.maxPollRecords.getOrElse(defaults.maxPollRecords),
         raw.maxPollIntervalSeconds.getOrElse(defaults.maxPollIntervalSeconds),
         raw.commitBatchSize.getOrElse(defaults.commitBatchSize),
-        raw.commitBatchIntervalMillis.getOrElse(defaults.commitBatchIntervalMillis)
+        raw.commitBatchIntervalMillis.getOrElse(defaults.commitBatchIntervalMillis),
+        notifications
       )
     }
+  }
+
+  /** SES is selected only when `provider = ses` and `ses.enabled = true` agree. A disagreeing pair is an error, never a
+    * silent fallback to the ledger. Missing required SES values and the pair error accumulate together.
+    */
+  private[config] def validNotifications(
+      raw: RawInterviewNotificationConfig
+  ): ValidatedNel[ConfigError, InterviewNotificationConfig] = {
+    val wantsSes = raw.provider == InterviewNotificationProviderKind.Ses
+    val pair = Either.cond(wantsSes == raw.ses.enabled, (), ConfigError.InvalidInterviewSesSelection).toValidatedNel
+    if (!(wantsSes && raw.ses.enabled)) pair.map(_ => InterviewNotificationConfig())
+    else
+      (
+        pair,
+        raw.ses.region.toValidNel(ConfigError.InvalidInterviewSesRegion),
+        raw.ses.fromAddress.toValidNel(ConfigError.InvalidInterviewSesFromAddress)
+      ).mapN { (_, region, from) =>
+        InterviewNotificationConfig(
+          InterviewNotificationSelection.Ses(SesNotificationSettings(region, from, raw.ses.configurationSet))
+        )
+      }
   }
 
   /** The interview workflow runs over Kafka, so it cannot be enabled while Kafka publication is disabled. */

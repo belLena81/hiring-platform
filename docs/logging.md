@@ -26,3 +26,12 @@ With masking disabled, diagnostics may reveal approved typed values only: UUID a
 Credentials, authorization and cookie headers, JWTs, raw GraphQL documents, request bodies/variables, descriptions, requirements, feedback, decline reasons, resumes, search text, vectors, BSON filters, Mongo URIs, raw exception messages, and stack traces are never emitted, even with masking disabled. Trace attributes follow the same restriction.
 
 Logging remains best effort: a failing sink cannot change an HTTP result, cancellation, resource finalizer, or http4s concurrency middleware cleanup. The bounded asynchronous queue prevents routine file I/O from adding storage latency to application fibers; the rolling-file retention bound limits disk use but does not guarantee a latency SLO.
+
+## Interview notification failures
+
+The interview notification adapter emits `INTERVIEW_NOTIFICATION_FAILED` (WARN, category `INTERVIEW`) when one send attempt does not deliver. It is defined in [Diagnostics](../src/main/scala/com/example/graphQL/cats/service/Diagnostics.scala) and emitted by [SesInterviewNotificationProvider](../src/main/scala/com/example/graphQL/cats/infrastructure/ses/SesInterviewNotificationProvider.scala). Its fields:
+
+- `errorCode`: a closed code such as `SES_THROTTLED`, `SES_RECIPIENT_REJECTED` or `SES_NO_RECIPIENT`. The full list is in the [SES operations note](ses-notification-operations.md#logging).
+- `errorType` and `errorLocation`, only for an unexpected exception: the class name (outside the allow-list reported as `OtherException`) and the first project file and line. The exception message is never logged.
+
+The event never carries a recipient address, sender address, subject, body, message identifier or workflow identifier. The AWS SDK must not write its own logs: a `software.amazon.awssdk` logger OFF is a pending requirement of the SES Gate 0 review, and the packaged `logback.xml` and `logback-container.xml` do not yet contain it.
