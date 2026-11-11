@@ -467,6 +467,86 @@ final class HiringGraphQLSearchOutcomeSpec extends CatsEffectSuite {
     }
   }
 
+  test("GDF-02.1 ranked job results expose missingSkills as the job's skills absent from the caller's own profile") {
+    val searcher = candidateWithSkills(Set(" scala ", "JAVA", "Rust"))
+    run(
+      s"""query { semanticJobSearch(query: "scala", first: 5) {
+         |  __typename ... on RankedJobResults { results { matchedSkills missingSkills } } } }""".stripMargin,
+      candidateActor(searcher),
+      new CountingEmbeddings(Left(EmbeddingError.ProviderUnavailable)),
+      users = List(searcher, recruiter),
+      job = matchingFreshJob,
+      lexical = Right(List(matchingFreshJob))
+    ).map { json =>
+      assert(!json.hcursor.downField("errors").succeeded, clue(json))
+      val hit = field(json, "semanticJobSearch").downField("results").downArray
+      assertEquals(hit.get[List[String]]("matchedSkills"), Right(List("java", "Scala")))
+      assertEquals(hit.get[List[String]]("missingSkills"), Right(List("JavaScript")))
+    }
+  }
+
+  test("GDF-02.1 a caller with no profile skills sees every required skill as missing") {
+    val searcher = candidateWithSkills(Set.empty)
+    run(
+      s"""query { semanticJobSearch(query: "scala", first: 5) {
+         |  __typename ... on RankedJobResults { results { matchedSkills missingSkills } } } }""".stripMargin,
+      candidateActor(searcher),
+      new CountingEmbeddings(Left(EmbeddingError.ProviderUnavailable)),
+      users = List(searcher, recruiter),
+      job = matchingFreshJob,
+      lexical = Right(List(matchingFreshJob))
+    ).map { json =>
+      val hit = field(json, "semanticJobSearch").downField("results").downArray
+      assertEquals(hit.get[List[String]]("matchedSkills"), Right(Nil))
+      assertEquals(hit.get[List[String]]("missingSkills"), Right(List("java", "JavaScript", "Scala")))
+    }
+  }
+
+  test("GDF-02.2 a recruiter's candidate results derive missingSkills only from the owned job and the listed skills") {
+    val matched = candidateWithSkills(Set(" scala ")).copy(
+      profile = Some(
+        UserProfile.Candidate(
+          CandidateProfile(Set(" scala "), None, None, recruiterSearchOptIn = true)
+        )
+      )
+    )
+    run(
+      s"""query { candidateMatches(jobId: "${matchingFreshJob.id.value}", query: "scala", first: 5) {
+         |  __typename ... on RankedCandidateResults { results { matchedSkills missingSkills } } } }""".stripMargin,
+      candidateActor(recruiter),
+      new CountingEmbeddings(Left(EmbeddingError.ProviderUnavailable)),
+      users = List(matched, recruiter),
+      job = matchingFreshJob,
+      lexicalCandidateUsers = List(matched)
+    ).map { json =>
+      assert(!json.hcursor.downField("errors").succeeded, clue(json))
+      val hit = field(json, "candidateMatches").downField("results").downArray
+      assertEquals(hit.get[List[String]]("matchedSkills"), Right(List("Scala")))
+      assertEquals(hit.get[List[String]]("missingSkills"), Right(List("java", "JavaScript")))
+    }
+  }
+
+  test(
+    "GDF-02.3 a candidate caller and a recruiter who does not own the job get no missingSkills and no provider call"
+  ) {
+    val embeddings = new CountingEmbeddings(Right(vector))
+    val query =
+      s"""query { candidateMatches(jobId: "${matchingFreshJob.id.value}", query: "scala", first: 5) {
+         |  __typename ... on RankedCandidateResults { results { missingSkills } } ... on UserError { code } } }""".stripMargin
+    for {
+      asCandidate <- run(query, candidateActor(candidate), embeddings, job = matchingFreshJob)
+      asOther <- run(query, candidateActor(otherRecruiter), embeddings, job = matchingFreshJob)
+    } yield {
+      assertEquals(field(asCandidate, "candidateMatches").get[String]("__typename"), Right("DomainError"))
+      assertEquals(field(asCandidate, "candidateMatches").get[String]("code"), Right("RECRUITER_REQUIRED"))
+      assertEquals(field(asOther, "candidateMatches").get[String]("code"), Right("NOT_FOUND"))
+      List(asCandidate, asOther).foreach { json =>
+        assert(field(json, "candidateMatches").downField("results").failed, clue(json))
+      }
+      assertEquals(embeddings.calls.get, 0)
+    }
+  }
+
   test("AIR-02.1 the classification keeps authentication, readiness and repository failures top-level") {
     val topLevel = List(
       UseCaseError.Authentication(com.example.graphQL.cats.service.AuthenticationError.Unauthorized),

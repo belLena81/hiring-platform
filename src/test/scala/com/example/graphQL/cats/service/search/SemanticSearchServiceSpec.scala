@@ -1323,6 +1323,109 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
       calls.update(_ + 1).as(Right(EmbeddingVector(List(0.1f, 0.2f), "voyage-4-lite", 2)))
   }
 
+  private val kafkaJob = {
+    val unembedded = openJob.copy(skills = Set("Scala", " kafka "))
+    val kafkaMeta = EmbeddingMeta("voyage-4-lite", SourceHash.sha256(SearchableText.job(unembedded)), now)
+    unembedded.copy(embedding = Some(EntityEmbedding(List(0.1f, 0.2f), kafkaMeta)))
+  }
+
+  test("GDF-02.1 a candidate's job hits list the job's skills the candidate's own profile lacks") {
+    for {
+      usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](
+        Map(candidateId -> candidateWithProfile.copy(embedding = Some(embedding)), recruiterId -> recruiter)
+      )
+      jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> kafkaJob))
+      service = semanticService(
+        new InMemoryUsers(usersRef),
+        new InMemoryJobs(jobsRef),
+        FakeEmbeddingService(Right(EmbeddingVector(List(0.1f, 0.2f), "voyage-4-lite", 2))),
+        FakeSearchRepository(jobs =
+          List(RankedJob(kafkaJob, 0.95, SearchMode.HYBRID, kafkaJob.embedding.get.meta, searchId))
+        )
+      )
+      actor = ActorContext(candidateId, UserRole.Candidate)
+      searched <- service
+        .semanticJobSearch(actor, "scala", JobSearchFilter(None, Set.empty, None), pageSize, searchId)
+        .value
+      recommended <- service.recommendedJobs(actor, pageSize, searchId).value
+    } yield {
+      assertEquals(searched.map(_.hits.map(_.matchedSkills)), Right(List(List("Scala"))))
+      assertEquals(searched.map(_.hits.map(_.missingSkills)), Right(List(List(" kafka "))))
+      assertEquals(recommended.map(_.map(_.matchedSkills)), Right(List(List("Scala"))))
+      assertEquals(recommended.map(_.map(_.missingSkills)), Right(List(List(" kafka "))))
+    }
+  }
+
+  test("GDF-02.2 a recruiter's candidate hits list the owned job's skills the candidate's visible skills lack") {
+    for {
+      usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](
+        Map(candidateId -> candidateWithProfile.copy(embedding = Some(embedding)), recruiterId -> recruiter)
+      )
+      jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> kafkaJob))
+      service = semanticService(
+        new InMemoryUsers(usersRef),
+        new InMemoryJobs(jobsRef),
+        FakeEmbeddingService.unused,
+        FakeSearchRepository(candidates =
+          List(
+            RankedCandidate(
+              CandidateSearchHit(candidateId, candidateWithProfile.name, profile.skills, profile.experienceSummary),
+              0.9,
+              SearchMode.VECTOR,
+              meta,
+              searchId
+            )
+          )
+        )
+      )
+      matches <- service
+        .candidateMatches(ActorContext(recruiterId, UserRole.Recruiter), jobId, pageSize, searchId)
+        .value
+    } yield {
+      assertEquals(matches.map(_.hits.map(_.matchedSkills)), Right(List(List("Scala"))))
+      assertEquals(matches.map(_.hits.map(_.missingSkills)), Right(List(List(" kafka "))))
+    }
+  }
+
+  test("GDF-02.2 a candidate skill the owned job does not require never appears in matchedSkills or missingSkills") {
+    val rustJob = kafkaJob
+    val extended = profile.copy(skills = Set("Scala", "Rust"))
+    val extendedEmbedding = EntityEmbedding(
+      List(0.1f, 0.2f),
+      EmbeddingMeta("voyage-4-lite", SourceHash.sha256(SearchableText.candidate(extended)), now)
+    )
+    val storedWithExtraSkill = candidateWithProfile.copy(profile = Some(UserProfile.Candidate(extended)))
+    for {
+      usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](
+        Map(candidateId -> storedWithExtraSkill.copy(embedding = Some(extendedEmbedding)), recruiterId -> recruiter)
+      )
+      jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> rustJob))
+      service = semanticService(
+        new InMemoryUsers(usersRef),
+        new InMemoryJobs(jobsRef),
+        FakeEmbeddingService.unused,
+        FakeSearchRepository(candidates =
+          List(
+            RankedCandidate(
+              CandidateSearchHit(candidateId, storedWithExtraSkill.name, extended.skills, profile.experienceSummary),
+              0.9,
+              SearchMode.VECTOR,
+              extendedEmbedding.meta,
+              searchId
+            )
+          )
+        )
+      )
+      matches <- service
+        .candidateMatches(ActorContext(recruiterId, UserRole.Recruiter), jobId, pageSize, searchId)
+        .value
+    } yield {
+      assertEquals(matches.map(_.hits.map(_.matchedSkills)), Right(List(List("Scala"))))
+      assertEquals(matches.map(_.hits.map(_.missingSkills)), Right(List(List(" kafka "))))
+      assertEquals(matches.map(_.hits.map(_.candidate.skills)), Right(List(Set("Scala", "Rust"))))
+    }
+  }
+
   private final case class FakeSearchRepository(
       jobs: List[RankedJob] = Nil,
       candidates: List[RankedCandidate] = Nil

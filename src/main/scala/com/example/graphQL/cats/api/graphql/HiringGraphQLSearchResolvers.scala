@@ -181,7 +181,14 @@ private[graphql] object HiringGraphQLSearchResolvers {
   private def rankedJobResults(found: SearchResults[SearchedJob], searchId: UUID): RankedJobResults =
     RankedJobResults(
       found.hits.map(value =>
-        RankedJobPayload(value.job, value.score, value.mode, value.matchedSkills, value.retrievalScore)
+        RankedJobPayload(
+          value.job,
+          value.score,
+          value.mode,
+          value.matchedSkills,
+          value.missingSkills,
+          value.retrievalScore
+        )
       ),
       SearchId(searchId),
       found.hits.headOption.flatMap(_.model),
@@ -200,6 +207,7 @@ private[graphql] object HiringGraphQLSearchResolvers {
           value.score,
           value.mode,
           value.matchedSkills,
+          value.missingSkills,
           value.retrievalScore
         )
       ),

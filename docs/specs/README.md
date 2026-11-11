@@ -17,7 +17,7 @@ One line per specification, grouped by what the first `- Status:` line says (rea
 | [mongodb-vector-retrieval-optimization](mongodb-vector-retrieval-optimization.md) | in progress; `.C` rows deferred, overall partial |
 | [analytics-reconciliation-recovery](analytics-reconciliation-recovery.md) | draft |
 | [deployed-analytics-performance](deployed-analytics-performance.md) | draft |
-| [guided-discovery-and-followup](guided-discovery-and-followup.md) | draft, not started; after the MVP claim |
+| [guided-discovery-and-followup](guided-discovery-and-followup.md) | draft, Partial; GDF-02 implemented (uncommitted after HEAD `8cf07f1`; GDF-02 Code Reviewer, Security and QA PASS), GDF-07 met (synthetic); other slices not run; after the MVP claim |
 | [hiring-observability-resilience](hiring-observability-resilience.md) | draft |
 | [production-readiness](production-readiness.md) | draft |
 | [agent-role-enforcement](agent-role-enforcement.md) | in progress |
@@ -31,8 +31,8 @@ One line per specification, grouped by what the first `- Status:` line says (rea
 | [analytics-data-model-refactoring](analytics-data-model-refactoring.md) | done 2026-11-01 |
 | [analytics-erasure-completion-window](analytics-erasure-completion-window.md) | done 2026-10-23; AEC-05.1 open for an operator run |
 | [dependency-circuit-breakers](dependency-circuit-breakers.md) | done (local) |
-| [duplicate-delivery-containment](duplicate-delivery-containment.md) | done (local) for DDC-01 to 05; the owner-run reader check (DDC-02.6) passed 2026-11-08 from terminal output on one workstation; deployed brokers not verified |
-| [durable-hiring-workflows](durable-hiring-workflows.md) | done (local) for DHW-01 to 34 on the fake-provider path; SES parts deferred |
+| [duplicate-delivery-containment](duplicate-delivery-containment.md) | reopened 2026-11-10 for DDC-04 (notification providers without a remote lookup are at least once; new DDC-04.6 and contract self-check; Code Reviewer, Security Engineer and final QA PASS recorded 2026-11-11 for the preparation code and DDC-04.6; owner `scripts/check-local.sh` PASS 6/6 on 2026-11-11). Previously: done (local) for DDC-01 to 05; the owner-run reader check (DDC-02.6) passed 2026-11-08 from terminal output on one workstation; deployed brokers not verified |
+| [durable-hiring-workflows](durable-hiring-workflows.md) | reopened 2026-11-10 for local completion: fresh interview evidence, lifecycle broker-outage tests, SES adapter preparation (stub-tested, not activatable; live SES and the dependency stay open) and saga documentation. Previously: done (local) for DHW-01 to 34 on the fake-provider path; SES parts deferred |
 | [effect-polymorphic-services](effect-polymorphic-services.md) | done (local) 2026-10-14 |
 | [embedding-coverage-report](embedding-coverage-report.md) | done (local) |
 | [hiring-analytics-lakehouse](hiring-analytics-lakehouse.md) | done (local, Phase 6) |

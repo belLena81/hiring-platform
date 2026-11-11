@@ -68,9 +68,7 @@ final class SemanticSearchService[F[_]: Monad](
               .map(hits => SearchResults(hits, Some(degraded)))
           )
       }
-    } yield results.copy(hits =
-      results.hits.take(first.value).map(value => value.copy(matchedSkills = candidateSkillMatch(candidate, value.job)))
-    )
+    } yield results.copy(hits = results.hits.take(first.value).map(value => withJobFitReasons(candidate, value)))
 
   def recommendedJobs(
       actor: ActorContext,
@@ -94,7 +92,12 @@ final class SemanticSearchService[F[_]: Monad](
             .flatMap(validateJobHits(actor, noFilter, _, Some(embedding)))
             .map(
               _.take(first.value)
-                .map(value => value.copy(matchedSkills = SkillMatching.matched(profile.skills, value.job.skills)))
+                .map(value =>
+                  value.copy(
+                    matchedSkills = SkillMatching.matched(profile.skills, value.job.skills),
+                    missingSkills = SkillMatching.missing(profile.skills, value.job.skills)
+                  )
+                )
             )
         }
       )
@@ -134,7 +137,7 @@ final class SemanticSearchService[F[_]: Monad](
     } yield results.copy(hits =
       results.hits
         .take(first.value)
-        .map(value => value.copy(matchedSkills = SkillMatching.matched(value.candidate.skills, prepared.job.skills)))
+        .map(value => withCandidateFitReasons(prepared.job, value))
     )
 
   /** The authorized job, normalized query and filters, and the job's current embedding, validated before any provider
@@ -195,8 +198,23 @@ final class SemanticSearchService[F[_]: Monad](
       )
     )
 
-  private def candidateSkillMatch(candidate: User, job: Job): List[String] =
-    SkillMatching.matched(candidate.candidateProfile.fold(Set.empty[String])(_.skills), job.skills)
+  /** Fit reasons for a candidate viewing a job: derived only from the job's skills and the caller's own profile. */
+  private def withJobFitReasons(candidate: User, hit: SearchedJob): SearchedJob = {
+    val own = candidate.candidateProfile.fold(Set.empty[String])(_.skills)
+    hit.copy(
+      matchedSkills = SkillMatching.matched(own, hit.job.skills),
+      missingSkills = SkillMatching.missing(own, hit.job.skills)
+    )
+  }
+
+  /** Fit reasons for a recruiter viewing a candidate of an owned job: only the job's skills and the skills the hit
+    * already carries to the recruiter.
+    */
+  private def withCandidateFitReasons(job: Job, hit: SearchedCandidate): SearchedCandidate =
+    hit.copy(
+      matchedSkills = SkillMatching.matched(hit.candidate.skills, job.skills),
+      missingSkills = SkillMatching.missing(hit.candidate.skills, job.skills)
+    )
 
   /** Turns exactly the degradable retrieval failures (`SearchFailure.degradation`) into a value. The retrieval passes
     * in unmapped, so a generic `Unavailable` (possibly the whole store), an `Overloaded` refusal (answering again

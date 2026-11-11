@@ -503,7 +503,7 @@ A feature must be authorized, necessary and available at ranking time.
 | Feature | Recommendations (candidate to jobs) | Matching (recruiter to candidates of an owned open job) | Why allowed |
 |---|---|---|---|
 | Retrieval rank | 1-based position of the job in the `recommendedJobs` list after the authoritative recheck | 1-based position of the candidate in the `candidateMatches` list after the authoritative recheck | Already computed. The ranker uses rank rather than raw score because vector, lexical and RRF scores are not comparable across modes or models. |
-| Skill evidence | Distinct canonical job skills covered by the caller's own profile skills, out of the job's distinct canonical skills | Distinct canonical skills of the owned job covered by the candidate's profile skills, which the minimized DTO already returns, out of the job's distinct canonical skills | The caller can already see both inputs, and the normalization is the same as `matchedSkills`. With distinct canonical counts it equals matched / (matched + missing) in the planned `missingSkills` field of [GDF-02](guided-discovery-and-followup.md). |
+| Skill evidence | Distinct canonical job skills covered by the caller's own profile skills, out of the job's distinct canonical skills | Distinct canonical skills of the owned job covered by the candidate's profile skills, which the minimized DTO already returns, out of the job's distinct canonical skills | The caller can already see both inputs, and the normalization is the same as `matchedSkills`. With distinct canonical counts it equals matched / (matched + missing) in the `missingSkills` field of [GDF-02](guided-discovery-and-followup.md). |
 
 The retrieval score is not a ranker input. The ranker reads only the retrieval rank and the evidence.
 
@@ -751,7 +751,7 @@ It needs a new packet and a new human review against the new digest, plus more p
 | `score` read as a monotone rank | For ranked results `score` need not decrease down the list, so a client that sorts or thresholds by `score` undoes the ranking. The API reference must say so at adoption. |
 | Gaming by skill stuffing | Order changes show a caller which listed skills move a hit up. Coverage limits the job side, but not the candidate side. |
 | Contract lock-in and cursor or tie semantics | Under the single-active-shape policy, list order for ranked results becomes a contract that clients page, cache or display by. A later change to the ranker or its tie rule changes that contract. |
-| Explanation requirement | A shown order must be explained. The only explanation allowed here is deterministic evidence (`matchedSkills`, and the planned `missingSkills`), not a model rationale. |
+| Explanation requirement | A shown order must be explained. The only explanation allowed here is deterministic evidence (`matchedSkills` and `missingSkills`), not a model rationale. |
 
 **Consequences of Q7, option B (recorder's analysis; owner selection 2026-11-10):**
 
@@ -764,7 +764,7 @@ It needs a new packet and a new human review against the new digest, plus more p
 - Ordering is documented as authoritative, in the API reference and the SDL description, with `score` described as a retrieval score that need not decrease down the list. Neither is described as a probability, a hiring-success measure or an automated decision.
 - No new field. The public shape stays as it is.
 - The ranker's order is a deterministic function of the caller-visible skill coverage and the retrieval rank. The HDQ-07.8 counterfactual requires that residence, availability, consent and name do not change it.
-- The value is not model-derived and generates no rationale. Explanation remains `matchedSkills` and the planned `missingSkills`.
+- The value is not model-derived and generates no rationale. Explanation remains `matchedSkills` and `missingSkills`.
 
 **Residual risks the mitigations do not remove:** clients may still read the list order as a probability or a decision; skill stuffing on the candidate side still raises rank (coverage limits only the job side); and a caller can infer relative coverage by varying listed skills and watching the order. Each of these needs the adoption review to accept it or to change the design.
 

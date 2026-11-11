@@ -112,6 +112,7 @@ private[graphql] object HiringGraphQLModel {
     def score: Double
     def searchMode: SearchMode
     def matchedSkills: List[String]
+    def missingSkills: List[String]
     def retrievalScore: Option[Double]
   }
   final case class RankedJobPayload(
@@ -119,6 +120,7 @@ private[graphql] object HiringGraphQLModel {
       score: Double,
       searchMode: SearchMode,
       matchedSkills: List[String],
+      missingSkills: List[String],
       retrievalScore: Option[Double]
   ) extends ScoredHit
   final case class RankedCandidatePayload(
@@ -126,6 +128,7 @@ private[graphql] object HiringGraphQLModel {
       score: Double,
       searchMode: SearchMode,
       matchedSkills: List[String],
+      missingSkills: List[String],
       retrievalScore: Option[Double]
   ) extends ScoredHit
 

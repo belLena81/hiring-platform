@@ -1247,6 +1247,9 @@ type RankedCandidate implements ScoredHit {
   score: Float!
   searchMode: SearchMode!
   matchedSkills: [String!]!
+
+  "The skills the target requires that the viewer's own visible skills lack: for a candidate, the job's skills missing from the candidate's own profile; for a recruiter, the owned job's skills missing from the candidate's listed skills. Together with matchedSkills it lists every required skill once."
+  missingSkills: [String!]!
   retrievalScore: Float
 }
 
@@ -1266,6 +1269,9 @@ type RankedJob implements ScoredHit {
   score: Float!
   searchMode: SearchMode!
   matchedSkills: [String!]!
+
+  "The skills the target requires that the viewer's own visible skills lack: for a candidate, the job's skills missing from the candidate's own profile; for a recruiter, the owned job's skills missing from the candidate's listed skills. Together with matchedSkills it lists every required skill once."
+  missingSkills: [String!]!
   retrievalScore: Float
 }
 
@@ -1401,6 +1407,9 @@ interface ScoredHit {
   score: Float!
   searchMode: SearchMode!
   matchedSkills: [String!]!
+
+  "The skills the target requires that the viewer's own visible skills lack: for a candidate, the job's skills missing from the candidate's own profile; for a recruiter, the owned job's skills missing from the candidate's listed skills. Together with matchedSkills it lists every required skill once."
+  missingSkills: [String!]!
   retrievalScore: Float
 }
 

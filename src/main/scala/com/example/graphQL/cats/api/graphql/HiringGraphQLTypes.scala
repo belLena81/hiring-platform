@@ -488,6 +488,16 @@ private[graphql] object HiringGraphQLTypes {
       simple("score", FloatType)(_.score),
       simple("searchMode", searchMode)(_.searchMode),
       Field("matchedSkills", ListType(StringType), resolve = _.value.matchedSkills),
+      Field(
+        "missingSkills",
+        ListType(StringType),
+        description = Some(
+          "The skills the target requires that the viewer's own visible skills lack: for a candidate, the job's " +
+            "skills missing from the candidate's own profile; for a recruiter, the owned job's skills missing from " +
+            "the candidate's listed skills. Together with matchedSkills it lists every required skill once."
+        ),
+        resolve = _.value.missingSkills
+      ),
       simple("retrievalScore", OptionType(FloatType))(_.retrievalScore)
     )
   lazy val scoredHitType: InterfaceType[RequestContext, ScoredHit] = InterfaceType(

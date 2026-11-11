@@ -180,6 +180,7 @@ final case class RankedJob(
     meta: EmbeddingMeta,
     searchId: UUID,
     matchedSkills: List[String] = Nil,
+    missingSkills: List[String] = Nil,
     retrievalScore: Option[Double] = None
 ) {
   def retrieval: JobRetrievalHit = SearchRetrievalHit(job.id, score, mode, meta, searchId, retrievalScore)
@@ -198,6 +199,7 @@ final case class RankedCandidate(
     meta: EmbeddingMeta,
     searchId: UUID,
     matchedSkills: List[String] = Nil,
+    missingSkills: List[String] = Nil,
     retrievalScore: Option[Double] = None
 ) {
   def retrieval: CandidateRetrievalHit = SearchRetrievalHit(candidate.id, score, mode, meta, searchId, retrievalScore)
@@ -217,6 +219,7 @@ final case class SearchedJob(
     model: Option[String],
     searchId: UUID,
     matchedSkills: List[String] = Nil,
+    missingSkills: List[String] = Nil,
     retrievalScore: Option[Double] = None
 )
 
@@ -229,6 +232,7 @@ object SearchedJob {
       Some(ranked.meta.model),
       ranked.searchId,
       ranked.matchedSkills,
+      ranked.missingSkills,
       ranked.retrievalScore
     )
 }
@@ -241,6 +245,7 @@ final case class SearchedCandidate(
     model: Option[String],
     searchId: UUID,
     matchedSkills: List[String] = Nil,
+    missingSkills: List[String] = Nil,
     retrievalScore: Option[Double] = None
 )
 
@@ -253,15 +258,26 @@ object SearchedCandidate {
       Some(ranked.meta.model),
       ranked.searchId,
       ranked.matchedSkills,
+      ranked.missingSkills,
       ranked.retrievalScore
     )
 }
 
+/** Fit reasons: how a target's required skills relate to what the viewer may already see. Pure; both lists use the
+  * target's spelling, ordered by canonical form, and compare through `SearchTerm.canonical` (case, surrounding spaces).
+  */
 object SkillMatching {
-  def matched(candidateSkills: Set[String], targetSkills: Set[String]): List[String] = {
+  def matched(candidateSkills: Set[String], targetSkills: Set[String]): List[String] =
+    split(candidateSkills, targetSkills)._1
+
+  /** The target's skills absent from `candidateSkills`; together with `matched` they cover the target exactly. */
+  def missing(candidateSkills: Set[String], targetSkills: Set[String]): List[String] =
+    split(candidateSkills, targetSkills)._2
+
+  private def split(candidateSkills: Set[String], targetSkills: Set[String]): (List[String], List[String]) = {
     val candidateCanonical = candidateSkills.map(SearchTerm.canonical)
     targetSkills.toList
-      .filter(skill => candidateCanonical.contains(SearchTerm.canonical(skill)))
       .sortBy(skill => (SearchTerm.canonical(skill), skill))
+      .partition(skill => candidateCanonical.contains(SearchTerm.canonical(skill)))
   }
 }
