@@ -123,8 +123,8 @@ The AWS SDK must not write its own logs. See Gate 0 item 4 above.
 - Real calendar provider behavior. The calendar provider is still the ledger.
 - Any live AWS call in the test suite.
 
-## Verification status (2026-11-10)
+## Verification status (2026-11-11)
 
 - Unit tests are written: `InterviewNotificationConfigSpec`, `InterviewNotificationProviderSelectionSpec`, `SesInterviewNotificationProviderSpec` (stub client, including the at-least-once contract), `InterviewNotificationAtLeastOnceContractSelfCheckSpec` (proves the at-least-once contract fails a key-deduplicating provider; it accepts any `AssertionError`) and the shared `InterviewNotificationProviderContract` (exactly-once ledger contract and the at-least-once contract).
-- Verdicts (2026-11-11): Code Reviewer PASS (after one FAIL and its fixes), Security Engineer PASS for the preparation code only (no dependency, no live call), and final QA PASS. The owner's `scripts/check-local.sh` passed 6/6 on 2026-11-11; the root step reused an unchanged-input PASS stamp.
+- Verdicts (2026-11-11): Code Reviewer PASS (after one FAIL and its fixes), Security Engineer PASS for the preparation code only (no dependency, no live call), and final QA PASS on committed HEAD `48f271a`. The owner's `scripts/check-local.sh` passed 6/6 on the committed tree on 2026-11-11 with the root step run (2718 tests, 2668 passed, 0 failed, 51 skipped; the skipped tests are not passes).
 - Not activatable. Live SES activation, the AWS SDK dependency, F1 (the fenced pre-send check) and the Gate 0 items (dependency provenance, logger and `.aws/` ignore rules, least-privilege IAM) remain open.

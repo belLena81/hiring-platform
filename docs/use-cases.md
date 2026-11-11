@@ -31,7 +31,7 @@ Current transitions are `Created → Accepted / Declined / Rejected`, `Accepted 
 
 ## Planned Guided Discovery and Follow-up (Phase 11A)
 
-Partly implemented: GDF-02 (fit reasons) is implemented on 2026-11-11 in the working tree after HEAD `8cf07f1` and is not yet committed; GDF-02 Code Reviewer, Security and QA PASS. The other items are planned, not implemented. The [guided discovery specification](specs/guided-discovery-and-followup.md) owns behavior and acceptance. It extends UC02, UC03, UC06, UC09 and UC10 without a language model and without changing ranking:
+Partly implemented: GDF-02 (fit reasons) is implemented and committed as `48f271a` (2026-11-11); GDF-02 Code Reviewer, Security and QA PASS. The other items are planned, not implemented. The [guided discovery specification](specs/guided-discovery-and-followup.md) owns behavior and acceptance. It extends UC02, UC03, UC06, UC09 and UC10 without a language model and without changing ranking:
 
 - UC02: an empty filtered search returns the nearest result with the relaxed filter named (planned, GDF-01); hits show matched and missing skills (implemented, GDF-02, 2026-11-11: `matchedSkills` and `missingSkills` derived only from the job's required skills and the candidate's own profile skills, with no provider call); the query yields suggested filters that are not applied automatically (planned, GDF-05); a candidate can save a search and receive alerts through the notification port (planned, GDF-06).
 - UC03: a job page offers similar open jobs from the stored job embedding (planned, GDF-03).
