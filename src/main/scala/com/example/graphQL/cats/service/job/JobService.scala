@@ -6,7 +6,16 @@ import cats.MonadThrow
 import cats.effect.Clock
 import cats.effect.std.UUIDGen
 import cats.syntax.all.*
-import com.example.graphQL.cats.service.{ActorContext, Diagnostics, SearchError, UseCaseError}
+import com.example.graphQL.cats.service.{
+  ActorContext,
+  Diagnostics,
+  LogEvent,
+  LogField,
+  LogFields,
+  SearchError,
+  UseCaseError
+}
+import com.example.graphQL.cats.service.Diagnostics.emit
 import com.example.graphQL.cats.service.port.{
   JobOwner,
   JobRepository,
@@ -37,7 +46,10 @@ import com.example.graphQL.cats.service.search.{
   JobDiscoveryFacets,
   JobFacetQuery,
   JobDiscoveryValidation,
-  LexicalMatchLimit
+  LexicalMatchLimit,
+  OpenJobsPage,
+  RelaxationAttempt,
+  ZeroResultRecovery
 }
 import java.time.Instant
 import scala.concurrent.duration.*
@@ -135,8 +147,57 @@ final class JobService[F[_]: MonadThrow](
 
   // For display only: under `JobProjection.Summary` the jobs carry a blank description and no requirements (the caller
   // proved the client selected neither); never persist or re-derive anything from them.
-  def searchOpenJobs(actor: ActorContext, filter: JobSearchFilter, page: JobPageRequest): UseCaseF[F, List[Job]] =
-    authorization.resolve(actor) *> UseCaseF.repository(jobs.findOpen(filter, page))
+  // Authorization and the base search come first, so a refused actor or a failed base search never reaches a relaxation.
+  def searchOpenJobs(
+      actor: ActorContext,
+      filter: JobSearchFilter,
+      page: JobPageRequest,
+      admitRelaxation: F[Boolean]
+  ): UseCaseF[F, OpenJobsPage] =
+    for {
+      _ <- authorization.resolve(actor)
+      base <- UseCaseF.repository(jobs.findOpen(filter, page))
+      result <-
+        if (base.nonEmpty || page.cursor.isDefined) EitherT.pure[F, UseCaseError](OpenJobsPage(base, Nil))
+        else EitherT.liftF[F, UseCaseError, OpenJobsPage](recoverEmptyPage(filter, page, admitRelaxation))
+    } yield result
+
+  // Optional work: no refusal or failure here may turn the (empty) base answer into an error.
+  private def recoverEmptyPage(
+      filter: JobSearchFilter,
+      page: JobPageRequest,
+      admitRelaxation: F[Boolean]
+  ): F[OpenJobsPage] = {
+    val empty = OpenJobsPage(Nil, Nil)
+    def attempts(remaining: List[RelaxationAttempt]): F[OpenJobsPage] =
+      remaining match {
+        case Nil          => empty.pure[F]
+        case next :: rest =>
+          admitRelaxation.attempt.flatMap {
+            case Right(true) =>
+              jobs.findOpen(next.filter, page).value.attempt.flatMap {
+                case Right(Right(found)) if found.nonEmpty => OpenJobsPage(found, List(next.relaxed)).pure[F]
+                case Right(Right(_))                       => attempts(rest)
+                case Right(Left(error))                    =>
+                  reportRelaxationFailure(LogFields.repositoryFailure(error)).as(empty)
+                case Left(error) =>
+                  reportRelaxationFailure(
+                    Map(LogField.ErrorCode -> "RELAXATION_SEARCH_FAILED") ++ LogFields.failure(error)
+                  ).as(empty)
+              }
+            case Right(false) => empty.pure[F]
+            case Left(error)  =>
+              reportRelaxationFailure(
+                Map(LogField.ErrorCode -> "RELAXATION_ADMISSION_FAILED") ++ LogFields.failure(error)
+              ).as(empty)
+          }
+      }
+    attempts(ZeroResultRecovery.plan(filter))
+  }
+
+  // Only the closed code and the failure class and location are logged: never a filter value, skill, city or actor.
+  private def reportRelaxationFailure(fields: Map[LogField, String]): F[Unit] =
+    diagnostics.emit(LogEvent.JobSearchRelaxationFailed, fields = fields)
 
   def nearbyJobs(actor: ActorContext, query: NearbyJobsQuery, limit: Int): UseCaseF[F, List[NearbyJob]] =
     for {

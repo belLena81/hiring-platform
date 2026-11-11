@@ -98,6 +98,13 @@ enum LogEvent(val category: String, val component: String, val message: String, 
         "Search session recording failed; the results were still returned",
         LogLevel.Warn
       )
+  case JobSearchRelaxationFailed
+      extends LogEvent(
+        "JOB_SEARCH_RELAXATION_FAILED",
+        "SEARCH",
+        "An optional search relaxation failed; the empty base page was still returned",
+        LogLevel.Warn
+      )
   case CircuitBreakerStateChanged
       extends LogEvent(
         "CIRCUIT_BREAKER_STATE_CHANGED",

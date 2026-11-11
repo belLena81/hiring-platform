@@ -35,3 +35,12 @@ The interview notification adapter emits `INTERVIEW_NOTIFICATION_FAILED` (WARN, 
 - `errorType` and `errorLocation`, only for an unexpected exception: the class name (outside the allow-list reported as `OtherException`) and the first project file and line. The exception message is never logged.
 
 The event never carries a recipient address, sender address, subject, body, message identifier or workflow identifier. The AWS SDK must not write its own logs: a `software.amazon.awssdk` logger OFF is a pending requirement of the SES Gate 0 review, and the packaged `logback.xml` and `logback-container.xml` do not yet contain it.
+
+## Job search relaxation failures
+
+`JOB_SEARCH_RELAXATION_FAILED` (WARN, category `SEARCH`, marker `HP.SEARCH.JOB_SEARCH_RELAXATION_FAILED`) is emitted by [JobService](../src/main/scala/com/example/graphQL/cats/service/job/JobService.scala) when an optional extra search of a zero-result candidate job search (GDF-01) cannot run or fails. The empty page is still returned, so the event never changes the response. Its fields:
+
+- `errorCode`: `RELAXATION_ADMISSION_FAILED` when the admission check raised, `RELAXATION_SEARCH_FAILED` when the extra search raised, or the stable name of a typed repository failure.
+- `errorType` and `errorLocation`, only for an exception: the class name (outside the allow-list reported as `OtherException`) and the first project file and line, as for the other failure events.
+
+A refused admission (the cost budget cannot pay for the extra search) and a successful relaxation log nothing, because both are expected outcomes. A failure of the base search or of authorization is still an error to the caller and is not this event. The event never carries a filter value, skill, city, user identifier or query text.

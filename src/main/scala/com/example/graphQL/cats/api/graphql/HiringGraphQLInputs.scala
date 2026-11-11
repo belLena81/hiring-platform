@@ -367,7 +367,10 @@ private[graphql] object HiringGraphQLInputs {
         "skills",
         "Only jobs that require all of these skills, each compared ignoring case and surrounding spaces; at most 100, each of bounded length."
       ),
-      DocumentInputField("createdAfter", "Only jobs created after this instant.")
+      DocumentInputField(
+        "createdAfter",
+        "Only jobs created at or after this instant (the bound is inclusive)."
+      )
     )
   lazy val jobFilterArgument: Argument[Option[JobFilterGraphQLInput]] =
     Argument("filter", OptionInputType(jobFilterInputType), "Optional structured filters.")

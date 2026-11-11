@@ -451,13 +451,67 @@ private[graphql] object HiringGraphQLTypes {
     connectionType("ApplicationConnection", applicationEdgeType)
   lazy val applicationEventConnectionType: ObjectType[RequestContext, Connection[ApplicationEvent]] =
     connectionType("ApplicationEventConnection", applicationEventEdgeType)
+  lazy val relaxableJobFilterType: EnumType[RelaxableJobFilter] =
+    describedNames(
+      "RelaxableJobFilter",
+      "A job filter that an empty search may relax to find results. A city is never relaxed.",
+      List(
+        ("CREATED_AFTER", RelaxableJobFilter.CreatedAfter, "The `createdAfter` lower bound."),
+        ("SKILLS", RelaxableJobFilter.Skills, "The `skills` filter, from all-of to any-of.")
+      )
+    )
+  lazy val relaxedFilterType: ObjectType[RequestContext, RelaxedFilter] = ObjectType(
+    "RelaxedFilter",
+    "A filter that was relaxed because the search as sent found no job: what it was and what it became.",
+    fields[RequestContext, RelaxedFilter](
+      Field(
+        "filter",
+        relaxableJobFilterType,
+        description = Some("The relaxed filter."),
+        resolve = _.value match {
+          case _: RelaxedFilter.CreatedAfterDropped => RelaxableJobFilter.CreatedAfter
+          case _: RelaxedFilter.SkillsAllOfToAnyOf  => RelaxableJobFilter.Skills
+        }
+      ),
+      Field(
+        "from",
+        StringType,
+        description = Some("What the filter was: the ISO-8601 `createdAfter` instant, or `ALL_OF` for skills."),
+        resolve = _.value match {
+          case RelaxedFilter.CreatedAfterDropped(from) => from.toString
+          case _: RelaxedFilter.SkillsAllOfToAnyOf     => "ALL_OF"
+        }
+      ),
+      Field(
+        "to",
+        OptionType(StringType),
+        description = Some("What the filter became: null when it was removed, or `ANY_OF` for skills."),
+        resolve = _.value match {
+          case _: RelaxedFilter.CreatedAfterDropped => None
+          case _: RelaxedFilter.SkillsAllOfToAnyOf  => Some("ANY_OF")
+        }
+      )
+    )
+  )
   lazy val jobSearchConnectionType: ObjectType[RequestContext, JobSearchConnection] =
     connectionObject[JobSearchConnection, Edge[Job]](
       "JobSearchConnection",
       jobEdgeType,
       _.edges,
       _.pageInfo,
-      List(simple("searchId", searchIdType)(_.searchId))
+      List(
+        simple("searchId", searchIdType)(_.searchId),
+        Field(
+          "relaxedFilters",
+          ListType(relaxedFilterType),
+          description = Some(
+            "Filters relaxed because the search as sent found no job; empty when the page is the answer to the " +
+              "search as sent. Nothing is relaxed silently: a relaxed page is the only page (`hasNextPage` is " +
+              "false), and a client that wants more applies the relaxation itself and searches again."
+          ),
+          resolve = _.value.relaxedFilters
+        )
+      )
     )
   lazy val userEdgeType: ObjectType[RequestContext, Edge[User]] = edgeType("UserEdge", userType)
   lazy val userConnectionType: ObjectType[RequestContext, Connection[User]] =

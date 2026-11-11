@@ -1,6 +1,7 @@
 package com.example.graphQL.cats.api.graphql
 
-import cats.effect.IO
+import cats.data.EitherT
+import cats.effect.{IO, Ref}
 
 import com.example.graphQL.cats.api.graphql.HiringGraphQLInputs.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.*
@@ -11,6 +12,7 @@ import com.example.graphQL.cats.service.job.{CreateJobInput, UpdateJobInput}
 import com.example.graphQL.cats.service.protocol.{IdempotencyRequest, JobUseCases, UseCaseF}
 import com.example.graphQL.cats.domain.pagination.{JobCursor, JobPageRequest}
 import com.example.graphQL.cats.service.events.OperationalEventPayload.SearchKind
+import com.example.graphQL.cats.service.search.RelaxedFilter
 import sangria.schema.Context
 
 private[graphql] object HiringGraphQLJobResolvers {
@@ -19,6 +21,7 @@ private[graphql] object HiringGraphQLJobResolvers {
       for {
         filter <- inputResult(discoveryFilter(context.arg(jobFilterArgument)))
         searchId <- searchIdFor(hiring, context.arg(searchIdArgument).map(_.value))
+        relaxed <- EitherT.liftF[IO, HiringGraphQLFailure, Ref[IO, List[RelaxedFilter]]](Ref.of(List.empty))
         connection <- paged[JobCursor, JobPageRequest, Job](
           hiring,
           context.arg(firstArgument),
@@ -26,16 +29,41 @@ private[graphql] object HiringGraphQLJobResolvers {
           "open-jobs"
         )((cursor, size) => JobPageRequest(None, cursor, size, HiringGraphQLJobProjection.of(context)))(request =>
           for {
-            values <- raiseOnUseCaseError(hiring.jobService.searchOpenJobs(actor, filter, request))
+            found <- raiseOnUseCaseError(
+              hiring.jobService.searchOpenJobs(
+                actor,
+                filter,
+                request,
+                // Each extra search costs what this field was charged at admission, so it is priced like the base one.
+                IO(
+                  context.ctx
+                    .chargeRelaxationCost(
+                      context.ctx
+                        .rootFieldCost(context.path)
+                        .getOrElse(QueryAdmission.relaxedSearchCost(context.arg(firstArgument)))
+                    )
+                    .isRight
+                )
+              )
+            )
+            _ <- EitherT.liftF[IO, HiringGraphQLFailure, Unit](relaxed.set(found.relaxedFilters))
+            // The session records what the caller was shown, under the filter as sent.
             _ <- recordSearch(context.ctx, hiring, actor.userId, SearchKind.Jobs, searchId, filterSnapshot(filter))(
-              values
+              found.jobs
             )(
               _.id.value.toString,
               _ => 0d
             )
-          } yield values
+          } yield found.jobs
         )(job => JobCursor(job.createdAt, job.id))
-      } yield JobSearchConnection(connection.edges, connection.pageInfo, SearchId(searchId))
+        relaxedFilters <- EitherT.liftF[IO, HiringGraphQLFailure, List[RelaxedFilter]](relaxed.get)
+      } yield JobSearchConnection(
+        connection.edges,
+        // A relaxed page is a recovery page: its cursor continues the relaxed query, which the client cannot send.
+        if (relaxedFilters.isEmpty) connection.pageInfo else connection.pageInfo.copy(hasNextPage = false),
+        SearchId(searchId),
+        relaxedFilters
+      )
     }
 
   def job(context: Context[RequestContext, Unit]): HiringGraphQLResult[Job] =

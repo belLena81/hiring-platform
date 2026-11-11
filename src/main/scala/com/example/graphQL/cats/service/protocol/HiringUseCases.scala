@@ -13,6 +13,7 @@ import com.example.graphQL.cats.service.search.{
   JobDiscoveryFacets,
   JobFacetQuery,
   JobSearchFilter,
+  OpenJobsPage,
   NearbyJob,
   NearbyJobsQuery,
   RankedJob,
@@ -59,7 +60,18 @@ trait JobUseCases[F[_]] {
   def publishJob(request: IdempotencyRequest, actor: ActorContext, jobId: JobId): UseCaseF[F, Job]
   def closeJob(request: IdempotencyRequest, actor: ActorContext, jobId: JobId): UseCaseF[F, Job]
   def viewJob(actor: ActorContext, jobId: JobId): UseCaseF[F, Job]
-  def searchOpenJobs(actor: ActorContext, filter: JobSearchFilter, page: JobPageRequest): UseCaseF[F, List[Job]]
+
+  /** Open jobs matching the filter. When the first page is empty and a filter was supplied, the search is rerun with
+    * one filter relaxed at a time (at most two extra searches) and the first non-empty page is returned with the
+    * relaxations named. `admitRelaxation` is asked before each extra search and answers whether the caller's budget
+    * allows it; a refusal or a failure of an extra search returns the empty base page.
+    */
+  def searchOpenJobs(
+      actor: ActorContext,
+      filter: JobSearchFilter,
+      page: JobPageRequest,
+      admitRelaxation: F[Boolean]
+  ): UseCaseF[F, OpenJobsPage]
   def nearbyJobs(actor: ActorContext, query: NearbyJobsQuery, limit: Int): UseCaseF[F, List[NearbyJob]]
   def jobDiscoveryFacets(actor: ActorContext, query: JobFacetQuery): UseCaseF[F, JobDiscoveryFacets]
   def myJobs(actor: ActorContext, page: JobPageRequest): UseCaseF[F, List[Job]]

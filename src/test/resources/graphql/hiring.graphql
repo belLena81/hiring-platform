@@ -806,7 +806,7 @@ input JobFilter {
   "Only jobs that require all of these skills, each compared ignoring case and surrounding spaces; at most 100, each of bounded length."
   skills: [String!]
 
-  "Only jobs created after this instant."
+  "Only jobs created at or after this instant (the bound is inclusive)."
   createdAfter: Instant
 }
 
@@ -844,6 +844,9 @@ type JobSearchConnection {
   edges: [JobEdge!]!
   pageInfo: PageInfo!
   searchId: SearchID!
+
+  "Filters relaxed because the search as sent found no job; empty when the page is the answer to the search as sent. Nothing is relaxed silently: a relaxed page is the only page (`hasNextPage` is false), and a client that wants more applies the relaxation itself and searches again."
+  relaxedFilters: [RelaxedFilter!]!
 }
 
 "The lifecycle state of a job."
@@ -1353,6 +1356,27 @@ input RejectApplicationInput {
 
 "The outcome of the mutation: Application on success, or a typed ValidationError or DomainError."
 union RejectApplicationResult = Application | ValidationError | DomainError
+
+"A job filter that an empty search may relax to find results. A city is never relaxed."
+enum RelaxableJobFilter {
+  "The `createdAfter` lower bound."
+  CREATED_AFTER
+
+  "The `skills` filter, from all-of to any-of."
+  SKILLS
+}
+
+"A filter that was relaxed because the search as sent found no job: what it was and what it became."
+type RelaxedFilter {
+  "The relaxed filter."
+  filter: RelaxableJobFilter!
+
+  "What the filter was: the ISO-8601 `createdAfter` instant, or `ALL_OF` for skills."
+  from: String!
+
+  "What the filter became: null when it was removed, or `ANY_OF` for skills."
+  to: String
+}
 
 "Admin repair of an interview workflow that needs attention."
 input RepairInterviewInput {

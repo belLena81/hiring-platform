@@ -1,6 +1,7 @@
 query OpenJobs($filter: JobFilter, $first: Int!, $after: Cursor, $searchId: SearchID) {
   jobs(filter: $filter, first: $first, after: $after, searchId: $searchId) {
     searchId
+    relaxedFilters { filter from to }
     edges {
       cursor
       node { id title skills location { country city remote } status createdAt }
@@ -26,7 +27,7 @@ query SemanticJobs($query: String!, $filter: JobFilter, $first: Int!, $searchId:
       searchId
       model
       degradedReason
-      results { score searchMode matchedSkills retrievalScore job { id title } }
+      results { score searchMode matchedSkills missingSkills retrievalScore job { id title } }
     }
     ... on SearchUnavailable { code message retryable }
     ... on ValidationError { code message field }

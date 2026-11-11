@@ -7,10 +7,14 @@ import com.example.graphQL.cats.shared.crypto.CriteriaDigest
 import java.time.Instant
 import java.util.UUID
 
+/** `skillMode` is honored by the open-job listing (`JobRepository.findOpen`) only; discovery and semantic search always
+  * match all skills and are never given `AnyOf`.
+  */
 final case class JobSearchFilter(
     city: Option[String],
     skills: Set[String],
-    createdAfter: Option[Instant]
+    createdAfter: Option[Instant],
+    skillMode: SkillMatchMode = SkillMatchMode.AllOf
 )
 
 final case class NearbyJobsQuery(
@@ -268,13 +272,14 @@ object SearchedCandidate {
   */
 object SkillMatching {
   def matched(candidateSkills: Set[String], targetSkills: Set[String]): List[String] =
-    split(candidateSkills, targetSkills)._1
+    fitReasons(candidateSkills, targetSkills)._1
 
   /** The target's skills absent from `candidateSkills`; together with `matched` they cover the target exactly. */
   def missing(candidateSkills: Set[String], targetSkills: Set[String]): List[String] =
-    split(candidateSkills, targetSkills)._2
+    fitReasons(candidateSkills, targetSkills)._2
 
-  private def split(candidateSkills: Set[String], targetSkills: Set[String]): (List[String], List[String]) = {
+  /** The target's skills the viewer has and lacks, computed once: `(matched, missing)`. */
+  def fitReasons(candidateSkills: Set[String], targetSkills: Set[String]): (List[String], List[String]) = {
     val candidateCanonical = candidateSkills.map(SearchTerm.canonical)
     targetSkills.toList
       .sortBy(skill => (SearchTerm.canonical(skill), skill))

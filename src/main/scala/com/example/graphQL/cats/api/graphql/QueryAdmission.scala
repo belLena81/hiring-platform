@@ -20,8 +20,14 @@ private[graphql] object QueryAdmission {
   // however they are aliased; the per-actor allowance then counts each of those actions individually.
   val InterviewActionComplexity = 100d
 
+  def connectionPrice(first: Int, child: Double): Double = 1d + first.max(0) * child
   val connectionComplexity: (RequestContext, Args, Double) => Double =
-    (_, args, child) => 1d + args.arg(firstArgument).max(0) * child
+    (_, args, child) => connectionPrice(args.arg(firstArgument), child)
+
+  /** The fallback charge for one extra search of a recovered `jobs` page when the field's priced complexity was not
+    * recorded: the page at its cheapest selection (child cost 1), a lower bound of what the field was charged.
+    */
+  def relaxedSearchCost(first: Int): Int = budgetCost(connectionPrice(first, 1d))
   // A nested list runs one authorized read per parent (no keyed batching yet), so it costs a base amount on top of
   // the page: 5 + first * children. With the cheapest selection a request carries about 99 parents per 1000 units.
   val NestedListBaseComplexity = 5d
@@ -145,6 +151,8 @@ private[graphql] object QueryAdmission {
               .fold(1d + childrenAcc)(args => estimate(context, args, childrenAcc))
           case None => 1d + childrenAcc
         }
+        if (parentType.name == "Query" && field.name == RecoverableRoot)
+          context.recordRootFieldCost(path, budgetCost(own))
         val weight = if (IntrospectionFields.contains(field.name)) IntrospectionComplexity else 0d
         fieldAcc + own + weight
       }
@@ -176,6 +184,8 @@ private[graphql] object QueryAdmission {
         _ => context
       )
   }
+  // The root field whose empty page may be recovered by extra searches, each charged what the field itself was charged.
+  private val RecoverableRoot = "jobs"
   private def budgetCost(complexity: Double): Int =
     math.min(Int.MaxValue.toDouble, math.max(1d, math.ceil(complexity))).toInt
 

@@ -131,4 +131,6 @@ The following changes were made directly under the single-active-shape policy, w
 - **`coverageLimit`.** `JobDiscoveryFacets.coverage` is removed. `coverageLimit: Int` is the single coverage field; null means the counts cover every matching job.
 - **`TimeSlot`.** `startsAt` and `endsAt` form the interval type of `InterviewWorkflow.slot`, of `pending`, and of `RescheduleProposal.slot`. `proposal` is `RescheduleProposal { slot, expiresAt }`, and `rescheduleRequestedAt` is a top-level field. The flat timestamps and boolean that these replace are listed in the cancellation and rescheduling entry above.
 
+**Additive: zero-result recovery (GDF-01).** `JobSearchConnection` gains `relaxedFilters: [RelaxedFilter!]!`, and the types `RelaxedFilter` and enum `RelaxableJobFilter` are new. No existing field, argument, enum value or code is removed, renamed or made stricter; a client that does not select the field is unaffected. A later relaxation of another filter would add a value to `RelaxableJobFilter`; a client that switches exhaustively on it must tolerate unknown values. The `createdAfter` SDL description states the inclusive bound (`createdAt >= createdAfter`). The `relaxedFilters` contract is in [API reference](api.md).
+
 Local evidence is the SDL snapshot and fixture validation in the unit suite; this entry does not establish deployed client compatibility.

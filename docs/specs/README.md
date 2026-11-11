@@ -17,7 +17,7 @@ One line per specification, grouped by what the first `- Status:` line says (rea
 | [mongodb-vector-retrieval-optimization](mongodb-vector-retrieval-optimization.md) | in progress; `.C` rows deferred, overall partial |
 | [analytics-reconciliation-recovery](analytics-reconciliation-recovery.md) | draft |
 | [deployed-analytics-performance](deployed-analytics-performance.md) | draft |
-| [guided-discovery-and-followup](guided-discovery-and-followup.md) | draft, Partial; GDF-02 implemented and committed as `48f271a` (GDF-02 Code Reviewer, Security and QA PASS), GDF-07 met (synthetic); other slices not run; after the MVP claim |
+| [guided-discovery-and-followup](guided-discovery-and-followup.md) | draft, Partial; GDF-02 committed as `48f271a` (GDF-02 Code Reviewer, Security and QA PASS); GDF-01 implemented on the uncommitted tree with the receipt lock fix (author `sbt test` 2141 passed, 0 failed, including the fifth GDF-01 test; Code Reviewer, Security and QA PASS on the uncommitted tree; remaining: commit, owner Docker runs, owner `scripts/check-local.sh` on the committed tree); GDF-07 met (synthetic); GDF-03–06 not run; GDF-08 partly: author runs on the relaxation path and the cost/authorization checks; GDF-03 vector path and the rest not run; after the MVP claim |
 | [hiring-observability-resilience](hiring-observability-resilience.md) | draft |
 | [production-readiness](production-readiness.md) | draft |
 | [agent-role-enforcement](agent-role-enforcement.md) | in progress |

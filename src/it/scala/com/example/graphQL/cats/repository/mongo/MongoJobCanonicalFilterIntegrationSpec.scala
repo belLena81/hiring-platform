@@ -175,6 +175,84 @@ final class MongoJobCanonicalFilterIntegrationSpec extends MongoJobDiscoveryFixt
     }
   }
 
+  test(
+    "MSC-08.1 any-of skills match a job with at least one canonical skill; all-of needs every one; closed jobs never match"
+  ) {
+    mongoResource.use { fixture =>
+      val repository = MongoJobRepository.transactional(
+        fixture.database,
+        fixture.client,
+        MongoEmbeddingWorkEnqueuer.disabled,
+        Diagnostics.noop[IO]
+      )
+      val both = jobWith(1, Set("Scala", "Kafka"), None)
+      val scalaOnly = jobWith(2, Set("Scala"), None)
+      val rust = jobWith(3, Set("Rust"), None)
+      val closedKafka = jobWith(4, Set("Kafka"), None).copy(state = JobState.Closed(now))
+      def ids(values: List[Job]): Set[JobId] = values.map(_.id).toSet
+      def search(skills: Set[String], mode: SkillMatchMode) =
+        success(repository.findOpen(JobSearchFilter(None, skills, None, mode), page)).map(ids)
+      for {
+        _ <- init(fixture.database)
+        _ <- List(both, scalaOnly, rust, closedKafka).traverse_(value =>
+          MongoRepositoryTestSupport.insertOne(fixture.database, Jobs, MongoHiringCodecs.job(value))
+        )
+        allOf <- search(Set("Scala", "Kafka"), SkillMatchMode.AllOf)
+        anyOf <- search(Set("Scala", "Kafka"), SkillMatchMode.AnyOf)
+        spelled <- search(Set(" SCALA ", "kafka"), SkillMatchMode.AnyOf)
+        sameSkillTwice <- search(Set("Scala", "scala"), SkillMatchMode.AnyOf)
+        unknown <- search(Set("Haskell"), SkillMatchMode.AnyOf)
+      } yield {
+        assertEquals(allOf, Set(both.id))
+        assertEquals(anyOf, Set(both.id, scalaOnly.id))
+        assertEquals(spelled, Set(both.id, scalaOnly.id))
+        assertEquals(sameSkillTwice, Set(both.id, scalaOnly.id))
+        assertEquals(unknown, Set.empty[JobId])
+      }
+    }
+  }
+
+  test(
+    "MSC-08.1 a hand-built any-of skills filter on open jobs is answered by an index scan and returns the expected count"
+  ) {
+    mongoResource.use { fixture =>
+      val values = (1 to 12).toList.map { index =>
+        jobWith(index, Set(if (index % 2 == 0) "Scala" else "Rust"), None)
+          .copy(createdAt = now.plusSeconds(index.toLong))
+      }
+      val filter = new Document("status", JobStatus.Open.toString)
+        .append(MongoFields.SkillsCanonical, new Document("$in", List("scala", "kafka").asJava))
+      val command = new Document("find", Jobs)
+        .append("filter", filter)
+        .append("sort", new Document(MongoFields.CreatedAt, -1).append(MongoFields.Id, -1))
+        .append("limit", 3)
+      for {
+        _ <- init(fixture.database)
+        _ <- values.traverse_(value =>
+          MongoRepositoryTestSupport.insertOne(fixture.database, Jobs, MongoHiringCodecs.job(value))
+        )
+        explained <- MongoAccessEvaluationSupport
+          .command(fixture.database, new Document("explain", command).append("verbosity", "executionStats"))
+        json <- IO.fromEither(io.circe.parser.parse(explained.toJson))
+        stages = json.hcursor
+          .downField("queryPlanner")
+          .downField("winningPlan")
+          .focus
+          .toList
+          .flatMap(plan => plan.findAllByKey("stage") ++ plan.findAllByKey("indexName"))
+          .flatMap(_.asString)
+        stats = json.hcursor.downField("executionStats")
+        _ = println(
+          s"MSC-08.1 any-of evidence: keysExamined=${stats.get[Long]("totalKeysExamined")} " +
+            s"docsExamined=${stats.get[Long]("totalDocsExamined")} nReturned=${stats.get[Long]("nReturned")} plan=$stages"
+        )
+      } yield {
+        assert(stages.contains("IXSCAN"), stages)
+        assertEquals(stats.get[Long]("nReturned"), Right(3L))
+      }
+    }
+  }
+
   test("MSC-08.1 a content edit keeps the canonical fields in step with the display fields") {
     mongoResource.use { fixture =>
       val original = jobWith(1, Set("Scala"), Some("Kyiv"))

@@ -78,7 +78,7 @@ The table lists business operations, rather than every private helper. The autho
 
 | Use case | Current GraphQL surface | Main implementation and behavior |
 |---|---|---|
-| [UC01: structured search](../use-cases.md#uc01--search-jobs-by-structured-filters) | `jobs` | `JobService.searchOpenJobs`: visible Open jobs, city/skills/creation-date filters, bounded cursor pagination. |
+| [UC01: structured search](../use-cases.md#uc01--search-jobs-by-structured-filters) | `jobs` | `JobService.searchOpenJobs`: visible Open jobs, city/skills/creation-date filters, bounded cursor pagination. An empty first page may be recovered by at most two relaxed searches, named in `relaxedFilters` and final (`hasNextPage` false); `JobService.searchOpenJobs`, `ZeroResultRecovery.plan`. Implemented on the uncommitted tree (GDF-01). |
 | [UC02: semantic/hybrid search](../use-cases.md#uc02--semantic--hybrid-job-search) | `semanticJobSearch` | [SemanticSearchService](../../src/main/scala/com/example/graphQL/cats/service/search/SemanticSearchService.scala): bounded query embedding/retrieval, configured fusion, freshness/eligibility validation and authorized entity hydration. |
 | [UC03: details](../use-cases.md#uc03--view-job-details) | `job`, `recordJobView` | `JobService.viewJob` authorizes visibility; a separate explicit idempotent mutation records a view. Reading a job is not an implicit analytics write. |
 | [UC04: apply](../use-cases.md#uc04--submit-application) | `submitApplication` | `ApplicationService.submitApplication`: Candidate role, open-job snapshot, atomic application/initial history/event/receipt and unique candidate/job pair. |

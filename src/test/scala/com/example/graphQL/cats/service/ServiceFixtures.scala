@@ -284,7 +284,12 @@ private[cats] object ServiceFixtures {
                 .filter { job =>
                   job.status == JobStatus.Open &&
                   filter.city.forall(c => job.location.city.contains(c)) &&
-                  filter.skills.subsetOf(job.skills) &&
+                  (filter.skillMode match {
+                    case com.example.graphQL.cats.service.search.SkillMatchMode.AllOf =>
+                      filter.skills.subsetOf(job.skills)
+                    case com.example.graphQL.cats.service.search.SkillMatchMode.AnyOf =>
+                      filter.skills.isEmpty || filter.skills.exists(job.skills.contains)
+                  }) &&
                   filter.createdAfter.forall(!job.createdAt.isBefore(_)) &&
                   matches(page)(job) &&
                   keysetAfter(page.cursor.map(cursor => cursor.createdAt -> cursor.id.value.toString))(job)(

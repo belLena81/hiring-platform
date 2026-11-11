@@ -11,7 +11,7 @@ import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.events.OperationalEventEnvelope
 import com.example.graphQL.cats.domain.pagination.JobPageRequest
-import com.example.graphQL.cats.service.search.JobSearchFilter
+import com.example.graphQL.cats.service.search.{JobSearchFilter, SkillMatchMode}
 import com.example.graphQL.cats.service.{Diagnostics, TransactionOperation}
 import com.mongodb.client.model.Filters
 import mongo4cats.client.{ClientSession, MongoClient}
@@ -404,7 +404,12 @@ final class MongoJobRepository(
         Some(MongoFilter.eq(MongoFields.Status, JobStatus.Open.toString)),
         filter.city.map(city => MongoFilter.eq(MongoFields.LocationCityCanonical, SearchTerm.canonical(city))),
         Option.when(filter.skills.nonEmpty)(
-          MongoFilter.all(MongoFields.SkillsCanonical, SearchTerm.canonicalSorted(filter.skills))
+          filter.skillMode match {
+            case SkillMatchMode.AllOf =>
+              MongoFilter.all(MongoFields.SkillsCanonical, SearchTerm.canonicalSorted(filter.skills))
+            case SkillMatchMode.AnyOf =>
+              MongoFilter.in(MongoFields.SkillsCanonical, SearchTerm.canonicalSorted(filter.skills))
+          }
         ),
         filter.createdAfter.map(createdAfter => MongoFilter.gte(MongoFields.CreatedAt, createdAfter.toDate))
       ),

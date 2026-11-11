@@ -1,7 +1,6 @@
 package com.example.graphQL.cats.api.graphql
 
 import cats.data.EitherT
-import java.util.concurrent.atomic.AtomicReference
 import cats.effect.{Deferred, IO, Ref, Resource}
 import cats.effect.std.Dispatcher
 import cats.syntax.all.*
@@ -93,11 +92,29 @@ final class RequestContext private (
     viewer: Option[UseCaseF[IO, AuthenticatedActor]],
     viewerInvalidated: Ref[IO, Boolean]
 ) {
-  // Written once by the synchronous cost budget reducer and read after execution; Sangria reducers cannot sequence an IO.
-  private val chargedCost = new AtomicReference[Option[CostReceipt]](None)
+  // Written by the synchronous cost budget reducer (the query charge) and by relaxation charges, and read after
+  // execution; Sangria reducers cannot sequence an IO. `requestedTotal` sums every charge of this request whatever the
+  // grant, so the receipt reports the full charge even when a shared-counter grant and a tracked one are mixed.
+  // One immutable value holds the total and the receipt, and every charge runs its budget grant and this update inside
+  // `chargeLock`, so charges are linearizable: the receipt always reflects the latest grant and the full requested sum
+  // even when Sangria resolves aliased fields in parallel. The section is in-memory and non-blocking in practice (the
+  // limiter is a synchronous counter), so it is safe on the compute pool.
+  private final case class Charged(requestedTotal: Int, receipt: Option[CostReceipt])
+  private val chargeLock = new Object
+  @volatile private var charged = Charged(0, None)
+
+  // The charge computed for each recoverable root field, by response path; written by the synchronous reducers.
+  private val rootFieldCosts = new java.util.concurrent.ConcurrentHashMap[Any, Int]()
+
+  private[graphql] def recordRootFieldCost(path: sangria.execution.ExecutionPath, cost: Int): Unit =
+    rootFieldCosts.put(path.cacheKey, cost): Unit
+
+  /** What the root field at `path` was charged at admission, so an extra search of it costs exactly the same. */
+  private[graphql] def rootFieldCost(path: sangria.execution.ExecutionPath): Option[Int] =
+    Option(rootFieldCosts.get(path.cacheKey))
 
   /** The cost charge of this request, present only when it was charged to the caller's own bucket. */
-  private[graphql] def costReceipt: Option[CostReceipt] = chargedCost.get()
+  private[graphql] def costReceipt: Option[CostReceipt] = charged.receipt
 
   private[graphql] def effectAdapter: HiringGraphQLSangriaAdapter = sangriaAdapter
 
@@ -147,15 +164,34 @@ final class RequestContext private (
     * id from the verified token claims (no storage read), or the resolved client address when anonymous. An admitted
     * charge on the caller's own bucket is remembered for the response; a shared overflow counter leaves nothing.
     */
+  private def budgetKey: CostBudgetLimiter.Key =
+    parameters.actor.fold[CostBudgetLimiter.Key](CostBudgetLimiter.Key.Client(parameters.clientAddress))(actor =>
+      CostBudgetLimiter.Key.Actor(actor.userId)
+    )
+
+  /** Charges a query's computed complexity to its caller's cost budget before any resolver runs. The key is the actor
+    * id from the verified token claims (no storage read), or the resolved client address when anonymous. An admitted
+    * charge on the caller's own bucket is remembered for the response; a shared overflow counter leaves nothing.
+    */
   private[graphql] def chargeCostBudget(cost: Int): Either[FixedWindowRateLimiter.RateLimited, Unit] =
-    parameters
-      .costBudget(
-        parameters.actor.fold[CostBudgetLimiter.Key](CostBudgetLimiter.Key.Client(parameters.clientAddress))(actor =>
-          CostBudgetLimiter.Key.Actor(actor.userId)
-        ),
-        cost
-      )
-      .map(grant => chargedCost.set(CostReceipt.from(cost, grant)))
+    chargeLock.synchronized {
+      parameters.costBudget(budgetKey, cost).map { grant =>
+        charged = Charged(cost, CostReceipt.from(cost, grant))
+      }
+    }
+
+  /** Charges one extra search of a recovered result to the same budget, after the query itself was admitted. A grant on
+    * the caller's own bucket adds to the receipt of this request; a refusal means the extra search must not run.
+    */
+  private[graphql] def chargeRelaxationCost(cost: Int): Either[FixedWindowRateLimiter.RateLimited, Unit] =
+    chargeLock.synchronized {
+      parameters.costBudget(budgetKey, cost).map { grant =>
+        val total = charged.requestedTotal + cost
+        // A tracked grant carries the caller's own bucket numbers and replaces the receipt; a shared one says nothing
+        // about the caller, so the numbers already disclosed stay and only the requested total grows.
+        charged = Charged(total, CostReceipt.from(cost, grant).orElse(charged.receipt).map(_.copy(requested = total)))
+      }
+    }
 
   private[graphql] def requestScoped[A](action: HiringGraphQLResult[A]): HiringGraphQLResult[A] =
     cats.data.EitherT(

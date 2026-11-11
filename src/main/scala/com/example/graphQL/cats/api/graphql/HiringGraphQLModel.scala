@@ -85,7 +85,18 @@ private[graphql] object HiringGraphQLModel {
   final case class Connection[A](edges: List[Edge[A]], pageInfo: PageInfo)
 
   /** The page of a job search together with the identifier of the search that produced it. */
-  final case class JobSearchConnection(edges: List[Edge[Job]], pageInfo: PageInfo, searchId: SearchId)
+  final case class JobSearchConnection(
+      edges: List[Edge[Job]],
+      pageInfo: PageInfo,
+      searchId: SearchId,
+      relaxedFilters: List[com.example.graphQL.cats.service.search.RelaxedFilter]
+  )
+
+  /** The wire name of a filter that a recovered search relaxed. */
+  enum RelaxableJobFilter {
+    case CreatedAfter
+    case Skills
+  }
   final case class NearbyJobEdge(node: Job, distanceKm: Double, cursor: String)
   final case class NearbyJobsConnection(edges: List[NearbyJobEdge], pageInfo: PageInfo)
   final case class JobFilterGraphQLInput(

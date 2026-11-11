@@ -92,12 +92,10 @@ final class SemanticSearchService[F[_]: Monad](
             .flatMap(validateJobHits(actor, noFilter, _, Some(embedding)))
             .map(
               _.take(first.value)
-                .map(value =>
-                  value.copy(
-                    matchedSkills = SkillMatching.matched(profile.skills, value.job.skills),
-                    missingSkills = SkillMatching.missing(profile.skills, value.job.skills)
-                  )
-                )
+                .map { value =>
+                  val (matched, missing) = SkillMatching.fitReasons(profile.skills, value.job.skills)
+                  value.copy(matchedSkills = matched, missingSkills = missing)
+                }
             )
         }
       )
@@ -201,20 +199,17 @@ final class SemanticSearchService[F[_]: Monad](
   /** Fit reasons for a candidate viewing a job: derived only from the job's skills and the caller's own profile. */
   private def withJobFitReasons(candidate: User, hit: SearchedJob): SearchedJob = {
     val own = candidate.candidateProfile.fold(Set.empty[String])(_.skills)
-    hit.copy(
-      matchedSkills = SkillMatching.matched(own, hit.job.skills),
-      missingSkills = SkillMatching.missing(own, hit.job.skills)
-    )
+    val (matched, missing) = SkillMatching.fitReasons(own, hit.job.skills)
+    hit.copy(matchedSkills = matched, missingSkills = missing)
   }
 
   /** Fit reasons for a recruiter viewing a candidate of an owned job: only the job's skills and the skills the hit
     * already carries to the recruiter.
     */
-  private def withCandidateFitReasons(job: Job, hit: SearchedCandidate): SearchedCandidate =
-    hit.copy(
-      matchedSkills = SkillMatching.matched(hit.candidate.skills, job.skills),
-      missingSkills = SkillMatching.missing(hit.candidate.skills, job.skills)
-    )
+  private def withCandidateFitReasons(job: Job, hit: SearchedCandidate): SearchedCandidate = {
+    val (matched, missing) = SkillMatching.fitReasons(hit.candidate.skills, job.skills)
+    hit.copy(matchedSkills = matched, missingSkills = missing)
+  }
 
   /** Turns exactly the degradable retrieval failures (`SearchFailure.degradation`) into a value. The retrieval passes
     * in unmapped, so a generic `Unavailable` (possibly the whole store), an `Overloaded` refusal (answering again
