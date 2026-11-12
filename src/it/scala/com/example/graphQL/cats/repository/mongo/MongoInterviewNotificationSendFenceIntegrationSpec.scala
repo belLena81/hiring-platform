@@ -13,9 +13,9 @@ import java.util.UUID
 import scala.concurrent.duration.*
 
 /** DHW-26 / Security finding F1 on the real replica set: the read-only pre-send fence answers like the receipt ledger's
-  * four checks (claim, participants, kind in phase) and writes nothing. Owner Docker run needed; not run in the
-  * authoring environment. The hiring-commit check is covered by the pure policy tests; arranging a workflow in
-  * `NotificationsPending` needs the full scheduling saga and is left to the worker integration specs.
+  * four checks (claim, participants, kind in phase) and writes nothing. The hiring-commit predicate is covered by the
+  * pure policy tests only; arranging a workflow in `NotificationsPending` needs the full scheduling saga and is left to
+  * the worker integration specs.
   */
 final class MongoInterviewNotificationSendFenceIntegrationSpec extends MongoIntegrationSuite {
   override val munitIOTimeout: FiniteDuration = 5.minutes
@@ -102,7 +102,12 @@ final class MongoInterviewNotificationSendFenceIntegrationSpec extends MongoInte
           users <- Mongo4catsCollections.documents(a.fixture.database, MongoCollections.Users)
           _ <- users.updateOne(
             Filters.eq(MongoFields.Id, subject.value.toString),
-            Updates.set(MongoFields.AccountStatus, "Deleted")
+            // The users validator only admits a Deleted account without its personal data (UserFields.erasedOnDeletion).
+            Updates.combine(
+              (Updates.set(MongoFields.AccountStatus, "Deleted") ::
+                Updates.set(MongoFields.DeletedAt, java.util.Date.from(Instant.now())) ::
+                UserFields.erasedOnDeletion.map(Updates.unset))*
+            )
           )
           result <- verify(a, InterviewNotificationKind.RescheduleProposed, Some(a.claim))
         } yield assertEquals(result, Left(InterviewNotificationSendRefusal.ParticipantInactive))

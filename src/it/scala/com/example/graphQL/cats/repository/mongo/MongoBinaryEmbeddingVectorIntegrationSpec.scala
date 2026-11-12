@@ -217,8 +217,15 @@ final class MongoBinaryEmbeddingVectorIntegrationSpec extends MongoJobDiscoveryF
             s"storageSize=$binaryStorage; size ratio=${binarySize.toDouble / legacySize.toDouble}"
         )
       } yield {
+        // The claim is about the stored document size (collStats `size`, the sum of BSON document sizes), which is
+        // deterministic for the seeded data. `storageSize` is WiredTiger allocated bytes (block compression,
+        // checkpoint timing, free-block reuse); observed float64-array storageSize differed between runs (e.g.
+        // 2961408, 6139904, 8617984), so it is printed above as evidence only. The asserted claim is the logical
+        // collection size ratio.
+        val sizeRatio = binarySize.toDouble / legacySize.toDouble
+        // The named "under half" check (implied by the ratio bound below).
         assert(binarySize * 2 < legacySize, clue((binarySize, legacySize)))
-        assert(binaryStorage < legacyStorage, clue((binaryStorage, legacyStorage)))
+        assert(sizeRatio > 0.25 && sizeRatio < 0.40, clue(sizeRatio))
       }
     }
   }
