@@ -51,7 +51,7 @@ Derived from `docs/use-cases.md` and the Query/Mutation lists in `hiring.graphql
 | Admin | UC12/UC13 analytics; users; embedding coverage; everything a recruiter can do | `analyticsReport`, `users`, `embeddingCoverage` |
 | No UI | UC11 events and Kafka | Only `recordJobView` and `recordSearchResultClick` feed analytics |
 
-Excluded from the first UI: Phase 11A guided discovery: saved searches and draft messages are not implemented, and `similarJobs` is implemented on the working tree after `e1eb2aa` (reviews pending); the phase is outside the MVP.
+Excluded from the first UI: Phase 11A guided discovery: saved searches and draft messages are not implemented, and `similarJobs` is committed as `35b8948` (GDF-03; Code Reviewer, Security Engineer and QA PASS on static re-checks, 2026-11-12); the phase is outside the MVP.
 
 Role visibility: build navigation from `me.role`. The backend denies by default: an unowned resource is `NOT_FOUND`, a wrong-role call is `FORBIDDEN`. UI guards are UX only.
 

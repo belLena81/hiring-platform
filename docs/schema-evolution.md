@@ -92,7 +92,7 @@ The Admin-only `embeddingCoverage(expectedModel: String)` query and its `Embeddi
 
 ## Similar jobs contract
 
-`similarJobs(jobId: JobID!, first: Int!)`, its `SimilarJobsResult` union and the `SimilarJobs` type (reusing `RankedJob`) are an additive read-only API change (GDF-03; implemented on the working tree after `e1eb2aa`, reviews pending). `first` is required (`Int!`), as on the other search roots; the GDF-03 signature in the specification does not state nullability. It adds no persisted field, index, migration, event or cursor, and it does not extend the `SearchKind` enum of the operational event contract, so it records no search session and has no `searchId`. The SDL snapshot, the operation fixture `similar-jobs.graphql` and the persisted-query manifest change together. The pre-MVP contract policy applies (no deprecation window or compatibility code).
+`similarJobs(jobId: JobID!, first: Int!)`, its `SimilarJobsResult` union and the `SimilarJobs` type (reusing `RankedJob`) are an additive read-only API change (GDF-03; committed as `35b8948`; Code Reviewer, Security Engineer and QA PASS on static re-checks, 2026-11-12). `first` is required (`Int!`), as on the other search roots; the GDF-03 signature in the specification does not state nullability. It adds no persisted field, index, migration, event or cursor, and it does not extend the `SearchKind` enum of the operational event contract, so it records no search session and has no `searchId`. The SDL snapshot, the operation fixture `similar-jobs.graphql` and the persisted-query manifest change together. The pre-MVP contract policy applies (no deprecation window or compatibility code).
 
 ## Geographic discovery and interview scheduling contracts
 
