@@ -45,16 +45,17 @@ trait InterviewCalendarProviderContract { self: CatsEffectSuite =>
 
   /** `Unavailable` is the contract's retryable outcome: a store whose transactions contend (eight callers on one
     * workflow's fence and participant locks) may exhaust its own bounded retries for one caller. A caller retries it,
-    * as the scheduling command does; any other error, and an `Unavailable` that outlasts the bound, still fails.
+    * as the scheduling command does; any other error, and an `Unavailable` that outlasts the bound, still fails. Used
+    * by the concurrent reserve and cancel tests. It is a bounded mitigation of contention, not a proof of cause.
     */
-  private def reserveRetryingUnavailable[A](
+  private def retryingUnavailable[A](
       call: => InterviewProviderF[IO, A],
       attemptsLeft: Int = 5
   ): IO[A] =
     call.value.flatMap {
       case Right(value)                                                 => IO.pure(value)
       case Left(InterviewProviderError.Unavailable) if attemptsLeft > 1 =>
-        reserveRetryingUnavailable(call, attemptsLeft - 1)
+        retryingUnavailable(call, attemptsLeft - 1)
       case Left(error) => IO.raiseError(new AssertionError(s"Provider failure: $error"))
     }
 
@@ -176,7 +177,7 @@ trait InterviewCalendarProviderContract { self: CatsEffectSuite =>
         workflow <- subject.newWorkflow(user(), user(), slot(0))
         at = Instant.now().truncatedTo(ChronoUnit.MILLIS)
         reservations <- (0 until 8).toList.parTraverse(attempt =>
-          reserveRetryingUnavailable(
+          retryingUnavailable(
             subject.provider.reserve(
               workflow.id,
               InterviewWorkflow.reservationKey(workflow.id, 0),
@@ -206,7 +207,8 @@ trait InterviewCalendarProviderContract { self: CatsEffectSuite =>
         key = InterviewWorkflow.cancellationKey(workflow.id, 0)
         at = Instant.now().truncatedTo(ChronoUnit.MILLIS)
         outcomes <- (0 until 8).toList.parTraverse(attempt =>
-          success(subject.provider.cancel(workflow.id, key, at.plusSeconds(attempt.toLong), None))
+          // Bounded mitigation (retry only Unavailable, as for reserve above), not a proof of the cause of a refusal.
+          retryingUnavailable(subject.provider.cancel(workflow.id, key, at.plusSeconds(attempt.toLong), None))
         )
         looked <- success(subject.provider.lookup(workflow.id, key))
       } yield {
