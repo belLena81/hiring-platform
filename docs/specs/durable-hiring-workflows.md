@@ -697,6 +697,19 @@ Remaining external gates (none closed by this checkpoint):
 - Real-provider slice gate: the unknown-reservation revisit above must be settled before a real calendar adapter is activated.
 - Independent QA (2026-10-13): PASS for DHW-14 to DHW-34 on the local ledger/fake-provider path. `bash scripts/check-local.sh` exit 0 (root 1083 units; integration 304 total, 290 passed, 14 skipped; analytics 458 units, 102 integrations, 4 ignored) and `scripts/run-local-tests.sh interview` 10/10. Logs: ignored `.local/logs/qa-local-closure-{check,interview}.log`. Remaining external gates are unchanged.
 
+## Open low follow-up: provider error mapping (2026-11-12)
+
+Severity low. Source: a read-only trace on 2026-11-12, not verified at runtime.
+
+- `MongoInterviewWorkflowStore.mapProvider` (`src/main/scala/com/example/graphQL/cats/repository/mongo/MongoInterviewWorkflowStore.scala`, lines 241-245) folds the repository errors `AuthorityRevoked`, `InvalidStoredData` and `MissingStoredResult` into the retryable provider `Unavailable`.
+- Callers: the calendar ledger reserve and cancel, and the notification `deliverOnce`.
+- The ledger is the provider today (a local Mongo transaction, idempotency-keyed), so a retry repeats no external effect.
+- `InterviewProviderExecutor` (`src/main/scala/com/example/graphQL/cats/service/application/InterviewProviderExecutor.scala`, lines 23-24) retries to `maxAttempts` with backoff, then reports `RepairRequired`.
+- `AuthorityRevoked` has no producer on these paths (account deletion surfaces as `Conflict`). No raise site of `MissingStoredResult` was found. `InvalidStoredData` is reachable (a corrupt stored reservation or receipt) and is retried although it is not transient.
+- Smallest fix: a typed non-retryable provider error handled in `InterviewProviderExecutor`, applied also to `release` and `find`. Tests: a `mapProvider` unit test per error, an executor test, and an integration test with a corrupt document.
+- Reviews required when fixed: Code Reviewer, Security Engineer and QA.
+- Not proven: attempt counts, receiver log contents, hidden raise sites, and future SES behavior.
+
 ## Review verdicts
 
 Collected from the Status line and the 2026-10-13 "Independent verdicts" entries so the verdict gate (`scripts/check-spec-verdicts.py`) can read them. The Status line is reopened (2026-11-10, Phase 11 local completion), so the verdict gate does not apply to it. The verdicts below cover the 2026-10-13 local ledger scope; the real-provider slice, the SES parts and deployed behavior are not covered.

@@ -64,6 +64,8 @@ final class HiringGraphQLSearchRecordingSpec extends CatsEffectSuite {
       )
     def recommendedJobs(a: ActorContext, first: PageSize, id: UUID): UseCaseF[IO, List[RankedJob]] =
       EitherT.rightT(Nil)
+    def similarJobs(a: ActorContext, j: JobId, first: PageSize, id: UUID): UseCaseF[IO, List[RankedJob]] =
+      EitherT.rightT(Nil)
     def candidateMatches(
         a: ActorContext,
         j: JobId,

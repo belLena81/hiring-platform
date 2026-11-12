@@ -106,6 +106,7 @@ final class SemanticSearchLexicalFallbackSpec extends CatsEffectSuite {
 
     def searchJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
       RepositoryF.fromEither[IO, List[JobRetrievalHit]](vector.as(Nil))
+    def similarJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] = recommendedJobs(query)
     def recommendedJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
       RepositoryF.at[IO].pure(Nil)
     def candidateMatches(query: VectorSearchQuery): RepositoryF[IO, List[CandidateRetrievalHit]] =

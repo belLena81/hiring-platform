@@ -38,6 +38,7 @@ private[graphql] object InputFieldPaths {
   private val pagePaths: Map[String, String] = Map("first" -> "first", "pageSize" -> "first")
   val semanticJobSearch: Path = from(same("query") ++ jobFilterPaths ++ pagePaths)
   val recommendedJobs: Path = from(pagePaths)
+  val similarJobs: Path = from(pagePaths)
   val candidateMatches: Path = from(
     same("query") ++ pagePaths ++ Map(
       "availabilityStatus" -> "filter.availabilityStatus",

@@ -441,6 +441,8 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
       search = new RetrievalSearchRepository {
         override def searchJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
           RepositoryF.fromFEither(IO.pure(Right(Nil)))
+        override def similarJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
+          recommendedJobs(query)
         override def recommendedJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
           RepositoryF.fromFEither(IO.pure(Right(Nil)))
         override def candidateMatches(query: VectorSearchQuery): RepositoryF[IO, List[CandidateRetrievalHit]] =
@@ -522,6 +524,8 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
       search = new RetrievalSearchRepository {
         override def searchJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
           RepositoryF.fromFEither(IO.pure(Right(Nil)))
+        override def similarJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
+          recommendedJobs(query)
         override def recommendedJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
           RepositoryF.fromFEither(IO.pure(Right(Nil)))
         override def candidateMatches(query: VectorSearchQuery): RepositoryF[IO, List[CandidateRetrievalHit]] =
@@ -574,6 +578,8 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
               .update(_.updated(jobId, embeddedJob.copy(state = JobState.Closed(java.time.Instant.EPOCH))))
               .as(Right(List(hit).map(_.retrieval)))
           )
+        override def similarJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
+          recommendedJobs(query)
         override def recommendedJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
           RepositoryF.fromFEither(IO.pure(Right(Nil)))
         override def candidateMatches(query: VectorSearchQuery): RepositoryF[IO, List[CandidateRetrievalHit]] =
@@ -615,6 +621,8 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
               .update(_.updated(firstJobId, firstJob.copy(state = JobState.Closed(java.time.Instant.EPOCH))))
               .as(Right(List(firstHit, secondHit).map(_.retrieval)))
           )
+        override def similarJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
+          recommendedJobs(query)
         override def recommendedJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
           RepositoryF.fromFEither(IO.pure(Right(Nil)))
         override def candidateMatches(query: VectorSearchQuery): RepositoryF[IO, List[CandidateRetrievalHit]] =
@@ -685,6 +693,8 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
       search = new RetrievalSearchRepository {
         override def searchJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
           RepositoryF.fromFEither(IO.pure(Right(Nil)))
+        override def similarJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
+          recommendedJobs(query)
         override def recommendedJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
           RepositoryF.fromFEither(IO.pure(Right(Nil)))
         override def candidateMatches(query: VectorSearchQuery): RepositoryF[IO, List[CandidateRetrievalHit]] =
@@ -719,6 +729,8 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
       search = new RetrievalSearchRepository {
         override def searchJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
           RepositoryF.fromFEither(IO.pure(Right(Nil)))
+        override def similarJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
+          recommendedJobs(query)
         override def recommendedJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
           RepositoryF.fromFEither(IO.pure(Right(Nil)))
         override def candidateMatches(query: VectorSearchQuery): RepositoryF[IO, List[CandidateRetrievalHit]] =
@@ -746,7 +758,8 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
   }
 
   test(
-    "AC-03.4 candidate matching refuses the results when the recruiter is deactivated between retrieval and revalidation"
+    "AC-03.4 candidate matching refuses the results when the recruiter is deactivated " +
+      "between retrieval and revalidation"
   ) {
     val owned = openJob.copy(embedding = Some(jobEmbedding))
     val cachedRecruiter = ActorContext(recruiterId, UserRole.Recruiter)
@@ -756,6 +769,8 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
       search = new RetrievalSearchRepository {
         override def searchJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
           RepositoryF.fromFEither(IO.pure(Right(Nil)))
+        override def similarJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
+          recommendedJobs(query)
         override def recommendedJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
           RepositoryF.fromFEither(IO.pure(Right(Nil)))
         override def candidateMatches(query: VectorSearchQuery): RepositoryF[IO, List[CandidateRetrievalHit]] =
@@ -793,6 +808,8 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
       search = new RetrievalSearchRepository {
         override def searchJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
           RepositoryF.fromFEither(IO.pure(Right(Nil)))
+        override def similarJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
+          recommendedJobs(query)
         override def recommendedJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
           RepositoryF.fromFEither(
             usersRef
@@ -899,6 +916,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
         search = new RetrievalSearchRepository {
           def searchJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
             RepositoryF.at[IO].pure(Nil)
+          def similarJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] = recommendedJobs(query)
           def recommendedJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
             RepositoryF.at[IO].pure(Nil)
           def candidateMatches(query: VectorSearchQuery): RepositoryF[IO, List[CandidateRetrievalHit]] =
@@ -946,6 +964,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
         search = new RetrievalSearchRepository {
           def searchJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
             RepositoryF.lift(entered.complete(()).void *> release.get.as(List(hit).map(_.retrieval)))
+          def similarJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] = recommendedJobs(query)
           def recommendedJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
             RepositoryF.at[IO].pure(Nil)
           def candidateMatches(query: VectorSearchQuery): RepositoryF[IO, List[CandidateRetrievalHit]] =
@@ -985,6 +1004,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
       search = new RetrievalSearchRepository {
         def searchJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
           RepositoryF.at[IO].pure(Nil)
+        def similarJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] = recommendedJobs(query)
         def recommendedJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
           RepositoryF.at[IO].pure(Nil)
         def candidateMatches(query: VectorSearchQuery): RepositoryF[IO, List[CandidateRetrievalHit]] =
@@ -1029,6 +1049,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
 
         def searchJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
           RepositoryF.at[IO].pure(List(hit, hit).map(_.retrieval))
+        def similarJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] = recommendedJobs(query)
         def recommendedJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
           RepositoryF.at[IO].pure(Nil)
         def candidateMatches(query: VectorSearchQuery): RepositoryF[IO, List[CandidateRetrievalHit]] =
@@ -1074,6 +1095,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
         ): RepositoryF[IO, List[CandidateSearchEligibility]] = RepositoryF.at[IO].raise(RepositoryError.Unavailable)
 
         def searchJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] = repository.searchJobs(query)
+        def similarJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] = recommendedJobs(query)
         def recommendedJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
           repository.recommendedJobs(query)
         def candidateMatches(query: VectorSearchQuery): RepositoryF[IO, List[CandidateRetrievalHit]] =
@@ -1208,6 +1230,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
           new RetrievalSearchRepository {
             def searchJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
               RepositoryF.at[IO].raise(failure)
+            def similarJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] = recommendedJobs(query)
             def recommendedJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
               RepositoryF.at[IO].raise(failure)
             def candidateMatches(query: VectorSearchQuery): RepositoryF[IO, List[CandidateRetrievalHit]] =
@@ -1276,6 +1299,8 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
                 .flatMap(allowed => if (allowed) candidateEligibility(ids) else RepositoryF.at[IO].pure(Nil))
             )
         def searchJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] = search.searchJobs(query)
+        def similarJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
+          search.similarJobs(query)
         def recommendedJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
           search.recommendedJobs(query)
         def candidateMatches(query: VectorSearchQuery): RepositoryF[IO, List[CandidateRetrievalHit]] =
@@ -1433,6 +1458,9 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
     override def searchJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
       com.example.graphQL.cats.service.port.RepositoryF.fromFEither(IO.pure(Right(jobs.map(_.retrieval))))
 
+    override def similarJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
+      recommendedJobs(query)
+
     override def recommendedJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
       com.example.graphQL.cats.service.port.RepositoryF.fromFEither(IO.pure(Right(jobs.map(_.retrieval))))
 
@@ -1445,6 +1473,9 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
   ) extends RetrievalSearchRepository {
     override def searchJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
       com.example.graphQL.cats.service.port.RepositoryF.fromFEither(queries.update(_ :+ query).as(Right(Nil)))
+
+    override def similarJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
+      recommendedJobs(query)
 
     override def recommendedJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
       com.example.graphQL.cats.service.port.RepositoryF.fromFEither(queries.update(_ :+ query).as(Right(Nil)))

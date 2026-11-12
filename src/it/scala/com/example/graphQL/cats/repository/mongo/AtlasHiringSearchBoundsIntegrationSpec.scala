@@ -187,6 +187,7 @@ final class AtlasHiringSearchBoundsIntegrationSpec extends CatsEffectSuite {
     def authorizedCandidateEligibility(scope: HiringReadScope, queryJob: JobSearchEligibility, ids: List[UserId]) =
       eligibility(ids.size).flatMap(_ => inner.authorizedCandidateEligibility(scope, queryJob, ids))
     def searchJobs(query: VectorSearchQuery) = inner.searchJobs(query)
+    def similarJobs(query: VectorSearchQuery) = inner.similarJobs(query)
     def recommendedJobs(query: VectorSearchQuery) = inner.recommendedJobs(query)
     def candidateMatches(query: VectorSearchQuery) =
       inner

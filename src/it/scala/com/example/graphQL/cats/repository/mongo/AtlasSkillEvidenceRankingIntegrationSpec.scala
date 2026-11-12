@@ -200,6 +200,7 @@ final class AtlasSkillEvidenceRankingIntegrationSpec extends CatsEffectSuite {
           authorizedCandidateEligibility,
           searchJobs,
           recommendedJobs,
+          similarJobs,
           lexicalJobs,
           lexicalCandidates
         }

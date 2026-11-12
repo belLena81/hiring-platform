@@ -35,7 +35,7 @@ Partly implemented: GDF-02 (fit reasons) is committed as `48f271a` (2026-11-11; 
 
 - UC01: an empty filtered job search runs at most two relaxed searches (drop `createdAfter`, then `skills` from all-of to any-of) and names each relaxed filter in `relaxedFilters`; a relaxed page is final (GDF-01, committed as `41329b7`; Code Reviewer, Security and QA PASS on the pre-commit tree).
 - UC02: hits show matched and missing skills (implemented, GDF-02, 2026-11-11: `matchedSkills` and `missingSkills` derived only from the job's required skills and the candidate's own profile skills, with no provider call); the query yields suggested filters that are not applied automatically (planned, GDF-05); a candidate can save a search and receive alerts through the notification port (planned, GDF-06).
-- UC03: a job page offers similar open jobs from the stored job embedding (planned, GDF-03).
+- UC03: a candidate sees similar open jobs for a job from its stored job embedding (`similarJobs`, implemented on the working tree after `e1eb2aa`, GDF-03; reviews pending; the Atlas Local integration test is owner-run and not passed). Candidate only; no embedding provider call; the source job must be visible to the caller; no search session is recorded.
 - UC09: a recruiter or candidate can request a draft message for an existing status action (planned, GDF-04). A draft sends nothing and changes no status; the existing mutation keeps its required feedback or reason.
 - UC10: matches show matched and missing skills of the owned job (implemented, GDF-02, 2026-11-11: derived only from the owned job's required skills and the candidate skills already in the result, so no new private candidate data is shown).
 

@@ -2285,6 +2285,8 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     override def searchJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
       com.example.graphQL.cats.service.port.RepositoryF.fromFEither(IO.pure(Right(jobs.map(_.retrieval))))
 
+    override def similarJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] = recommendedJobs(query)
+
     override def recommendedJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
       com.example.graphQL.cats.service.port.RepositoryF.fromFEither(IO.pure(Right(jobs.map(_.retrieval))))
 

@@ -1175,6 +1175,14 @@ type Query {
     "Reuses a search identifier so repeated pages and later interactions correlate; the server issues one if absent."
     searchId: SearchID): RecommendedJobsResult
 
+  "Open jobs nearest to the stored embedding of a job the calling candidate may see, nearest first, never the job itself. A bounded top-N list of at most `first` results: it has no pageInfo and cannot be paged. A job that does not exist and a job the caller may not see give the same DomainError; a job whose stored embedding is missing or out of date gives SearchUnavailable. No embedding provider is called. Cost: 100 + first * (1 + cost of the selected subfields). Caps per request: total complexity at most 1000, nesting depth at most 16, `first` between 1 and 100, and a configured maximum number of expensive discovery roots (default 4). The cost is charged to the caller's cost budget; the response reports it in `extensions.cost` when the caller has its own allowance."
+  similarJobs(
+    "The job."
+    jobId: JobID!,
+
+    "The page size; between 1 and 100."
+    first: Int!): SimilarJobsResult
+
   "Candidates ranked against a job the caller owns. A bounded top-N list of at most `first` results: it has no pageInfo and cannot be paged. Cost: 100 + first * (1 + cost of the selected subfields). Caps per request: total complexity at most 1000, nesting depth at most 16, `first` between 1 and 100, and a configured maximum number of expensive discovery roots (default 4). The cost is charged to the caller's cost budget; the response reports it in `extensions.cost` when the caller has its own allowance."
   candidateMatches(
     "The job."
@@ -1490,6 +1498,17 @@ input SignUpInput {
 
 "The outcome of the mutation: AuthSuccess on success, or a typed ValidationError or DomainError."
 union SignUpResult = AuthSuccess | ValidationError | DomainError
+
+"Open jobs nearest to the stored embedding of the requested job, nearest first; never the requested job."
+type SimilarJobs {
+  results: [RankedJob!]!
+
+  "The embedding model that ranked the results."
+  model: String
+}
+
+"The outcome of the search: SimilarJobs, or SearchUnavailable when it cannot be served now, or a typed ValidationError or DomainError. Authentication, authorization and server failures remain top-level errors that null only this field."
+union SimilarJobsResult = SimilarJobs | SearchUnavailable | ValidationError | DomainError
 
 "Applies to an open job as the calling candidate."
 input SubmitApplicationInput {

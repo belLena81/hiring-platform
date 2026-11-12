@@ -114,6 +114,17 @@ private[graphql] object HiringGraphQLSchemaAssembly {
         complexity = Some(expensivePageComplexity)
       )(recommendedJobs),
       resultField(
+        "similarJobs",
+        OptionType(similarJobsResultType),
+        "Open jobs nearest to the stored embedding of a job the calling candidate may see, nearest first, never the " +
+          "job itself. A bounded top-N list of at most `first` results: it has no pageInfo and cannot be paged. A job " +
+          "that does not exist and a job the caller may not see give the same DomainError; a job whose stored " +
+          "embedding is missing or out of date gives SearchUnavailable. No embedding provider is called." + CostNote +
+          "." + ExpensiveRootCaps,
+        jobIdArgument :: firstArgument :: Nil,
+        complexity = Some(expensivePageComplexity)
+      )(similarJobs),
+      resultField(
         "candidateMatches",
         OptionType(candidateMatchesResultType),
         "Candidates ranked against a job the caller owns. A bounded top-N list of at most `first` results: it has " +

@@ -1,0 +1,17 @@
+query SimilarJobs($jobId: JobID!, $first: Int!) {
+  similarJobs(jobId: $jobId, first: $first) {
+    ... on SimilarJobs {
+      model
+      results {
+        score
+        searchMode
+        matchedSkills
+        missingSkills
+        job { id title }
+      }
+    }
+    ... on SearchUnavailable { code message retryable }
+    ... on ValidationError { code message field }
+    ... on DomainError { code message }
+  }
+}

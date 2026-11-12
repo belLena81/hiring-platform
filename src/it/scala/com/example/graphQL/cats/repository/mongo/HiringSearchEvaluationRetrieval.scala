@@ -91,6 +91,7 @@ private[mongo] final class HiringSearchEvaluationRetrieval(
         repository.authorizedJobEligibility(scope, ids, candidate)
       def authorizedCandidateEligibility(scope: HiringReadScope, job: JobSearchEligibility, ids: List[UserId]) =
         repository.authorizedCandidateEligibility(scope, job, ids)
+      def similarJobs(query: VectorSearchQuery) = repository.similarJobs(query)
       def recommendedJobs(query: VectorSearchQuery) = repository.recommendedJobs(query)
       def lexicalJobs(query: LexicalSearchQuery) = repository.lexicalJobs(query)
       def lexicalCandidates(query: LexicalSearchQuery) = repository.lexicalCandidates(query)

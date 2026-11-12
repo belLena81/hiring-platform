@@ -287,7 +287,8 @@ final class HiringGraphQLContractSpec extends CatsEffectSuite {
       "interview-cancellation.graphql",
       "interview-scheduling.graphql",
       "job-discovery-facets.graphql",
-      "jobs.graphql"
+      "jobs.graphql",
+      "similar-jobs.graphql"
     )
     names.traverse { name =>
       fixture(name).map { operation =>

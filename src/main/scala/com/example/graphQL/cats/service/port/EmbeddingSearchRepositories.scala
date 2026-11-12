@@ -119,6 +119,11 @@ trait SemanticSearchRepository[F[_]] {
 
   def searchJobs(query: VectorSearchQuery): RepositoryF[F, List[JobRetrievalHit]]
   def recommendedJobs(query: VectorSearchQuery): RepositoryF[F, List[JobRetrievalHit]]
+
+  /** Open, eligible jobs nearest to `query.vector`, which is a stored job embedding: no provider call is involved. The
+    * source job itself is a legitimate nearest neighbour here; the service removes it and rechecks eligibility.
+    */
+  def similarJobs(query: VectorSearchQuery): RepositoryF[F, List[JobRetrievalHit]]
   def candidateMatches(query: VectorSearchQuery): RepositoryF[F, List[CandidateRetrievalHit]]
 
   /** Open jobs matching the lexical text and filters, whatever their embedding state. Shares search admission. */

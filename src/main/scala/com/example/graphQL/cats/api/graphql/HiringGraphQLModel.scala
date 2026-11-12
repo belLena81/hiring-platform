@@ -152,6 +152,9 @@ private[graphql] object HiringGraphQLModel {
       model: Option[String],
       degradedReason: Option[String] = None
   )
+
+  /** The jobs nearest to a job's stored embedding. There is no `searchId`: the root records no search session. */
+  final case class SimilarJobsResults(results: List[RankedJobPayload], model: Option[String])
   final case class RankedCandidateResults(
       results: List[RankedCandidatePayload],
       searchId: SearchId,

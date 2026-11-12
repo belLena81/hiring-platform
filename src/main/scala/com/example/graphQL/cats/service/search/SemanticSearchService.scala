@@ -101,6 +101,45 @@ final class SemanticSearchService[F[_]: Monad](
       )
     }
 
+  /** Open jobs nearest to the stored embedding of a job the calling candidate may see. Order matters: the caller is
+    * authorized and the source job's visibility is established (an unknown job and a job this candidate may not see
+    * both end as `NotFound("job")` after the same two reads) before the stored embedding is read, so neither the
+    * existence nor the embedding state of a hidden job is disclosed, and no vector or provider call precedes it. It
+    * never calls the embedding provider.
+    */
+  override def similarJobs(
+      actor: ActorContext,
+      jobId: JobId,
+      first: PageSize,
+      searchId: UUID
+  ): UseCaseF[F, List[RankedJob]] = {
+    val noFilter = JobSearchFilter(None, Set.empty, None)
+    for {
+      (candidate, scope) <- currentCandidate(actor)
+      visible <- searchRead(search.authorizedJobEligibility(scope, List(jobId), None))
+      _ <- UseCaseF.ensure[F](
+        visible.exists(value => value.job.id == jobId && SearchEligibilityPolicy.jobLexical(value, noFilter)),
+        UseCaseError.Domain(DomainError.NotFound("job"))
+      )
+      source <- withEmbedding(jobId).leftMap(_.asSearchFailure)
+      // The job may have closed or been deleted since the eligibility read: same NotFound, before any vector call.
+      _ <- UseCaseF.ensure[F](source.status == JobStatus.Open, UseCaseError.Domain(DomainError.NotFound("job")))
+      embedding <- currentEmbedding(source.embedding, "job", jobEmbeddingIsCurrent(source, _))
+      hits <- searchRead(
+        search.similarJobs(
+          VectorSearchQuery(embedding.values, None, noFilter, first, SearchMode.VECTOR, embedding.meta.model, searchId)
+        )
+      )
+      ranked <- validateJobHits(actor, noFilter, hits.filterNot(_.id == jobId))
+    } yield ranked.take(first.value).map { value =>
+      val (matched, missing) = SkillMatching.fitReasons(
+        candidate.candidateProfile.fold(Set.empty[String])(_.skills),
+        value.job.skills
+      )
+      value.copy(matchedSkills = matched, missingSkills = missing)
+    }
+  }
+
   /** Ranked candidates for a job the actor manages. It answers from lexical retrieval, marked degraded, when only the
     * query embedding provider or `$vectorSearch` is unavailable. A missing or stale job embedding is not degradable.
     * The fallback text is the query, else the job's skills; with neither, the original failure is returned.

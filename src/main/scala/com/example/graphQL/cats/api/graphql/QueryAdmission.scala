@@ -61,6 +61,7 @@ private[graphql] object QueryAdmission {
       "semanticJobSearch",
       "recommendedJobs",
       "candidateMatches",
+      "similarJobs",
       "embeddingCoverage"
     )
   // Each embedding coverage root starts bounded but full scans; two roots exceed MaxQueryComplexity.

@@ -136,6 +136,33 @@ private[graphql] object HiringGraphQLSearchResolvers {
       } yield rankedJobResults(SearchResults(results.map(SearchedJob.from), None), searchId)
     }
 
+  def similarJobs(
+      context: Context[RequestContext, Unit]
+  ): HiringGraphQLResult[Option[SearchOutcome[SimilarJobsResults]]] =
+    searchResult(similarJobsBody(context), InputFieldPaths.similarJobs).map(Some(_))
+
+  /** Records no search session: a new `searchKind` would be a change to the operational event contract. */
+  private def similarJobsBody(context: Context[RequestContext, Unit]): HiringGraphQLResult[SimilarJobsResults] =
+    authenticatedSearch(context).flatMap { case (actor, hiring, service) =>
+      for {
+        size <- inputResult(pageSize(context.arg(firstArgument)))
+        searchId <- searchIdFor(hiring, None)
+        results <- raiseOnUseCaseError(service.similarJobs(actor, context.arg(jobIdArgument), size, searchId))
+      } yield SimilarJobsResults(
+        results.map(value =>
+          RankedJobPayload(
+            value.job,
+            value.score,
+            value.mode,
+            value.matchedSkills,
+            value.missingSkills,
+            value.retrievalScore
+          )
+        ),
+        results.headOption.map(_.meta.model)
+      )
+    }
+
   def candidateMatches(
       context: Context[RequestContext, Unit]
   ): HiringGraphQLResult[Option[SearchOutcome[RankedCandidateResults]]] =

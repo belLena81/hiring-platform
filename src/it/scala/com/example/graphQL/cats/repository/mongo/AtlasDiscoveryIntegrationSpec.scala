@@ -589,6 +589,7 @@ final class AtlasDiscoveryIntegrationSpec extends CatsEffectSuite {
           authorizedCandidateEligibility,
           searchJobs,
           recommendedJobs,
+          similarJobs,
           lexicalJobs,
           lexicalCandidates
         }

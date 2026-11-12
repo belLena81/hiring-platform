@@ -186,6 +186,9 @@ final class MongoSemanticSearchRepository(
   override def recommendedJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
     admitted(rankedJobs(query, JobSearchFilter(None, Set.empty, None)))
 
+  override def similarJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
+    admitted(vectorJobs(query, jobFilter(query, JobSearchFilter(None, Set.empty, None)), branchLimit))
+
   /** Lexical fallback: shares the discovery admission, `maxTimeMS` and breaker with every other search root. */
   override def lexicalJobs(query: LexicalSearchQuery): RepositoryF[IO, List[LexicalJobHit]] = {
     val stages = lexicalJobStages(

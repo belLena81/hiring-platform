@@ -70,7 +70,9 @@ final class HiringGraphQLSearchOutcomeSpec extends CatsEffectSuite {
   /** Returns no vector hits; lexical hits are the given jobs (eligible for Candidates) or a store failure. */
   private final class FakeRepository(
       lexical: Either[RepositoryError, List[Job]],
-      lexicalCandidateUsers: List[User] = Nil
+      lexicalCandidateUsers: List[User] = Nil,
+      similar: List[JobRetrievalHit] = Nil,
+      similarCalls: AtomicInteger = new AtomicInteger(0)
   ) extends SemanticSearchRepository[IO] {
     override def authorizedJobEligibility(
         scope: com.example.graphQL.cats.service.read.HiringReadScope,
@@ -102,6 +104,8 @@ final class HiringGraphQLSearchOutcomeSpec extends CatsEffectSuite {
         )
     override def searchJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
       RepositoryF.at[IO].fromEither(Right(Nil))
+    override def similarJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
+      RepositoryF.lift(IO(similarCalls.incrementAndGet())) *> RepositoryF.at[IO].fromEither(Right(similar))
     override def recommendedJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] =
       RepositoryF.at[IO].fromEither(Right(Nil))
     override def candidateMatches(query: VectorSearchQuery): RepositoryF[IO, List[CandidateRetrievalHit]] =
@@ -125,7 +129,9 @@ final class HiringGraphQLSearchOutcomeSpec extends CatsEffectSuite {
       searchConfigured: Boolean = true,
       lexical: Either[RepositoryError, List[Job]] = Right(Nil),
       costSink: Option[AtomicInteger] = None,
-      lexicalCandidateUsers: List[User] = Nil
+      lexicalCandidateUsers: List[User] = Nil,
+      similar: List[JobRetrievalHit] = Nil,
+      similarCalls: AtomicInteger = new AtomicInteger(0)
   ): IO[Json] =
     for {
       usersRef <- Ref.of[IO, Map[UserId, User]](users.map(user => user.id -> user).toMap)
@@ -140,7 +146,7 @@ final class HiringGraphQLSearchOutcomeSpec extends CatsEffectSuite {
         userRepository,
         jobRepository,
         embeddings,
-        new FakeRepository(lexical, lexicalCandidateUsers),
+        new FakeRepository(lexical, lexicalCandidateUsers, similar, similarCalls),
         model
       )
       services = TestGraphQLSupport.emptyServices.copy(
@@ -395,6 +401,185 @@ final class HiringGraphQLSearchOutcomeSpec extends CatsEffectSuite {
       assert(!json.noSpaces.contains("Exception"), clue(json))
       assertEquals(field(json, "sibling").focus.flatMap(_.asString), Some("NOT_FOUND"))
       assertEquals(embeddings.calls.get, 0)
+    }
+  }
+
+  private def similarHit(job: Job, score: Double): JobRetrievalHit =
+    com.example.graphQL.cats.service.search
+      .SearchRetrievalHit(job.id, score, SearchMode.VECTOR, job.embedding.get.meta, UUID.randomUUID())
+  private def similarNeighbour(n: Int, state: JobState = JobState.Open): Job = {
+    val base = ServiceFixtures.openJob
+      .copy(id = JobId(UUID.fromString(f"00000000-0000-0000-0002-$n%012d")), title = s"Neighbour $n", state = state)
+    base.copy(embedding =
+      Some(
+        EntityEmbedding(List(0.3f, 0.3f), EmbeddingMeta(model, SourceHash.sha256(SearchableText.job(base)), now))
+      )
+    )
+  }
+  private def similarJobsQuery(id: JobId, extra: String = "") =
+    s"""query { sibling: accountDeletionStatus(receiptId: "00000000-0000-0000-0000-000000000001")
+       |  similarJobs(jobId: "${id.value}", first: 5) { __typename
+       |    ... on SimilarJobs { model results { score searchMode matchedSkills missingSkills job { id } } }
+       |    ... on UserError { code } $extra } }""".stripMargin
+
+  test("GDF-03.1 similarJobs returns the neighbours nearest first without the job itself or a closed job") {
+    val near = similarNeighbour(1)
+    val shut = similarNeighbour(2, JobState.Closed(now))
+    val far = similarNeighbour(3)
+    val embeddings = new CountingEmbeddings(Right(vector))
+    run(
+      similarJobsQuery(freshJob.id),
+      candidateActor(candidate),
+      embeddings,
+      lexical = Right(List(freshJob, near, shut, far)),
+      similar = List(similarHit(freshJob, 0.99), similarHit(near, 0.9), similarHit(shut, 0.8), similarHit(far, 0.7))
+    ).map { json =>
+      assert(!json.hcursor.downField("errors").succeeded, clue(json))
+      val found = field(json, "similarJobs")
+      assertEquals(found.get[String]("__typename"), Right("SimilarJobs"))
+      assertEquals(found.get[String]("model"), Right(model))
+      assertEquals(
+        found.downField("results").values.map(_.flatMap(_.hcursor.downField("job").get[String]("id").toOption).toList),
+        Some(List(near.id.value.toString, far.id.value.toString))
+      )
+      assertEquals(found.downField("results").downArray.get[String]("searchMode"), Right("VECTOR"))
+      assertEquals(embeddings.calls.get, 0)
+    }
+  }
+
+  test("GDF-03.2 a closed job and an unknown job give the identical DomainError and no vector call") {
+    val calls = new AtomicInteger(0)
+    val embeddings = new CountingEmbeddings(Right(vector))
+    val closedJob = freshJob.copy(state = JobState.Closed(now))
+    for {
+      hidden <- run(
+        similarJobsQuery(closedJob.id),
+        candidateActor(candidate),
+        embeddings,
+        job = closedJob,
+        lexical = Right(List(closedJob)),
+        similarCalls = calls
+      )
+      unknown <- run(
+        similarJobsQuery(JobId(UUID.fromString("00000000-0000-0000-0000-00000000dead"))),
+        candidateActor(candidate),
+        embeddings,
+        lexical = Right(List(freshJob)),
+        similarCalls = calls
+      )
+    } yield {
+      assertEquals(field(hidden, "similarJobs").get[String]("__typename"), Right("DomainError"))
+      assertEquals(field(hidden, "similarJobs").get[String]("code"), Right("NOT_FOUND"))
+      assertEquals(field(hidden, "similarJobs").focus, field(unknown, "similarJobs").focus)
+      assertEquals(field(hidden, "sibling").focus.flatMap(_.asString), Some("NOT_FOUND"))
+      assertEquals(calls.get, 0)
+      assertEquals(embeddings.calls.get, 0)
+    }
+  }
+
+  test("GDF-03.3 a stale or missing source embedding is SearchUnavailable data, siblings survive, no vector call") {
+    val calls = new AtomicInteger(0)
+    val embeddings = new CountingEmbeddings(Right(vector))
+    val missing = freshJob.copy(embedding = None)
+    for {
+      stale <- run(
+        similarJobsQuery(currentJob.id),
+        candidateActor(candidate),
+        embeddings,
+        job = currentJob,
+        lexical = Right(List(currentJob)),
+        similarCalls = calls
+      )
+      absent <- run(
+        similarJobsQuery(missing.id),
+        candidateActor(candidate),
+        embeddings,
+        job = missing,
+        lexical = Right(List(missing)),
+        similarCalls = calls
+      )
+    } yield {
+      assert(!stale.hcursor.downField("errors").succeeded, clue(stale))
+      assertEquals(field(stale, "similarJobs").get[String]("__typename"), Right("SearchUnavailable"))
+      assertEquals(field(stale, "similarJobs").get[String]("code"), Right("STALE_EMBEDDING"))
+      assertEquals(field(absent, "similarJobs").get[String]("__typename"), Right("SearchUnavailable"))
+      assertEquals(field(absent, "similarJobs").get[String]("code"), Right("MISSING_EMBEDDING"))
+      assertEquals(field(stale, "sibling").focus.flatMap(_.asString), Some("NOT_FOUND"))
+      assertEquals(calls.get, 0)
+      assertEquals(embeddings.calls.get, 0)
+    }
+  }
+
+  test("GDF-08 a recruiter, an Admin and an unauthenticated caller are refused before any vector or provider call") {
+    val calls = new AtomicInteger(0)
+    val embeddings = new CountingEmbeddings(Right(vector))
+    for {
+      byRecruiter <- run(
+        similarJobsQuery(freshJob.id),
+        candidateActor(recruiter),
+        embeddings,
+        lexical = Right(List(freshJob)),
+        similarCalls = calls
+      )
+      byAdmin <- run(
+        similarJobsQuery(freshJob.id),
+        candidateActor(ServiceFixtures.admin),
+        embeddings,
+        users = List(candidate, recruiter, otherRecruiter, ServiceFixtures.admin),
+        lexical = Right(List(freshJob)),
+        similarCalls = calls
+      )
+      anonymous <- run(
+        similarJobsQuery(freshJob.id),
+        None,
+        embeddings,
+        lexical = Right(List(freshJob)),
+        similarCalls = calls
+      )
+    } yield {
+      assertEquals(field(byRecruiter, "similarJobs").get[String]("code"), Right("CANDIDATE_REQUIRED"))
+      assertEquals(field(byAdmin, "similarJobs").get[String]("code"), Right("CANDIDATE_REQUIRED"))
+      assertEquals(topLevelCode(anonymous), Right("UNAUTHORIZED"))
+      assertEquals(calls.get, 0)
+      assertEquals(embeddings.calls.get, 0)
+    }
+  }
+
+  test("GDF-03.5 similarJobs is priced as an expensive root, like recommendedJobs, and charged to the budget") {
+    def cost(query: String): IO[Int] = {
+      val sink = new AtomicInteger(0)
+      run(query, candidateActor(candidate), new CountingEmbeddings(Right(vector)), costSink = Some(sink))
+        .map(_ => sink.get)
+    }
+    val similar =
+      s"""query { similarJobs(jobId: "${freshJob.id.value}", first: 5) { ... on SimilarJobs { results { score } } } }"""
+    val recommended = "query { recommendedJobs(first: 5) { ... on RankedJobResults { results { score } } } }"
+    for {
+      similarCost <- cost(similar)
+      recommendedCost <- cost(recommended)
+    } yield {
+      assertEquals(similarCost, 100 + 5 * (1 + 2))
+      assertEquals(similarCost, recommendedCost)
+    }
+  }
+
+  test("GDF-03.5 similarJobs counts toward the expensive root cap of four per request") {
+    def aliased(count: Int) =
+      s"""query { ${(1 to count)
+          .map(n => s"""a$n: similarJobs(jobId: "${freshJob.id.value}", first: 1) { __typename }""")
+          .mkString(" ")} }"""
+    for {
+      four <- run(
+        aliased(4),
+        candidateActor(candidate),
+        new CountingEmbeddings(Right(vector)),
+        lexical = Right(List(freshJob)),
+        similar = List(similarHit(freshJob, 0.99))
+      )
+      five <- run(aliased(5), candidateActor(candidate), new CountingEmbeddings(Right(vector))).attempt
+    } yield {
+      assertEquals(field(four, "a4").get[String]("__typename"), Right("SimilarJobs"))
+      assert(five.left.exists(_.getMessage.contains("InvalidQuery")), clue(five))
     }
   }
 

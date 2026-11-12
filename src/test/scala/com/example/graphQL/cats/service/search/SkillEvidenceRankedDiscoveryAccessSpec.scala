@@ -127,6 +127,7 @@ final class SkillEvidenceRankedDiscoveryAccessSpec extends CatsEffectSuite {
                 else RepositoryF.at[IO].pure(Nil)
               }
           def searchJobs(query: VectorSearchQuery) = RepositoryF.at[IO].pure(world.jobHits.map(_.retrieval))
+          def similarJobs(query: VectorSearchQuery): RepositoryF[IO, List[JobRetrievalHit]] = recommendedJobs(query)
           def recommendedJobs(query: VectorSearchQuery) = RepositoryF.at[IO].pure(world.jobHits.map(_.retrieval))
           def candidateMatches(query: VectorSearchQuery) =
             RepositoryF.at[IO].pure(world.candidates.map(_.retrieval))

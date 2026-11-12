@@ -113,6 +113,11 @@ trait SearchUseCases[F[_]] {
   /** Ranked jobs for the calling candidate's profile. It makes no provider call and has no fallback. */
   def recommendedJobs(actor: ActorContext, first: PageSize, searchId: UUID): UseCaseF[F, List[RankedJob]]
 
+  /** Open jobs nearest to the stored embedding of a job the calling candidate may see, never the job itself. It makes
+    * no provider call and has no fallback; a job that is unknown or not visible gives the same `NotFound("job")`.
+    */
+  def similarJobs(actor: ActorContext, jobId: JobId, first: PageSize, searchId: UUID): UseCaseF[F, List[RankedJob]]
+
   /** Ranked candidates for a job the actor manages, with the same degradation rule as `semanticJobSearch`. */
   def candidateMatches(
       actor: ActorContext,

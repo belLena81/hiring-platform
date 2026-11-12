@@ -602,6 +602,20 @@ private[graphql] object HiringGraphQLTypes {
       ) ++
         searchResultFields[RankedJobResults](_.searchId, _.model, _.degradedReason)
     )
+  lazy val similarJobsResultsType: ObjectType[RequestContext, SimilarJobsResults] =
+    ObjectType(
+      "SimilarJobs",
+      "Open jobs nearest to the stored embedding of the requested job, nearest first; never the requested job.",
+      fields[RequestContext, SimilarJobsResults](
+        Field("results", ListType(rankedJobType), resolve = _.value.results),
+        Field(
+          "model",
+          OptionType(StringType),
+          description = Some("The embedding model that ranked the results."),
+          resolve = _.value.model
+        )
+      )
+    )
   lazy val rankedCandidateResultsType: ObjectType[RequestContext, RankedCandidateResults] =
     ObjectType(
       "RankedCandidateResults",
@@ -698,6 +712,8 @@ private[graphql] object HiringGraphQLTypes {
     searchResultType("SemanticJobSearchResult", rankedJobResultsType)
   lazy val recommendedJobsResultType: OutputType[SearchOutcome[RankedJobResults]] =
     searchResultType("RecommendedJobsResult", rankedJobResultsType)
+  lazy val similarJobsResultType: OutputType[SearchOutcome[SimilarJobsResults]] =
+    searchResultType("SimilarJobsResult", similarJobsResultsType)
   lazy val candidateMatchesResultType: OutputType[SearchOutcome[RankedCandidateResults]] =
     searchResultType("CandidateMatchesResult", rankedCandidateResultsType)
   lazy val jobDiscoveryFacetsResultType
